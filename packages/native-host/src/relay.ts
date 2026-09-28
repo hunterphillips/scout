@@ -54,6 +54,13 @@ export const EXIT_REFUSED = 2;
 
 const EXTENSION_ID_RE = /^[a-p]{32}$/;
 
+/**
+ * Flush order for the pre-connect buffer. Fixed, not arrival order: the core
+ * accepts page_text only while it has a current focus, and a reconnect clears it,
+ * so focus must land before page_text.
+ */
+const PRE_CONNECT_FLUSH_ORDER: readonly BrowserObservation["kind"][] = ["permissions", "focus", "page_text"];
+
 export interface HostTimers {
   setTimeout(fn: () => void, ms: number): unknown;
   clearTimeout(handle: unknown): void;
@@ -133,7 +140,7 @@ export function createHost(deps: HostDeps): Host {
   let flushTimer: unknown = null;
   let retriesLeft = Math.floor(RETRY_WINDOW_MS / RETRY_INTERVAL_MS);
   let reportedUnavailable = false;
-  /** Encoded observations waiting for the core: latest per kind, in arrival order. */
+  /** Encoded observations waiting for the core: latest per kind. */
   const preConnect = new Map<BrowserObservation["kind"], Buffer>();
 
   const doExit = () => {
@@ -228,10 +235,9 @@ export function createHost(deps: HostDeps): Host {
       writeToCore(socket, bytes);
       return;
     }
-    // Not connected yet (or retrying): keep only the latest per kind. Re-inserting
-    // moves the kind to the end so the flush follows arrival order.
+    // Not connected yet (or retrying): keep only the latest per kind.
     const kind = parsed.data.kind;
-    if (preConnect.delete(kind)) fromChrome.noCore += 1;
+    if (preConnect.has(kind)) fromChrome.noCore += 1;
     preConnect.set(kind, bytes);
   };
 
@@ -268,7 +274,10 @@ export function createHost(deps: HostDeps): Host {
       connected = true;
       const hello: Hello = { type: "hello", protocol: BRIDGE_PROTOCOL };
       s.write(encodeFrame(hello, MAX_FRAME_FROM_CHROME));
-      for (const bytes of preConnect.values()) writeToCore(s, bytes);
+      for (const kind of PRE_CONNECT_FLUSH_ORDER) {
+        const bytes = preConnect.get(kind);
+        if (bytes !== undefined) writeToCore(s, bytes);
+      }
       preConnect.clear();
       log("scout-native-host: connected to core");
     });

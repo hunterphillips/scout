@@ -14,6 +14,7 @@ beforeEach(() => {
   home = mkdtempSync(join(tmpdir(), "scout-home-"));
 });
 afterEach(() => {
+  chmodSync(home, 0o700);
   server?.close();
   server = null;
   rmSync(home, { recursive: true, force: true });
@@ -43,6 +44,12 @@ describe("checkRuntimeDir", () => {
     expect(checkRuntimeDir(path)).toEqual({ status: "missing" });
     mkdirSync(join(home, "run"), { mode: 0o700 });
     expect(checkRuntimeDir(path)).toEqual({ status: "missing" });
+  });
+
+  it("refuses, not retries, when the runtime dir cannot be inspected (EACCES)", () => {
+    mkdirSync(join(home, "run"), { mode: 0o700 });
+    chmodSync(home, 0o000);
+    expect(checkRuntimeDir(coreSocketPath(home))).toEqual({ status: "refused", reason: "runtime-dir-unreadable" });
   });
 
   it("accepts a 0700 dir holding a private socket", async () => {

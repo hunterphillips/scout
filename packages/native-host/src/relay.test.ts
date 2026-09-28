@@ -233,6 +233,36 @@ describe("relay", () => {
     expect(h.host.drops().fromChrome).toMatchObject({ forwarded: 2, noCore: 1 });
   });
 
+  it("flushes permissions, then focus, then page_text regardless of arrival order", async () => {
+    const h = harness();
+    const pageText = {
+      kind: "page_text",
+      seq: 2,
+      at: 1001,
+      tabId: 3,
+      documentId: "doc-a",
+      url: "https://github.com/o/r/issues/1",
+      source: "github_issue",
+      title: "Issue",
+      text: "body",
+      truncated: false,
+    } as const;
+    const refocus = { ...focus, seq: 3, at: 1002 };
+    h.stdin.write(encodeFrame(focus));
+    h.stdin.write(encodeFrame(pageText));
+    h.stdin.write(encodeFrame(refocus)); // same tab refocused
+    h.stdin.write(encodeFrame(permissions));
+    await settle();
+    h.last().succeed();
+    expect(h.last().frames()).toEqual([
+      { type: "hello", protocol: 1 },
+      { type: "observation", observation: permissions },
+      { type: "observation", observation: refocus },
+      { type: "observation", observation: pageText },
+    ]);
+    expect(h.host.drops().fromChrome).toMatchObject({ forwarded: 3, noCore: 1 });
+  });
+
   it("keeps the pre-connect buffer across retries and counts leftovers on exit", async () => {
     const h = harness();
     h.stdin.write(encodeFrame(focus));

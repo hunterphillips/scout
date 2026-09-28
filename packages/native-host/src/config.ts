@@ -32,9 +32,11 @@ export function readExtensionId(home: string): string | undefined {
 }
 
 export type RuntimeRefusal =
+  | "runtime-dir-unreadable"
   | "runtime-dir-not-directory"
   | "runtime-dir-wrong-owner"
   | "runtime-dir-not-private"
+  | "socket-unreadable"
   | "socket-not-socket"
   | "socket-wrong-owner"
   | "socket-not-private";
@@ -42,8 +44,8 @@ export type RuntimeRefusal =
 /**
  * Result of checking the core's runtime dir and socket:
  * - `ok`: both exist and are private to us; connect.
- * - `missing`: the dir or socket does not exist yet; treat like ENOENT and retry.
- * - `refused`: something exists but is not ours or not private; never connect.
+ * - `missing`: the dir or socket does not exist yet (ENOENT/ENOTDIR); retry.
+ * - `refused`: something is not ours, not private, or cannot be inspected; never connect.
  */
 export type RuntimeCheck = { status: "ok" } | { status: "missing" } | { status: "refused"; reason: RuntimeRefusal };
 
@@ -59,8 +61,8 @@ export function checkRuntimeDir(socketPath: string, uid: number = process.getuid
   let dir;
   try {
     dir = lstatSync(dirname(socketPath));
-  } catch {
-    return { status: "missing" };
+  } catch (e) {
+    return isMissing(e) ? { status: "missing" } : refuse("runtime-dir-unreadable");
   }
   if (dir.isSymbolicLink() || !dir.isDirectory()) return refuse("runtime-dir-not-directory");
   if (dir.uid !== uid) return refuse("runtime-dir-wrong-owner");
@@ -69,11 +71,16 @@ export function checkRuntimeDir(socketPath: string, uid: number = process.getuid
   let sock;
   try {
     sock = lstatSync(socketPath);
-  } catch {
-    return { status: "missing" };
+  } catch (e) {
+    return isMissing(e) ? { status: "missing" } : refuse("socket-unreadable");
   }
   if (!sock.isSocket()) return refuse("socket-not-socket");
   if (sock.uid !== uid) return refuse("socket-wrong-owner");
   if ((sock.mode & 0o077) !== 0) return refuse("socket-not-private");
   return { status: "ok" };
+}
+
+function isMissing(e: unknown): boolean {
+  const code = (e as NodeJS.ErrnoException | null)?.code;
+  return code === "ENOENT" || code === "ENOTDIR";
 }
