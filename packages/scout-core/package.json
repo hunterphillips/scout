@@ -2,7 +2,7 @@
   "name": "@scout/scout-core",
   "version": "0.0.0",
   "private": true,
-  "description": "Scout core logic (Phase 0 placeholder).",
+  "description": "Scout coordinator: visit tracking, resume cache, diagnostics.",
   "type": "module",
   "engines": {
     "node": ">=22.12.0"
@@ -15,10 +15,15 @@
       "default": "./dist/index.js"
     }
   },
-  "files": ["dist"],
+  "files": [
+    "dist"
+  ],
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "vitest run --passWithNoTests"
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@scout/contracts": "0.0.0"
   }
 }
