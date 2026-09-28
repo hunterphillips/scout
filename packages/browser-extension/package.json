@@ -2,23 +2,20 @@
   "name": "@scout/browser-extension",
   "version": "0.0.0",
   "private": true,
-  "description": "Scout Chrome sensor extension (Phase 0 placeholder).",
+  "description": "Scout Sensor: the MV3 Chrome extension. `npm run build` writes the unpacked extension to dist/.",
   "type": "module",
   "engines": {
     "node": ">=22.12.0"
   },
-  "main": "./dist/index.js",
-  "types": "./dist/index.d.ts",
-  "exports": {
-    ".": {
-      "types": "./dist/index.d.ts",
-      "default": "./dist/index.js"
-    }
-  },
-  "files": ["dist"],
+  "files": [
+    "dist"
+  ],
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "node build.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "vitest run --passWithNoTests"
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@scout/contracts": "0.0.0"
   }
 }

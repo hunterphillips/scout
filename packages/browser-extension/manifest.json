@@ -1,0 +1,12 @@
+{
+  "manifest_version": 3,
+  "name": "Scout Sensor",
+  "version": "0.1.0",
+  "description": "Scout's browser sensor: reports the focused tab and, on GitHub issues, the issue text, to the local Scout app.",
+  "minimum_chrome_version": "116",
+  "incognito": "not_allowed",
+  "permissions": ["nativeMessaging", "scripting", "storage"],
+  "optional_host_permissions": ["https://github.com/*", "https://docs.stripe.com/*", "https://www.peakdesign.com/*"],
+  "background": { "service_worker": "background.js", "type": "module" },
+  "action": { "default_title": "Scout Sensor", "default_popup": "popup.html" }
+}

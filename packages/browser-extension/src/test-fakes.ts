@@ -1,0 +1,363 @@
+// Test-only fakes (never bundled): a synthetic GitHub issue DOM mirroring the
+// live structure (data-testid layout verified 2026-09-24), a read-counting
+// jsdom with a synthetic History/Navigation driver, a fake clock, and a fake
+// `chrome` for the background. Ported from the Phase 0 spike's test-fakes.mjs.
+
+import { JSDOM } from "jsdom";
+
+export const EXT_ID = "abcdefghijklmnopabcdefghijklmnop";
+
+/** Strings that must never reach a message. */
+export const SENTINEL = {
+  comment: "SENTINEL-COMMENT-TEXT-1c1c",
+  sidebar: "SENTINEL-SIDEBAR-2d2d",
+  nav: "SENTINEL-NAV-3e3e",
+  draft: "SENTINEL-DRAFT-4f4f",
+  sticky: "SENTINEL-STICKY-7c7c",
+};
+
+export function issueMain({ owner = "acme", repo = "widgets", number = 1, title = "Issue title", body = "<p>Issue body</p>" } = {}): string {
+  return `<div data-testid="issue-viewer-container">
+  <div data-testid="issue-header"><h1><bdi data-testid="issue-title" class="markdown-title">${title}</bdi><span> #${number}</span></h1></div>
+  <div data-testid="issue-metadata-sticky"><span data-testid="issue-title-sticky">${SENTINEL.sticky}</span></div>
+  <div data-testid="issue-body">
+    <a data-testid="issue-body-header-link" href="https://github.com/${owner}/${repo}/issues/${number}#issue-9${number}">opened</a>
+    <div data-testid="issue-body-viewer"><div data-testid="markdown-body" class="markdown-body">${body}</div></div>
+  </div>
+  <div data-testid="issue-viewer-comments-container"><div data-testid="markdown-body">${SENTINEL.comment}</div></div>
+  <form data-testid="comment-composer"><textarea>${SENTINEL.draft}</textarea></form>
+  <div data-testid="issue-viewer-metadata-pane">${SENTINEL.sidebar}</div>
+</div>`;
+}
+
+export const listMain = (): string =>
+  `<div data-testid="issues-list-surface"><a data-testid="issue-listitem-title-link" href="https://github.com/acme/widgets/issues/1">One</a></div>`;
+export const repoHomeMain = (): string => `<div id="repo-home"><a href="/acme/widgets/issues">Issues</a> README text</div>`;
+
+const page = (main: string) =>
+  `<!doctype html><html><head><title>t</title></head><body><header><nav>${SENTINEL.nav}</nav></header><main id="main">${main}</main></body></html>`;
+
+/**
+ * A jsdom window at `url` with counters on every text-reading accessor:
+ * reads.nodeValue counts text-node reads (the extractor's only text path);
+ * reads.other counts textContent/innerText/innerHTML/outerHTML/value reads,
+ * which the extractor must never use. `navigate` is the synthetic
+ * History/Navigation driver: pushState, then the Navigation API's
+ * `currententrychange` event (jsdom has no Navigation API).
+ */
+export function makeDom(url: string, mainHtml: string) {
+  const dom = new JSDOM(page(mainHtml), { url, pretendToBeVisual: true });
+  const win = dom.window as unknown as Window & typeof globalThis;
+  const reads = { nodeValue: 0, other: 0, counting: true };
+  const wrap = (proto: object, prop: string, key: "nodeValue" | "other") => {
+    const d = Object.getOwnPropertyDescriptor(proto, prop);
+    if (!d?.get) return;
+    const get = d.get;
+    Object.defineProperty(proto, prop, {
+      configurable: true,
+      enumerable: d.enumerable ?? false,
+      get() {
+        if (reads.counting) reads[key]++;
+        return get.call(this);
+      },
+      ...(d.set ? { set: d.set } : {}),
+    });
+  };
+  wrap(win.Node.prototype, "nodeValue", "nodeValue");
+  wrap(win.Node.prototype, "textContent", "other");
+  wrap(win.HTMLElement.prototype, "innerText", "other");
+  wrap(win.Element.prototype, "innerHTML", "other");
+  wrap(win.Element.prototype, "outerHTML", "other");
+  wrap(win.HTMLTextAreaElement.prototype, "value", "other");
+  let visibility: DocumentVisibilityState = "visible";
+  Object.defineProperty(win.document, "visibilityState", { configurable: true, get: () => visibility });
+  const navigation = new win.EventTarget();
+  const uncounted = <T>(fn: () => T): T => {
+    const was = reads.counting;
+    reads.counting = false;
+    try {
+      return fn();
+    } finally {
+      reads.counting = was;
+    }
+  };
+  return {
+    win,
+    doc: win.document,
+    reads,
+    navigation,
+    setMain(html: string) {
+      uncounted(() => {
+        win.document.getElementById("main")!.innerHTML = html;
+      });
+    },
+    /** SPA navigation: URL changes without a document load, with the Navigation API event. */
+    navigate(u: string) {
+      win.history.pushState({}, "", u);
+      navigation.dispatchEvent(new win.Event("currententrychange"));
+    },
+    /** URL changes with no event at all (only the 1 s check can see it). */
+    pushSilently(u: string) {
+      win.history.pushState({}, "", u);
+    },
+    setVisible(v: boolean) {
+      visibility = v ? "visible" : "hidden";
+      win.document.dispatchEvent(new win.Event("visibilitychange"));
+    },
+    close() {
+      win.close();
+    },
+  };
+}
+
+/** Let pending promise callbacks and jsdom mutation records run. */
+export const flush = async (n = 3): Promise<void> => {
+  for (let i = 0; i < n; i++) await new Promise<void>((r) => setTimeout(r, 0));
+};
+
+/** A deterministic clock with setTimeout and setInterval. */
+export function fakeClock(start = 1_000_000) {
+  let t = start;
+  let nextId = 1;
+  const q = new Map<number, { at: number; fn: () => void; every: number | null }>();
+  const clock = {
+    now: () => t,
+    setTimeout(fn: () => void, ms: number): unknown {
+      const id = nextId++;
+      q.set(id, { at: t + ms, fn, every: null });
+      return id;
+    },
+    clearTimeout(h: unknown) {
+      q.delete(h as number);
+    },
+    setInterval(fn: () => void, ms: number): unknown {
+      const id = nextId++;
+      q.set(id, { at: t + ms, fn, every: ms });
+      return id;
+    },
+    clearInterval(h: unknown) {
+      q.delete(h as number);
+    },
+    get pending() {
+      return q.size;
+    },
+    /** Run every timer due within `ms`, in order, flushing promises between them. */
+    async advance(ms: number) {
+      const end = t + ms;
+      for (;;) {
+        await flush(2);
+        let nid = -1;
+        let n: { at: number; fn: () => void; every: number | null } | undefined;
+        for (const [id, e] of q) if (e.at <= end && (!n || e.at < n.at)) [nid, n] = [id, e];
+        if (!n) break;
+        t = n.at;
+        if (n.every !== null) n.at = t + n.every;
+        else q.delete(nid);
+        n.fn();
+      }
+      t = end;
+      await flush(2);
+    },
+  };
+  return clock;
+}
+
+function ev<F extends (...a: never[]) => unknown>() {
+  const ls: F[] = [];
+  return {
+    ls,
+    addListener: (f: F) => void ls.push(f),
+    removeListener: (f: F) => void ls.splice(ls.indexOf(f), 1),
+    emit: (...a: Parameters<F>) => ls.map((f) => f(...a)),
+  };
+}
+
+export interface FakePort {
+  name: string;
+  posted: Array<Record<string, unknown>>;
+  onMessage: ReturnType<typeof ev<(m: unknown) => void>>;
+  onDisconnect: ReturnType<typeof ev<(p: unknown) => void>>;
+  postMessage(m: unknown): void;
+  disconnect(): void;
+  disconnected: boolean;
+}
+
+function makePort(name: string): FakePort {
+  const port: FakePort = {
+    name,
+    posted: [],
+    onMessage: ev(),
+    onDisconnect: ev(),
+    disconnected: false,
+    postMessage(m) {
+      if (port.disconnected) throw new Error("Attempting to use a disconnected port object");
+      port.posted.push(JSON.parse(JSON.stringify(m)));
+    },
+    disconnect() {
+      port.disconnected = true;
+    },
+  };
+  return port;
+}
+
+export interface FakeTab {
+  id: number;
+  windowId: number;
+  active: boolean;
+  url: string;
+  title: string;
+  incognito: boolean;
+}
+
+/**
+ * Fake chrome. `host` decides how a new native port behaves: "ok" (stays
+ * open) or "missing" (disconnects at once with the host-not-found error).
+ * Tab url/title are visible only for hosts in `granted`.
+ */
+export function makeChrome({ granted = [] as string[], host = "ok" as "ok" | "missing" } = {}) {
+  const tabs = new Map<number, FakeTab>();
+  const windows = new Map<number, { id: number; focused: boolean }>();
+  const registered: chrome.scripting.RegisteredContentScript[] = [];
+  const executeCalls: unknown[] = [];
+  const tabMessages: Array<{ tabId: number; msg: unknown }> = [];
+  const store: Record<string, unknown> = {};
+  const ports: FakePort[] = [];
+  const state = { granted: [...granted], host, storageFails: false, lastFocusedWindow: 1 };
+  const visible = (u: string) => state.granted.some((p) => u.startsWith(p.replace(/\*$/, "")));
+  const view = (t: FakeTab) => {
+    const o: Record<string, unknown> = { id: t.id, windowId: t.windowId, active: t.active, incognito: t.incognito };
+    if (visible(t.url)) {
+      o["url"] = t.url;
+      o["title"] = t.title;
+    }
+    return o as unknown as chrome.tabs.Tab;
+  };
+  const fake = {
+    _: { tabs, windows, registered, executeCalls, tabMessages, store, ports, state },
+    runtime: {
+      id: EXT_ID,
+      lastError: undefined as { message: string } | undefined,
+      onMessage: ev(),
+      getURL: (p: string) => `chrome-extension://${EXT_ID}/${p}`,
+      connectNative(name: string) {
+        const port = makePort(name);
+        ports.push(port);
+        if (state.host === "missing") {
+          queueMicrotask(() => {
+            fake.runtime.lastError = { message: "Specified native messaging host not found." };
+            port.disconnected = true;
+            port.onDisconnect.emit(port);
+            fake.runtime.lastError = undefined;
+          });
+        }
+        return port;
+      },
+    },
+    permissions: {
+      contains: async ({ origins }: { origins: string[] }) => origins.every((o) => state.granted.includes(o)),
+      getAll: async () => ({ origins: [...state.granted], permissions: [] }),
+      onAdded: ev(),
+      onRemoved: ev(),
+    },
+    scripting: {
+      async registerContentScripts(arr: chrome.scripting.RegisteredContentScript[]) {
+        for (const s of arr) {
+          if (registered.some((r) => r.id === s.id)) throw new Error("Duplicate script ID");
+          registered.push(s);
+        }
+      },
+      async getRegisteredContentScripts({ ids }: { ids: string[] }) {
+        return registered.filter((r) => ids.includes(r.id));
+      },
+      async unregisterContentScripts({ ids }: { ids: string[] }) {
+        for (const id of ids) {
+          const i = registered.findIndex((r) => r.id === id);
+          if (i < 0) throw new Error("Nonexistent script ID");
+          registered.splice(i, 1);
+        }
+      },
+      async executeScript(x: unknown) {
+        executeCalls.push(x);
+        return [];
+      },
+    },
+    tabs: {
+      async query(q: { active?: boolean; lastFocusedWindow?: boolean; url?: string }) {
+        return [...tabs.values()]
+          .filter((t) => (!q.active || t.active) && (!q.lastFocusedWindow || t.windowId === state.lastFocusedWindow))
+          .filter((t) => q.url === undefined || (visible(t.url) && t.url.startsWith(q.url.replace(/\*$/, ""))))
+          .map(view);
+      },
+      async sendMessage(tabId: number, msg: unknown) {
+        tabMessages.push({ tabId, msg });
+      },
+      onActivated: ev(),
+      onUpdated: ev(),
+      onRemoved: ev(),
+    },
+    windows: {
+      WINDOW_ID_NONE: -1,
+      async get(id: number) {
+        const w = windows.get(id);
+        return w ? { id: w.id, focused: w.focused, incognito: false } : undefined;
+      },
+      async getLastFocused() {
+        const w = windows.get(state.lastFocusedWindow);
+        return { id: w?.id, focused: w?.focused === true };
+      },
+      onFocusChanged: ev(),
+    },
+    storage: {
+      local: {
+        async get(defaults: Record<string, unknown>) {
+          if (state.storageFails) throw new Error("storage unavailable");
+          return { ...defaults, ...store };
+        },
+        async set(o: Record<string, unknown>) {
+          Object.assign(store, o);
+        },
+      },
+    },
+  };
+  windows.set(1, { id: 1, focused: true });
+  tabs.set(10, { id: 10, windowId: 1, active: true, url: "https://github.com/acme/widgets/issues/1", title: "Issue 1", incognito: false });
+  tabs.set(11, { id: 11, windowId: 1, active: false, url: "https://github.com/acme/widgets/issues/2", title: "Issue 2", incognito: false });
+  tabs.set(12, { id: 12, windowId: 1, active: false, url: "https://example.com/", title: "Example", incognito: false });
+  return fake;
+}
+
+export type FakeChrome = ReturnType<typeof makeChrome>;
+export const asChrome = (f: FakeChrome): typeof chrome => f as unknown as typeof chrome;
+
+/** Make `tabId` the active tab of its window (and focus that window). */
+export function activate(f: FakeChrome, tabId: number): void {
+  const t = f._.tabs.get(tabId)!;
+  for (const o of f._.tabs.values()) if (o.windowId === t.windowId) o.active = o.id === tabId;
+}
+
+/**
+ * A content-script MessageSender. `url` is sender.url, which real Chrome
+ * appears to keep at the document's first URL across SPA navigation, so tests
+ * may pass a stale one. sender.tab.url is the browser-owned current tab URL
+ * (present only with host access), taken from the fake tab.
+ */
+export function sender(f: FakeChrome, { tabId = 10, url, documentId = "doc-1", frameId = 0 }: { tabId?: number; url?: string; documentId?: string; frameId?: number } = {}): chrome.runtime.MessageSender {
+  const t = f._.tabs.get(tabId)!;
+  return {
+    id: EXT_ID,
+    frameId,
+    documentId,
+    documentLifecycle: "active",
+    url: url ?? t.url,
+    origin: "https://github.com",
+    tab: fakeView(f, t),
+  } as chrome.runtime.MessageSender;
+}
+
+function fakeView(f: FakeChrome, t: FakeTab): chrome.tabs.Tab {
+  const o: Record<string, unknown> = { id: t.id, windowId: t.windowId, active: t.active, incognito: t.incognito };
+  if (f._.state.granted.some((p) => t.url.startsWith(p.replace(/\*$/, "")))) o["url"] = t.url;
+  return o as unknown as chrome.tabs.Tab;
+}
+
+export const popupSender = (): chrome.runtime.MessageSender => ({ id: EXT_ID, url: `chrome-extension://${EXT_ID}/popup.html` });
