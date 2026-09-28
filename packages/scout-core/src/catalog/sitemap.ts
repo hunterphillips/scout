@@ -1,6 +1,6 @@
 import { XMLParser } from "fast-xml-parser";
 import { type CatalogFetch, SITEMAP_MAX_BYTES } from "./catalogFetch.js";
-import { sameOriginHttpsUrl } from "./sameOrigin.js";
+import { sameOriginAbsoluteHttpsUrl } from "./sameOrigin.js";
 import { CANDIDATE_DESCRIPTION_MAX, CANDIDATE_TITLE_MAX, sanitizeLabel } from "./sanitizeLabel.js";
 
 /** Most child sitemaps read from one sitemap index. */
@@ -8,6 +8,9 @@ export const MAX_SITEMAP_INDEX_CHILDREN = 10;
 
 /** Most top-level sitemap files read: `/sitemap.xml` plus robots `Sitemap:` URLs. */
 export const MAX_ROOT_SITEMAPS = 5;
+
+/** Most sitemap entries collected across all files in one `fetchSitemaps` run. */
+export const MAX_SITEMAP_ENTRIES = 50_000;
 
 export interface SitemapImage {
   title?: string;
@@ -47,8 +50,18 @@ export interface SitemapCounters {
   childrenSkipped: number;
   /** Index children that were themselves indexes (depth 2), not followed. */
   nestedIndexesIgnored: number;
-  /** `loc`s and robots `Sitemap:` URLs dropped for not being same-origin `https:`. */
+  /**
+   * `loc`s and robots `Sitemap:` URLs dropped for not being absolute same-origin `https:`
+   * URLs of at most `MAX_URL_LENGTH` characters (empty and relative values included).
+   */
   droppedOffOrigin: number;
+  /** Entries beyond `MAX_SITEMAP_ENTRIES` in the file that reached the cap; later files are not fetched. */
+  entriesSkipped: number;
+}
+
+export interface FetchSitemapsOptions {
+  /** Entry cap for the run; defaults to `MAX_SITEMAP_ENTRIES`. */
+  maxEntries?: number;
 }
 
 export interface FetchedSitemaps {
@@ -109,8 +122,9 @@ function field(node: unknown, key: string): unknown {
  * Parse a sitemap document (`urlset` or `sitemapindex`).
  *
  * Policy: any document containing `<!DOCTYPE` or `<!ENTITY` is rejected before parsing,
- * and the parser runs with entity processing, DTDs, and attributes off. Only same-origin
- * `https:` `loc`s are kept; the rest are counted. Image titles and captions pass through
+ * and the parser runs with entity processing, DTDs, and attributes off. Only absolute
+ * same-origin `https:` `loc`s are kept; the rest (including empty and relative ones) are
+ * counted. Image titles and captions pass through
  * `sanitizeLabel`.
  */
 export function parseSitemap(xml: string, origin: string): ParsedSitemap {
@@ -125,7 +139,7 @@ export function parseSitemap(xml: string, origin: string): ParsedSitemap {
   let droppedOffOrigin = 0;
   const keep = (loc: unknown): string | null => {
     const text = textOf(loc);
-    const url = text === undefined ? null : sameOriginHttpsUrl(text, origin);
+    const url = text === undefined ? null : sameOriginAbsoluteHttpsUrl(text, origin);
     if (!url) droppedOffOrigin += 1;
     return url ? url.toString() : null;
   };
@@ -174,13 +188,21 @@ function toEntries(urls: SitemapUrl[]): SitemapEntry[] {
 }
 
 /**
- * Read `${origin}/sitemap.xml` plus the robots `Sitemap:` URLs (same-origin only,
- * deduplicated, at most `MAX_ROOT_SITEMAPS`). A `sitemapindex` contributes its first
+ * Read `${origin}/sitemap.xml` plus the robots `Sitemap:` URLs (absolute same-origin
+ * only, deduplicated, at most `MAX_ROOT_SITEMAPS`). A `sitemapindex` contributes its first
  * `MAX_SITEMAP_INDEX_CHILDREN` children, depth 1: a child that is itself an index is
- * ignored. Each file is capped at 2 MiB. Returns raw entries in document order plus
- * counters for diagnostics.
+ * ignored. Each file is capped at 2 MiB, so the real ceiling is 5 roots × (1 + 10
+ * children) = 55 files. Collection stops at `maxEntries` (default `MAX_SITEMAP_ENTRIES`)
+ * across all files; no further files are fetched once it is reached. Returns raw entries
+ * in document order plus counters for diagnostics.
  */
-export async function fetchSitemaps(origin: string, sitemapUrls: readonly string[], fetch: CatalogFetch): Promise<FetchedSitemaps> {
+export async function fetchSitemaps(
+  origin: string,
+  sitemapUrls: readonly string[],
+  fetch: CatalogFetch,
+  options: FetchSitemapsOptions = {},
+): Promise<FetchedSitemaps> {
+  const maxEntries = options.maxEntries ?? MAX_SITEMAP_ENTRIES;
   const counters: SitemapCounters = {
     filesFetched: 0,
     filesAbsent: 0,
@@ -189,13 +211,14 @@ export async function fetchSitemaps(origin: string, sitemapUrls: readonly string
     childrenSkipped: 0,
     nestedIndexesIgnored: 0,
     droppedOffOrigin: 0,
+    entriesSkipped: 0,
   };
   const entries: SitemapEntry[] = [];
   const visited = new Set<string>();
 
   const roots: string[] = [];
   for (const candidate of [`${origin}/sitemap.xml`, ...sitemapUrls]) {
-    const url = sameOriginHttpsUrl(candidate, origin);
+    const url = sameOriginAbsoluteHttpsUrl(candidate, origin);
     if (!url) {
       counters.droppedOffOrigin += 1;
       continue;
@@ -225,16 +248,25 @@ export async function fetchSitemaps(origin: string, sitemapUrls: readonly string
     return parsed;
   };
 
+  const collect = (urls: SitemapUrl[]): void => {
+    const room = Math.max(0, maxEntries - entries.length);
+    entries.push(...toEntries(urls.slice(0, room)));
+    counters.entriesSkipped += Math.max(0, urls.length - room);
+  };
+  const full = (): boolean => entries.length >= maxEntries;
+
   for (const root of roots.slice(0, MAX_ROOT_SITEMAPS)) {
+    if (full()) break;
     if (visited.has(root)) continue;
     const parsed = await read(root);
     if (!parsed) continue;
     if (parsed.kind === "urlset") {
-      entries.push(...toEntries(parsed.entries));
+      collect(parsed.entries);
       continue;
     }
     counters.childrenSkipped += Math.max(0, parsed.children.length - MAX_SITEMAP_INDEX_CHILDREN);
     for (const child of parsed.children.slice(0, MAX_SITEMAP_INDEX_CHILDREN)) {
+      if (full()) break;
       if (visited.has(child)) continue;
       const childParsed = await read(child);
       if (!childParsed) continue;
@@ -242,7 +274,7 @@ export async function fetchSitemaps(origin: string, sitemapUrls: readonly string
         counters.nestedIndexesIgnored += 1;
         continue;
       }
-      entries.push(...toEntries(childParsed.entries));
+      collect(childParsed.entries);
     }
   }
   return { entries, counters };

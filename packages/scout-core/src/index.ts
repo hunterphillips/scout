@@ -66,12 +66,14 @@ export {
 } from "./fetch/guardedFetch.js";
 export { isDisallowedAddress } from "./fetch/ipAddressPolicy.js";
 export { type CatalogFetch, SITEMAP_MAX_BYTES, TEXT_SOURCE_MAX_BYTES } from "./catalog/catalogFetch.js";
-export { sameOriginHttpsUrl } from "./catalog/sameOrigin.js";
-export { CANDIDATE_DESCRIPTION_MAX, CANDIDATE_TITLE_MAX, sanitizeLabel } from "./catalog/sanitizeLabel.js";
+export { MAX_URL_LENGTH, sameOriginAbsoluteHttpsUrl, sameOriginHttpsUrl } from "./catalog/sameOrigin.js";
+export { CANDIDATE_DESCRIPTION_MAX, CANDIDATE_TITLE_MAX, SANITIZE_INPUT_FACTOR, sanitizeLabel } from "./catalog/sanitizeLabel.js";
 export {
   fetchRobots,
   isAllowed,
   MAX_CRAWL_DELAY_MS,
+  MAX_RULE_PATTERN_LENGTH,
+  MAX_RULES,
   parseRobots,
   ROBOTS_PRODUCT_TOKEN,
   type FetchedRobots,
@@ -90,9 +92,11 @@ export {
 export {
   fetchSitemaps,
   MAX_ROOT_SITEMAPS,
+  MAX_SITEMAP_ENTRIES,
   MAX_SITEMAP_INDEX_CHILDREN,
   parseSitemap,
   type FetchedSitemaps,
+  type FetchSitemapsOptions,
   type ParsedSitemap,
   type SitemapCounters,
   type SitemapEntry,

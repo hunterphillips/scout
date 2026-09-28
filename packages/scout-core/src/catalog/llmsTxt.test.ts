@@ -7,13 +7,14 @@ import { fetchLlmsTxt, MAX_NESTED_LLMS_TXT, parseLlmsTxt } from "./llmsTxt.js";
 const fixture = (name: string) => readFileSync(new URL(`../../test/fixtures/llms/${name}`, import.meta.url), "utf8");
 const ORIGIN = "https://docs.stripe.com";
 
-function fakeFetch(files: Record<string, string>) {
+function fakeFetch(files: Record<string, string>, redirects: Record<string, string> = {}) {
   const calls: string[] = [];
   const fetch: CatalogFetch = async (url) => {
     calls.push(url);
     const body = files[url];
+    const finalUrl = redirects[url] ?? url;
     const result: GuardedFetchResult =
-      body === undefined ? { kind: "absent", status: 404 } : { kind: "ok", status: 200, body, bytes: new Uint8Array(), finalUrl: url };
+      body === undefined ? { kind: "absent", status: 404 } : { kind: "ok", status: 200, body, bytes: new Uint8Array(), finalUrl };
     return result;
   };
   return { fetch, calls };
@@ -53,6 +54,21 @@ describe("parseLlmsTxt", () => {
     expect(parsed.droppedOffOrigin).toBe(1);
     expect(JSON.stringify(parsed)).not.toContain("evil.example");
   });
+
+  it("counts link-like list lines that do not parse", () => {
+    const text = [
+      "- [Good](/good.md): kept",
+      "- [Dash description](/a.md) - not the llms.txt form",
+      "- [Nested [brackets]](/b.md)",
+      "- [Script](javascript:alert(1))",
+      "- plain list item",
+      "Prose with [a link](/c.md) is not a list item.",
+    ].join("\n");
+    const parsed = parseLlmsTxt(text, ORIGIN);
+
+    expect(parsed.entries.map((entry) => entry.url)).toEqual([`${ORIGIN}/good.md`]);
+    expect(parsed.skippedLines).toBe(3);
+  });
 });
 
 describe("fetchLlmsTxt", () => {
@@ -82,5 +98,17 @@ describe("fetchLlmsTxt", () => {
       Array.from({ length: MAX_NESTED_LLMS_TXT }, (_, i) => `${ORIGIN}/area${i}/page${i}.md`),
     );
     expect(result.nestedSkipped).toBe(2 + MAX_NESTED_LLMS_TXT); // two over the cap, plus each file's deeper link
+  });
+
+  it("resolves relative links against the URL the file was finally served from", async () => {
+    const { fetch } = fakeFetch(
+      { [`${ORIGIN}/llms.txt`]: "- [Intro](intro.md)\n- [Guide](/guide.md)" },
+      { [`${ORIGIN}/llms.txt`]: `${ORIGIN}/docs/v2/llms.txt` },
+    );
+
+    const result = await fetchLlmsTxt(ORIGIN, fetch);
+
+    if (!result.found) throw new Error("expected found");
+    expect(result.entries.map((entry) => entry.url)).toEqual([`${ORIGIN}/docs/v2/intro.md`, `${ORIGIN}/guide.md`]);
   });
 });

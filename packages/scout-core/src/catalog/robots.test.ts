@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import type { GuardedFetchResult } from "../fetch/guardedFetch.js";
-import { fetchRobots, isAllowed, MAX_CRAWL_DELAY_MS, parseRobots } from "./robots.js";
+import { fetchRobots, isAllowed, MAX_CRAWL_DELAY_MS, MAX_RULE_PATTERN_LENGTH, MAX_RULES, parseRobots } from "./robots.js";
 
 const fixture = (name: string) => readFileSync(new URL(`../../test/fixtures/robots/${name}`, import.meta.url), "utf8");
 
@@ -29,6 +29,9 @@ describe("parseRobots", () => {
 
   it("lets Allow win a tie and treats an empty Disallow as allow", () => {
     expect(isAllowed(parseRobots("User-agent: *\nDisallow: /page\nAllow: /page"), "/page")).toBe(true);
+    // Equal-length, different patterns that both match: Allow still wins.
+    expect(isAllowed(parseRobots("User-agent: *\nDisallow: /pag*\nAllow: /page"), "/page/x")).toBe(true);
+    expect(isAllowed(parseRobots("User-agent: *\nAllow: /page\nDisallow: /pag*"), "/page/x")).toBe(true);
     expect(isAllowed(parseRobots("User-agent: *\nDisallow:"), "/anything")).toBe(true);
   });
 
@@ -36,11 +39,46 @@ describe("parseRobots", () => {
     expect(parseRobots("User-agent: *\nCrawl-delay: 86400").crawlDelayMs).toBe(MAX_CRAWL_DELAY_MS);
   });
 
+  it("ignores a non-decimal crawl delay so a later valid one applies", () => {
+    expect(parseRobots("User-agent: *\nCrawl-delay:\nCrawl-delay: 1e3\nCrawl-delay: 0x10\nCrawl-delay: 1.5").crawlDelayMs).toBe(1500);
+    expect(parseRobots("User-agent: *\nCrawl-delay: soon").crawlDelayMs).toBeUndefined();
+  });
+
+  it("matches non-ASCII patterns and escapes regardless of percent-encoding case", () => {
+    const rules = parseRobots("User-agent: *\nDisallow: /café\nDisallow: /a%2fb");
+    expect(isAllowed(rules, "/caf%C3%A9")).toBe(false);
+    expect(isAllowed(rules, "/caf%c3%a9/menu")).toBe(false);
+    expect(isAllowed(rules, "/a%2Fb")).toBe(false);
+    expect(isAllowed(rules, "/cafe")).toBe(true);
+  });
+
+  it("skips over-long patterns and rules beyond the cap, and counts them", () => {
+    const long = `Disallow: /*${"x".repeat(2000)}`;
+    const many = Array.from({ length: MAX_RULES + 5 }, (_, i) => `Disallow: /r${i}/`);
+    const rules = parseRobots(["User-agent: *", long, ...many].join("\n"));
+
+    expect(rules.rules).toHaveLength(MAX_RULES);
+    expect(rules.skippedRules).toEqual({ tooLong: 1, overLimit: 5 });
+    expect(isAllowed(rules, `/${"x".repeat(2000)}`)).toBe(true);
+    expect(isAllowed(rules, `/r${MAX_RULES}/`)).toBe(true);
+    expect(isAllowed(rules, `/r${MAX_RULES - 1}/`)).toBe(false);
+  });
+
   it("matches many-wildcard patterns without pathological backtracking", () => {
     const rules = parseRobots(`User-agent: *\nDisallow: /${"*a".repeat(40)}b`);
     const started = performance.now();
     expect(isAllowed(rules, `/${"a".repeat(5000)}`)).toBe(true);
     expect(performance.now() - started).toBeLessThan(1000);
+  });
+
+  it("matches a maximal-length pattern against a 2,048-character path quickly", () => {
+    const pattern = `/${"*a".repeat((MAX_RULE_PATTERN_LENGTH - 2) / 2)}b`;
+    expect(pattern).toHaveLength(MAX_RULE_PATTERN_LENGTH);
+    const rules = parseRobots(`User-agent: *\nDisallow: ${pattern}`);
+    expect(rules.rules).toHaveLength(1);
+    const started = performance.now();
+    expect(isAllowed(rules, `/${"a".repeat(2047)}`)).toBe(true);
+    expect(performance.now() - started).toBeLessThan(100);
   });
 });
 
@@ -51,8 +89,9 @@ describe("fetchRobots", () => {
     const absent = await fetchRobots("https://example.com", fetchReturning({ kind: "absent", status: 404 }));
     const failed = await fetchRobots("https://example.com", fetchReturning({ kind: "error", reason: "timeout", message: "t" }));
 
-    expect(absent).toEqual({ rules: [], sitemaps: [], source: "absent" });
-    expect(failed).toEqual({ rules: [], sitemaps: [], source: "error" });
+    const none = { tooLong: 0, overLimit: 0 };
+    expect(absent).toEqual({ rules: [], sitemaps: [], skippedRules: none, source: "absent" });
+    expect(failed).toEqual({ rules: [], sitemaps: [], skippedRules: none, source: "error" });
     expect(isAllowed(absent, "/admin")).toBe(true);
   });
 

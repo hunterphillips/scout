@@ -16,8 +16,10 @@ export interface ParsedLlmsTxt {
   entries: LlmsTxtEntry[];
   /** Same-origin links to other `llms.txt` files, deduplicated, in document order. */
   nestedLlmsTxtUrls: string[];
-  /** Links dropped because they were not same-origin `https:` URLs. */
+  /** Links dropped because they were not same-origin `https:` URLs (or were over `MAX_URL_LENGTH`). */
   droppedOffOrigin: number;
+  /** List lines that look like links (`- ...](...`) but do not parse as a link item. */
+  skippedLines: number;
 }
 
 export type FetchedLlmsTxt =
@@ -32,10 +34,13 @@ export type FetchedLlmsTxt =
       /** Nested links beyond `MAX_NESTED_LLMS_TXT`, plus any found in nested files (depth 1). */
       nestedSkipped: number;
       droppedOffOrigin: number;
+      skippedLines: number;
     };
 
 // `- [label](url)` or `* [label](url)`, an optional quoted link title, then an optional `: description`.
 const LINK_LINE = /^\s*[-*+]\s+\[([^\]]*)\]\(\s*<?([^\s)>]+)>?(?:\s+"[^"]*")?\s*\)(?:\s*:\s*(.*))?$/;
+// A list item containing `](`: meant as a link, so a parse failure is worth counting.
+const LINK_LIKE_LINE = /^\s*[-*+]\s/;
 
 function isNestedLlmsTxt(url: URL): boolean {
   return /(?:^|\/)llms\.txt$/.test(url.pathname);
@@ -44,8 +49,9 @@ function isNestedLlmsTxt(url: URL): boolean {
 /**
  * Parse an `llms.txt` file.
  *
- * Policy: only Markdown link list items are read. Links resolve against `baseUrl` (the
- * file's own URL) and are kept only if they are same-origin `https:` URLs; everything else
+ * Policy: only Markdown link list items are read; list lines that contain `](` but do not
+ * parse are counted in `skippedLines`. Links resolve against `baseUrl` (the URL the file
+ * was finally served from) and are kept only if they are same-origin `https:` URLs; everything else
  * is dropped and counted. Labels and descriptions pass through `sanitizeLabel` and are
  * data only. A same-origin link to another `llms.txt` is reported in `nestedLlmsTxtUrls`
  * instead of becoming an entry.
@@ -54,6 +60,7 @@ export function parseLlmsTxt(text: string, origin: string, baseUrl: string = `${
   const entries: LlmsTxtEntry[] = [];
   const nested = new Set<string>();
   let droppedOffOrigin = 0;
+  let skippedLines = 0;
   let self: string | null = null;
   try {
     self = new URL(baseUrl).toString();
@@ -63,7 +70,10 @@ export function parseLlmsTxt(text: string, origin: string, baseUrl: string = `${
 
   for (const line of text.split(/\r\n|\r|\n/)) {
     const match = LINK_LINE.exec(line);
-    if (!match) continue;
+    if (!match) {
+      if (LINK_LIKE_LINE.test(line) && line.includes("](")) skippedLines += 1;
+      continue;
+    }
     const [, label = "", href = "", description] = match;
     const url = sameOriginHttpsUrl(href, origin, baseUrl);
     if (!url) {
@@ -79,13 +89,14 @@ export function parseLlmsTxt(text: string, origin: string, baseUrl: string = `${
     if (cleanDescription) entry.description = cleanDescription;
     entries.push(entry);
   }
-  return { entries, nestedLlmsTxtUrls: [...nested], droppedOffOrigin };
+  return { entries, nestedLlmsTxtUrls: [...nested], droppedOffOrigin, skippedLines };
 }
 
 /**
  * Fetch `${origin}/llms.txt` and, one level deep, up to `MAX_NESTED_LLMS_TXT` nested
  * `llms.txt` files it links to. Nested files contribute entries; their own nested links
- * are not followed. Each file is capped at 512 KiB.
+ * are not followed. Each file is capped at 512 KiB. Relative links resolve against the
+ * URL each file was finally served from (after redirects), not the URL requested.
  */
 export async function fetchLlmsTxt(origin: string, fetch: CatalogFetch): Promise<FetchedLlmsTxt> {
   const rootUrl = `${origin}/llms.txt`;
@@ -93,9 +104,10 @@ export async function fetchLlmsTxt(origin: string, fetch: CatalogFetch): Promise
   if (root.kind === "absent") return { found: false, source: "absent" };
   if (root.kind !== "ok") return { found: false, source: "error" };
 
-  const parsed = parseLlmsTxt(root.body, origin, rootUrl);
+  const parsed = parseLlmsTxt(root.body, origin, root.finalUrl);
   const entries = [...parsed.entries];
   let droppedOffOrigin = parsed.droppedOffOrigin;
+  let skippedLines = parsed.skippedLines;
   let filesFetched = 1;
   let nestedFailed = 0;
   let nestedSkipped = Math.max(0, parsed.nestedLlmsTxtUrls.length - MAX_NESTED_LLMS_TXT);
@@ -107,10 +119,11 @@ export async function fetchLlmsTxt(origin: string, fetch: CatalogFetch): Promise
       continue;
     }
     filesFetched += 1;
-    const child = parseLlmsTxt(result.body, origin, nestedUrl);
+    const child = parseLlmsTxt(result.body, origin, result.finalUrl);
     entries.push(...child.entries);
     droppedOffOrigin += child.droppedOffOrigin;
+    skippedLines += child.skippedLines;
     nestedSkipped += child.nestedLlmsTxtUrls.length;
   }
-  return { found: true, entries, filesFetched, nestedFailed, nestedSkipped, droppedOffOrigin };
+  return { found: true, entries, filesFetched, nestedFailed, nestedSkipped, droppedOffOrigin, skippedLines };
 }
