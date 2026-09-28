@@ -1,12 +1,15 @@
 # Scout
 
-Phase 0 only. Nothing here is functional yet.
+Scout is a proof of concept. When Hunter lands on a website, it shows a few links from
+that site that fit what he is working on. Phase 1 is the plumbing only: a Chrome
+extension senses the focused tab, a native host relays that to a local core process,
+and a Mac app shows the core's status. There is no ranking yet.
 
-This directory is a standalone workspace for Scout: a native Mac companion
-(`native/Scout`), a Chrome sensor (`packages/browser-extension` plus
-`packages/native-host`), shared code (`packages/contracts`,
-`packages/scout-core`), and an independent personal-context MCP agent
-(`packages/personal-context-mcp`, which must never import `@scout/*`).
+Pieces: a native Mac companion (`native/Scout`), a Chrome sensor
+(`packages/browser-extension` plus `packages/native-host`), shared code
+(`packages/contracts`, `packages/scout-core`), and an independent personal-context MCP
+agent (`packages/personal-context-mcp`, still a placeholder; it must never import
+`@scout/*`).
 
 ## Commands
 
@@ -15,31 +18,51 @@ Run from this directory (Node 22.12+, npm):
     npm ci
     npm run build
     npm run typecheck
-    npm test
+    npm test            # workspace tests, spikes, and setup-script tests
+    npm run test:e2e    # real native host against the real core (needs npm run build)
+    npm run test:all    # build, then both of the above
 
-Native scaffold:
+Native app:
 
     cd native/Scout && swift build && swift test
 
-## Billing preflight
+## Install for a manual check
+
+1. `npm run build`
+2. `npm run setup` — generates an extension key, writes `~/.scout/config.json`
+   (node path, repo path, extension ID, destination sites), the native-host wrapper
+   in `~/.scout/bin`, and Chrome's native-messaging manifest. Everything it writes is
+   listed in `~/.scout/installed.json`. Add `--dry-run` to see the paths first.
+3. In Chrome, open `chrome://extensions`, turn on Developer mode, and load
+   `packages/browser-extension/dist` unpacked.
+4. Start the app: `cd native/Scout && swift run ScoutApp` (from a shell without
+   `SCOUT_HOME` set; the app reads only `~/.scout`).
+5. Click the Scout Sensor icon and press **Grant sites**.
+
+What you should see: the popup says "connected"; the app panel says "Idle" and, while
+a docs.stripe.com or www.peakdesign.com tab is in front, shows that hostname on a
+second line. Switching tabs or apps clears it. A GitHub issue page raises the popup's
+"acked" count. Quitting the app makes the popup say "core unavailable" or "connecting"
+for about four and a half minutes, then "disconnected"; relaunching inside that window
+reconnects on its own, and after it a tab switch or **Reconnect** does.
+
+`npm run doctor` checks the install. `npm run uninstall` removes only the files
+`installed.json` lists, after showing them; it keeps the key unless you pass
+`--include-key`, and never touches `~/.scout/logs`.
+
+Rebuilding the extension keeps the `key` setup wrote. A fresh clone needs setup again.
+
+## Phase 0 spikes
+
+The billing preflights and the throwaway capture/bridge spikes live under
+`scripts/spikes/`. Results: `../thoughts/shared/research/2026-09-24-scout-phase0-results.md`.
 
     node scripts/spikes/auth-preflight.mjs
-
-Checks, without any model call, whether a `claude` child process started with
-this environment would bill a claude.ai subscription. It prints a JSON report
-of presence flags and key names only, never values. Exit 0 means
-`subscription`; any other exit means `ambiguous` and no inference may run.
-
-## Direct-profile billing preflight
-
     npm run preflight:direct -- --scratch-root <absolute dir outside the workspace>
 
-Same checks, run against the personal-context service's own launch profile
-(`scripts/spikes/launch-profile.mjs`) instead of the inherited environment.
-The profile starts `claude` from a fresh private directory under the scratch
-root, with an allowlisted environment that drops gateway, API-key, provider,
-model and nested-session variables. It changes no settings and no parent
-environment; user and managed settings still apply and can still block. The
-report adds the profile id, forwarded and dropped key names, and how the
-directory was classified. The directory is removed afterwards. Exit codes
-match the inherited preflight.
+The first checks, without any model call, whether a `claude` child started with this
+environment would bill a claude.ai subscription; it prints presence flags and key
+names only. Exit 0 means `subscription`; anything else means `ambiguous` and no
+inference may run. The second runs the same checks against the personal-context
+service's own launch profile (`scripts/spikes/launch-profile.mjs`), which starts
+`claude` from a fresh private directory with an allowlisted environment.
