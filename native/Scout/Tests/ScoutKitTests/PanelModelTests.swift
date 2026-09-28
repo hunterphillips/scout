@@ -9,6 +9,13 @@ import Testing
         #expect(model.text.hasPrefix("Setup needed\nnodePath is missing"))
         model.apply(.stopped)
         #expect(model.text.hasPrefix("Stopped"))
+        #expect(model.text.contains("after \(RestartPolicy.defaultMaxRestarts) restarts in a minute"))
+    }
+
+    @Test func describesRestartWindows() {
+        #expect(PanelModel.describe(60) == "a minute")
+        #expect(PanelModel.describe(120) == "2 minutes")
+        #expect(PanelModel.describe(90) == "90 seconds")
     }
 
     @Test func runningShowsCoreStatusAndResults() {

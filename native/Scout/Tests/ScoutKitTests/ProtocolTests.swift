@@ -85,6 +85,22 @@ import Testing
         let next = parser.append(Data((#"{"type":"state","status":"idle"}"# + "\n").utf8))
         #expect(next.count == 1)
     }
+
+    @Test func finishCountsAnUnfinishedLastLineOnce() {
+        var parser = JSONLParser()
+        _ = parser.append(Data(#"{"type":"state","status":"idle"}"#.utf8))
+        parser.finish()
+        #expect(parser.ignoredLineCount == 1)
+        parser.finish()
+        #expect(parser.ignoredLineCount == 1)
+    }
+
+    @Test func finishIgnoresTrailingWhitespace() {
+        var parser = JSONLParser()
+        _ = parser.append(Data("\n  \r".utf8))
+        parser.finish()
+        #expect(parser.ignoredLineCount == 0)
+    }
 }
 
 @Suite struct NativeCommandTests {

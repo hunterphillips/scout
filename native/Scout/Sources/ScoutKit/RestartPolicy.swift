@@ -7,7 +7,10 @@ public struct RestartPolicy: Sendable {
     public let window: TimeInterval
     private var restarts: [Date] = []
 
-    public init(maxRestarts: Int = 3, window: TimeInterval = 60) {
+    public static let defaultMaxRestarts = 3
+    public static let defaultWindow: TimeInterval = 60
+
+    public init(maxRestarts: Int = defaultMaxRestarts, window: TimeInterval = defaultWindow) {
         self.maxRestarts = maxRestarts
         self.window = window
     }

@@ -32,4 +32,11 @@ public struct JSONLParser: Sendable {
         }
         return states
     }
+
+    /// Call at end of stream. An unfinished last line counts as one ignored line.
+    public mutating func finish() {
+        let leftover = buffer.allSatisfy { $0 == 0x20 || $0 == 0x09 || $0 == 0x0D }
+        buffer.removeAll()
+        if !leftover { ignoredLineCount += 1 }
+    }
 }

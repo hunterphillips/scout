@@ -62,8 +62,10 @@ import Testing
     @Test func parsesStdoutWritesStdinAndShutsDownCleanly() async throws {
         let f = try Fixture(); defer { f.cleanUp() }
         let received = f.dir.appendingPathComponent("received")
+        let launches = f.dir.appendingPathComponent("launches")
         try f.writeNode("""
             #!/bin/sh
+            echo x >> '\(launches.path)'
             echo '{"type":"state","status":"idle"}'
             echo 'garbage'
             echo '{"type":"results","visitEpoch":1,"status":"empty","items":[]}'
@@ -96,7 +98,79 @@ import Testing
         ])
         // Give a stray termination callback a chance to (wrongly) restart it.
         try await Task.sleep(nanoseconds: 200_000_000)
-        #expect(sidecar.status == .running)
+        #expect(lines(launches).count == 1)
+    }
+
+    @Test func startTwiceLaunchesOneChild() async throws {
+        let f = try Fixture(); defer { f.cleanUp() }
+        let launches = f.dir.appendingPathComponent("launches")
+        try f.writeNode("#!/bin/sh\necho x >> '\(launches.path)'\nwhile read line; do :; done\n")
+        let sidecar = SidecarProcess(
+            resolveLaunch: { .ready(LaunchSpec(executable: f.node, arguments: [])) })
+        sidecar.start()
+        sidecar.start()
+        await waitUntil { !lines(launches).isEmpty }
+        try await Task.sleep(nanoseconds: 200_000_000)
+        #expect(lines(launches).count == 1)
+        sidecar.shutdown(timeout: 1)
+    }
+
+    @Test func childRunsInTheSpecsDirectory() async throws {
+        let f = try Fixture(); defer { f.cleanUp() }
+        let cwd = f.dir.appendingPathComponent("cwd")
+        try f.writeNode("#!/bin/sh\npwd -P > '\(cwd.path)'\nwhile read line; do :; done\n")
+        let sidecar = SidecarProcess(resolveLaunch: {
+            .ready(LaunchSpec(executable: f.node, arguments: [], currentDirectoryURL: f.root))
+        })
+        sidecar.start()
+        await waitUntil { !lines(cwd).isEmpty }
+        sidecar.shutdown(timeout: 1)
+        // Foundation's symlink resolution drops /private, so ask the OS.
+        let real = try #require(realpath(f.root.path, nil))
+        defer { free(real) }
+        #expect(lines(cwd) == [String(cString: real)])
+    }
+
+    @Test func unfinishedLastLineAtEOFIsCounted() async throws {
+        let f = try Fixture(); defer { f.cleanUp() }
+        // Prints a good line and an unfinished one, closes stdout, and keeps running.
+        try f.writeNode("""
+            #!/bin/sh
+            echo '{"type":"state","status":"idle"}'
+            printf '{"type":"state"'
+            exec >&-
+            while read line; do :; done
+            """)
+        var states: [PanelState] = []
+        let sidecar = SidecarProcess(
+            resolveLaunch: { .ready(LaunchSpec(executable: f.node, arguments: [])) })
+        sidecar.onPanelState = { states.append($0) }
+        sidecar.start()
+        await waitUntil { sidecar.ignoredLineCount == 1 }
+        sidecar.shutdown(timeout: 1)
+        #expect(states == [.state(status: .idle, visitEpoch: nil, detail: nil)])
+        #expect(sidecar.ignoredLineCount == 1)
+    }
+
+    @Test func sendNeverBlocksWhenTheChildStopsReading() async throws {
+        let f = try Fixture(); defer { f.cleanUp() }
+        let pidFile = f.dir.appendingPathComponent("pid")
+        try f.writeNode("#!/bin/sh\necho $$ > '\(pidFile.path)'\nwhile :; do sleep 0.1; done\n")
+        let sidecar = SidecarProcess(
+            resolveLaunch: { .ready(LaunchSpec(executable: f.node, arguments: [])) })
+        sidecar.start()
+        await waitUntil { !lines(pidFile).isEmpty }
+        let pid = try #require(lines(pidFile).first.flatMap { pid_t($0) })
+
+        // A pipe holds 16-64 KiB; this is far more.
+        let began = Date()
+        for i in 0..<10_000 where sidecar.droppedCommandCount == 0 {
+            sidecar.send(.frontmost(bundleId: "com.example.app\(i)", at: Int64(i)))
+        }
+        #expect(sidecar.droppedCommandCount > 0)
+        sidecar.shutdown()
+        #expect(Date().timeIntervalSince(began) < 3)
+        #expect(kill(pid, 0) != 0)
     }
 
     @Test func shutdownKillsAChildThatIgnoresIt() async throws {

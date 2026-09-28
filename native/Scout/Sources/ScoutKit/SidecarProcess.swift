@@ -22,6 +22,9 @@ public final class SidecarProcess {
 
     public var ignoredLineCount: Int { parser.ignoredLineCount + ignoredBefore }
 
+    /// Commands dropped because the child's stdin was full or closed.
+    public private(set) var droppedCommandCount = 0
+
     private let resolveLaunch: () -> SidecarLaunch
     private var policy: RestartPolicy
     private let restartDelay: TimeInterval
@@ -47,25 +50,41 @@ public final class SidecarProcess {
     }
 
     public func start() {
+        guard process == nil else { return }
         // A write to a child that already exited must fail, not kill the app.
         signal(SIGPIPE, SIG_IGN)
         stopping = false
         launch()
     }
 
+    /// Never blocks: stdin is non-blocking, and a message that doesn't fit in the pipe
+    /// right now is dropped. Messages up to `PIPE_BUF` bytes are written whole or not
+    /// at all, so a drop never leaves half a line in the pipe.
     public func send(_ command: NativeCommand) {
         guard let stdin else { return }
-        do {
-            try stdin.write(contentsOf: command.jsonLine())
-        } catch {
-            log("write failed: \(error)")
+        let line = command.jsonLine()
+        guard line.count <= Int(PIPE_BUF) else {
+            drop("command is \(line.count) bytes, over PIPE_BUF")
+            return
         }
+        let written = line.withUnsafeBytes { Darwin.write(stdin.fileDescriptor, $0.baseAddress, $0.count) }
+        if written != line.count {
+            let reason = written < 0 ? String(cString: strerror(errno)) : "short write \(written)"
+            drop(reason)
+        }
+    }
+
+    private func drop(_ reason: String) {
+        droppedCommandCount += 1
+        log("dropped command (\(reason)); total dropped \(droppedCommandCount)")
     }
 
     /// Sends `shutdown`, waits up to `timeout` for the child to exit, then kills it.
     /// Blocks the caller; meant for app termination.
     public func shutdown(timeout: TimeInterval = 2) {
         stopping = true
+        // Ignore anything the child still prints.
+        generation += 1
         guard let process, process.isRunning else { return }
         send(.shutdown)
         try? stdin?.close()
@@ -100,6 +119,7 @@ public final class SidecarProcess {
         let child = Process()
         child.executableURL = spec.executable
         child.arguments = spec.arguments
+        child.currentDirectoryURL = spec.currentDirectoryURL
         let input = Pipe()
         let output = Pipe()
         child.standardInput = input
@@ -110,6 +130,9 @@ public final class SidecarProcess {
             let data = handle.availableData
             if data.isEmpty {
                 handle.readabilityHandler = nil
+                DispatchQueue.main.async {
+                    MainActor.assumeIsolated { self?.finishOutput(generation: gen) }
+                }
                 return
             }
             // The main queue is FIFO, so chunks arrive in order.
@@ -135,6 +158,8 @@ public final class SidecarProcess {
             }
             return
         }
+        let fd = input.fileHandleForWriting.fileDescriptor
+        _ = fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK)
         process = child
         stdin = input.fileHandleForWriting
         status = .running
@@ -152,8 +177,21 @@ public final class SidecarProcess {
         }
     }
 
+    private func finishOutput(generation gen: Int) {
+        guard gen == generation else { return }
+        let before = parser.ignoredLineCount
+        parser.finish()
+        if parser.ignoredLineCount > before {
+            log("ignored an unfinished last line; total \(ignoredLineCount)")
+        }
+    }
+
     private func handleExit(generation gen: Int, code: Int32) {
         guard gen == generation, !stopping else { return }
+        finishOutput(generation: gen)
+        // Output from the dead child that is still in flight must not reach the panel.
+        generation += 1
+        let pending = generation
         process = nil
         stdin = nil
         log("sidecar exited with status \(code)")
@@ -163,7 +201,11 @@ public final class SidecarProcess {
         }
         status = .starting
         DispatchQueue.main.asyncAfter(deadline: .now() + restartDelay) {
-            MainActor.assumeIsolated { [weak self] in self?.launch() }
+            MainActor.assumeIsolated { [weak self] in
+                // Skip if start() or shutdown() ran in the meantime.
+                guard let self, self.generation == pending else { return }
+                self.launch()
+            }
         }
     }
 

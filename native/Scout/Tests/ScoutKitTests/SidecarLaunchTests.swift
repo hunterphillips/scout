@@ -53,7 +53,17 @@ struct Fixture {
         let f = try Fixture(); defer { f.cleanUp() }
         try f.writeConfig(#"{"nodePath":"\#(f.node.path)","scoutRoot":"\#(f.root.path)","claudePath":"/x"}"#)
         #expect(SidecarLaunch.resolve(configURL: f.configURL) == .ready(LaunchSpec(
-            executable: f.node, arguments: [f.mainJS.path, "--stdio"])))
+            executable: f.node,
+            arguments: [f.mainJS.path, "--stdio"],
+            currentDirectoryURL: URL(fileURLWithPath: f.root.path, isDirectory: true))))
+    }
+
+    @Test func setupMessagesSayToReopenScout() throws {
+        let f = try Fixture(); defer { f.cleanUp() }
+        guard case let .setupNeeded(reason) = SidecarLaunch.resolve(configURL: f.configURL) else {
+            Issue.record("expected setupNeeded"); return
+        }
+        #expect(reason.hasSuffix("then reopen Scout."))
     }
 
     @Test func missingConfigFile() throws {

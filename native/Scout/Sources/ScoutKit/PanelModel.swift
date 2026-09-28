@@ -34,7 +34,8 @@ public struct PanelModel: Sendable, Equatable {
         case let .setupNeeded(reason):
             return "Setup needed\n\(reason)"
         case .stopped:
-            return "Stopped\nScout core kept exiting after 3 restarts in a minute. Quit and reopen Scout."
+            return "Stopped\nScout core kept exiting after \(RestartPolicy.defaultMaxRestarts) restarts in "
+                + "\(Self.describe(RestartPolicy.defaultWindow)). Quit and reopen Scout."
         case .running:
             break
         }
@@ -57,5 +58,12 @@ public struct PanelModel: Sendable, Equatable {
             lines.append("Results error: \(reason)")
         }
         return lines.joined(separator: "\n")
+    }
+
+    static func describe(_ window: Double) -> String {
+        let seconds = Int(window)
+        if seconds == 60 { return "a minute" }
+        if seconds % 60 == 0 { return "\(seconds / 60) minutes" }
+        return "\(seconds) seconds"
     }
 }
