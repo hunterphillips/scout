@@ -1,0 +1,38 @@
+import Testing
+@testable import ScoutKit
+
+@Suite struct PanelModelTests {
+    @Test func sidecarStatusesRenderAsText() {
+        var model = PanelModel()
+        #expect(model.text == "Starting…")
+        model.apply(.setupNeeded("nodePath is missing"))
+        #expect(model.text.hasPrefix("Setup needed\nnodePath is missing"))
+        model.apply(.stopped)
+        #expect(model.text.hasPrefix("Stopped"))
+    }
+
+    @Test func runningShowsCoreStatusAndResults() {
+        var model = PanelModel()
+        model.apply(.running)
+        model.apply(.state(status: .working, visitEpoch: 1, detail: "ranking"))
+        #expect(model.text == "Working\nranking")
+        model.apply(.results(visitEpoch: 1, outcome: .ok([
+            ResultItem(candidateId: "c1", title: "Webhooks", href: "https://a", reason: "r"),
+            ResultItem(candidateId: "c2", title: "Testing", href: "https://b", reason: "r"),
+        ])))
+        model.apply(.state(status: .idle, visitEpoch: 1, detail: nil))
+        #expect(model.text == "Idle\n\n• Webhooks\n• Testing")
+        model.apply(.results(visitEpoch: 2, outcome: .unavailable("service down")))
+        #expect(model.text == "Idle\n\nResults unavailable: service down")
+    }
+
+    @Test func restartClearsCoreState() {
+        var model = PanelModel()
+        model.apply(.running)
+        model.apply(.state(status: .paused, visitEpoch: nil, detail: nil))
+        model.apply(.results(visitEpoch: 1, outcome: .empty))
+        model.apply(.starting)
+        model.apply(.running)
+        #expect(model.text == "Connected")
+    }
+}
