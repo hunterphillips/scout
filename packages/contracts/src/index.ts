@@ -1,2 +1,6 @@
-// Phase 0 placeholder: no functionality yet. Exists only so the workspace compiles.
-export const PACKAGE_NAME = "@scout/contracts";
+export * from "./browser.js";
+export * from "./visit.js";
+export * from "./catalog.js";
+export * from "./panel.js";
+export * from "./bridge.js";
+export * from "./frame.js";
