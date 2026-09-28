@@ -1,2 +1,15 @@
-// Phase 0 placeholder: no functionality yet. Exists only so the workspace compiles.
-export const PACKAGE_NAME = "@scout/native-host";
+export {
+  createHost,
+  expectedOrigin,
+  readExtensionId,
+  scoutHome,
+  EXIT_CORE_UNAVAILABLE,
+  EXIT_OK,
+  EXIT_REFUSED,
+  RETRY_INTERVAL_MS,
+  RETRY_WINDOW_MS,
+  type Host,
+  type HostCounters,
+  type HostDeps,
+  type HostTimers,
+} from "./host.js";

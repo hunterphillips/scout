@@ -2,7 +2,7 @@
   "name": "@scout/native-host",
   "version": "0.0.0",
   "private": true,
-  "description": "Chrome native-messaging host for Scout (Phase 0 placeholder).",
+  "description": "Chrome native-messaging host for Scout. Chrome runs dist/host.js through the ~/.scout/bin/scout-native-host wrapper.",
   "type": "module",
   "engines": {
     "node": ">=22.12.0"
@@ -15,10 +15,15 @@
       "default": "./dist/index.js"
     }
   },
-  "files": ["dist"],
+  "files": [
+    "dist"
+  ],
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "vitest run --passWithNoTests"
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@scout/contracts": "0.0.0"
   }
 }
