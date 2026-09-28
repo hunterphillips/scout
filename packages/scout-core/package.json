@@ -2,7 +2,7 @@
   "name": "@scout/scout-core",
   "version": "0.0.0",
   "private": true,
-  "description": "Scout coordinator: visit tracking, resume cache, diagnostics.",
+  "description": "Scout coordinator process: visit tracking, activity forwarding, bridge socket, diagnostics.",
   "type": "module",
   "engines": {
     "node": ">=22.12.0"

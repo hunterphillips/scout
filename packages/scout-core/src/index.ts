@@ -24,3 +24,27 @@ export {
   type VisitTracker,
   type VisitTrackerOptions,
 } from "./visitTracker.js";
+export {
+  createActivityForwarder,
+  type ActivityForwarder,
+  type ActivityForwarderOptions,
+  type ActivitySend,
+} from "./activityForwarder.js";
+export {
+  createCoordinator,
+  type Coordinator,
+  type CoordinatorConfig,
+  type CoordinatorOptions,
+} from "./coordinator.js";
+export {
+  createSocketServer,
+  ensurePrivateRunDir,
+  HELLO_TIMEOUT_MS,
+  SOCKET_NAME,
+  SocketServerError,
+  type SocketClient,
+  type SocketServer,
+  type SocketServerErrorCode,
+  type SocketServerOptions,
+} from "./socketServer.js";
+export { DEFAULT_DESTINATIONS, readDestinations, runStdio, type StdioCore, type StdioDeps } from "./main.js";
