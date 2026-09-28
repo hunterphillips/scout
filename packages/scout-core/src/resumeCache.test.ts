@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { type ContextStatus, createResumeCache, type ResumeKey } from "./resumeCache.js";
+import { type ContextStatus, createResumeCache, RESUME_MAX_ENTRIES, type ResumeKey } from "./resumeCache.js";
 
 const STATUS: ContextStatus = { serviceInstanceId: "svc-1", activityRevision: 4, sourceGrantRevision: "grant-a" };
 const KEY_A: ResumeKey = { tabId: 10, documentId: "doc-a", catalogVersion: "cat-1", contextRevision: 3 };
@@ -39,13 +39,72 @@ describe("resumeCache", () => {
     expect(fetchStatus).not.toHaveBeenCalled();
   });
 
-  // It is the one cache, not a cross-visit ranking cache: B finishing replaces A.
-  it("holds one entry; storing B discards A", async () => {
+  // Plan: "A-B-A switching within 30 s shows A's result again with no new rank." B's
+  // finished rank must not evict A.
+  it("store A, store B, restore A within 30 s returns A's result", async () => {
+    const { clock, cache } = setup();
+    cache.store(KEY_A, "result-A", STATUS);
+    clock.t = 5_000;
+    cache.store(KEY_B, "result-B", STATUS);
+    clock.t = 10_000;
+    expect(await cache.restore(KEY_A, ok())).toBe("result-A");
+    expect(cache.size).toBe(2);
+  });
+
+  // Each key keeps its own entry; B's lookup returns B's result, never A's.
+  it("keeps A and B side by side under their own keys", async () => {
     const { cache } = setup();
     cache.store(KEY_A, "result-A", STATUS);
     cache.store(KEY_B, "result-B", STATUS);
-    expect(await cache.restore(KEY_A, ok())).toBeNull();
     expect(await cache.restore(KEY_B, ok())).toBe("result-B");
+    expect(await cache.restore(KEY_A, ok())).toBe("result-A");
+  });
+
+  it("discards only the mismatched key's entry", async () => {
+    const { cache } = setup();
+    cache.store(KEY_A, "result-A", STATUS);
+    cache.store(KEY_B, "result-B", STATUS);
+    expect(await cache.restore(KEY_A, ok({ ...STATUS, activityRevision: 5 }))).toBeNull();
+    expect(cache.size).toBe(1);
+    expect(await cache.restore(KEY_B, ok())).toBe("result-B");
+  });
+
+  it("sweeps expired entries on store", () => {
+    const { clock, cache } = setup();
+    cache.store(KEY_A, "result-A", STATUS);
+    clock.t = 30_000;
+    cache.store(KEY_B, "result-B", STATUS);
+    expect(cache.size).toBe(1);
+  });
+
+  it("holds at most eight entries, evicting the oldest-stored", async () => {
+    const { clock, cache } = setup();
+    for (let i = 0; i < 9; i++) {
+      clock.t = i;
+      cache.store({ ...KEY_A, tabId: i }, `result-${i}`, STATUS);
+    }
+    expect(cache.size).toBe(RESUME_MAX_ENTRIES);
+    expect(await cache.restore({ ...KEY_A, tabId: 0 }, ok())).toBeNull();
+    expect(await cache.restore({ ...KEY_A, tabId: 8 }, ok())).toBe("result-8");
+  });
+
+  it("re-storing a key refreshes its age and eviction order", async () => {
+    const { clock, cache } = setup();
+    cache.store({ ...KEY_A, tabId: 0 }, "old", STATUS);
+    for (let i = 1; i < 8; i++) cache.store({ ...KEY_A, tabId: i }, `result-${i}`, STATUS);
+    clock.t = 1;
+    cache.store({ ...KEY_A, tabId: 0 }, "new", STATUS);
+    cache.store({ ...KEY_A, tabId: 8 }, "result-8", STATUS);
+    expect(await cache.restore({ ...KEY_A, tabId: 1 }, ok())).toBeNull();
+    expect(await cache.restore({ ...KEY_A, tabId: 0 }, ok())).toBe("new");
+  });
+
+  it("clear() empties every entry", () => {
+    const { cache } = setup();
+    cache.store(KEY_A, "result-A", STATUS);
+    cache.store(KEY_B, "result-B", STATUS);
+    cache.clear();
+    expect(cache.size).toBe(0);
   });
 
   // Plan: "after 30 s ... returning to A discards the entry."
@@ -72,7 +131,8 @@ describe("resumeCache", () => {
   });
 
   // Plan: "when context_status reports a different instance, activity revision, or grant
-  // revision ... returning to A discards the entry."
+  // revision ... returning to A discards the entry." The grant-revision row is also what
+  // covers "A grant revoked (reload) between ranks means the cached result is not shown."
   it.each([
     ["service instance", { ...STATUS, serviceInstanceId: "svc-2" }],
     ["activity revision", { ...STATUS, activityRevision: 5 }],
@@ -97,8 +157,9 @@ describe("resumeCache", () => {
     expect(cache.size).toBe(0);
   });
 
-  // Plan: "A grant revoked (reload) between ranks means the cached result is not shown."
-  // A revoke or reload bumps Scout's contextRevision, so the lookup key no longer matches.
+  // The key is exact: a lookup under a different contextRevision is a different key. The
+  // plan's "grant revoked (reload) between ranks" case is covered by the grant-revision
+  // status mismatch above, not by this test.
   it("misses when Scout's contextRevision changed since the rank", async () => {
     const { cache } = setup();
     cache.store(KEY_A, "result-A", STATUS);

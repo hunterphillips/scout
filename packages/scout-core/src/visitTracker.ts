@@ -57,7 +57,7 @@ const EMPTY_TUPLE: VisitTuple = {
  */
 export function createVisitTracker(options: VisitTrackerOptions): VisitTracker {
   const chromeBundleId = options.chromeBundleId ?? CHROME_BUNDLE_ID;
-  const destinations = new Set(options.destinations.map((d) => d.toLowerCase()));
+  const approvedOrigins = new Set(options.destinations.map((d) => `https://${d.toLowerCase()}`));
   const getContextRevision = options.getContextRevision ?? (() => 0);
 
   let focus: FocusObservation | null = null;
@@ -74,7 +74,8 @@ export function createVisitTracker(options: VisitTrackerOptions): VisitTracker {
       return null;
     }
     if (parsed.protocol !== "https:") return null;
-    return destinations.has(parsed.hostname) ? parsed.origin : null;
+    // Compare the full origin so a port-bearing origin (https://host:8443) is not approved.
+    return approvedOrigins.has(parsed.origin) ? parsed.origin : null;
   };
 
   const computeTuple = (): VisitTuple => {

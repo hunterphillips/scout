@@ -88,6 +88,7 @@ describe("visitTracker", () => {
       (s) => s.tracker.observeFrontmost({ type: "frontmost", bundleId: "com.apple.Terminal", at: s.clock.t }),
     ],
     ["unapproved origin", (s) => s.tracker.observeFocus(s.focus({ url: "https://stripe.com/pricing" }))],
+    ["non-default port", (s) => s.tracker.observeFocus(s.focus({ url: "https://docs.stripe.com:8443/payments" }))],
     ["http instead of https", (s) => s.tracker.observeFocus(s.focus({ url: "http://docs.stripe.com/payments" }))],
     [
       "missing URL",
