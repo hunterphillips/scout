@@ -1,18 +1,30 @@
 import type { FocusObservation } from "@scout/contracts";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import type { DiagnosticFields, Diagnostics } from "./diagnostics.js";
 import { createVisitTracker, type VisitChange, WINDOW_ID_NONE } from "./visitTracker.js";
 
 const STRIPE = "https://docs.stripe.com/payments/checkout";
 
-function setup() {
+function spyDiagnostics() {
+  const events: Array<{ name: string; fields: DiagnosticFields }> = [];
+  const diagnostics: Diagnostics = { failures: 0, event: (name, fields = {}) => void events.push({ name, fields }) };
+  return { events, diagnostics };
+}
+
+function setup(opts: { onChange?: (c: VisitChange) => void } = {}) {
   const clock = { t: 1_000, now: () => clock.t };
   const changes: Array<VisitChange & { at: number }> = [];
   let contextRevision = 7;
+  const { events, diagnostics } = spyDiagnostics();
   const tracker = createVisitTracker({
     destinations: ["docs.stripe.com", "www.peakdesign.com"],
     clock,
     getContextRevision: () => contextRevision,
-    onChange: (c) => changes.push({ ...c, at: clock.t }),
+    diagnostics,
+    onChange: (c) => {
+      changes.push({ ...c, at: clock.t });
+      opts.onChange?.(c);
+    },
   });
   let seq = 0;
   const focus = (overrides: Partial<FocusObservation> = {}): FocusObservation => ({
@@ -38,6 +50,7 @@ function setup() {
   return {
     clock,
     changes,
+    events,
     tracker,
     focus,
     chrome,
@@ -90,6 +103,7 @@ describe("visitTracker", () => {
     ["unapproved origin", (s) => s.tracker.observeFocus(s.focus({ url: "https://stripe.com/pricing" }))],
     ["non-default port", (s) => s.tracker.observeFocus(s.focus({ url: "https://docs.stripe.com:8443/payments" }))],
     ["http instead of https", (s) => s.tracker.observeFocus(s.focus({ url: "http://docs.stripe.com/payments" }))],
+    ["malformed URL", (s) => s.tracker.observeFocus(s.focus({ url: "not a url" }))],
     [
       "missing URL",
       (s) => {
@@ -109,7 +123,7 @@ describe("visitTracker", () => {
     expect(s.tracker.current()).toBeNull();
     expect(s.tracker.epoch).toBe(before + 1);
     expect(s.changes).toHaveLength(1);
-    expect(s.changes[0]).toMatchObject({ epoch: before + 1, visit: null });
+    expect(s.changes[0]).toMatchObject({ epoch: before + 1, visit: null, previous: { epoch: before } });
     expect(s.changes[0]!.at - startedAt).toBeLessThan(250);
   });
 
@@ -138,10 +152,12 @@ describe("visitTracker", () => {
   it("a same-tab navigation (new documentId or URL) is a real change", () => {
     const s = setup();
     s.activate();
+    const before = s.tracker.epoch;
     s.tracker.observeFocus(s.focus({ documentId: "doc-a2" }));
     s.tracker.observeFocus(s.focus({ documentId: "doc-a2", url: "https://docs.stripe.com/billing" }));
     expect(s.changes.map((c) => c.visit?.documentId)).toEqual(["doc-a2", "doc-a2"]);
-    expect(s.changes.map((c) => c.epoch)).toEqual([3, 4]);
+    expect(s.changes.map((c) => c.epoch)).toEqual([before + 1, before + 2]);
+    expect(s.changes[1]!.previous).toBe(s.changes[0]!.visit);
   });
 
   it("leaving and coming back is two changes, so the return is a new epoch", () => {
@@ -161,4 +177,69 @@ describe("visitTracker", () => {
     tracker.observeFocus(focus());
     expect(tracker.current()).toBeNull();
   });
+
+  it("activates when focus arrives first and Chrome becomes frontmost later", () => {
+    const s = setup();
+    s.tracker.observeFocus(s.focus());
+    expect(s.tracker.current()).toBeNull();
+    s.clock.t += 500;
+    s.chrome();
+    expect(s.tracker.current()).toMatchObject({ tabId: 10, origin: "https://docs.stripe.com", startedAt: s.clock.t });
+    expect(s.changes.at(-1)).toMatchObject({ visit: s.tracker.current(), previous: null });
+  });
+
+  it("idle to idle is a change with previous null but is not logged", () => {
+    const s = setup();
+    s.chrome();
+    s.tracker.observeFocus(s.focus({ url: "https://example.com/" }));
+    s.events.length = 0;
+    s.changes.length = 0;
+    s.tracker.observeFocus(s.focus({ tabId: 11, url: "https://example.org/" }));
+    expect(s.changes).toHaveLength(1);
+    expect(s.changes[0]).toMatchObject({ visit: null, previous: null });
+    expect(s.events.filter((e) => e.name === "visit_change")).toHaveLength(0);
+  });
+
+  it("logs visit_change when a visit starts, changes, or ends", () => {
+    const s = setup();
+    s.activate();
+    s.events.length = 0;
+    s.tracker.observeFocus(s.focus({ documentId: "doc-a2" }));
+    s.tracker.observeFocus(s.focus({ browserFocused: false }));
+    expect(s.events.filter((e) => e.name === "visit_change").map((e) => e.fields.active)).toEqual([true, false]);
+  });
+
+  it("never logs the page URL or documentId", () => {
+    const s = setup();
+    s.activate();
+    s.tracker.observeFocus(s.focus({ url: "https://docs.stripe.com/billing" }));
+    s.tracker.observeFocus(s.focus({ browserFocused: false }));
+    expect(s.events.length).toBeGreaterThan(0);
+    for (const { fields } of s.events) {
+      for (const value of Object.values(fields)) {
+        expect(String(value)).not.toContain("docs.stripe.com");
+        expect(String(value)).not.toContain("doc-a");
+      }
+    }
+  });
+
+  it("catches and logs a throwing onChange handler", () => {
+    const s = setup({
+      onChange: () => {
+        throw new Error("boom");
+      },
+    });
+    expect(() => s.activate()).not.toThrow();
+    expect(s.tracker.current()).not.toBeNull();
+    expect(s.events.some((e) => e.name === "visit_change_handler_error")).toBe(true);
+  });
+
+  it.each(["https://docs.stripe.com", "Docs.Stripe.com", "docs.stripe.com/payments", "", "bad host"])(
+    "rejects the invalid destination %j at construction",
+    (d) => {
+      expect(() =>
+        createVisitTracker({ destinations: ["docs.stripe.com", d], clock: { now: () => 0 }, onChange: vi.fn() }),
+      ).toThrow(/invalid destination/);
+    },
+  );
 });

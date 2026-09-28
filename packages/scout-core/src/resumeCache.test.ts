@@ -2,8 +2,20 @@ import { describe, expect, it, vi } from "vitest";
 import { type ContextStatus, createResumeCache, RESUME_MAX_ENTRIES, type ResumeKey } from "./resumeCache.js";
 
 const STATUS: ContextStatus = { serviceInstanceId: "svc-1", activityRevision: 4, sourceGrantRevision: "grant-a" };
-const KEY_A: ResumeKey = { tabId: 10, documentId: "doc-a", catalogVersion: "cat-1", contextRevision: 3 };
-const KEY_B: ResumeKey = { tabId: 20, documentId: "doc-b", catalogVersion: "cat-2", contextRevision: 3 };
+const KEY_A: ResumeKey = {
+  tabId: 10,
+  documentId: "doc-a",
+  url: "https://docs.stripe.com/payments",
+  catalogVersion: "cat-1",
+  contextRevision: 3,
+};
+const KEY_B: ResumeKey = {
+  tabId: 20,
+  documentId: "doc-b",
+  url: "https://www.peakdesign.com/products/everyday-backpack",
+  catalogVersion: "cat-2",
+  contextRevision: 3,
+};
 
 function setup() {
   const clock = { t: 0, now: () => clock.t };
@@ -185,5 +197,32 @@ describe("resumeCache", () => {
     cache.store(noDoc, "result-A", STATUS);
     expect(await cache.restore(KEY_A, ok())).toBeNull();
     expect(await cache.restore(noDoc, ok())).toBe("result-A");
+  });
+
+  // documentId survives pushState navigation, so /payments must not restore on /billing.
+  it("misses for the same tab and documentId at a different URL", async () => {
+    const { cache } = setup();
+    cache.store(KEY_A, "result-A", STATUS);
+    const fetchStatus = ok();
+    expect(await cache.restore({ ...KEY_A, url: "https://docs.stripe.com/billing" }, fetchStatus)).toBeNull();
+    expect(fetchStatus).not.toHaveBeenCalled();
+  });
+
+  it("ignores the URL fragment", async () => {
+    const { cache } = setup();
+    cache.store({ ...KEY_A, url: `${KEY_A.url}#step-1` }, "result-A", STATUS);
+    expect(await cache.restore({ ...KEY_A, url: `${KEY_A.url}#step-2` }, ok())).toBe("result-A");
+    expect(await cache.restore(KEY_A, ok())).toBe("result-A");
+  });
+
+  it("treats a clock that went backwards as expired", async () => {
+    const { clock, cache } = setup();
+    clock.t = 10_000;
+    cache.store(KEY_A, "result-A", STATUS);
+    clock.t = 9_000;
+    const fetchStatus = ok();
+    expect(await cache.restore(KEY_A, fetchStatus)).toBeNull();
+    expect(fetchStatus).not.toHaveBeenCalled();
+    expect(cache.size).toBe(0);
   });
 });

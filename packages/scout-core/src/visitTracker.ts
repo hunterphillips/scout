@@ -11,14 +11,20 @@ export interface VisitChange {
   epoch: number;
   /** null means idle: no approved page is in front. */
   visit: ActiveVisit | null;
+  /** The visit this change replaces; null means the tracker was idle. idle to idle is possible. */
+  previous: ActiveVisit | null;
 }
 
 export interface VisitTrackerOptions {
-  /** Approved hostnames, e.g. "docs.stripe.com". */
+  /** Approved hostnames, e.g. "docs.stripe.com". Each must be a bare lowercase host; construction throws otherwise. */
   destinations: readonly string[];
   chromeBundleId?: string;
   clock: Clock;
-  /** Called synchronously on every real change, never on a duplicate. */
+  /**
+   * Called synchronously on every real change, never on a duplicate. A throw is caught and
+   * logged, never rethrown. Re-entry is not supported: the handler must not call
+   * observeFocus or observeFrontmost.
+   */
   onChange: (change: VisitChange) => void;
   /** Scout's current contextRevision, stamped on each new visit. */
   getContextRevision?: () => number;
@@ -57,7 +63,8 @@ const EMPTY_TUPLE: VisitTuple = {
  */
 export function createVisitTracker(options: VisitTrackerOptions): VisitTracker {
   const chromeBundleId = options.chromeBundleId ?? CHROME_BUNDLE_ID;
-  const approvedOrigins = new Set(options.destinations.map((d) => `https://${d.toLowerCase()}`));
+  for (const d of options.destinations) assertDestination(d);
+  const approvedOrigins = new Set(options.destinations.map((d) => `https://${d}`));
   const getContextRevision = options.getContextRevision ?? (() => 0);
 
   let focus: FocusObservation | null = null;
@@ -99,9 +106,17 @@ export function createVisitTracker(options: VisitTrackerOptions): VisitTracker {
     if (sameTuple(tuple, next)) return;
     tuple = next;
     epoch += 1;
+    const previous = visit;
     visit = toVisit(next, epoch, options.clock.now(), getContextRevision());
-    options.diagnostics?.event("visit_change", { epoch, active: visit !== null });
-    options.onChange({ epoch, visit });
+    // Idle to idle (e.g. switching between unapproved tabs) is not worth a log line.
+    if (visit !== null || previous !== null) {
+      options.diagnostics?.event("visit_change", { epoch, active: visit !== null });
+    }
+    try {
+      options.onChange({ epoch, visit, previous });
+    } catch {
+      options.diagnostics?.event("visit_change_handler_error", { epoch });
+    }
   };
 
   return {
@@ -118,6 +133,17 @@ export function createVisitTracker(options: VisitTrackerOptions): VisitTracker {
       recompute();
     },
   };
+}
+
+/** A destination must be a bare host as URL parsing would print it: no scheme, path, or uppercase. */
+function assertDestination(d: string): void {
+  let host: string | null = null;
+  try {
+    host = new URL(`https://${d}`).host;
+  } catch {
+    // Falls through to the throw below.
+  }
+  if (host !== d) throw new Error(`scout: invalid destination host ${JSON.stringify(d)}`);
 }
 
 function toVisit(t: VisitTuple, epoch: number, now: number, contextRevision: number): ActiveVisit | null {

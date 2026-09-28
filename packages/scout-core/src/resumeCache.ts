@@ -1,19 +1,14 @@
+import type { ContextStatus } from "@scout/contracts";
 import type { Clock } from "./clock.js";
 import type { Diagnostics } from "./diagnostics.js";
 
-/** `context_status` output; every rank response carries the same three fields. */
-export interface ContextStatus {
-  /** Random per personal-context service process start. */
-  serviceInstanceId: string;
-  /** Bumps on each accepted activity observation or expiry. */
-  activityRevision: number;
-  /** Hash of the enabled source config. */
-  sourceGrantRevision: string;
-}
+export type { ContextStatus };
 
 export interface ResumeKey {
   tabId: number;
   documentId?: string;
+  /** The page URL. The fragment is ignored; path and query are part of the key. */
+  url: string;
   catalogVersion: string;
   /** Scout's contextRevision at rank time. */
   contextRevision: number;
@@ -62,7 +57,11 @@ export function createResumeCache<T>(options: ResumeCacheOptions): ResumeCache<T
   // Insertion order is store order: store() re-inserts, so the first entry is the oldest.
   const entries = new Map<string, Entry<T>>();
 
-  const expired = (e: Entry<T>): boolean => options.clock.now() - e.storedAt >= ttlMs;
+  const expired = (e: Entry<T>): boolean => {
+    const age = options.clock.now() - e.storedAt;
+    // A clock that went backwards makes the age unknowable; treat it as expired.
+    return age < 0 || age >= ttlMs;
+  };
 
   const miss = (reason: ResumeMissReason, id: string, discard: Entry<T> | null): null => {
     // Only discard the entry we examined; a store() for this key during the await must survive.
@@ -113,9 +112,17 @@ export function createResumeCache<T>(options: ResumeCacheOptions): ResumeCache<T
   };
 }
 
-/** Exact serialized key; a missing documentId is distinct from any string. */
+/**
+ * Exact serialized key; a missing documentId is distinct from any string. The URL is part
+ * of the key because documentId survives same-document (pushState) navigation.
+ */
 function keyId(key: ResumeKey): string {
-  return JSON.stringify([key.tabId, key.documentId ?? null, key.catalogVersion, key.contextRevision]);
+  return JSON.stringify([key.tabId, key.documentId ?? null, stripFragment(key.url), key.catalogVersion, key.contextRevision]);
+}
+
+function stripFragment(url: string): string {
+  const hash = url.indexOf("#");
+  return hash === -1 ? url : url.slice(0, hash);
 }
 
 function sameStatus(a: ContextStatus, b: ContextStatus): boolean {

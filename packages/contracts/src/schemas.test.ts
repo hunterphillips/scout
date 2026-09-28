@@ -3,6 +3,7 @@ import {
   BridgeFrameSchema,
   BrowserObservationSchema,
   CandidateSchema,
+  ContextStatusSchema,
   NativeCommandSchema,
   PanelStateSchema,
   ToChromeFrameSchema,
@@ -64,5 +65,11 @@ describe("contract schemas", () => {
     expect(NativeCommandSchema.parse({ type: "frontmost", bundleId: "com.google.Chrome", at: 5 }).type).toBe("frontmost");
     expect(NativeCommandSchema.parse({ type: "shutdown" })).toEqual({ type: "shutdown" });
     expect(NativeCommandSchema.safeParse({ type: "frontmost" }).success).toBe(false);
+  });
+
+  it("accepts a context_status and rejects a fractional activity revision", () => {
+    const status = { serviceInstanceId: "svc", activityRevision: 4, sourceGrantRevision: "g" };
+    expect(ContextStatusSchema.parse(status)).toEqual(status);
+    expect(ContextStatusSchema.safeParse({ ...status, activityRevision: 1.5 }).success).toBe(false);
   });
 });
