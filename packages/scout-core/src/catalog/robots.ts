@@ -136,32 +136,28 @@ function normalizeEncoding(text: string): string {
 
 /**
  * Match a robots path pattern: `*` matches any run of characters, a trailing `$` anchors
- * the end, otherwise the pattern is a prefix. Iterative wildcard matching (no RegExp), so
- * a hostile pattern with many `*` costs at most O(pattern × path).
+ * the end, otherwise the pattern is a prefix. The pattern is split on `*` and each piece is
+ * found at its leftmost position after the previous one, with no backtracking (leftmost
+ * matching is correct when `*` is the only wildcard), so a rule costs about O(path) no
+ * matter how many `*` it has. A `$` anywhere but the end is literal.
  */
 function patternMatches(pattern: string, path: string): boolean {
   const anchored = pattern.endsWith("$");
-  const p = anchored ? pattern.slice(0, -1) : `${pattern}*`;
-  let pi = 0;
-  let si = 0;
-  let star = -1;
-  let resume = 0;
-  while (si < path.length) {
-    if (pi < p.length && p[pi] === "*") {
-      star = pi++;
-      resume = si;
-    } else if (pi < p.length && p[pi] === path[si]) {
-      pi++;
-      si++;
-    } else if (star >= 0) {
-      pi = star + 1;
-      si = ++resume;
-    } else {
-      return false;
-    }
+  const pieces = (anchored ? pattern.slice(0, -1) : pattern).split("*");
+  const first = pieces[0] ?? "";
+  if (pieces.length === 1) return anchored ? path === first : path.startsWith(first);
+  if (!path.startsWith(first)) return false;
+  let pos = first.length;
+  for (let i = 1; i < pieces.length - 1; i++) {
+    const piece = pieces[i] ?? "";
+    if (!piece) continue;
+    const found = path.indexOf(piece, pos);
+    if (found < 0) return false;
+    pos = found + piece.length;
   }
-  while (pi < p.length && p[pi] === "*") pi++;
-  return pi === p.length;
+  const last = pieces[pieces.length - 1] ?? "";
+  if (anchored) return path.length - last.length >= pos && path.endsWith(last);
+  return path.indexOf(last, pos) >= 0;
 }
 
 /**

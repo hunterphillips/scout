@@ -80,6 +80,33 @@ describe("parseRobots", () => {
     expect(isAllowed(rules, `/${"a".repeat(2047)}`)).toBe(true);
     expect(performance.now() - started).toBeLessThan(100);
   });
+
+  it("checks the maximum number of worst-case wildcard rules against a 2,048-character path quickly", () => {
+    const pattern = `/*${"a".repeat(MAX_RULE_PATTERN_LENGTH - 3)}b`;
+    expect(pattern).toHaveLength(MAX_RULE_PATTERN_LENGTH);
+    const rules = parseRobots(["User-agent: *", ...Array.from({ length: MAX_RULES }, () => `Disallow: ${pattern}`)].join("\n"));
+    expect(rules.rules).toHaveLength(MAX_RULES);
+    const started = performance.now();
+    expect(isAllowed(rules, `/${"a".repeat(2047)}`)).toBe(true);
+    expect(performance.now() - started).toBeLessThan(100);
+  });
+
+  it("keeps anchor, prefix, and multi-wildcard semantics", () => {
+    const matches = (pattern: string, path: string) => !isAllowed(parseRobots(`User-agent: *\nDisallow: ${pattern}`), path);
+    expect(matches("/a", "/abc")).toBe(true);
+    expect(matches("/a$", "/a")).toBe(true);
+    expect(matches("/a$", "/ab")).toBe(false);
+    expect(matches("/a$b", "/a$bc")).toBe(true); // a $ not at the end is literal
+    expect(matches("/*.pdf$", "/x.pdf.pdf")).toBe(true);
+    expect(matches("/*.pdf$", "/x.pdfx")).toBe(false);
+    expect(matches("/a*b*c", "/aXbYc/z")).toBe(true);
+    expect(matches("/a*b*c", "/aXcYb")).toBe(false);
+    expect(matches("/ab*ba$", "/aba")).toBe(false); // pieces may not overlap
+    expect(matches("/ab*ba$", "/abba")).toBe(true);
+    expect(matches("/**x*", "/x")).toBe(true);
+    expect(matches("/*$", "/anything")).toBe(true);
+    expect(matches("*", "/")).toBe(true);
+  });
 });
 
 describe("fetchRobots", () => {
