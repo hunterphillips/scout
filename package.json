@@ -17,8 +17,12 @@
   "scripts": {
     "build": "npm run build --workspaces",
     "typecheck": "npm run typecheck --workspaces",
-    "test": "npm run test --workspaces && npm run test:spikes",
+    "test": "npm run test --workspaces && npm run test:spikes && npm run test:scripts",
     "test:spikes": "vitest run --root scripts/spikes",
+    "test:scripts": "vitest run --root scripts --exclude 'spikes/**'",
+    "setup": "node scripts/setup.mjs",
+    "doctor": "node scripts/doctor.mjs",
+    "uninstall": "node scripts/uninstall.mjs",
     "preflight:auth": "node scripts/spikes/auth-preflight.mjs",
     "preflight:direct": "node scripts/spikes/direct-profile-preflight.mjs",
     "smoke:agent": "node scripts/spikes/agent-smoke.mjs",
