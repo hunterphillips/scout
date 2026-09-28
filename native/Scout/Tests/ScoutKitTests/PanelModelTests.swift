@@ -1,3 +1,4 @@
+import Foundation
 import Testing
 @testable import ScoutKit
 
@@ -31,6 +32,19 @@ import Testing
         #expect(model.text == "Idle\n\n• Webhooks\n• Testing")
         model.apply(.results(visitEpoch: 2, outcome: .unavailable("service down")))
         #expect(model.text == "Idle\n\nResults unavailable: service down")
+    }
+
+    @Test func idleVisitShowsTheHostnameAndLeavingClearsIt() throws {
+        var model = PanelModel()
+        model.apply(.running)
+        let line = #"{"type":"state","status":"idle","visitEpoch":2,"detail":"docs.stripe.com"}"# + "\n"
+        var parser = JSONLParser()
+        let states = parser.append(Data(line.utf8))
+        try #require(states.count == 1)
+        model.apply(states[0])
+        #expect(model.text == "Idle\ndocs.stripe.com")
+        model.apply(.state(status: .idle, visitEpoch: 3, detail: nil))
+        #expect(model.text == "Idle")
     }
 
     @Test func restartClearsCoreState() {

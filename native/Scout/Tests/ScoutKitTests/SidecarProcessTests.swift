@@ -131,6 +131,24 @@ import Testing
         #expect(lines(cwd) == [String(cString: real)])
     }
 
+    @Test func childEnvironmentDropsScoutHome() async throws {
+        let f = try Fixture(); defer { f.cleanUp() }
+        let env = f.dir.appendingPathComponent("env")
+        try f.writeNode("""
+            #!/bin/sh
+            echo "home=${SCOUT_HOME-unset} keep=${KEEP_ME-unset}" > '\(env.path)'
+            while read line; do :; done
+            """)
+        let sidecar = SidecarProcess(
+            resolveLaunch: { .ready(LaunchSpec(executable: f.node, arguments: [])) },
+            parentEnvironment: { ["SCOUT_HOME": "/tmp/elsewhere", "KEEP_ME": "yes", "PATH": "/usr/bin:/bin"] })
+        sidecar.start()
+        await waitUntil { !lines(env).isEmpty }
+        sidecar.shutdown(timeout: 1)
+        #expect(lines(env) == ["home=unset keep=yes"])
+        #expect(SidecarProcess.childEnvironment(from: ["SCOUT_HOME": "x", "A": "b"]) == ["A": "b"])
+    }
+
     @Test func unfinishedLastLineAtEOFIsCounted() async throws {
         let f = try Fixture(); defer { f.cleanUp() }
         // Prints a good line and an unfinished one, closes stdout, and keeps running.

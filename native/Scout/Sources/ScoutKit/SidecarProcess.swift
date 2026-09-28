@@ -11,6 +11,8 @@ public enum SidecarStatus: Sendable, Equatable {
 /// Runs `node scout-core/dist/main.js --stdio` as a child process. Reads `PanelState`
 /// JSONL from its stdout, writes `NativeCommand` JSONL to its stdin, and leaves its
 /// stderr on the app's stderr. Restarts it on exit, subject to `RestartPolicy`.
+/// The child inherits the app's environment minus `SCOUT_HOME`, so the core always uses
+/// `~/.scout`, the same home the app and the browser side use.
 @MainActor
 public final class SidecarProcess {
     public var onStatus: ((SidecarStatus) -> Void)?
@@ -29,6 +31,7 @@ public final class SidecarProcess {
     private var policy: RestartPolicy
     private let restartDelay: TimeInterval
     private let now: () -> Date
+    private let parentEnvironment: () -> [String: String]
 
     private var process: Process?
     private var stdin: FileHandle?
@@ -41,12 +44,21 @@ public final class SidecarProcess {
         resolveLaunch: @escaping () -> SidecarLaunch = { SidecarLaunch.resolve() },
         restartPolicy: RestartPolicy = RestartPolicy(),
         restartDelay: TimeInterval = 1,
-        now: @escaping () -> Date = Date.init
+        now: @escaping () -> Date = Date.init,
+        parentEnvironment: @escaping () -> [String: String] = { ProcessInfo.processInfo.environment }
     ) {
         self.resolveLaunch = resolveLaunch
         self.policy = restartPolicy
         self.restartDelay = restartDelay
         self.now = now
+        self.parentEnvironment = parentEnvironment
+    }
+
+    /// The child's environment: the parent's without `SCOUT_HOME`.
+    nonisolated static func childEnvironment(from parent: [String: String]) -> [String: String] {
+        var env = parent
+        env.removeValue(forKey: "SCOUT_HOME")
+        return env
     }
 
     public func start() {
@@ -120,6 +132,7 @@ public final class SidecarProcess {
         child.executableURL = spec.executable
         child.arguments = spec.arguments
         child.currentDirectoryURL = spec.currentDirectoryURL
+        child.environment = Self.childEnvironment(from: parentEnvironment())
         let input = Pipe()
         let output = Pipe()
         child.standardInput = input
