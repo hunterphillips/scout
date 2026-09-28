@@ -49,3 +49,19 @@ export {
 } from "./socketServer.js";
 export { ConfigError, type CoreConfig, DEFAULT_DESTINATIONS, readConfig, readDestinations } from "./config.js";
 export { runStdio, type StdioCore, type StdioDeps } from "./main.js";
+export { SCOUT_VERSION } from "./version.js";
+export {
+  DEFAULT_ACCEPT,
+  DEFAULT_MAX_BYTES,
+  DEFAULT_MAX_REDIRECTS,
+  DEFAULT_TIMEOUT_MS,
+  guardedFetch,
+  SCOUT_USER_AGENT,
+  type FetchLike,
+  type GuardedFetchErrorReason,
+  type GuardedFetchOptions,
+  type GuardedFetchResult,
+  type GuardedRequestInit,
+  type HostLookup,
+} from "./fetch/guardedFetch.js";
+export { isDisallowedAddress } from "./fetch/ipAddressPolicy.js";
