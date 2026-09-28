@@ -9,7 +9,7 @@ import { lstatSync, readFileSync } from "node:fs";
 import { HOST_NAME, REPO_ROOT, layout } from "./lib/paths.mjs";
 import { EXTENSION_ID_RE, extensionIdFromManifestKey, extensionIdFromPem } from "./lib/extension-key.mjs";
 import { isExecutableFile } from "./lib/executables.mjs";
-import { readInstalled } from "./lib/installed.mjs";
+import { allowedPath, readInstalled } from "./lib/installed.mjs";
 import { exists, readJsonObject, wrapperScript } from "./lib/files.mjs";
 import { isMain } from "./lib/is-main.mjs";
 
@@ -43,6 +43,14 @@ export function runChecks(env = process.env) {
   const L = layout({ env, scoutRoot: typeof scout?.scoutRoot === "string" ? scout.scoutRoot : REPO_ROOT });
   const extensionId = scout?.extensionId;
 
+  if (installed.value) {
+    const outside = installed.value.files.filter((f) => !allowedPath(f.kind, f.path, L));
+    check(outside.length === 0, "install record lists only paths setup writes", outside.length ? outside.map((f) => `${f.kind} ${f.path}`).join("; ") : base.installed);
+  }
+  const markerCheck = (value, label) => check(marker != null && value === marker, label, `${String(value)} (recorded ${String(marker)})`);
+  if (scout) markerCheck(scout.x_scout_marker, "scout config carries the recorded marker");
+  if (pcCfg) markerCheck(pcCfg.x_scout_marker, "personal-context config carries the recorded marker");
+
   check(isExecutableFile(scout?.nodePath), "scout nodePath is an executable file", String(scout?.nodePath));
   check(isExecutableFile(pcCfg?.nodePath), "personal-context nodePath is an executable file", String(pcCfg?.nodePath));
   if (pcCfg && pcCfg.claudePath == null) add("WARN", "claudePath not set", "Phase 3 needs it; re-run setup once claude is installed");
@@ -66,6 +74,9 @@ export function runChecks(env = process.env) {
   const nmh = nm.value ?? null;
   check(nmh != null, "native messaging manifest exists and parses", nm.error ?? (nmh ? L.nmhManifest : `${L.nmhManifest} missing`));
   if (nmh) {
+    markerCheck(nmh.x_scout_marker, "native messaging manifest carries the recorded marker");
+    const st = tryRead(() => lstatSync(L.nmhManifest));
+    check(st.value?.isFile() && (st.value.mode & 0o777) === 0o644, "native messaging manifest is a 0644 file", st.error ?? oct(st.value.mode));
     check(nmh.name === HOST_NAME && nmh.type === "stdio", "manifest name and type", `${nmh.name} ${nmh.type}`);
     check(nmh.path === L.wrapper, "manifest path is the wrapper", String(nmh.path));
     const origin = `chrome-extension://${extensionId}/`;
@@ -93,6 +104,8 @@ export function runChecks(env = process.env) {
     check(st.isDirectory() && !st.isSymbolicLink() && st.uid === uid && (st.mode & 0o777) === 0o700, label, `${dir} ${oct(st.mode)} uid=${st.uid}`);
   };
   privateDir(L.scoutHome, "scout home is a 0700 dir owned by you", false);
+  privateDir(L.binDir, "scout bin dir is a 0700 dir owned by you", false);
+  privateDir(L.pcHome, "personal-context home is a 0700 dir owned by you", false);
   privateDir(L.runDir, "scout run dir is a 0700 dir owned by you", true);
 
   // Key

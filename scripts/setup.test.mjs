@@ -1,14 +1,15 @@
 import { spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { runSetup } from "./setup.mjs";
 import { runUninstall } from "./uninstall.mjs";
 import { runChecks, runDoctor } from "./doctor.mjs";
-import { layout } from "./lib/paths.mjs";
+import { REPO_ROOT, layout } from "./lib/paths.mjs";
 import { extensionIdFromManifestKey } from "./lib/extension-key.mjs";
 import { FAKE_MANIFEST, listTree, makeFixture } from "./lib/test-fixture.mjs";
+import { shDoubleQuote } from "./lib/files.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const mode = (p) => statSync(p).mode & 0o777;
@@ -26,9 +27,9 @@ beforeEach(() => {
 });
 afterEach(() => fx.cleanup());
 
-const setup = (args = [], env = fx.env) => {
+const setup = (args = [], env = fx.env, extra = {}) => {
   const c = capture();
-  const code = runSetup(["--scout-root", fx.scoutRoot, ...args], { env, out: c.out, err: c.err });
+  const code = runSetup(["--scout-root", fx.scoutRoot, ...args], { env, out: c.out, err: c.err, ...extra });
   return { code, ...c };
 };
 
@@ -45,6 +46,29 @@ describe("setup --dry-run", () => {
     expect(r.stdout).toMatch(/would write .*extension-key\.pem.*would generate/);
     expect(listTree(fx.root)).toEqual(before);
     expect(json(L.extensionManifest)).toEqual(FAKE_MANIFEST);
+  });
+
+  it("fails the private-dir checks the same way a real run does", () => {
+    const target = join(fx.root, "real scout home");
+    mkdirSync(target);
+    symlinkSync(target, fx.env.SCOUT_HOME);
+    for (const args of [["--dry-run"], []]) {
+      const r = setup(args);
+      expect(r.code).toBe(1);
+      expect(r.text()).toContain(`setup: ${fx.env.SCOUT_HOME} is not a directory`);
+    }
+  });
+
+  it("says it would chmod an existing dir, and quotes the wrapper line for the shell", () => {
+    const L = layout({ env: fx.env, scoutRoot: fx.scoutRoot });
+    mkdirSync(L.scoutHome, { mode: 0o755 });
+    chmodSync(L.scoutHome, 0o755);
+    const r = setup(["--dry-run"]);
+    expect(r.code, r.text()).toBe(0);
+    expect(r.text()).toContain(`would chmod existing dir ${L.scoutHome} to 0700 (now 0755)`);
+    expect(r.text()).toContain(`would create dir ${L.binDir} (0700)`);
+    expect(r.text()).toContain(`exec ${shDoubleQuote(process.execPath)} ${shDoubleQuote(L.hostJs)} "$@"`);
+    expect(mode(L.scoutHome)).toBe(0o755);
   });
 
   it("fails with a build hint when the extension is not built", () => {
@@ -120,6 +144,21 @@ describe("setup", () => {
     expect(JSON.parse(r.stdout)).toEqual(["chrome-extension://x/", L.scoutHome]);
   });
 
+  it("the wrapper runs end to end when paths contain a double quote, a dollar sign, and a backtick", () => {
+    fx.cleanup();
+    fx = makeFixture({ rootPrefix: 'scout "q" $HOME `id` ' });
+    writeFileSync(join(fx.scoutRoot, "packages/native-host/dist/host.js"), "console.log(JSON.stringify([process.argv[2], process.env.SCOUT_HOME]));\n");
+    const r0 = setup();
+    expect(r0.code, r0.text()).toBe(0);
+    const L = layout({ env: fx.env, scoutRoot: fx.scoutRoot });
+    expect(L.hostJs).toMatch(/"q" \$HOME `id`/);
+    const r = spawnSync(L.wrapper, ["chrome-extension://x/"], { env: { PATH: "/usr/bin:/bin" }, encoding: "utf8" });
+    expect(r.status, r.stderr).toBe(0);
+    expect(JSON.parse(r.stdout)).toEqual(["chrome-extension://x/", L.scoutHome]);
+    const c = capture();
+    expect(runDoctor(fx.env, c.out), c.text()).toBe(0);
+  });
+
   it("is idempotent: same key, same marker, no duplicate records, destinations preserved", () => {
     expect(setup().code).toBe(0);
     const L = layout({ env: fx.env, scoutRoot: fx.scoutRoot });
@@ -138,12 +177,11 @@ describe("setup", () => {
   });
 
   it("writes claudePath null with a warning when claude is not found", () => {
-    const r = setup([], { ...fx.env, PATH: join(fx.root, "no-bin") });
-    // Fallbacks (~/.local/bin under the temp HOME, /opt/homebrew/bin) may still find one on this machine.
+    const r = setup([], { ...fx.env, PATH: join(fx.root, "no-bin") }, { claudeFallbacks: [] });
+    expect(r.code, r.text()).toBe(0);
     const L = layout({ env: fx.env, scoutRoot: fx.scoutRoot });
-    const claudePath = json(L.pcConfig).claudePath;
-    if (claudePath === null) expect(r.text()).toMatch(/claude not found/);
-    else expect(claudePath).toBe("/opt/homebrew/bin/claude");
+    expect(json(L.pcConfig).claudePath).toBeNull();
+    expect(r.text()).toMatch(/claude not found/);
   });
 
   it("merges into an existing personal-context config, keeping its other keys", () => {
@@ -198,6 +236,86 @@ describe("setup", () => {
     const r = setup(["--yes"]);
     expect(r.code).toBe(1);
     expect(r.text()).toMatch(/unknown argument: --yes/);
+  });
+
+  it.each([
+    ["config", (L) => [L.scoutConfig, JSON.stringify({ x_scout_marker: "other-install" })]],
+    ["wrapper", (L) => [L.wrapper, "#!/bin/sh\n# scout-marker: other-install\n"]],
+  ])("refuses to overwrite a %s left by a different marker", (_kind, make) => {
+    const L = layout({ env: fx.env, scoutRoot: fx.scoutRoot });
+    const [p, text] = make(L);
+    mkdirSync(dirname(p), { recursive: true });
+    writeFileSync(p, text);
+    const r = setup();
+    expect(r.code).toBe(1);
+    expect(r.text()).toMatch(/refusing to overwrite/);
+    expect(r.text()).toContain(p);
+    expect(readFileSync(p, "utf8")).toBe(text);
+    expect(existsSync(L.installed)).toBe(false);
+  });
+
+  it("refuses a SCOUT_HOME install without --scout-root, so the real extension is not re-keyed", () => {
+    const real = join(REPO_ROOT, "packages/browser-extension/dist/manifest.json");
+    const before = existsSync(real) ? readFileSync(real, "utf8") : null;
+    const treeBefore = listTree(fx.root);
+    for (const args of [[], ["--dry-run"]]) {
+      const c = capture();
+      expect(runSetup(args, { env: fx.env, out: c.out, err: c.err })).toBe(1);
+      expect(c.text()).toMatch(/SCOUT_HOME is set but --scout-root is not/);
+    }
+    expect(existsSync(real) ? readFileSync(real, "utf8") : null).toBe(before);
+    expect(listTree(fx.root)).toEqual(treeBefore);
+  });
+
+  it("reports a failure after planning, and a re-run recovers (crash mid-setup)", () => {
+    const L = layout({ env: fx.env, scoutRoot: fx.scoutRoot });
+    mkdirSync(L.nmhDir, { recursive: true });
+    chmodSync(L.nmhDir, 0o500);
+    let r;
+    try {
+      r = setup();
+    } finally {
+      chmodSync(L.nmhDir, 0o755);
+    }
+    expect(r.code).toBe(1);
+    expect(r.text()).toContain(`setup: failed at ${L.nmhManifest}`);
+    expect(r.text()).toMatch(/re-running is safe/);
+    expect(existsSync(L.nmhManifest)).toBe(false);
+    const partial = json(L.installed);
+    expect(partial.files.map((f) => f.kind)).toEqual(["key", "extension-manifest-key", "config", "config-merged", "wrapper"]);
+    const pem = readFileSync(L.keyPem, "utf8");
+
+    // A stale temp file from the crashed run must not block the re-run.
+    writeFileSync(join(L.nmhDir, `.dev.scout.bridge.json.${process.pid}.tmp`), "stale");
+    const r2 = setup();
+    expect(r2.code, r2.text()).toBe(0);
+    expect(json(L.installed).marker).toBe(partial.marker);
+    expect(json(L.installed).files).toHaveLength(6);
+    expect(readFileSync(L.keyPem, "utf8")).toBe(pem);
+    expect(existsSync(join(L.nmhDir, `.dev.scout.bridge.json.${process.pid}.tmp`))).toBe(false);
+    const c = capture();
+    expect(runDoctor(fx.env, c.out), c.text()).toBe(0);
+  });
+
+  it("reuses an existing key but forces it to 0600, and refuses a symlinked key", () => {
+    expect(setup().code).toBe(0);
+    const L = layout({ env: fx.env, scoutRoot: fx.scoutRoot });
+    chmodSync(L.keyPem, 0o644);
+    const dry = setup(["--dry-run"]);
+    expect(dry.text()).toMatch(/would keep .*extension-key\.pem.*would chmod from 0644 to 0600/);
+    expect(mode(L.keyPem)).toBe(0o644);
+    expect(setup().code).toBe(0);
+    expect(mode(L.keyPem)).toBe(0o600);
+
+    const elsewhere = join(fx.root, "elsewhere.pem");
+    writeFileSync(elsewhere, readFileSync(L.keyPem, "utf8"));
+    spawnSync("rm", [L.keyPem]);
+    symlinkSync(elsewhere, L.keyPem);
+    for (const args of [[], ["--dry-run"]]) {
+      const r = setup(args);
+      expect(r.code).toBe(1);
+      expect(r.text()).toMatch(/extension-key\.pem is not a regular file/);
+    }
   });
 
   it("refuses to overwrite a native messaging manifest that is not its own", () => {
@@ -269,6 +387,39 @@ describe("uninstall", () => {
     expect(existsSync(L.keyPem)).toBe(false);
     expect(r.text()).toMatch(/SKIP .*dev\.scout\.bridge\.json/);
     expect(json(L.installed).files.map((f) => f.kind).sort()).toEqual(["nmh-manifest", "wrapper"]);
+  });
+});
+
+describe("uninstall: out-of-scope entries", () => {
+  it("touches nothing outside what setup writes and exits 2", async () => {
+    const L = layout({ env: fx.env, scoutRoot: fx.scoutRoot });
+    const marker = "m".repeat(32);
+    const victimConfig = join(fx.root, "victim", "config.json");
+    const victimMerged = join(fx.root, "victim", "settings.json");
+    mkdirSync(dirname(victimConfig), { recursive: true });
+    writeFileSync(victimConfig, JSON.stringify({ x_scout_marker: marker }));
+    writeFileSync(victimMerged, JSON.stringify({ x_scout_marker: marker, nodePath: "/n", keep: 1 }));
+    mkdirSync(L.scoutHome, { recursive: true, mode: 0o700 });
+    const record = {
+      version: 1,
+      marker,
+      files: [
+        { path: victimConfig, kind: "config" },
+        { path: victimMerged, kind: "config-merged", keys: ["keep"] },
+      ],
+    };
+    writeFileSync(L.installed, JSON.stringify(record));
+    const before = listTree(fx.root).map((f) => [f, readFileSync(join(fx.root, f), "utf8")]);
+
+    const c = capture();
+    const code = await runUninstall(["--yes"], { env: fx.env, out: c.out, err: c.err });
+    expect(code).toBe(2);
+    expect(c.text()).toMatch(/SKIP .*victim\/config\.json \(not a path setup writes for kind config/);
+    expect(c.text()).toMatch(/SKIP .*victim\/settings\.json \(not a path setup writes for kind config-merged/);
+    expect(listTree(fx.root).map((f) => [f, readFileSync(join(fx.root, f), "utf8")])).toEqual(before);
+
+    const bad = runChecks(fx.env).find((r) => r.label === "install record lists only paths setup writes");
+    expect(bad.status).toBe("FAIL");
   });
 });
 
@@ -386,6 +537,23 @@ describe("doctor", () => {
     expect(runDoctor(fx.env, c.out)).toBe(1);
     const failed = runChecks(fx.env).filter((r) => r.status === "FAIL").map((r) => r.label);
     expect(failed).toEqual(["claudePath is an executable file", "wrapper mode is 0700", "extension key is a 0600 file"]);
+  });
+
+  it("reports FAIL when a marker differs or a dir or manifest mode drifts", () => {
+    expect(setup().code).toBe(0);
+    const L = layout({ env: fx.env, scoutRoot: fx.scoutRoot });
+    writeFileSync(L.pcConfig, JSON.stringify({ ...json(L.pcConfig), x_scout_marker: "other" }));
+    chmodSync(L.pcConfig, 0o600);
+    chmodSync(L.nmhManifest, 0o600);
+    chmodSync(L.binDir, 0o755);
+    chmodSync(L.pcHome, 0o750);
+    const failed = runChecks(fx.env).filter((r) => r.status === "FAIL").map((r) => r.label);
+    expect(failed).toEqual([
+      "personal-context config carries the recorded marker",
+      "native messaging manifest is a 0644 file",
+      "scout bin dir is a 0700 dir owned by you",
+      "personal-context home is a 0700 dir owned by you",
+    ]);
   });
 
   it("reports FAIL when nothing is installed and writes nothing", () => {

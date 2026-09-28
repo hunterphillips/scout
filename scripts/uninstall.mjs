@@ -5,16 +5,19 @@
 // Lists the files and asks y/N before changing anything; --yes skips the prompt.
 // Without a terminal on stdin and without --yes, it aborts.
 //
+// Entries whose path is outside what setup could have written (lib/installed.mjs
+// allowedPath) are skipped and reported.
+//
 // Usage: node scripts/uninstall.mjs [--dry-run] [--yes] [--include-key]
-// Env overrides: SCOUT_HOME (see lib/paths.mjs); every other path comes from installed.json.
+// Env overrides: SCOUT_HOME, PERSONAL_CONTEXT_HOME (see lib/paths.mjs); the other paths
+// come from installed.json, checked against allowedPath.
 // Never touches ~/.rook, ~/.scout/logs, or anything not listed.
 
 import { lstatSync, readFileSync, rmdirSync, statSync, unlinkSync } from "node:fs";
-import { isAbsolute } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { layout } from "./lib/paths.mjs";
 import { extensionIdFromPem } from "./lib/extension-key.mjs";
-import { PC_MERGED_KEYS, readInstalled } from "./lib/installed.mjs";
+import { PC_MERGED_KEYS, allowedPath, readInstalled } from "./lib/installed.mjs";
 import { exists, fileMarker, readJsonObject, writeJson } from "./lib/files.mjs";
 import { isMain } from "./lib/is-main.mjs";
 
@@ -52,9 +55,9 @@ export async function ttyConfirm(question, { input = process.stdin, output = pro
 }
 
 /** Decide what to do with one entry: { action: "remove"|"strip-key"|"strip-merged"|"gone"|"keep"|"skip", reason }. */
-export function judge(entry, marker, { includeKey }) {
+export function judge(entry, marker, { includeKey }, L) {
   const p = entry.path;
-  if (typeof p !== "string" || !isAbsolute(p)) return { action: "skip", reason: "path is not absolute" };
+  if (!allowedPath(entry.kind, p, L)) return { action: "skip", reason: `not a path setup writes for kind ${entry.kind}; not touching` };
   if (!exists(p)) return { action: "gone", reason: "already absent" };
   if (!isRegularFile(p)) return { action: "skip", reason: "not a regular file" };
   switch (entry.kind) {
@@ -73,8 +76,7 @@ export function judge(entry, marker, { includeKey }) {
       }
       if (!m) return { action: "skip", reason: "not a JSON object; not changing" };
       if (m.x_scout_marker !== marker) return { action: "skip", reason: "Scout marker missing or different; not changing" };
-      const keys = mergedKeys(entry);
-      const others = Object.keys(m).filter((k) => !keys.includes(k));
+      const others = Object.keys(m).filter((k) => !PC_MERGED_KEYS.includes(k));
       return others.length
         ? { action: "strip-merged", reason: `marker matches; keeping ${others.join(", ")}` }
         : { action: "remove", reason: "marker matches and only Scout's keys remain" };
@@ -109,10 +111,6 @@ export function judge(entry, marker, { includeKey }) {
   }
 }
 
-function mergedKeys(entry) {
-  return Array.isArray(entry.keys) && entry.keys.length ? entry.keys : PC_MERGED_KEYS;
-}
-
 function removeDirIfEmpty(dir, out, dryRun) {
   if (!exists(dir)) return;
   if (dryRun) {
@@ -144,7 +142,7 @@ export async function runUninstall(argv, { env = process.env, out = console.log,
   }
 
   out(`Files listed in ${L.installed}:`);
-  for (const f of record.files) out(`  ${f.kind.padEnd(22)} ${f.path}`);
+  for (const f of record.files) out(`  ${String(f.kind).padEnd(22)} ${f.path}`);
   if (opts.dryRun) out(`Dry run: nothing is changed.`);
   else if (!opts.yes) {
     const answer = await confirm("Remove the files above that still carry this install's marker? [y/N] ");
@@ -161,7 +159,7 @@ export async function runUninstall(argv, { env = process.env, out = console.log,
   const remaining = [];
   let skipped = 0;
   for (const entry of record.files) {
-    const { action, reason } = judge(entry, record.marker, opts);
+    const { action, reason } = judge(entry, record.marker, opts, L);
     const would = opts.dryRun ? "would " : "";
     if (action === "remove") {
       if (!opts.dryRun) unlinkSync(entry.path);
@@ -174,13 +172,12 @@ export async function runUninstall(argv, { env = process.env, out = console.log,
       }
       out(`${would}strip "key" from ${entry.path} (${reason})`);
     } else if (action === "strip-merged") {
-      const keys = mergedKeys(entry);
       if (!opts.dryRun) {
         const m = readJsonObject(entry.path);
-        for (const k of keys) delete m[k];
+        for (const k of PC_MERGED_KEYS) delete m[k];
         writeJson(entry.path, m, statSync(entry.path).mode & 0o777);
       }
-      out(`${would}remove ${keys.join(", ")} from ${entry.path} (${reason})`);
+      out(`${would}remove ${PC_MERGED_KEYS.join(", ")} from ${entry.path} (${reason})`);
     } else if (action === "gone") {
       out(`skip ${entry.path} (${reason})`);
     } else {
@@ -193,6 +190,8 @@ export async function runUninstall(argv, { env = process.env, out = console.log,
   if (remaining.length === 0) {
     if (!opts.dryRun) unlinkSync(L.installed);
     out(`${opts.dryRun ? "would remove" : "removed"} ${L.installed}`);
+  } else if (remaining.length === record.files.length) {
+    out(`${opts.dryRun ? "would leave" : "left"} ${L.installed} unchanged`);
   } else {
     if (!opts.dryRun) writeJson(L.installed, { ...record, files: remaining }, 0o600);
     out(`${opts.dryRun ? "would keep" : "kept"} ${L.installed} listing the ${remaining.length} file(s) not removed`);

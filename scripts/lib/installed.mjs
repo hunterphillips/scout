@@ -7,6 +7,7 @@
 
 import { randomBytes } from "node:crypto";
 import { readFileSync } from "node:fs";
+import { basename, dirname, isAbsolute, resolve } from "node:path";
 
 export const KINDS = ["config", "config-merged", "wrapper", "nmh-manifest", "key", "extension-manifest-key"];
 
@@ -39,4 +40,31 @@ export function upsertEntry(record, entry) {
   const files = record.files.filter((f) => f.path !== entry.path);
   files.push(entry);
   return { ...record, files };
+}
+
+export const EXTENSION_MANIFEST_SUFFIX = "/packages/browser-extension/dist/manifest.json";
+
+/**
+ * True when `path` is a place setup could have written an entry of `kind`, given
+ * `L` (a layout from paths.mjs). Uninstall and doctor ignore any other entry, so a
+ * tampered installed.json cannot point them at arbitrary files.
+ */
+export function allowedPath(kind, path, L) {
+  if (typeof path !== "string" || !isAbsolute(path) || resolve(path) !== path) return false;
+  switch (kind) {
+    case "key":
+      return path === L.keyPem;
+    case "config":
+      return path === L.scoutConfig;
+    case "wrapper":
+      return path === L.wrapper;
+    case "nmh-manifest":
+      return basename(path) === "dev.scout.bridge.json";
+    case "config-merged":
+      return path === L.pcConfig || (basename(path) === "config.json" && basename(dirname(path)) === ".personal-context-mcp");
+    case "extension-manifest-key":
+      return path.endsWith(EXTENSION_MANIFEST_SUFFIX);
+    default:
+      return false;
+  }
 }

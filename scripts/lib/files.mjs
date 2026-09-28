@@ -1,6 +1,6 @@
 // Scout setup: private directories, mode-exact writes, the wrapper script, and marker checks.
 
-import { chmodSync, lstatSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { chmodSync, lstatSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join, basename } from "node:path";
 
 export const WRAPPER_MARKER_PREFIX = "# scout-marker: ";
@@ -22,19 +22,40 @@ exec ${shDoubleQuote(nodePath)} ${shDoubleQuote(hostJs)} "$@"
 `;
 }
 
-/** Create `dir` (and parents) and force it to 0700. Refuses a symlink or non-directory. */
-export function ensurePrivateDir(dir) {
-  mkdirSync(dir, { recursive: true, mode: 0o700 });
-  const st = lstatSync(dir);
+/**
+ * Check `dir` without changing anything. Throws on a symlink, a non-directory, or a
+ * directory owned by someone else. Returns { exists, mode } (mode null when absent).
+ */
+export function checkPrivateDir(dir) {
+  let st;
+  try {
+    st = lstatSync(dir);
+  } catch (e) {
+    if (e.code === "ENOENT") return { exists: false, mode: null };
+    throw e;
+  }
   if (st.isSymbolicLink() || !st.isDirectory()) throw new Error(`${dir} is not a directory`);
   if (st.uid !== process.getuid()) throw new Error(`${dir} is not owned by the current user`);
-  if ((st.mode & 0o777) !== 0o700) chmodSync(dir, 0o700);
+  return { exists: true, mode: st.mode & 0o777 };
 }
 
-/** Write via a temp file + rename, with an exact mode. */
+/** Create `dir` (and parents) and force it to 0700. Refuses a symlink, non-directory, or foreign owner. */
+export function ensurePrivateDir(dir) {
+  checkPrivateDir(dir);
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const { mode } = checkPrivateDir(dir);
+  if (mode !== 0o700) chmodSync(dir, 0o700);
+}
+
+/** Write via a fresh temp file + rename, with an exact mode. A stale temp file is removed first. */
 export function writeFileMode(path, content, mode) {
   const tmp = join(dirname(path), `.${basename(path)}.${process.pid}.tmp`);
-  writeFileSync(tmp, content, { mode });
+  try {
+    unlinkSync(tmp);
+  } catch (e) {
+    if (e.code !== "ENOENT") throw e;
+  }
+  writeFileSync(tmp, content, { mode, flag: "wx" });
   chmodSync(tmp, mode);
   renameSync(tmp, path);
 }

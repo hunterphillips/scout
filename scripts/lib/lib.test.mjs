@@ -5,7 +5,8 @@ import { describe, expect, it } from "vitest";
 import { EXTENSION_ID_RE, extensionIdFromManifestKey, extensionIdFromPem, generateKeyPem, idFromBytes, manifestKey } from "./extension-key.mjs";
 import { findOnPath, isExecutableFile, resolveClaude } from "./executables.mjs";
 import { shDoubleQuote, wrapperScript, fileMarker } from "./files.mjs";
-import { upsertEntry } from "./installed.mjs";
+import { allowedPath, upsertEntry } from "./installed.mjs";
+import { layout } from "./paths.mjs";
 
 describe("extension ID", () => {
   it("matches Chrome's id_util vectors", () => {
@@ -71,5 +72,25 @@ describe("installed record", () => {
     r = upsertEntry(r, { path: "/b", kind: "wrapper" });
     expect(r.files.map((f) => f.path)).toEqual(["/a", "/b"]);
     expect(() => upsertEntry(r, { path: "/c", kind: "bogus" })).toThrow();
+  });
+});
+
+describe("allowedPath", () => {
+  const L = layout({ env: { HOME: "/h", SCOUT_HOME: "/s", PERSONAL_CONTEXT_HOME: "/p", CHROME_NMH_DIR: "/n" }, scoutRoot: "/r" });
+  it("accepts only paths setup writes for each kind", () => {
+    expect(allowedPath("key", L.keyPem, L)).toBe(true);
+    expect(allowedPath("key", "/etc/extension-key.pem", L)).toBe(false);
+    expect(allowedPath("config", L.scoutConfig, L)).toBe(true);
+    expect(allowedPath("config", "/etc/config.json", L)).toBe(false);
+    expect(allowedPath("wrapper", L.wrapper, L)).toBe(true);
+    expect(allowedPath("nmh-manifest", "/elsewhere/dev.scout.bridge.json", L)).toBe(true);
+    expect(allowedPath("nmh-manifest", "/elsewhere/other.json", L)).toBe(false);
+    expect(allowedPath("config-merged", L.pcConfig, L)).toBe(true);
+    expect(allowedPath("config-merged", "/u/.personal-context-mcp/config.json", L)).toBe(true);
+    expect(allowedPath("config-merged", "/u/.ssh/config.json", L)).toBe(false);
+    expect(allowedPath("extension-manifest-key", "/x/packages/browser-extension/dist/manifest.json", L)).toBe(true);
+    expect(allowedPath("extension-manifest-key", "/x/manifest.json", L)).toBe(false);
+    expect(allowedPath("config", "/s/../s/config.json", L)).toBe(false);
+    expect(allowedPath("bogus", L.scoutConfig, L)).toBe(false);
   });
 });

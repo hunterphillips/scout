@@ -10,8 +10,9 @@ export const FAKE_MANIFEST = {
   permissions: ["nativeMessaging"],
 };
 
-export function makeFixture({ withClaude = true } = {}) {
-  const root = mkdtempSync(join(tmpdir(), "scout setup test "));
+/** `rootPrefix` lets a test put shell metacharacters in every fixture path. */
+export function makeFixture({ withClaude = true, rootPrefix = "scout setup test " } = {}) {
+  const root = mkdtempSync(join(tmpdir(), rootPrefix));
   const home = join(root, "home dir");
   const scoutRoot = join(root, "scout root");
   const binDir = join(root, "bin");
