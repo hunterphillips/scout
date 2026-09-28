@@ -4,11 +4,14 @@
 // created 0700 when missing and refused, never chmod-ed, when it exists with other
 // permissions. An existing socket file is removed only after a connect probe is refused
 // (a stale socket); a live one means another core is running, and start() refuses.
+// The listener binds a temp name (core.sock.<pid>.tmp), is chmod-ed 0600, and only then
+// is hard-linked to core.sock, so the final name never shows the umask mode. link (not
+// rename) fails if another core claimed core.sock in the meantime, instead of replacing it.
 // Frames are length-prefixed JSON (see @scout/contracts/frame). Each connection must
 // open with a valid hello; anything else before it closes the connection. After hello,
 // bad frames are dropped and counted, and valid observation frames reach the caller.
 
-import { chmodSync, lstatSync, mkdirSync, unlinkSync } from "node:fs";
+import { chmodSync, linkSync, lstatSync, mkdirSync, unlinkSync } from "node:fs";
 import { createConnection, createServer, type Server, type Socket } from "node:net";
 import { join } from "node:path";
 import { BRIDGE_PROTOCOL, BridgeFrameSchema, type ObservationFrame, type ToChromeFrame } from "@scout/contracts";
@@ -56,7 +59,7 @@ export interface SocketServerOptions {
   onClient: (client: SocketClient) => void;
   diagnostics: Diagnostics;
   helloTimeoutMs?: number;
-  /** Test seam for the post-listen chmod; defaults to fs.chmodSync. */
+  /** Test seam for the post-listen chmod of the temp socket; defaults to fs.chmodSync. */
   chmod?: (path: string, mode: number) => void;
 }
 
@@ -70,6 +73,7 @@ export interface SocketServer {
 export function createSocketServer(options: SocketServerOptions): SocketServer {
   const { diagnostics } = options;
   const socketPath = join(options.runDir, options.socketName ?? SOCKET_NAME);
+  const tempPath = `${socketPath}.${process.pid}.tmp`;
   const helloTimeoutMs = options.helloTimeoutMs ?? HELLO_TIMEOUT_MS;
   const sockets = new Set<Socket>();
   let server: Server | null = null;
@@ -161,34 +165,47 @@ export function createSocketServer(options: SocketServerOptions): SocketServer {
       ensurePrivateRunDir(options.runDir);
       await clearStaleSocket(socketPath);
 
+      // A leftover temp name from an earlier core with our pid would fail the bind.
+      unlinkQuietly(tempPath);
+
       const srv = createServer(handleConnection);
       // No umask here: it is process-wide and would also apply to anything else created
       // while listen is pending (e.g. the diagnostics log dir). The run dir is 0700 and
-      // owner-checked, so the socket is private before the chmod below tightens it.
+      // owner-checked, and the socket is only published under its final name after the
+      // chmod below.
       try {
         await new Promise<void>((resolve, reject) => {
           srv.once("error", reject);
-          srv.listen({ path: socketPath }, () => {
+          srv.listen({ path: tempPath }, () => {
             srv.off("error", reject);
             resolve();
           });
         });
       } catch {
+        unlinkQuietly(tempPath);
         throw new SocketServerError("listen-failed");
       }
+      let published = false;
       try {
-        (options.chmod ?? chmodSync)(socketPath, 0o600);
-        socketIno = lstatSync(socketPath).ino;
-      } catch {
-        // Don't leak a listener nobody will close, or its socket file.
+        (options.chmod ?? chmodSync)(tempPath, 0o600);
+        const ino = lstatSync(tempPath).ino;
+        try {
+          linkSync(tempPath, socketPath);
+        } catch (e) {
+          throw new SocketServerError(
+            (e as NodeJS.ErrnoException).code === "EEXIST" ? "already-running" : "listen-failed",
+          );
+        }
+        published = true;
+        unlinkSync(tempPath);
+        socketIno = ino;
+      } catch (e) {
+        // Don't leak a listener nobody will close, or its socket files.
         for (const sock of sockets) sock.destroy();
         await new Promise<void>((resolve) => srv.close(() => resolve()));
-        try {
-          unlinkSync(socketPath);
-        } catch {
-          // Already gone.
-        }
-        throw new SocketServerError("listen-failed");
+        unlinkQuietly(tempPath);
+        if (published) unlinkQuietly(socketPath);
+        throw e instanceof SocketServerError ? e : new SocketServerError("listen-failed");
       }
       server = srv;
       srv.on("error", () => diagnostics.event("socket_server_error", {}));
@@ -210,6 +227,14 @@ export function createSocketServer(options: SocketServerOptions): SocketServer {
       }
     },
   };
+}
+
+function unlinkQuietly(path: string): void {
+  try {
+    unlinkSync(path);
+  } catch {
+    // Already gone.
+  }
 }
 
 /** Create (0700) or verify the run dir. Never loosens or tightens an existing one. */

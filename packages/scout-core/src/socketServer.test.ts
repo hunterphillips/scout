@@ -1,4 +1,4 @@
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { connect, createServer, Server, Socket } from "node:net";
 import { tmpdir } from "node:os";
@@ -86,6 +86,63 @@ describe("socketServer", () => {
     const st = lstatSync(s.socketPath);
     expect(st.isSocket()).toBe(true);
     expect(st.mode & 0o777).toBe(0o600);
+  });
+
+  it("publishes the socket already 0600 and leaves no temp name behind", async () => {
+    // The final name must never show the umask mode, even to a host that stats it the
+    // instant it appears: bind a permissive umask to make the pre-chmod mode visible.
+    const old = process.umask(0o000);
+    let st;
+    try {
+      const { server: s } = await start();
+      st = lstatSync(s.socketPath);
+    } finally {
+      process.umask(old);
+    }
+    expect(st.isSocket()).toBe(true);
+    expect(st.mode & 0o077).toBe(0);
+    expect(st.mode & 0o777).toBe(0o600);
+    expect(readdirSync(runDir)).toEqual(["core.sock"]);
+  });
+
+  it("the final name appears only after the chmod", async () => {
+    const seen: boolean[] = [];
+    const spy = spyDiagnostics();
+    server = createSocketServer({
+      runDir,
+      onClient: () => {},
+      diagnostics: spy.diagnostics,
+      chmod: (path, mode) => {
+        seen.push(existsSync(join(runDir, "core.sock")));
+        expect(path).toBe(join(runDir, `core.sock.${process.pid}.tmp`));
+        chmodSync(path, mode);
+      },
+    });
+    await server.start();
+    expect(seen).toEqual([false]);
+    expect(lstatSync(server.socketPath).mode & 0o777).toBe(0o600);
+  });
+
+  it("refuses, without replacing it, a core.sock another core published while we were binding", async () => {
+    const other = createServer();
+    extra.push(other);
+    const listen = Server.prototype.listen;
+    Server.prototype.listen = function (this: Server, ...args: unknown[]) {
+      Server.prototype.listen = listen;
+      // Another core wins the race for the final name while our bind is pending.
+      other.listen({ path: join(runDir, "core.sock") });
+      return (listen as (...a: unknown[]) => Server).apply(this, args);
+    } as typeof listen;
+    try {
+      expect(await refusal()).toBe("already-running");
+    } finally {
+      Server.prototype.listen = listen;
+    }
+    await until(() => other.listening);
+    expect(lstatSync(join(runDir, "core.sock")).isSocket()).toBe(true);
+    expect(readdirSync(runDir)).toEqual(["core.sock"]);
+    const probe = await rawClient(join(runDir, "core.sock"));
+    extra.push(probe.sock);
   });
 
   it("refuses a group- or world-accessible run dir without changing it", async () => {
@@ -192,6 +249,7 @@ describe("socketServer", () => {
       Server.prototype.listen = listen;
     }
     expect(existsSync(s.socketPath)).toBe(false);
+    expect(readdirSync(runDir)).toEqual([]);
     expect(bound).toHaveLength(1);
     expect(bound[0]?.listening).toBe(false);
     expect(spy.events.some((e) => e.name === "socket_listening")).toBe(false);
