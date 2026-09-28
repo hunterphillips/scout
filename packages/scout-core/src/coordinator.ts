@@ -2,10 +2,13 @@
 // acks out. All I/O is injected, so tests drive it with plain function calls.
 //
 // Panel status, in priority order: paused, then disconnected (no live sensor), then
-// idle with the tracker's current epoch. Consecutive identical states are sent once,
-// and idle-to-idle visit changes (unapproved page to unapproved page) send nothing.
+// idle with the tracker's current epoch. While a visit is active, idle carries the
+// approved hostname as `detail` (origin only, never the path). Consecutive identical
+// states are sent once, and idle-to-idle visit changes (unapproved page to unapproved
+// page) send nothing.
 
 import type {
+  ActiveVisit,
   BrowserObservation,
   FocusObservation,
   NativeCommand,
@@ -76,16 +79,21 @@ export function createCoordinator(options: CoordinatorOptions): Coordinator {
     }
   };
 
+  const idleState = (visitEpoch: number, visit: ActiveVisit | null): PanelState => {
+    if (visit === null) return { type: "state", status: "idle", visitEpoch };
+    return { type: "state", status: "idle", visitEpoch, detail: new URL(visit.origin).hostname };
+  };
+
   const emitCurrent = (): void => {
     if (paused) emit({ type: "state", status: "paused" });
     else if (liveClient === null) emit({ type: "state", status: "disconnected" });
-    else emit({ type: "state", status: "idle", visitEpoch: tracker.epoch });
+    else emit(idleState(tracker.epoch, tracker.current()));
   };
 
   const onVisitChange = (change: VisitChange): void => {
     if (change.previous === null && change.visit === null) return;
     if (paused || liveClient === null) return;
-    emit({ type: "state", status: "idle", visitEpoch: change.epoch });
+    emit(idleState(change.epoch, change.visit));
   };
 
   const tracker = createVisitTracker({
@@ -106,6 +114,11 @@ export function createCoordinator(options: CoordinatorOptions): Coordinator {
     if (f.tabId !== obs.tabId) return "not-focused-tab";
     // The focused tab has navigated to another document since this text was captured.
     if (f.documentId !== undefined && f.documentId !== obs.documentId) return "not-focused-document";
+    // The focused tab is on another issue (e.g. a same-document navigation).
+    if (f.url !== undefined) {
+      const focused = canonicalIssueUrl(f.url);
+      if (focused === null || focused !== canonicalIssueUrl(obs.url)) return "url-mismatch";
+    }
     return null;
   };
 
@@ -208,4 +221,24 @@ export function createCoordinator(options: CoordinatorOptions): Coordinator {
 
   emitCurrent();
   return coordinator;
+}
+
+// Same rule as the extension's route.ts (copied, not imported): a GitHub issue page,
+// with query and fragment ignored.
+const ISSUE_PATH_RE = /^\/([^/]+)\/([^/]+)\/issues\/(\d+)\/?$/;
+
+/** `https://github.com/<owner>/<repo>/issues/<n>` with owner/repo lowercased, or null if not an issue page. */
+export function canonicalIssueUrl(raw: string): string | null {
+  let u: URL;
+  try {
+    u = new URL(raw);
+  } catch {
+    return null;
+  }
+  if (u.protocol !== "https:" || u.hostname !== "github.com" || u.port !== "" || u.username || u.password) return null;
+  const m = ISSUE_PATH_RE.exec(u.pathname);
+  if (m === null) return null;
+  const number = Number(m[3]);
+  if (!Number.isSafeInteger(number) || number <= 0) return null;
+  return `https://github.com/${m[1]!.toLowerCase()}/${m[2]!.toLowerCase()}/issues/${number}`;
 }

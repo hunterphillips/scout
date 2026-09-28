@@ -155,7 +155,7 @@ describe("main --stdio", () => {
       observation: { kind: "focus", seq: 1, at: 1, browserFocused: true, windowId: 1, tabId: 7, url: "https://docs.stripe.com/x" },
     });
     await until(() => c.lines.length >= 3);
-    expect(c.lines[2]).toEqual({ type: "state", status: "idle", visitEpoch: 2 });
+    expect(c.lines[2]).toEqual({ type: "state", status: "idle", visitEpoch: 2, detail: "docs.stripe.com" });
 
     send({
       type: "observation",

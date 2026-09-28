@@ -88,6 +88,19 @@ describe("coordinator", () => {
     expect(panel.at(-1)).toEqual({ type: "state", status: "idle", visitEpoch: 0 });
   });
 
+  it("an active visit's idle state carries the approved hostname only; leaving drops it", () => {
+    const { coordinator, panel, focus, chrome, connect } = setup();
+    const c = connect();
+    chrome();
+    c.observe(focus({ url: "https://docs.stripe.com/payments/checkout?q=secret#frag" }));
+    const state = panel.at(-1);
+    expect(state).toEqual({ type: "state", status: "idle", visitEpoch: coordinator.tracker.epoch, detail: "docs.stripe.com" });
+    expect(JSON.stringify(state)).not.toContain("payments");
+    coordinator.handleNativeCommand({ type: "frontmost", bundleId: "com.apple.Terminal", at: 1 });
+    expect(panel.at(-1)).toEqual({ type: "state", status: "idle", visitEpoch: coordinator.tracker.epoch });
+    expect(panel.at(-1)).not.toHaveProperty("detail");
+  });
+
   it("an approved focus while Chrome is frontmost emits idle with the new epoch; a repeat emits nothing", () => {
     const { coordinator, panel, focus, chrome, connect } = setup();
     const c = connect();
@@ -96,7 +109,7 @@ describe("coordinator", () => {
     c.observe(focus());
     expect(coordinator.tracker.current()).not.toBeNull();
     const epoch = coordinator.tracker.epoch;
-    expect(panel.slice(before)).toEqual([{ type: "state", status: "idle", visitEpoch: epoch }]);
+    expect(panel.slice(before)).toEqual([{ type: "state", status: "idle", visitEpoch: epoch, detail: "docs.stripe.com" }]);
 
     c.observe(focus({ title: "retitled" }));
     chrome();
@@ -197,6 +210,33 @@ describe("coordinator", () => {
     expect(coordinator.forwarder.contextRevision).toBe(1);
   });
 
+  it("page_text whose URL is not the focused tab's issue is dropped as url-mismatch", () => {
+    const { coordinator, events, focus, pageText, chrome, connect } = setup();
+    const c = connect();
+    chrome();
+    c.observe(focus({ tabId: 20, url: "https://github.com/o/r/issues/2", documentId: "doc-issue" }));
+    c.observe(pageText());
+    c.observe(focus({ tabId: 20, url: "https://github.com/o/r/pulls", documentId: "doc-issue" }));
+    c.observe(pageText());
+    expect(c.sent).toEqual([]);
+    expect(coordinator.forwarder.contextRevision).toBe(0);
+    expect(events.filter((e) => e.name === "page_text_dropped").map((e) => e.fields.reason)).toEqual([
+      "url-mismatch",
+      "url-mismatch",
+    ]);
+  });
+
+  it("the URL gate ignores query, fragment, trailing slash, and owner/repo case", () => {
+    const { coordinator, focus, pageText, chrome, connect } = setup();
+    const c = connect();
+    chrome();
+    c.observe(focus({ tabId: 20, url: "https://github.com/O/R/issues/1/?tab=x#issuecomment-5", documentId: "doc-issue" }));
+    const obs = pageText();
+    c.observe(obs);
+    expect(c.sent).toEqual([{ type: "ack", seq: obs.seq }]);
+    expect(coordinator.forwarder.contextRevision).toBe(1);
+  });
+
   it("pause emits paused and suppresses forwarding and visit states; resume emits idle", () => {
     const { coordinator, panel, focus, pageText, chrome, connect } = setup();
     const c = connect();
@@ -211,7 +251,13 @@ describe("coordinator", () => {
     expect(c.sent).toEqual([]);
     expect(coordinator.forwarder.contextRevision).toBe(0);
     coordinator.handleNativeCommand({ type: "resume" });
-    expect(panel.at(-1)).toEqual({ type: "state", status: "idle", visitEpoch: coordinator.tracker.epoch });
+    // The visit to docs.stripe.com (tracked while paused) is still active.
+    expect(panel.at(-1)).toEqual({
+      type: "state",
+      status: "idle",
+      visitEpoch: coordinator.tracker.epoch,
+      detail: "docs.stripe.com",
+    });
   });
 
   it("permissions observations are logged as a count only", () => {
