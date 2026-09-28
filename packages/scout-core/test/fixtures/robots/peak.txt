@@ -1,0 +1,16 @@
+# we use Shopify as our ecommerce platform
+
+User-agent: *
+Disallow: /admin
+Disallow: /cart
+Disallow: /checkouts/
+Disallow: /*?*oseid=*
+Disallow: /*.pdf$
+Allow: /cart/shared
+Crawl-delay: 2
+
+User-agent: AhrefsBot
+Crawl-delay: 10
+Disallow: /
+
+Sitemap: https://www.peakdesign.com/sitemap.xml

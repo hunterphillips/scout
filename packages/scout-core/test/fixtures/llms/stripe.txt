@@ -1,0 +1,19 @@
+# Stripe Documentation
+
+> Stripe is a payments platform. These docs cover the API and products.
+
+## Docs
+
+- [Testing](https://docs.stripe.com/testing.md): Simulate payments to test your integration.
+- [API Reference](https://docs.stripe.com/api.md)
+- [Payment Intents](https://docs.stripe.com/payments/payment-intents.md): Learn how to use the **Payment Intents** API for [Stripe](https://docs.stripe.com/) payments.
+* [Webhooks](/webhooks.md): Listen for events on your account.
+
+## More
+
+- [Billing docs index](https://docs.stripe.com/billing/llms.txt): Everything about Billing.
+- [Full text](https://docs.stripe.com/llms-full.txt): The whole thing in one file.
+- [Stripe blog](https://stripe.com/blog): Company news.
+- [Insecure](http://docs.stripe.com/insecure.md): Should be dropped.
+
+Some prose with an inline [link](https://docs.stripe.com/prose.md) that is not a list item.

@@ -65,3 +65,38 @@ export {
   type HostLookup,
 } from "./fetch/guardedFetch.js";
 export { isDisallowedAddress } from "./fetch/ipAddressPolicy.js";
+export { type CatalogFetch, SITEMAP_MAX_BYTES, TEXT_SOURCE_MAX_BYTES } from "./catalog/catalogFetch.js";
+export { sameOriginHttpsUrl } from "./catalog/sameOrigin.js";
+export { CANDIDATE_DESCRIPTION_MAX, CANDIDATE_TITLE_MAX, sanitizeLabel } from "./catalog/sanitizeLabel.js";
+export {
+  fetchRobots,
+  isAllowed,
+  MAX_CRAWL_DELAY_MS,
+  parseRobots,
+  ROBOTS_PRODUCT_TOKEN,
+  type FetchedRobots,
+  type RobotsRule,
+  type RobotsRules,
+  type RobotsSource,
+} from "./catalog/robots.js";
+export {
+  fetchLlmsTxt,
+  MAX_NESTED_LLMS_TXT,
+  parseLlmsTxt,
+  type FetchedLlmsTxt,
+  type LlmsTxtEntry,
+  type ParsedLlmsTxt,
+} from "./catalog/llmsTxt.js";
+export {
+  fetchSitemaps,
+  MAX_ROOT_SITEMAPS,
+  MAX_SITEMAP_INDEX_CHILDREN,
+  parseSitemap,
+  type FetchedSitemaps,
+  type ParsedSitemap,
+  type SitemapCounters,
+  type SitemapEntry,
+  type SitemapImage,
+  type SitemapRejectReason,
+  type SitemapUrl,
+} from "./catalog/sitemap.js";

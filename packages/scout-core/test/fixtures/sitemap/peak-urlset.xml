@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9" xmlns:image="http://www.google.com/schemas/sitemap-image/1.1">
+  <url>
+    <loc>https://www.peakdesign.com/products/everyday-backpack</loc>
+    <lastmod>2026-08-30T12:00:00-07:00</lastmod>
+    <changefreq>daily</changefreq>
+    <image:image>
+      <image:loc>https://cdn.shopify.com/s/files/1/everyday-backpack-20l-black.jpg</image:loc>
+      <image:title>Everyday Backpack 20L</image:title>
+      <image:caption>Everyday Backpack 20L in Black, shown with the side access zip open</image:caption>
+    </image:image>
+    <image:image>
+      <image:loc>https://cdn.shopify.com/s/files/1/everyday-backpack-30l-ash.jpg</image:loc>
+      <image:title>Everyday Backpack 30L</image:title>
+    </image:image>
+  </url>
+  <url>
+    <loc>https://www.peakdesign.com/products/capture-camera-clip?variant=1&amp;color=black</loc>
+    <image:image>
+      <image:loc>https://cdn.shopify.com/s/files/1/capture.jpg</image:loc>
+      <image:title><![CDATA[Capture Camera Clip <b>V3</b>]]></image:title>
+      <image:caption>Clip &amp; plate, sold together</image:caption>
+    </image:image>
+  </url>
+  <url>
+    <loc>https://www.peakdesign.com/pages/warranty</loc>
+  </url>
+  <url>
+    <loc>https://evil.example/products/fake</loc>
+  </url>
+  <url>
+    <loc>http://www.peakdesign.com/products/plaintext</loc>
+  </url>
+</urlset>
