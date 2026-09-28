@@ -1,6 +1,6 @@
 import type { BrowserObservation, FocusObservation, ObservationFrame, PageTextObservation, PanelState, ToChromeFrame } from "@scout/contracts";
 import { describe, expect, it } from "vitest";
-import { createCoordinator } from "./coordinator.js";
+import { type CoordinatorOptions, createCoordinator } from "./coordinator.js";
 import type { DiagnosticFields, Diagnostics } from "./diagnostics.js";
 import type { SocketClient } from "./socketServer.js";
 
@@ -34,7 +34,7 @@ function fakeClient(id: number) {
   };
 }
 
-function setup() {
+function setup(extra: Partial<CoordinatorOptions> = {}) {
   const clock = { t: 1_000, now: () => clock.t };
   const panel: PanelState[] = [];
   const events: Array<{ name: string; fields: DiagnosticFields }> = [];
@@ -44,6 +44,7 @@ function setup() {
     clock,
     diagnostics,
     emitPanel: (s) => void panel.push(s),
+    ...extra,
   });
   let seq = 0;
   const focus = (overrides: Partial<FocusObservation> = {}): FocusObservation => ({
@@ -130,7 +131,7 @@ describe("coordinator", () => {
     const { coordinator, events, focus, pageText, chrome, connect } = setup();
     const c = connect();
     chrome();
-    c.observe(focus({ tabId: 20, url: ISSUE }));
+    c.observe(focus({ tabId: 20, url: ISSUE, documentId: "doc-issue" }));
     const obs = pageText();
     c.observe(obs);
     expect(coordinator.forwarder.contextRevision).toBe(1);
@@ -142,7 +143,7 @@ describe("coordinator", () => {
     const { coordinator, focus, pageText, chrome, connect } = setup();
     const c = connect();
     chrome();
-    c.observe(focus({ tabId: 20, url: ISSUE }));
+    c.observe(focus({ tabId: 20, url: ISSUE, documentId: "doc-issue" }));
     c.observe(pageText());
     c.observe(focus());
     expect(coordinator.tracker.current()?.contextRevision).toBe(1);
@@ -152,11 +153,11 @@ describe("coordinator", () => {
     const { coordinator, events, focus, pageText, chrome, connect } = setup();
     const c = connect();
     chrome();
-    c.observe(focus({ tabId: 20, url: ISSUE }));
+    c.observe(focus({ tabId: 20, url: ISSUE, documentId: "doc-issue" }));
     c.observe(pageText({ tabId: 21 }));
-    c.observe(focus({ tabId: 20, url: ISSUE, browserFocused: false, windowId: -1 }));
+    c.observe(focus({ tabId: 20, url: ISSUE, documentId: "doc-issue", browserFocused: false, windowId: -1 }));
     c.observe(pageText());
-    c.observe(focus({ tabId: 20, url: ISSUE }));
+    c.observe(focus({ tabId: 20, url: ISSUE, documentId: "doc-issue" }));
     coordinator.handleNativeCommand({ type: "frontmost", bundleId: "com.apple.Terminal", at: 1 });
     c.observe(pageText());
     expect(c.sent).toEqual([]);
@@ -168,11 +169,39 @@ describe("coordinator", () => {
     ]);
   });
 
+  it("page_text is dropped while the focused tab is incognito", () => {
+    const { coordinator, events, focus, pageText, chrome, connect } = setup();
+    const c = connect();
+    chrome();
+    c.observe(focus({ tabId: 20, url: ISSUE, documentId: "doc-issue", incognito: true }));
+    c.observe(pageText());
+    expect(c.sent).toEqual([]);
+    expect(coordinator.forwarder.contextRevision).toBe(0);
+    expect(events.filter((e) => e.name === "page_text_dropped").map((e) => e.fields.reason)).toEqual(["incognito"]);
+  });
+
+  it("page_text from a document the focused tab has left is dropped; no focus documentId skips the check", () => {
+    const { coordinator, events, focus, pageText, chrome, connect } = setup();
+    const c = connect();
+    chrome();
+    c.observe(focus({ tabId: 20, url: ISSUE, documentId: "doc-next" }));
+    c.observe(pageText());
+    expect(c.sent).toEqual([]);
+    expect(events.filter((e) => e.name === "page_text_dropped").map((e) => e.fields.reason)).toEqual([
+      "not-focused-document",
+    ]);
+    c.observe(focus({ tabId: 20, url: ISSUE, documentId: undefined }));
+    const obs = pageText();
+    c.observe(obs);
+    expect(c.sent).toEqual([{ type: "ack", seq: obs.seq }]);
+    expect(coordinator.forwarder.contextRevision).toBe(1);
+  });
+
   it("pause emits paused and suppresses forwarding and visit states; resume emits idle", () => {
     const { coordinator, panel, focus, pageText, chrome, connect } = setup();
     const c = connect();
     chrome();
-    c.observe(focus({ tabId: 20, url: ISSUE }));
+    c.observe(focus({ tabId: 20, url: ISSUE, documentId: "doc-issue" }));
     coordinator.handleNativeCommand({ type: "pause" });
     expect(panel.at(-1)).toEqual({ type: "state", status: "paused" });
     const before = panel.length;
@@ -206,6 +235,17 @@ describe("coordinator", () => {
     expect(coordinator.tracker.current()).not.toBeNull();
   });
 
+  it("a new sensor ends the previous sensor's visit", () => {
+    const { coordinator, panel, focus, chrome, connect } = setup();
+    const first = connect(1);
+    chrome();
+    first.observe(focus());
+    expect(coordinator.tracker.current()).not.toBeNull();
+    connect(2);
+    expect(coordinator.tracker.current()).toBeNull();
+    expect(panel.at(-1)).toEqual({ type: "state", status: "idle", visitEpoch: coordinator.tracker.epoch });
+  });
+
   it("losing the live sensor ends the visit and emits disconnected", () => {
     const { coordinator, panel, focus, chrome, connect } = setup();
     const c = connect();
@@ -219,11 +259,14 @@ describe("coordinator", () => {
     expect(again.closed).toBe(false);
   });
 
-  it("shutdown stops handling input", () => {
-    const { coordinator, panel, focus, chrome, connect } = setup();
+  it("shutdown stops handling input and asks the owner to shut down once", () => {
+    let requests = 0;
+    const { coordinator, panel, focus, chrome, connect } = setup({ onShutdownRequested: () => void (requests += 1) });
     const c = connect();
     coordinator.handleNativeCommand({ type: "shutdown" });
+    coordinator.handleNativeCommand({ type: "shutdown" });
     expect(coordinator.stopped).toBe(true);
+    expect(requests).toBe(1);
     const before = panel.length;
     chrome();
     c.observe(focus());

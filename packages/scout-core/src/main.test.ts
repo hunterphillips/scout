@@ -2,13 +2,16 @@
 import { type ChildProcessWithoutNullStreams, execFileSync, spawn } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
-import { connect } from "node:net";
+import { connect, Server } from "node:net";
 import { tmpdir } from "node:os";
+import { PassThrough } from "node:stream";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { encodeFrame, FrameDecoder, MAX_FRAME_FROM_CHROME } from "@scout/contracts/frame";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { DEFAULT_DESTINATIONS, readDestinations } from "./main.js";
+import { DEFAULT_DESTINATIONS, readDestinations } from "./config.js";
+import type { Diagnostics } from "./diagnostics.js";
+import { runStdio } from "./main.js";
 
 const pkgDir = join(dirname(fileURLToPath(import.meta.url)), "..");
 const mainJs = join(pkgDir, "dist", "main.js");
@@ -107,7 +110,7 @@ describe("main --stdio", () => {
     expect(existsSync(socketPath())).toBe(false);
   });
 
-  for (const sig of ["SIGTERM", "SIGINT"] as const) {
+  for (const sig of ["SIGTERM", "SIGINT", "SIGHUP"] as const) {
     it(`exits 0 on ${sig} and removes its socket`, async () => {
       const c = await startReady();
       const sentAt = Date.now();
@@ -210,6 +213,77 @@ describe("main --stdio", () => {
     const child = spawn(process.execPath, [mainJs], { env: { ...process.env, SCOUT_HOME: home } });
     const code = await new Promise<number | null>((r) => child.once("exit", (c) => r(c)));
     expect(code).toBe(2);
+  });
+});
+
+describe("runStdio (in process)", () => {
+  let home: string;
+  beforeEach(() => {
+    home = mkdtempSync(join(tmpdir(), "sci-"));
+  });
+  afterEach(() => rmSync(home, { recursive: true, force: true }));
+
+  const harness = () => {
+    const stdin = new PassThrough();
+    const stdout = new PassThrough();
+    stdout.resume();
+    const logs: string[] = [];
+    const exits: Array<{ code: number; socketLeft: boolean }> = [];
+    const diagnostics: Diagnostics = { failures: 0, event: () => {} };
+    const socketPath = join(home, "run", "core.sock");
+    const run = () =>
+      runStdio({
+        stdin,
+        stdout,
+        env: { SCOUT_HOME: home },
+        log: (l) => void logs.push(l),
+        exit: (code) => void exits.push({ code, socketLeft: existsSync(socketPath) }),
+        diagnostics,
+      });
+    return { stdin, stdout, logs, exits, socketPath, run };
+  };
+  const settle = () => new Promise((r) => setTimeout(r, 50));
+
+  it("a socket start failure exits once with 1 and no stdin-closed shutdown", async () => {
+    mkdirSync(join(home, "run"));
+    chmodSync(join(home, "run"), 0o750);
+    const h = harness();
+    await h.run();
+    await settle();
+    expect(h.exits.map((e) => e.code)).toEqual([1]);
+    expect(h.logs.join("\n")).toContain("runtime-dir-not-private");
+    expect(h.logs.some((l) => l.includes("shutdown ("))).toBe(false);
+  });
+
+  it("a stdout error (EPIPE) shuts down with 0 after removing the socket", async () => {
+    const h = harness();
+    await h.run();
+    expect(existsSync(h.socketPath)).toBe(true);
+    h.stdout.emit("error", Object.assign(new Error("write EPIPE"), { code: "EPIPE" }));
+    await until(() => h.exits.length > 0);
+    await settle();
+    expect(h.exits).toEqual([{ code: 0, socketLeft: false }]);
+    expect(h.logs).toContain("scout-core: shutdown (stdout-error)");
+  });
+
+  it("stdin closing while the socket is still binding closes the new listener before exiting", async () => {
+    const h = harness();
+    const listen = Server.prototype.listen;
+    Server.prototype.listen = function (this: Server, ...args: unknown[]) {
+      h.stdin.end();
+      setTimeout(() => (listen as (...a: unknown[]) => Server).apply(this, args), 50);
+      return this;
+    } as typeof listen;
+    try {
+      await h.run();
+    } finally {
+      Server.prototype.listen = listen;
+    }
+    await settle();
+    expect(h.exits).toEqual([{ code: 0, socketLeft: false }]);
+    expect(h.logs).toContain("scout-core: shutdown (stdin-closed)");
+    expect(h.logs.some((l) => l.includes("listening on"))).toBe(false);
+    expect(existsSync(h.socketPath)).toBe(false);
   });
 });
 

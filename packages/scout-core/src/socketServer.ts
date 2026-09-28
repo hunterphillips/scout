@@ -56,6 +56,8 @@ export interface SocketServerOptions {
   onClient: (client: SocketClient) => void;
   diagnostics: Diagnostics;
   helloTimeoutMs?: number;
+  /** Test seam for the post-listen chmod; defaults to fs.chmodSync. */
+  chmod?: (path: string, mode: number) => void;
 }
 
 export interface SocketServer {
@@ -140,7 +142,9 @@ export function createSocketServer(options: SocketServerOptions): SocketServer {
       for (const r of decoder.end()) if (!r.ok) drop(r.code);
       sock.end();
     });
-    sock.on("error", () => {});
+    sock.on("error", (e: NodeJS.ErrnoException) =>
+      diagnostics.event("bridge_conn_error", { conn: id, code: e.code ?? "unknown" }),
+    );
     sock.on("close", () => {
       clearTimeout(helloTimer);
       sockets.delete(sock);
@@ -158,9 +162,9 @@ export function createSocketServer(options: SocketServerOptions): SocketServer {
       await clearStaleSocket(socketPath);
 
       const srv = createServer(handleConnection);
-      // Bind with a 0177 umask so the socket is never briefly wider than 0600, then chmod
-      // anyway: umask cannot be set from a worker thread.
-      const prevUmask = trySetUmask(0o177);
+      // No umask here: it is process-wide and would also apply to anything else created
+      // while listen is pending (e.g. the diagnostics log dir). The run dir is 0700 and
+      // owner-checked, so the socket is private before the chmod below tightens it.
       try {
         await new Promise<void>((resolve, reject) => {
           srv.once("error", reject);
@@ -171,11 +175,21 @@ export function createSocketServer(options: SocketServerOptions): SocketServer {
         });
       } catch {
         throw new SocketServerError("listen-failed");
-      } finally {
-        if (prevUmask !== null) trySetUmask(prevUmask);
       }
-      chmodSync(socketPath, 0o600);
-      socketIno = lstatSync(socketPath).ino;
+      try {
+        (options.chmod ?? chmodSync)(socketPath, 0o600);
+        socketIno = lstatSync(socketPath).ino;
+      } catch {
+        // Don't leak a listener nobody will close, or its socket file.
+        for (const sock of sockets) sock.destroy();
+        await new Promise<void>((resolve) => srv.close(() => resolve()));
+        try {
+          unlinkSync(socketPath);
+        } catch {
+          // Already gone.
+        }
+        throw new SocketServerError("listen-failed");
+      }
       server = srv;
       srv.on("error", () => diagnostics.event("socket_server_error", {}));
       diagnostics.event("socket_listening", {});
@@ -251,12 +265,4 @@ function probeSocket(path: string): Promise<"live" | "refused" | "gone" | "error
       else done("error");
     });
   });
-}
-
-function trySetUmask(mask: number): number | null {
-  try {
-    return process.umask(mask);
-  } catch {
-    return null;
-  }
 }

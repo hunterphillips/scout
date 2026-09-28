@@ -1,6 +1,6 @@
 import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { spawn } from "node:child_process";
-import { connect, createServer, type Server, Socket } from "node:net";
+import { connect, createServer, Server, Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ToChromeFrame } from "@scout/contracts";
@@ -151,6 +151,59 @@ describe("socketServer", () => {
     await s.close();
     server = null;
     expect(existsSync(s.socketPath)).toBe(false);
+  });
+
+  it("leaves the process umask alone while listen is pending", async () => {
+    // Anything else the process creates during bind (e.g. the diagnostics log dir) must
+    // get its requested mode, not one narrowed by a process-wide umask.
+    const probe = join(root, "made-during-listen");
+    const listen = Server.prototype.listen;
+    Server.prototype.listen = function (this: Server, ...args: unknown[]) {
+      mkdirSync(probe, { mode: 0o700 });
+      return (listen as (...a: unknown[]) => Server).apply(this, args);
+    } as typeof listen;
+    try {
+      await start();
+    } finally {
+      Server.prototype.listen = listen;
+    }
+    expect(lstatSync(probe).mode & 0o777).toBe(0o700);
+  });
+
+  it("closes the listener and removes the socket when the post-listen chmod fails", async () => {
+    const spy = spyDiagnostics();
+    const bound: Server[] = [];
+    const listen = Server.prototype.listen;
+    Server.prototype.listen = function (this: Server, ...args: unknown[]) {
+      bound.push(this);
+      return (listen as (...a: unknown[]) => Server).apply(this, args);
+    } as typeof listen;
+    const s = createSocketServer({
+      runDir,
+      onClient: () => {},
+      diagnostics: spy.diagnostics,
+      chmod: () => {
+        throw new Error("EPERM");
+      },
+    });
+    try {
+      await expect(s.start()).rejects.toMatchObject({ code: "listen-failed" });
+    } finally {
+      Server.prototype.listen = listen;
+    }
+    expect(existsSync(s.socketPath)).toBe(false);
+    expect(bound).toHaveLength(1);
+    expect(bound[0]?.listening).toBe(false);
+    expect(spy.events.some((e) => e.name === "socket_listening")).toBe(false);
+  });
+
+  it("closes a connection that does not say hello in time", async () => {
+    const spy = spyDiagnostics();
+    server = createSocketServer({ runDir, onClient: () => {}, diagnostics: spy.diagnostics, helloTimeoutMs: 50 });
+    await server.start();
+    const c = await rawClient(server.socketPath);
+    await c.closed;
+    expect(spy.events).toContainEqual({ name: "bridge_rejected", fields: { conn: 1, code: "hello-timeout" } });
   });
 
   it("closes a connection whose first frame is not hello", async () => {

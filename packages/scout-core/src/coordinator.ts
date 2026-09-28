@@ -5,7 +5,14 @@
 // idle with the tracker's current epoch. Consecutive identical states are sent once,
 // and idle-to-idle visit changes (unapproved page to unapproved page) send nothing.
 
-import type { BrowserObservation, FocusObservation, NativeCommand, PanelState, ToChromeFrame } from "@scout/contracts";
+import type {
+  BrowserObservation,
+  FocusObservation,
+  NativeCommand,
+  PageTextObservation,
+  PanelState,
+  ToChromeFrame,
+} from "@scout/contracts";
 import { createActivityForwarder, type ActivityForwarder, type ActivitySend } from "./activityForwarder.js";
 import type { Clock } from "./clock.js";
 import type { Diagnostics } from "./diagnostics.js";
@@ -25,6 +32,8 @@ export interface CoordinatorOptions {
   emitPanel: (state: PanelState) => void;
   /** Phase 3 passes the real observe_activity client. */
   sendActivity?: ActivitySend;
+  /** Called once when a `shutdown` command stops the coordinator. */
+  onShutdownRequested?: () => void;
 }
 
 export interface Coordinator {
@@ -88,12 +97,15 @@ export function createCoordinator(options: CoordinatorOptions): Coordinator {
   });
 
   /** Why a page_text is not forwarded, or null to forward it. */
-  const gatePageText = (tabId: number): string | null => {
+  const gatePageText = (obs: PageTextObservation): string | null => {
     if (paused) return "paused";
     if (frontmostBundleId !== CHROME_BUNDLE_ID) return "chrome-not-frontmost";
     const f = latestFocus;
     if (f === null || !f.browserFocused || f.windowId === WINDOW_ID_NONE) return "browser-not-focused";
-    if (f.tabId !== tabId) return "not-focused-tab";
+    if (f.incognito === true) return "incognito";
+    if (f.tabId !== obs.tabId) return "not-focused-tab";
+    // The focused tab has navigated to another document since this text was captured.
+    if (f.documentId !== undefined && f.documentId !== obs.documentId) return "not-focused-document";
     return null;
   };
 
@@ -105,7 +117,7 @@ export function createCoordinator(options: CoordinatorOptions): Coordinator {
         tracker.observeFocus(obs);
         return;
       case "page_text": {
-        const reason = gatePageText(obs.tabId);
+        const reason = gatePageText(obs);
         if (reason !== null) {
           diagnostics.event("page_text_dropped", { reason });
           return;
@@ -120,12 +132,16 @@ export function createCoordinator(options: CoordinatorOptions): Coordinator {
     }
   };
 
+  /** Forget the last focus and end any visit: a visit never outlives its sensor. */
+  const resetFocus = (): void => {
+    latestFocus = null;
+    tracker.observeFocus({ kind: "focus", seq: 0, at: clock.now(), browserFocused: false, windowId: WINDOW_ID_NONE });
+  };
+
   const sensorLost = (): void => {
     liveClient = null;
-    latestFocus = null;
-    // The last focus is stale without a sensor: end any visit. No idle is sent while
-    // disconnected, so this only moves the epoch.
-    tracker.observeFocus({ kind: "focus", seq: 0, at: clock.now(), browserFocused: false, windowId: WINDOW_ID_NONE });
+    // No idle is sent while disconnected, so ending the visit here only moves the epoch.
+    resetFocus();
     emitCurrent();
   };
 
@@ -155,6 +171,7 @@ export function createCoordinator(options: CoordinatorOptions): Coordinator {
           return;
         case "shutdown":
           coordinator.stop();
+          options.onShutdownRequested?.();
           return;
       }
     },
@@ -166,7 +183,7 @@ export function createCoordinator(options: CoordinatorOptions): Coordinator {
       }
       liveClient = client;
       // A new host starts from scratch; its first focus observation will follow.
-      latestFocus = null;
+      resetFocus();
       diagnostics.event("sensor_connected", { conn: client.id });
       client.onFrame((frame) => {
         if (liveClient !== client) {

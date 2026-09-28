@@ -47,4 +47,5 @@ export {
   type SocketServerErrorCode,
   type SocketServerOptions,
 } from "./socketServer.js";
-export { DEFAULT_DESTINATIONS, readDestinations, runStdio, type StdioCore, type StdioDeps } from "./main.js";
+export { ConfigError, DEFAULT_DESTINATIONS, readDestinations } from "./config.js";
+export { runStdio, type StdioCore, type StdioDeps } from "./main.js";

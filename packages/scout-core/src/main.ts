@@ -7,56 +7,24 @@
 // SIGHUP, or on a `shutdown` command, after closing the socket server and removing the
 // socket file. It never outlives the app by more than SHUTDOWN_DEADLINE_MS.
 
-import { readFileSync, realpathSync } from "node:fs";
+import { realpathSync } from "node:fs";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
 import type { Readable, Writable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { NativeCommandSchema, type PanelState } from "@scout/contracts";
 import { type Clock, systemClock } from "./clock.js";
+import { ConfigError, readDestinations } from "./config.js";
 import { type Coordinator, createCoordinator } from "./coordinator.js";
 import { createDiagnostics, defaultDiagnosticsPath, type Diagnostics, scoutHome } from "./diagnostics.js";
 import { createSocketServer, SocketServerError } from "./socketServer.js";
 
-export const DEFAULT_DESTINATIONS: readonly string[] = ["docs.stripe.com", "www.peakdesign.com"];
 /** Hard cap on shutdown: exit anyway if closing takes longer. */
 export const SHUTDOWN_DEADLINE_MS = 500;
 
 export const EXIT_OK = 0;
 export const EXIT_START_FAILED = 1;
 export const EXIT_USAGE = 2;
-
-export class ConfigError extends Error {
-  constructor(readonly code: "config-unreadable" | "config-invalid-destinations") {
-    super(code);
-    this.name = "ConfigError";
-  }
-}
-
-/**
- * Reads `destinations` from <scoutHome>/config.json. A missing file or a missing field
- * means the defaults; a present but malformed file or field is an error, not a fallback.
- */
-export function readDestinations(home: string): readonly string[] {
-  let raw: string;
-  try {
-    raw = readFileSync(join(home, "config.json"), "utf8");
-  } catch (e) {
-    if ((e as NodeJS.ErrnoException).code === "ENOENT") return DEFAULT_DESTINATIONS;
-    throw new ConfigError("config-unreadable");
-  }
-  let cfg: unknown;
-  try {
-    cfg = JSON.parse(raw);
-  } catch {
-    throw new ConfigError("config-unreadable");
-  }
-  if (cfg === null || typeof cfg !== "object" || Array.isArray(cfg)) throw new ConfigError("config-unreadable");
-  if (!("destinations" in cfg)) return DEFAULT_DESTINATIONS;
-  const d = (cfg as { destinations: unknown }).destinations;
-  if (!Array.isArray(d) || !d.every((x) => typeof x === "string")) throw new ConfigError("config-invalid-destinations");
-  return d as string[];
-}
 
 export interface StdioDeps {
   stdin: Readable;
@@ -99,7 +67,13 @@ export async function runStdio(deps: StdioDeps): Promise<StdioCore> {
 
   let coordinator: Coordinator;
   try {
-    coordinator = createCoordinator({ config: { destinations }, clock, diagnostics, emitPanel });
+    coordinator = createCoordinator({
+      config: { destinations },
+      clock,
+      diagnostics,
+      emitPanel,
+      onShutdownRequested: () => void shutdown("shutdown-command"),
+    });
   } catch {
     deps.log("scout-core: config-invalid-destinations");
     diagnostics.event("start_failed", { code: "config-invalid-destinations" });
@@ -113,16 +87,29 @@ export async function runStdio(deps: StdioDeps): Promise<StdioCore> {
     diagnostics,
   });
 
+  // stdin lines are not length-capped: the only writer is the native app that launched
+  // us over a private pipe, and its commands are a few dozen bytes. Deliberate.
   const rl = createInterface({ input: deps.stdin, crlfDelay: Infinity });
   let shuttingDown: Promise<void> | null = null;
+  // Settles (never rejects) once start() has finished either way, so a shutdown that
+  // arrives mid-bind closes the listener that bind is about to produce.
+  let startSettled: Promise<void> = Promise.resolve();
   const shutdown = (reason: string): Promise<void> => {
     if (shuttingDown !== null) return shuttingDown;
+    // Claim shutdown before rl.close(): it emits "close" synchronously, which would
+    // otherwise re-enter here as a second, stdin-closed shutdown with its own exit.
+    let finished!: () => void;
+    shuttingDown = new Promise<void>((resolve) => (finished = resolve));
     diagnostics.event("shutdown", { reason });
     deps.log(`scout-core: shutdown (${reason})`);
     coordinator.stop();
     rl.close();
     const deadline = new Promise<void>((resolve) => setTimeout(resolve, SHUTDOWN_DEADLINE_MS).unref());
-    shuttingDown = Promise.race([server.close(), deadline]).then(() => deps.exit(EXIT_OK));
+    const closed = startSettled.then(() => server.close());
+    void Promise.race([closed, deadline]).then(() => {
+      deps.exit(EXIT_OK);
+      finished();
+    });
     return shuttingDown;
   };
 
@@ -142,29 +129,38 @@ export async function runStdio(deps: StdioDeps): Promise<StdioCore> {
       return;
     }
     coordinator.handleNativeCommand(parsed.data);
-    if (coordinator.stopped) void shutdown("shutdown-command");
   });
   // stdin closing means the app is gone: never outlive it.
   rl.on("close", () => void shutdown("stdin-closed"));
+  rl.on("error", () => void shutdown("stdin-error"));
   deps.stdout.on("error", () => {
     stdoutOpen = false;
     void shutdown("stdout-error");
   });
 
+  const starting = server.start();
+  startSettled = starting.then(
+    () => {},
+    () => {},
+  );
   try {
-    await server.start();
+    await starting;
   } catch (e) {
     const code = e instanceof SocketServerError ? e.code : "listen-failed";
     deps.log(`scout-core: socket server refused to start: ${code}`);
     diagnostics.event("start_failed", { code });
+    // The app left while we were binding: shutdown already owns the exit.
+    if (shuttingDown !== null) return { shutdown };
+    // Claim shutdown first: rl.close() emits "close" synchronously, and that must not
+    // start a second, stdin-closed shutdown with its own exit.
+    shuttingDown = Promise.resolve();
     coordinator.stop();
     rl.close();
-    shuttingDown = Promise.resolve();
     deps.exit(EXIT_START_FAILED);
     return { shutdown: async () => {} };
   }
-  // stdin may have closed while the socket was binding.
-  if (shuttingDown !== null) await server.close();
+  // stdin may have closed while the socket was binding; that shutdown closes the server.
+  if (shuttingDown !== null) await shuttingDown;
   else deps.log(`scout-core: listening on ${server.socketPath}`);
   return { shutdown };
 }
