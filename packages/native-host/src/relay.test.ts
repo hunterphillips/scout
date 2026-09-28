@@ -165,6 +165,8 @@ describe("relay", () => {
     const h = harness();
     h.last().succeed();
     expect(h.last().frames()).toEqual([{ type: "hello", protocol: 1 }]);
+    await settle();
+    expect(h.toChrome()).toEqual([{ type: "ready" }]);
 
     h.stdin.write(encodeFrame({ ...focus, injected: "x" }));
     h.stdin.write(encodeFrame(permissions));
@@ -177,7 +179,7 @@ describe("relay", () => {
     h.last().feed({ type: "ack", seq: 4, extra: "dropped" });
     h.last().feed({ type: "core_unavailable" });
     await settle();
-    expect(h.toChrome()).toEqual([{ type: "ack", seq: 4 }, { type: "core_unavailable" }]);
+    expect(h.toChrome()).toEqual([{ type: "ready" }, { type: "ack", seq: 4 }, { type: "core_unavailable" }]);
     expect(h.host.drops().fromChrome.forwarded).toBe(2);
     expect(h.host.drops().fromCore.forwarded).toBe(2);
     expect(h.exits).toEqual([]);
@@ -212,7 +214,7 @@ describe("relay", () => {
     h.last().feed({ type: "hello", protocol: 1 });
     h.last().feed({ type: "ack", seq: 2 });
     await settle();
-    expect(h.toChrome()).toEqual([{ type: "ack", seq: 2 }]);
+    expect(h.toChrome()).toEqual([{ type: "ready" }, { type: "ack", seq: 2 }]);
     expect(h.host.drops().fromCore).toEqual({ forwarded: 1, invalid: 2 });
   });
 
@@ -345,7 +347,7 @@ describe("core unavailable", () => {
     h.last().succeed();
     h.last().destroy();
     await settle();
-    expect(h.toChrome()).toEqual([{ type: "core_unavailable" }]);
+    expect(h.toChrome()).toEqual([{ type: "ready" }, { type: "core_unavailable" }]);
     expect(h.exits).toEqual([EXIT_OK]);
     expect(h.sockets).toHaveLength(1);
   });
@@ -359,7 +361,7 @@ describe("shutdown", () => {
     await settle();
     expect(h.last().destroyed).toBe(true);
     expect(h.exits).toEqual([EXIT_OK]);
-    expect(h.toChrome()).toEqual([]);
+    expect(h.toChrome()).toEqual([{ type: "ready" }]);
   });
 
   it("stop() closes the socket, logs the reason, and exits 0 once", async () => {
@@ -454,7 +456,7 @@ describe("with a real Unix socket", () => {
     await waitFor(() => h.toChrome().length === 1);
     peer!.destroy();
     await waitFor(() => h.exits.length === 1);
-    expect(h.toChrome()).toEqual([{ type: "ack", seq: 1 }, { type: "core_unavailable" }]);
+    expect(h.toChrome()).toEqual([{ type: "ready" }, { type: "ack", seq: 1 }, { type: "core_unavailable" }]);
     expect(h.exits).toEqual([EXIT_OK]);
   });
 

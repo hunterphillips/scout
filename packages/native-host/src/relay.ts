@@ -7,7 +7,8 @@
 //   - before each connect attempt, checks the core's runtime dir and socket are
 //     ours and private: missing is treated like ENOENT (retry), anything else
 //     unsafe reports core_unavailable and exits 1 without retrying;
-//   - connects to the core and sends hello;
+//   - connects to the core, sends hello, flushes the pre-connect buffer, then
+//     tells the extension {type:"ready"} (its signal that the link is healthy);
 //   - relays Chrome -> core: each frame validated as a BrowserObservation and
 //     re-encoded as {type:"observation", observation}. Frames that arrive before
 //     the core is connected wait in a small buffer holding the latest observation
@@ -279,6 +280,7 @@ export function createHost(deps: HostDeps): Host {
         if (bytes !== undefined) writeToCore(s, bytes);
       }
       preConnect.clear();
+      sendToChrome({ type: "ready" });
       log("scout-native-host: connected to core");
     });
     s.on("data", (chunk) => {

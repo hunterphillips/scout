@@ -24,12 +24,16 @@ export const CoreUnavailableSchema = z.object({ type: z.literal("core_unavailabl
 /** Core -> extension: a page_text observation with this seq was accepted. */
 export const AckSchema = z.object({ type: z.literal("ack"), seq: z.int().nonnegative() });
 
+/** Native host -> extension: the core socket is connected and hello was sent. */
+export const ReadySchema = z.object({ type: z.literal("ready") });
+
 /** Everything the extension accepts from the native host. */
-export const ToChromeFrameSchema = z.discriminatedUnion("type", [CoreUnavailableSchema, AckSchema]);
+export const ToChromeFrameSchema = z.discriminatedUnion("type", [CoreUnavailableSchema, AckSchema, ReadySchema]);
 
 export type Hello = z.infer<typeof HelloSchema>;
 export type ObservationFrame = z.infer<typeof ObservationFrameSchema>;
 export type BridgeFrame = z.infer<typeof BridgeFrameSchema>;
 export type CoreUnavailable = z.infer<typeof CoreUnavailableSchema>;
 export type Ack = z.infer<typeof AckSchema>;
+export type Ready = z.infer<typeof ReadySchema>;
 export type ToChromeFrame = z.infer<typeof ToChromeFrameSchema>;

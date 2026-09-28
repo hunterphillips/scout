@@ -41,6 +41,7 @@ describe("contract schemas", () => {
     expect(BridgeFrameSchema.safeParse({ type: "observation", observation: { kind: "x" } }).success).toBe(false);
     expect(ToChromeFrameSchema.parse({ type: "ack", seq: 2 })).toEqual({ type: "ack", seq: 2 });
     expect(ToChromeFrameSchema.parse({ type: "core_unavailable" })).toEqual({ type: "core_unavailable" });
+    expect(ToChromeFrameSchema.parse({ type: "ready", extra: 1 })).toEqual({ type: "ready" });
   });
 
   it("enforces candidate id format and label caps", () => {
