@@ -229,6 +229,16 @@ describe("capture controller (jsdom + synthetic History/Navigation driver + fake
     expect(sent).toHaveLength(1);
   });
 
+  it("a refresh that finds the URL changed asks for approval once, not twice", async () => {
+    const { d, clock, ctl, approvals } = harness(REPO, repoHomeMain());
+    ctl.start();
+    d.pushSilently(ISSUE1); // no event yet; the refresh's URL check sees it
+    d.setMain(issueMain());
+    ctl.refresh();
+    await clock.advance(0);
+    expect(approvals).toEqual([{ navCounter: 1, url: ISSUE1 }]);
+  });
+
   it("a background cancel mid-settle stops further text reads", async () => {
     const { d, clock, ctl, sent } = harness(ISSUE1, issueMain());
     ctl.start();

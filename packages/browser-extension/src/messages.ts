@@ -25,14 +25,7 @@ export interface PageTextMessage {
   truncated: boolean;
 }
 
-/** Content -> background: this document left the issue route. */
-export interface RouteMessage {
-  type: "route";
-  issue: false;
-  navCounter: number;
-}
-
-export type ContentToBackground = ApproveRequest | PageTextMessage | RouteMessage;
+export type ContentToBackground = ApproveRequest | PageTextMessage;
 
 /** Background -> content. */
 export type BackgroundToContent = { type: "refresh" } | { type: "cancel"; stop: boolean };

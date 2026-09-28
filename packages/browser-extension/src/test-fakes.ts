@@ -211,10 +211,17 @@ export interface FakeTab {
 
 /**
  * Fake chrome. `host` decides how a new native port behaves: "ok" (stays
- * open) or "missing" (disconnects at once with the host-not-found error).
- * Tab url/title are visible only for hosts in `granted`.
+ * open and reports ready), "silent" (stays open, never reports ready) or
+ * "missing" (disconnects at once with the host-not-found error).
+ * Tab url/title are visible only for hosts in `granted`. Pass the same
+ * `session` object to two fakes to model a service-worker restart
+ * (chrome.storage.session survives it; everything in memory does not).
  */
-export function makeChrome({ granted = [] as string[], host = "ok" as "ok" | "missing" } = {}) {
+export function makeChrome({
+  granted = [] as string[],
+  host = "ok" as "ok" | "silent" | "missing",
+  session = {} as Record<string, unknown>,
+} = {}) {
   const tabs = new Map<number, FakeTab>();
   const windows = new Map<number, { id: number; focused: boolean }>();
   const registered: chrome.scripting.RegisteredContentScript[] = [];
@@ -233,7 +240,7 @@ export function makeChrome({ granted = [] as string[], host = "ok" as "ok" | "mi
     return o as unknown as chrome.tabs.Tab;
   };
   const fake = {
-    _: { tabs, windows, registered, executeCalls, tabMessages, store, ports, state },
+    _: { tabs, windows, registered, executeCalls, tabMessages, store, session, ports, state },
     runtime: {
       id: EXT_ID,
       lastError: undefined as { message: string } | undefined,
@@ -249,9 +256,14 @@ export function makeChrome({ granted = [] as string[], host = "ok" as "ok" | "mi
             port.onDisconnect.emit(port);
             fake.runtime.lastError = undefined;
           });
+        } else if (state.host === "ok") {
+          queueMicrotask(() => {
+            if (!port.disconnected) port.onMessage.emit({ type: "ready" });
+          });
         }
         return port;
       },
+      onInstalled: ev<(d: unknown) => void>(),
     },
     permissions: {
       contains: async ({ origins }: { origins: string[] }) => origins.every((o) => state.granted.includes(o)),
@@ -315,6 +327,14 @@ export function makeChrome({ granted = [] as string[], host = "ok" as "ok" | "mi
         },
         async set(o: Record<string, unknown>) {
           Object.assign(store, o);
+        },
+      },
+      session: {
+        async get(key: string) {
+          return key in session ? { [key]: structuredClone(session[key]) } : {};
+        },
+        async set(o: Record<string, unknown>) {
+          Object.assign(session, structuredClone(o));
         },
       },
     },

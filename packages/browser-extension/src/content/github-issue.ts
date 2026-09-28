@@ -43,6 +43,7 @@ export function startContentScript(ch: ContentChrome, win: Window): CaptureContr
     navigation,
     requestApproval: (m) => send<ApproveResponse>({ type: "approve", navCounter: m.navCounter, url: m.url }),
     sendPageText: (m) => send(m),
+    alive: () => !!ch.runtime?.id, // extension reloaded: this script is orphaned
   });
   holder.ctl = ctl;
   if (!holder.listening) {

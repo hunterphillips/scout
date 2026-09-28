@@ -37,6 +37,8 @@ export interface CaptureEnv {
   clock?: ContentClock;
   MutationObserver?: MutationObserverCtor | null;
   limits?: Partial<Limits>;
+  /** Checked on every poll tick; false (e.g. the extension was reloaded) stops the controller. */
+  alive?: () => boolean;
 }
 
 export type CapturePhase = "idle" | "waiting-visible" | "approving" | "denied" | "settling" | "failed" | "sent" | "cancelled";
@@ -212,7 +214,7 @@ export function createCaptureController(env: CaptureEnv): CaptureController {
     retryIfNeeded();
   }
 
-  return {
+  const ctl: CaptureController = {
     state,
     get navCounter() {
       return navCounter;
@@ -227,12 +229,17 @@ export function createCaptureController(env: CaptureEnv): CaptureController {
       on(doc, "visibilitychange", onVisibility);
       on(win, "blur", cancel); // window lost focus: fail closed locally too
       on(win, "focus", onFocus);
-      pollTimer = clock.setInterval(checkUrl, limits.pollMs);
+      pollTimer = clock.setInterval(() => {
+        if (env.alive && !env.alive()) ctl.stop();
+        else checkUrl();
+      }, limits.pollMs);
       if (parseIssueRoute(href)) void runJob();
     },
     refresh() {
       if (stopped) return;
+      const before = navCounter;
       checkUrl();
+      if (navCounter !== before) return; // the navigation already started a job
       if (parseIssueRoute(win.location.href)) void runJob();
     },
     checkUrl,
@@ -245,4 +252,5 @@ export function createCaptureController(env: CaptureEnv): CaptureController {
       for (const off of listeners.splice(0)) off();
     },
   };
+  return ctl;
 }
