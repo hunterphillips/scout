@@ -13,6 +13,10 @@
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
+    },
+    "./frame": {
+      "types": "./dist/frame.d.ts",
+      "default": "./dist/frame.js"
     }
   },
   "files": [

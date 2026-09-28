@@ -3,7 +3,9 @@ import { endianness } from "node:os";
 import { describe, expect, it } from "vitest";
 import {
   encodeFrame,
+  frameBytes,
   FrameDecoder,
+  FrameError,
   frameHeader,
   type FrameResult,
   MAX_FRAME_FROM_CHROME,
@@ -107,5 +109,12 @@ describe("frame codec", () => {
     expect(encodeFrame({ p: "x".repeat(MAX_FRAME_TO_CHROME - 20) }).length).toBeLessThanOrEqual(
       MAX_FRAME_TO_CHROME + 4,
     );
+  });
+
+  it("frames a body of exactly 16 KiB and refuses one byte more", () => {
+    const exact = frameBytes(Buffer.alloc(MAX_FRAME_TO_CHROME, 0x20));
+    expect(exact.length).toBe(MAX_FRAME_TO_CHROME + 4);
+    expect(exact.subarray(0, 4)).toEqual(frameHeader(MAX_FRAME_TO_CHROME));
+    expect(() => frameBytes(Buffer.alloc(MAX_FRAME_TO_CHROME + 1, 0x20))).toThrow(FrameError);
   });
 });

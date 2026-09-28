@@ -15,7 +15,7 @@ export const ObservationFrameSchema = z.object({
   observation: BrowserObservationSchema,
 });
 
-/** Everything the core accepts on the bridge socket. */
+/** Everything the core accepts on the bridge socket; the core validates each socket frame against this. */
 export const BridgeFrameSchema = z.discriminatedUnion("type", [HelloSchema, ObservationFrameSchema]);
 
 /** Native host -> extension: the core socket is not reachable. */

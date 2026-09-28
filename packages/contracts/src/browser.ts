@@ -4,6 +4,9 @@ import { z } from "zod";
 export const PAGE_TEXT_TITLE_MAX_CHARS = 300;
 export const PAGE_TEXT_BODY_MAX_BYTES = 8 * 1024;
 
+// TextEncoder, not Buffer: this module is bundled into the Chrome extension.
+const utf8Encoder = new TextEncoder();
+
 /** Chrome window focus or active-tab change, as seen by the extension. */
 export const FocusObservationSchema = z.object({
   kind: z.literal("focus"),
@@ -28,7 +31,7 @@ export const PageTextObservationSchema = z.object({
   url: z.string(),
   source: z.literal("github_issue"),
   title: z.string().max(PAGE_TEXT_TITLE_MAX_CHARS),
-  text: z.string().refine((t) => Buffer.byteLength(t, "utf8") <= PAGE_TEXT_BODY_MAX_BYTES, {
+  text: z.string().refine((t) => utf8Encoder.encode(t).byteLength <= PAGE_TEXT_BODY_MAX_BYTES, {
     message: `text exceeds ${PAGE_TEXT_BODY_MAX_BYTES} bytes`,
   }),
   truncated: z.boolean(),
