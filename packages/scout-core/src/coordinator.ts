@@ -26,6 +26,8 @@ import { CHROME_BUNDLE_ID, createVisitTracker, type VisitChange, type VisitTrack
 export interface CoordinatorConfig {
   /** Approved hostnames, e.g. "docs.stripe.com". */
   destinations: readonly string[];
+  /** The bundle id treated as "Chrome frontmost". Defaults to CHROME_BUNDLE_ID. */
+  chromeBundleId?: string;
 }
 
 export interface CoordinatorOptions {
@@ -56,6 +58,7 @@ export interface Coordinator {
 
 export function createCoordinator(options: CoordinatorOptions): Coordinator {
   const { clock, diagnostics } = options;
+  const chromeBundleId = options.config.chromeBundleId ?? CHROME_BUNDLE_ID;
   const forwarder = createActivityForwarder(
     options.sendActivity === undefined ? { diagnostics } : { diagnostics, send: options.sendActivity },
   );
@@ -98,6 +101,7 @@ export function createCoordinator(options: CoordinatorOptions): Coordinator {
 
   const tracker = createVisitTracker({
     destinations: options.config.destinations,
+    chromeBundleId,
     clock,
     diagnostics,
     onChange: onVisitChange,
@@ -107,7 +111,7 @@ export function createCoordinator(options: CoordinatorOptions): Coordinator {
   /** Why a page_text is not forwarded, or null to forward it. */
   const gatePageText = (obs: PageTextObservation): string | null => {
     if (paused) return "paused";
-    if (frontmostBundleId !== CHROME_BUNDLE_ID) return "chrome-not-frontmost";
+    if (frontmostBundleId !== chromeBundleId) return "chrome-not-frontmost";
     const f = latestFocus;
     if (f === null || !f.browserFocused || f.windowId === WINDOW_ID_NONE) return "browser-not-focused";
     if (f.incognito === true) return "incognito";

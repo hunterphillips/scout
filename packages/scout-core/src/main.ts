@@ -14,7 +14,7 @@ import type { Readable, Writable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { NativeCommandSchema, type PanelState } from "@scout/contracts";
 import { type Clock, systemClock } from "./clock.js";
-import { ConfigError, readDestinations } from "./config.js";
+import { ConfigError, type CoreConfig, readConfig } from "./config.js";
 import { type Coordinator, createCoordinator } from "./coordinator.js";
 import { createDiagnostics, defaultDiagnosticsPath, type Diagnostics, scoutHome } from "./diagnostics.js";
 import { createSocketServer, SocketServerError } from "./socketServer.js";
@@ -48,9 +48,9 @@ export async function runStdio(deps: StdioDeps): Promise<StdioCore> {
   const diagnostics =
     deps.diagnostics ?? createDiagnostics({ path: defaultDiagnosticsPath(deps.env), clock, warn: deps.log });
 
-  let destinations: readonly string[];
+  let config: CoreConfig;
   try {
-    destinations = readDestinations(home);
+    config = readConfig(home);
   } catch (e) {
     const code = e instanceof ConfigError ? e.code : "config-unreadable";
     deps.log(`scout-core: ${code}`);
@@ -68,7 +68,7 @@ export async function runStdio(deps: StdioDeps): Promise<StdioCore> {
   let coordinator: Coordinator;
   try {
     coordinator = createCoordinator({
-      config: { destinations },
+      config,
       clock,
       diagnostics,
       emitPanel,
@@ -161,7 +161,7 @@ export async function runStdio(deps: StdioDeps): Promise<StdioCore> {
   }
   // stdin may have closed while the socket was binding; that shutdown closes the server.
   if (shuttingDown !== null) await shuttingDown;
-  else deps.log(`scout-core: listening on ${server.socketPath}`);
+  else deps.log(`scout-core: listening on ${server.socketPath} (chromeBundleId ${config.chromeBundleId})`);
   return { shutdown };
 }
 

@@ -9,7 +9,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { encodeFrame, FrameDecoder, MAX_FRAME_FROM_CHROME } from "@scout/contracts/frame";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { DEFAULT_DESTINATIONS, readDestinations } from "./config.js";
+import { DEFAULT_DESTINATIONS, readConfig, readDestinations } from "./config.js";
 import type { Diagnostics } from "./diagnostics.js";
 import { runStdio } from "./main.js";
 
@@ -311,4 +311,31 @@ describe("readDestinations", () => {
     writeFileSync(join(home, "config.json"), JSON.stringify({ destinations: "docs.stripe.com" }));
     expect(() => readDestinations(home)).toThrow("config-invalid-destinations");
   });
+});
+
+describe("readConfig chromeBundleId", () => {
+  let home: string;
+  beforeEach(() => {
+    home = mkdtempSync(join(tmpdir(), "scd-"));
+  });
+  afterEach(() => rmSync(home, { recursive: true, force: true }));
+
+  it("defaults to stable Chrome when config.json or the field is missing", () => {
+    expect(readConfig(home).chromeBundleId).toBe("com.google.Chrome");
+    writeFileSync(join(home, "config.json"), JSON.stringify({ destinations: ["docs.stripe.com"] }));
+    expect(readConfig(home)).toEqual({ destinations: ["docs.stripe.com"], chromeBundleId: "com.google.Chrome" });
+  });
+
+  it("reads a configured bundle id", () => {
+    writeFileSync(join(home, "config.json"), JSON.stringify({ chromeBundleId: "com.google.chrome.for.testing" }));
+    expect(readConfig(home)).toEqual({ destinations: DEFAULT_DESTINATIONS, chromeBundleId: "com.google.chrome.for.testing" });
+  });
+
+  it.each([[""], ["com.google.Chrome;rm"], ["com google"], [42], [null], [["com.google.Chrome"]]])(
+    "throws on an invalid bundle id %j",
+    (value) => {
+      writeFileSync(join(home, "config.json"), JSON.stringify({ chromeBundleId: value }));
+      expect(() => readConfig(home)).toThrow("config-invalid-chrome-bundle-id");
+    },
+  );
 });

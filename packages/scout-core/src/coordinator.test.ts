@@ -81,6 +81,19 @@ function setup(extra: Partial<CoordinatorOptions> = {}) {
 }
 
 describe("coordinator", () => {
+  it("a configured chromeBundleId is the one that counts as Chrome frontmost", () => {
+    const { coordinator, focus, connect } = setup({
+      config: { destinations: ["docs.stripe.com"], chromeBundleId: "com.google.chrome.for.testing" },
+    });
+    const c = connect();
+    coordinator.handleNativeCommand({ type: "frontmost", bundleId: "com.google.Chrome", at: 1 });
+    c.observe(focus());
+    expect(coordinator.tracker.current()).toBeNull();
+    coordinator.handleNativeCommand({ type: "frontmost", bundleId: "com.google.chrome.for.testing", at: 2 });
+    expect(coordinator.tracker.current()).not.toBeNull();
+    expect(new URL(coordinator.tracker.current()!.origin).hostname).toBe("docs.stripe.com");
+  });
+
   it("starts disconnected and goes idle when a sensor says hello", () => {
     const { panel, connect } = setup();
     expect(panel).toEqual([{ type: "state", status: "disconnected" }]);
