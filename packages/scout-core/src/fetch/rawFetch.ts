@@ -17,6 +17,17 @@ export type FetchLike = (url: string, init: GuardedRequestInit) => Promise<Respo
 const NULL_BODY_STATUSES = new Set([204, 205, 304]);
 
 /**
+ * Thrown by the transport for a status `Response` cannot represent (outside 200-599).
+ * Guarded fetch reports it as an `http` error carrying the status, not a network failure.
+ */
+export class UnexpectedStatusError extends Error {
+  constructor(readonly status: number) {
+    super(`Unexpected status ${status}`);
+    this.name = "UnexpectedStatusError";
+  }
+}
+
+/**
  * One HTTP exchange through undici's `request`, returned as a `Response` whose body is
  * the bytes on the wire, still content-encoded.
  *
@@ -32,6 +43,10 @@ export const rawFetch: FetchLike = async (url, init) => {
     signal: init.signal,
     dispatcher: init.dispatcher,
   });
+  if (response.statusCode < 200 || response.statusCode > 599) {
+    await response.body.dump();
+    throw new UnexpectedStatusError(response.statusCode);
+  }
   const headers = new Headers();
   for (const [name, value] of Object.entries(response.headers)) {
     if (Array.isArray(value)) for (const item of value) headers.append(name, item);
@@ -41,6 +56,7 @@ export const rawFetch: FetchLike = async (url, init) => {
     await response.body.dump();
     return new Response(null, { status: response.statusCode, headers });
   }
+  // Readable.toWeb honours backpressure here (verified on Node 24): the socket is read only as the decoder pulls.
   const body = Readable.toWeb(response.body) as ReadableStream<Uint8Array>;
   return new Response(body, { status: response.statusCode, headers });
 };

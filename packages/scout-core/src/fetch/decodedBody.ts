@@ -37,6 +37,10 @@ export async function readDecodedBody(
   }
 
   const source = Readable.fromWeb(body as NodeReadableStream<Uint8Array>);
+  // An empty body labelled gzip or br is still an empty body; the decoder alone would
+  // call it truncated. Count the encoded bytes so that case can be told apart.
+  let encodedBytes = 0;
+  if (decoder) source.on("data", (chunk: Uint8Array) => { encodedBytes += chunk.byteLength; });
   // pipeline() destroys every stage when one fails or is destroyed; its own error is
   // surfaced through the iteration below, so the callback has nothing to do.
   const decoded: Readable = decoder ? (pipeline(source, decoder, () => undefined) as unknown as Readable) : source;
@@ -47,13 +51,18 @@ export async function readDecodedBody(
   try {
     const chunks: Uint8Array[] = [];
     let received = 0;
-    for await (const chunk of decoded as AsyncIterable<Uint8Array>) {
-      received += chunk.byteLength;
-      if (received > maxBytes) {
-        decoded.destroy();
-        return { kind: "too_large" };
+    try {
+      for await (const chunk of decoded as AsyncIterable<Uint8Array>) {
+        received += chunk.byteLength;
+        if (received > maxBytes) {
+          decoded.destroy();
+          return { kind: "too_large" };
+        }
+        chunks.push(chunk);
       }
-      chunks.push(chunk);
+    } catch (error) {
+      if (decoder && encodedBytes === 0 && !signal.aborted && source.readableEnded) return { kind: "ok", bytes: new Uint8Array() };
+      throw error;
     }
     const bytes = new Uint8Array(received);
     let offset = 0;

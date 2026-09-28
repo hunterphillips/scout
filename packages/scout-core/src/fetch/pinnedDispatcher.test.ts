@@ -1,4 +1,4 @@
-import type { LookupAddress } from "node:dns";
+import type { LookupAddress, LookupOptions } from "node:dns";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { gzipSync } from "node:zlib";
@@ -6,9 +6,9 @@ import { afterEach, describe, expect, it } from "vitest";
 import { type ConnectLookup, createPinnedDispatcher, createPinnedLookup } from "./pinnedDispatcher.js";
 import { rawFetch } from "./rawFetch.js";
 
-function resolve(lookup: ConnectLookup, hostname: string, all: boolean) {
+function resolve(lookup: ConnectLookup, hostname: string, all: boolean, family?: LookupOptions["family"]) {
   return new Promise<{ error: Error | null; address: string | LookupAddress[] }>((done) => {
-    lookup(hostname, { all }, (error, address) => done({ error, address }));
+    lookup(hostname, family === undefined ? { all } : { all, family }, (error, address) => done({ error, address }));
   });
 }
 
@@ -32,6 +32,20 @@ describe("createPinnedLookup", () => {
     expect((await resolve(createPinnedLookup("a.example", []), "a.example", true)).error).toBeInstanceOf(Error);
     const pinned = createPinnedLookup("a.example", [{ address: "93.184.216.34", family: 4 }]);
     expect((await resolve(pinned, "b.example", true)).error).toBeInstanceOf(Error);
+  });
+
+  it("offers only the requested address family and fails rather than fall back when none match", async () => {
+    const dualStack = createPinnedLookup("a.example", [
+      { address: "93.184.216.34", family: 4 },
+      { address: "2606:2800:220:1::1", family: 6 },
+    ]);
+    expect(await resolve(dualStack, "a.example", true, 6)).toEqual({ error: null, address: [{ address: "2606:2800:220:1::1", family: 6 }] });
+    expect(await resolve(dualStack, "a.example", false, "IPv4")).toEqual({ error: null, address: "93.184.216.34" });
+    expect(await resolve(dualStack, "a.example", true, 0)).toMatchObject({ error: null, address: [{ family: 4 }, { family: 6 }] });
+
+    const v4Only = createPinnedLookup("a.example", [{ address: "93.184.216.34", family: 4 }]);
+    expect((await resolve(v4Only, "a.example", true, 6)).error).toBeInstanceOf(Error);
+    expect((await resolve(v4Only, "a.example", false, 6)).error).toBeInstanceOf(Error);
   });
 });
 

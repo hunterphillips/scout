@@ -8,14 +8,15 @@ import { lookup as dnsLookup } from "node:dns/promises";
 import { SCOUT_VERSION } from "../version.js";
 import { ACCEPT_ENCODING, readDecodedBody } from "./decodedBody.js";
 import { isDisallowedAddress } from "./ipAddressPolicy.js";
+import type { Dispatcher } from "undici";
 import { createPinnedDispatcher, type ScreenedAddress } from "./pinnedDispatcher.js";
-import { type FetchLike, rawFetch } from "./rawFetch.js";
+import { type FetchLike, rawFetch, UnexpectedStatusError } from "./rawFetch.js";
 
 /**
  * Guarded outbound HTTP for public HTTPS resources.
  *
- * Policy: `https:` only; the hostname must not resolve to a loopback, unspecified,
- * private, or link-local address; redirects are followed only to the same host and
+ * Policy: `https:` only; the hostname must not resolve to any address refused by
+ * `isDisallowedAddress` (loopback, private, link-local, CGNAT, multicast, ...); redirects are followed only to the same host and
  * only up to a hop limit; one deadline covers the whole call (DNS, every hop, and the
  * body read); responses have a size cap on decoded bytes and a fixed `User-Agent`.
  * Policy and network conditions are returned as `error` results rather than thrown.
@@ -43,11 +44,24 @@ export type HostLookup = (hostname: string) => Promise<ScreenedAddress[]>;
 
 export type { FetchLike, GuardedRequestInit } from "./rawFetch.js";
 
+/** Builds the per-call dispatcher that pins connections to the screened addresses. */
+export type DispatcherFactory = (hostname: string, addresses: ScreenedAddress[]) => Dispatcher;
+
 export interface GuardedFetchOptions {
   /** Injectable for tests; defaults to undici `request` through the pinned dispatcher. */
   fetch?: FetchLike;
   /** Injectable for tests; defaults to `dns.promises.lookup` with `{ all: true }`. */
   lookup?: HostLookup;
+  /**
+   * Test hook: the address policy. Defaults to `isDisallowedAddress`; only tests that
+   * talk to a loopback server override it.
+   */
+  isDisallowed?: (address: string) => boolean;
+  /**
+   * Test hook: builds the pinned dispatcher. Defaults to `createPinnedDispatcher`; tests
+   * use it to trust a self-signed certificate. It must still pin to `addresses`.
+   */
+  dispatcherFactory?: DispatcherFactory;
   timeoutMs?: number;
   /** Cap on decoded body bytes. */
   maxBytes?: number;
@@ -63,6 +77,10 @@ export type GuardedFetchResult =
   | { kind: "ok"; status: number; body: string; bytes: Uint8Array; etag?: string; lastModified?: string; contentType?: string; finalUrl: string }
   | { kind: "not_modified"; etag?: string; lastModified?: string }
   | { kind: "absent"; status: number }
+  /**
+   * `message` is for local logs and tests only. It may contain the full URL (path and
+   * query), so it must never be written to diagnostics, which carry the origin only.
+   */
   | { kind: "error"; reason: GuardedFetchErrorReason; status?: number; message: string };
 
 function fail(reason: GuardedFetchErrorReason, message: string, status?: number): GuardedFetchResult {
@@ -84,7 +102,10 @@ function hostnameOf(url: URL): string {
   return url.hostname.replace(/^\[|\]$/g, "").toLowerCase();
 }
 
-/** Discard an unread body so the connection can be reused. */
+/**
+ * Discard an unread body. Cancelling destroys the body and its socket, so the next hop
+ * opens a fresh connection; that costs little because the dispatcher is per call.
+ */
 async function drain(response: Response): Promise<void> {
   await response.body?.cancel().catch(() => undefined);
 }
@@ -105,6 +126,8 @@ const defaultLookup: HostLookup = (hostname) => dnsLookup(hostname, { all: true 
 export async function guardedFetch(url: string, options: GuardedFetchOptions = {}): Promise<GuardedFetchResult> {
   const doFetch = options.fetch ?? rawFetch;
   const lookup = options.lookup ?? defaultLookup;
+  const isDisallowed = options.isDisallowed ?? isDisallowedAddress;
+  const dispatcherFactory: DispatcherFactory = options.dispatcherFactory ?? createPinnedDispatcher;
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const maxBytes = options.maxBytes ?? DEFAULT_MAX_BYTES;
   const maxRedirects = options.maxRedirects ?? DEFAULT_MAX_REDIRECTS;
@@ -131,7 +154,7 @@ export async function guardedFetch(url: string, options: GuardedFetchOptions = {
     timedOut = true;
     controller.abort();
   }, timeoutMs);
-  let dispatcher: ReturnType<typeof createPinnedDispatcher> | null = null;
+  let dispatcher: Dispatcher | null = null;
 
   try {
     for (let hop = 0; ; hop += 1) {
@@ -156,9 +179,9 @@ export async function guardedFetch(url: string, options: GuardedFetchOptions = {
           return fail("network", `DNS lookup failed for ${hostname}: ${errorMessage(cause)}`);
         }
         if (addresses.length === 0) return fail("network", `DNS lookup returned no addresses for ${hostname}`);
-        const disallowed = addresses.find((entry) => isDisallowedAddress(entry.address));
+        const disallowed = addresses.find((entry) => isDisallowed(entry.address));
         if (disallowed) return fail("policy", `${hostname} resolves to a disallowed address: ${disallowed.address}`);
-        dispatcher = createPinnedDispatcher(hostname, addresses);
+        dispatcher = dispatcherFactory(hostname, addresses);
       }
 
       let response: Response;
@@ -166,6 +189,7 @@ export async function guardedFetch(url: string, options: GuardedFetchOptions = {
         response = await doFetch(target.toString(), { method: "GET", redirect: "manual", signal: controller.signal, headers, dispatcher });
       } catch (cause) {
         if (timedOut) return fail("timeout", `Request to ${target.href} timed out after ${timeoutMs}ms`);
+        if (cause instanceof UnexpectedStatusError) return fail("http", `Unexpected status ${cause.status} from ${target.href}`, cause.status);
         return fail("network", `Request to ${target.href} failed: ${errorMessage(cause)}`);
       }
 

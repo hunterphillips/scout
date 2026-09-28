@@ -50,6 +50,24 @@ describe("readDecodedBody", () => {
     expect(await readDecodedBody(new Response("x").body, "zstd", MiB, never)).toEqual({ kind: "unsupported", coding: "zstd" });
   });
 
+  it("treats a zero-byte body labelled gzip or br as an empty body", async () => {
+    expect(await readDecodedBody(new Response(new Uint8Array()).body, "gzip", MiB, never)).toEqual({ kind: "ok", bytes: new Uint8Array() });
+    expect(await readDecodedBody(new Response(new Uint8Array()).body, "br", MiB, never)).toEqual({ kind: "ok", bytes: new Uint8Array() });
+  });
+
+  it("still rejects a truncated gzip body", async () => {
+    const truncated = gzipSync(Buffer.from("# llms.txt\n")).subarray(0, 8);
+    await expect(readDecodedBody(new Response(truncated).body, "gzip", MiB, never)).rejects.toThrow();
+  });
+
+  it("accepts a body of exactly the cap and refuses one byte more", async () => {
+    const text = new Uint8Array(1000).fill(0x78);
+    expect(await readDecodedBody(new Response(gzipSync(text)).body, "gzip", 1000, never)).toEqual({ kind: "ok", bytes: text });
+    expect(await readDecodedBody(new Response(gzipSync(text)).body, "gzip", 999, never)).toEqual({ kind: "too_large" });
+    expect(await readDecodedBody(chunkedStream(text, 100), null, 1000, never)).toEqual({ kind: "ok", bytes: text });
+    expect(await readDecodedBody(chunkedStream(text, 100), null, 999, never)).toEqual({ kind: "too_large" });
+  });
+
   it("throws when the signal aborts a stalled body", async () => {
     const controller = new AbortController();
     const stalled = new ReadableStream<Uint8Array>({ pull: () => new Promise(() => {}) });

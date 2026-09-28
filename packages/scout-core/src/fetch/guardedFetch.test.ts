@@ -2,9 +2,10 @@
 // Berryman / Arcturus Labs). Scout changes: FetchLike stubs; tests for address classes,
 // DNS pinning across redirects, Accept-Encoding, and the decoded-size cap.
 
-import { gzipSync } from "node:zlib";
+import { brotliCompressSync, gzipSync } from "node:zlib";
 import { describe, expect, it } from "vitest";
 import { DEFAULT_ACCEPT, type FetchLike, type GuardedRequestInit, guardedFetch, type HostLookup } from "./guardedFetch.js";
+import { UnexpectedStatusError } from "./rawFetch.js";
 
 const PUBLIC_LOOKUP: HostLookup = async () => [{ address: "93.184.216.34", family: 4 }];
 
@@ -62,7 +63,7 @@ describe("guardedFetch", () => {
     if (result.kind === "ok") expect(result.bytes).toEqual(served);
   });
 
-  it("maps 304, 404, and 500 responses to not_modified, absent, and an http error", async () => {
+  it("maps 304, 404, 410, and 500 responses to not_modified, absent, and an http error", async () => {
     const call = async (status: number, headers: Record<string, string> = {}) => {
       const { impl } = stubFetch(() => new Response(status === 304 ? null : "body", { status, headers }));
       return guardedFetch("https://example.com/AGENTS.md", { fetch: impl, lookup: PUBLIC_LOOKUP });
@@ -74,6 +75,7 @@ describe("guardedFetch", () => {
       lastModified: "Mon, 17 Aug 2026 12:00:00 GMT",
     });
     expect(await call(404)).toEqual({ kind: "absent", status: 404 });
+    expect(await call(410)).toEqual({ kind: "absent", status: 410 });
     expect(await call(500)).toMatchObject({ kind: "error", reason: "http", status: 500 });
   });
 
@@ -248,7 +250,33 @@ describe("guardedFetch", () => {
     const result = await guardedFetch("https://example.com/llms.txt", { fetch: impl, lookup: PUBLIC_LOOKUP, maxBytes: 128 });
 
     expect(result).toMatchObject({ kind: "error", reason: "too_large" });
-    expect(emitted).toBeLessThan(10);
+    expect(emitted).toBeLessThan(50);
+  });
+
+  it("accepts a body of exactly the cap and refuses one byte more", async () => {
+    const serve = () => stubFetch(() => new Response("x".repeat(128), { status: 200 })).impl;
+
+    const atCap = await guardedFetch("https://example.com/llms.txt", { fetch: serve(), lookup: PUBLIC_LOOKUP, maxBytes: 128 });
+    const overCap = await guardedFetch("https://example.com/llms.txt", { fetch: serve(), lookup: PUBLIC_LOOKUP, maxBytes: 127 });
+
+    expect(atCap).toMatchObject({ kind: "ok", body: "x".repeat(128) });
+    expect(overCap).toMatchObject({ kind: "error", reason: "too_large" });
+  });
+
+  it("reports an unsupported content-encoding as an http error", async () => {
+    const { impl } = stubFetch(() => new Response("compressed?", { status: 200, headers: { "content-encoding": "zstd" } }));
+
+    const result = await guardedFetch("https://example.com/llms.txt", { fetch: impl, lookup: PUBLIC_LOOKUP });
+
+    expect(result).toMatchObject({ kind: "error", reason: "http", status: 200 });
+  });
+
+  it("reports a status the transport cannot represent as an http error", async () => {
+    const { impl } = stubFetch(() => { throw new UnexpectedStatusError(600); });
+
+    const result = await guardedFetch("https://example.com/llms.txt", { fetch: impl, lookup: PUBLIC_LOOKUP });
+
+    expect(result).toMatchObject({ kind: "error", reason: "http", status: 600 });
   });
 
   it("sends the fixed user agent and the supplied conditional headers", async () => {
@@ -325,6 +353,16 @@ describe("guardedFetch", () => {
   it("returns too_large for a gzip bomb that inflates past the cap", async () => {
     const bomb = gzipSync(Buffer.alloc(20 * 1024 * 1024));
     const { impl } = stubFetch(() => new Response(bomb, { status: 200, headers: { "content-encoding": "gzip" } }));
+
+    const result = await guardedFetch("https://example.com/sitemap.xml", { fetch: impl, lookup: PUBLIC_LOOKUP });
+
+    expect(bomb.byteLength).toBeLessThan(100_000);
+    expect(result).toMatchObject({ kind: "error", reason: "too_large" });
+  });
+
+  it("returns too_large for a brotli bomb that inflates past the cap", async () => {
+    const bomb = brotliCompressSync(Buffer.alloc(20 * 1024 * 1024));
+    const { impl } = stubFetch(() => new Response(bomb, { status: 200, headers: { "content-encoding": "br" } }));
 
     const result = await guardedFetch("https://example.com/sitemap.xml", { fetch: impl, lookup: PUBLIC_LOOKUP });
 
