@@ -21,6 +21,17 @@ describe("contract schemas", () => {
     expect(BrowserObservationSchema.safeParse({ ...pageText, source: "gitlab" }).success).toBe(false);
   });
 
+  it("rejects page text over the title and body caps", () => {
+    const pageText = {
+      kind: "page_text", seq: 2, at: 2, tabId: 3, documentId: "d", url: "https://github.com/o/r/issues/1",
+      source: "github_issue", title: "t", text: "body", truncated: true,
+    };
+    expect(BrowserObservationSchema.safeParse({ ...pageText, title: "x".repeat(301) }).success).toBe(false);
+    expect(BrowserObservationSchema.safeParse({ ...pageText, text: "x".repeat(8 * 1024) }).success).toBe(true);
+    // 4-byte characters: byte length, not char count, is what's capped.
+    expect(BrowserObservationSchema.safeParse({ ...pageText, text: "😀".repeat(2049) }).success).toBe(false);
+  });
+
   it("wraps observations in bridge frames and accepts only protocol 1 hello", () => {
     const observation = { kind: "permissions", granted: [] };
     expect(BridgeFrameSchema.parse({ type: "observation", observation })).toEqual({ type: "observation", observation });

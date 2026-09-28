@@ -1,5 +1,9 @@
 import { z } from "zod";
 
+/** Caps the content script enforces; re-checked here so a misbehaving extension is dropped, not trusted. */
+export const PAGE_TEXT_TITLE_MAX_CHARS = 300;
+export const PAGE_TEXT_BODY_MAX_BYTES = 8 * 1024;
+
 /** Chrome window focus or active-tab change, as seen by the extension. */
 export const FocusObservationSchema = z.object({
   kind: z.literal("focus"),
@@ -23,8 +27,10 @@ export const PageTextObservationSchema = z.object({
   documentId: z.string(),
   url: z.string(),
   source: z.literal("github_issue"),
-  title: z.string().max(300),
-  text: z.string(),
+  title: z.string().max(PAGE_TEXT_TITLE_MAX_CHARS),
+  text: z.string().refine((t) => Buffer.byteLength(t, "utf8") <= PAGE_TEXT_BODY_MAX_BYTES, {
+    message: `text exceeds ${PAGE_TEXT_BODY_MAX_BYTES} bytes`,
+  }),
   truncated: z.boolean(),
 });
 
