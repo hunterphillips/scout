@@ -1,15 +1,25 @@
+// Library surface. The Chrome entrypoint is dist/host.js; importing this module never runs it.
 export {
+  CORE_WRITE_HIGH_WATER_BYTES,
+  type CoreSocket,
   createHost,
-  expectedOrigin,
-  readExtensionId,
-  scoutHome,
   EXIT_CORE_UNAVAILABLE,
+  EXIT_FLUSH_TIMEOUT_MS,
   EXIT_OK,
   EXIT_REFUSED,
+  expectedOrigin,
+  type Host,
+  type HostDeps,
+  type HostDrops,
+  type HostTimers,
   RETRY_INTERVAL_MS,
   RETRY_WINDOW_MS,
-  type Host,
-  type HostCounters,
-  type HostDeps,
-  type HostTimers,
-} from "./host.js";
+} from "./relay.js";
+export {
+  checkRuntimeDir,
+  coreSocketPath,
+  readExtensionId,
+  type RuntimeCheck,
+  type RuntimeRefusal,
+  scoutHome,
+} from "./config.js";
