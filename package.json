@@ -1,0 +1,37 @@
+{
+  "name": "scout-workspace",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Scout Phase 0 workspace skeleton (not functional yet).",
+  "type": "module",
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "workspaces": [
+    "packages/contracts",
+    "packages/scout-core",
+    "packages/native-host",
+    "packages/browser-extension",
+    "packages/personal-context-mcp"
+  ],
+  "scripts": {
+    "build": "npm run build --workspaces",
+    "typecheck": "npm run typecheck --workspaces",
+    "test": "npm run test --workspaces && npm run test:spikes",
+    "test:spikes": "vitest run --root scripts/spikes",
+    "preflight:auth": "node scripts/spikes/auth-preflight.mjs",
+    "preflight:direct": "node scripts/spikes/direct-profile-preflight.mjs",
+    "smoke:agent": "node scripts/spikes/agent-smoke.mjs",
+    "spike:capture:prepare": "node scripts/spikes/github-capture/prepare.mjs",
+    "spike:bridge:server": "node scripts/spikes/bridge/echo-server.mjs",
+    "spike:bridge:echo-test": "node scripts/spikes/bridge/echo-test.mjs"
+  },
+  "devDependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.1",
+    "@types/node": "^22.20.4",
+    "jsdom": "^30.1.1",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.1",
+    "zod": "^4.6.5"
+  }
+}
