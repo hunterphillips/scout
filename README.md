@@ -52,6 +52,10 @@ reconnects on its own, and after it a tab switch or **Reconnect** does.
 
 Rebuilding the extension keeps the `key` setup wrote. A fresh clone needs setup again.
 
+To check against Chrome for Testing instead of stable Chrome, set `CHROME_NMH_DIR` to
+the test profile's `NativeMessagingHosts/` when running setup, and add
+`"chromeBundleId": "com.google.chrome.for.testing"` to `~/.scout/config.json`.
+
 ## Phase 0 spikes
 
 The billing preflights and the throwaway capture/bridge spikes live under

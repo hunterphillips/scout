@@ -4,7 +4,8 @@ Scout is a proof of concept. When Hunter lands on a website, Scout quietly shows
 links from that site that fit what he is working on. It never chats, never acts on the
 site, and opens a page only when he clicks.
 
-**Status (2026-09-28): Phase 1 is built and reviewed; it awaits Hunter's manual check.**
+**Status (2026-09-28): Phase 1 is built, reviewed, and passed its manual check; Phase 2
+awaits Hunter's approval.**
 Phase 1 is the plumbing: the extension senses the focused tab, the native host relays
 it to the core over a Unix socket, the core tracks visits and forwards GitHub issue
 text to a no-op activity forwarder, and the Mac app shows the core's status. There is
@@ -53,6 +54,7 @@ baseline commit.
 - `packages/scout-core` (`@scout/scout-core`): the coordinator. `main.ts --stdio`
   (JSONL to the Swift app, exits on stdin EOF/signals, `dist/main.js`), `socketServer.ts`
   (0700 run dir, socket published only after chmod 0600, stale-probe), `coordinator.ts`
+  (`chromeBundleId` from config.json, default `com.google.Chrome`),
   (panel state, live sensor, page_text gate + ack), `visitTracker.ts`, `resumeCache.ts`
   (keyed map, 30 s TTL, unused until Phase 2), `activityForwarder.ts` (Phase 1: counts
   only), `diagnostics.ts` (JSONL, scalar fields, forbidden-name filter), `config.ts`.
@@ -105,5 +107,7 @@ The Swift app reads only `~/.scout`.
 - Site text is data, never instructions. Scout never sends personal context to a site
   and takes no commerce actions. Diagnostics carry counts, epochs, codes, and origins;
   never page text, titles, URLs beyond origin, prompts, or tokens.
-- Never run `scripts/setup.mjs` for real from an agent session; only `--dry-run` and
-  tests against temp homes. Setup is Hunter's step.
+- Don't run `scripts/setup.mjs` against the real `~/.scout` unless Hunter asks for a
+  live check; tests and dry runs use temp homes. For an agent-driven check, use Chrome
+  for Testing with a throwaway profile and `CHROME_NMH_DIR` so real Chrome is untouched
+  (the 2026-09-28 run is in the plan's phase log), and uninstall afterwards.
