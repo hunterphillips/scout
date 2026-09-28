@@ -2,8 +2,10 @@
 // Scout setup: install the extension key, configs, native host wrapper, and
 // Chrome native-messaging manifest. Every file written is recorded in
 // <SCOUT_HOME>/installed.json so uninstall.mjs can remove exactly those.
+// ~/.personal-context-mcp/config.json belongs to the personal-context service;
+// setup only merges nodePath, claudePath, and x_scout_marker into it.
 //
-// Usage: node scripts/setup.mjs [--dry-run] [--yes] [--scout-root <dir>]
+// Usage: node scripts/setup.mjs [--dry-run] [--scout-root <dir>]
 // Env overrides: SCOUT_HOME, PERSONAL_CONTEXT_HOME, CHROME_NMH_DIR (see lib/paths.mjs).
 // Never touches ~/.rook or any process.
 
@@ -11,16 +13,15 @@ import { mkdirSync, readFileSync, statSync } from "node:fs";
 import { DEFAULT_DESTINATIONS, HOST_NAME, REPO_ROOT, layout } from "./lib/paths.mjs";
 import { extensionIdFromPem, generateKeyPem, manifestKey } from "./lib/extension-key.mjs";
 import { defaultClaudeFallbacks, isExecutableFile, resolveClaude, resolveNode } from "./lib/executables.mjs";
-import { newMarker, readInstalled, upsertEntry } from "./lib/installed.mjs";
+import { PC_MERGED_KEYS, newMarker, readInstalled, upsertEntry } from "./lib/installed.mjs";
 import { ensurePrivateDir, exists, fileMarker, readJsonObject, wrapperScript, writeFileMode, writeJson } from "./lib/files.mjs";
 import { isMain } from "./lib/is-main.mjs";
 
 export function parseArgs(argv) {
-  const opts = { dryRun: false, yes: false, scoutRoot: REPO_ROOT };
+  const opts = { dryRun: false, scoutRoot: REPO_ROOT };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--dry-run") opts.dryRun = true;
-    else if (a === "--yes") opts.yes = true;
     else if (a === "--scout-root") {
       if (!argv[i + 1]) throw new Error("--scout-root needs a directory");
       opts.scoutRoot = argv[++i];
@@ -53,13 +54,19 @@ export function planSetup({ env = process.env, scoutRoot = REPO_ROOT, dryRun = f
 
   const nodePath = resolveNode();
   if (!isExecutableFile(nodePath)) throw new Error(`node path is not an executable file: ${nodePath}`);
+  if (/\/\.nvm\//.test(nodePath)) {
+    warnings.push(`node is under nvm (${nodePath}); an nvm upgrade will move it, and you must re-run \`npm run setup\``);
+  }
+  if (env.SCOUT_HOME) {
+    warnings.push(`SCOUT_HOME is set (${L.scoutHome}); the native app only reads ~/.scout, so this install is for testing`);
+  }
   const claudePath = resolveClaude({ pathVar: env.PATH ?? "", fallbacks: defaultClaudeFallbacks(env) });
   if (!claudePath) warnings.push("claude not found on PATH, ~/.local/bin, or /opt/homebrew/bin; writing claudePath: null (Phase 3 needs it)");
 
-  // Refuse to overwrite a marker-bearing file that isn't ours.
+  // Refuse to overwrite any Scout-owned file that exists without this install's marker.
+  // The personal-context config is not in this list: it is merged, not owned.
   const foreign = [
     [L.scoutConfig, "config"],
-    [L.pcConfig, "config"],
     [L.wrapper, "wrapper"],
     [L.nmhManifest, "nmh-manifest"],
   ].filter(([p, kind]) => exists(p) && fileMarker(p, kind) !== marker);
@@ -81,8 +88,14 @@ export function planSetup({ env = process.env, scoutRoot = REPO_ROOT, dryRun = f
   const existingScout = readJsonObject(L.scoutConfig) ?? {};
   const destinations = validDestinations(existingScout.destinations) ? existingScout.destinations : DEFAULT_DESTINATIONS;
   const scoutConfig = { ...existingScout, x_scout_marker: marker, nodePath, scoutRoot: L.scoutRoot, extensionId, destinations };
-  const existingPc = readJsonObject(L.pcConfig) ?? {};
+  let existingPc;
+  try {
+    existingPc = readJsonObject(L.pcConfig) ?? {};
+  } catch (e) {
+    throw new Error(`cannot merge into ${L.pcConfig}: ${e.message}\nFix or move it aside and re-run.`);
+  }
   const pcConfig = { ...existingPc, x_scout_marker: marker, nodePath, claudePath };
+  const pcKept = Object.keys(existingPc).filter((k) => !PC_MERGED_KEYS.includes(k));
   const nmh = {
     name: HOST_NAME,
     description: "Scout native bridge",
@@ -120,10 +133,12 @@ export function planSetup({ env = process.env, scoutRoot = REPO_ROOT, dryRun = f
     },
     {
       path: L.pcConfig,
-      kind: "config",
+      kind: "config-merged",
       mode: 0o600,
-      summary: `nodePath=${nodePath} claudePath=${claudePath ?? "null"}`,
-      entry: { path: L.pcConfig, kind: "config" },
+      summary:
+        `merge nodePath=${nodePath} claudePath=${claudePath ?? "null"}` +
+        (pcKept.length ? ` (keeps existing keys: ${pcKept.join(", ")})` : " (new file)"),
+      entry: { path: L.pcConfig, kind: "config-merged", keys: PC_MERGED_KEYS },
       write: () => writeJson(L.pcConfig, pcConfig, 0o600),
     },
     {

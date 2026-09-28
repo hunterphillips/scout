@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { chmodSync, existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -104,7 +104,7 @@ describe("setup", () => {
         ["key", L.keyPem],
         ["extension-manifest-key", L.extensionManifest],
         ["config", L.scoutConfig],
-        ["config", L.pcConfig],
+        ["config-merged", L.pcConfig],
         ["wrapper", L.wrapper],
         ["nmh-manifest", L.nmhManifest],
       ].sort(),
@@ -146,6 +146,60 @@ describe("setup", () => {
     else expect(claudePath).toBe("/opt/homebrew/bin/claude");
   });
 
+  it("merges into an existing personal-context config, keeping its other keys", () => {
+    const L = layout({ env: fx.env, scoutRoot: fx.scoutRoot });
+    mkdirSync(L.pcHome, { recursive: true });
+    const sources = [{ id: "focus", kind: "focus_http", enabled: true }];
+    writeFileSync(L.pcConfig, JSON.stringify({ port: 47821, sources, nodePath: "/old/node" }));
+    const r = setup();
+    expect(r.code, r.text()).toBe(0);
+    const installed = json(L.installed);
+    expect(json(L.pcConfig)).toEqual({
+      port: 47821,
+      sources,
+      nodePath: process.execPath,
+      claudePath: join(fx.binDir, "claude"),
+      x_scout_marker: installed.marker,
+    });
+    expect(mode(L.pcConfig)).toBe(0o600);
+    expect(installed.files.find((f) => f.path === L.pcConfig)).toEqual({
+      path: L.pcConfig,
+      kind: "config-merged",
+      keys: ["x_scout_marker", "nodePath", "claudePath"],
+    });
+  });
+
+  it("dry run names the existing personal-context keys it would keep", () => {
+    const L = layout({ env: fx.env, scoutRoot: fx.scoutRoot });
+    mkdirSync(L.pcHome, { recursive: true });
+    writeFileSync(L.pcConfig, JSON.stringify({ port: 47821, sources: [] }));
+    const r = setup(["--dry-run"]);
+    expect(r.code, r.text()).toBe(0);
+    expect(r.text()).toMatch(/keeps existing keys: port, sources/);
+  });
+
+  it("refuses a personal-context config that is not a JSON object", () => {
+    const L = layout({ env: fx.env, scoutRoot: fx.scoutRoot });
+    mkdirSync(L.pcHome, { recursive: true });
+    writeFileSync(L.pcConfig, "[1, 2]");
+    const r = setup();
+    expect(r.code).toBe(1);
+    expect(r.text()).toMatch(/cannot merge into .*not a JSON object/);
+    expect(readFileSync(L.pcConfig, "utf8")).toBe("[1, 2]");
+    expect(existsSync(L.scoutHome)).toBe(false);
+  });
+
+  it("warns that a SCOUT_HOME install is for testing", () => {
+    const r = setup(["--dry-run"]);
+    expect(r.text()).toMatch(/warning: SCOUT_HOME is set .*native app only reads ~\/\.scout/);
+  });
+
+  it("rejects --yes", () => {
+    const r = setup(["--yes"]);
+    expect(r.code).toBe(1);
+    expect(r.text()).toMatch(/unknown argument: --yes/);
+  });
+
   it("refuses to overwrite a native messaging manifest that is not its own", () => {
     const L = layout({ env: fx.env, scoutRoot: fx.scoutRoot });
     spawnSync("mkdir", ["-p", L.nmhDir]);
@@ -159,21 +213,21 @@ describe("setup", () => {
 });
 
 describe("uninstall", () => {
-  const uninstall = (args = []) => {
+  const uninstall = async (args = ["--yes"], confirm) => {
     const c = capture();
-    const code = runUninstall(args, { env: fx.env, out: c.out, err: c.err });
+    const code = await runUninstall(args, { env: fx.env, out: c.out, err: c.err, confirm });
     return { code, ...c };
   };
 
-  it("--dry-run changes nothing", () => {
+  it("--dry-run changes nothing", async () => {
     expect(setup().code).toBe(0);
     const before = listTree(fx.root);
-    const r = uninstall(["--dry-run"]);
+    const r = await uninstall(["--dry-run"]);
     expect(r.code).toBe(0);
     expect(listTree(fx.root)).toEqual(before);
   });
 
-  it("removes only listed files, strips the manifest key, keeps logs, unlisted files, and the key", () => {
+  it("removes only listed files, strips the manifest key, keeps logs, unlisted files, and the key", async () => {
     expect(setup().code).toBe(0);
     const L = layout({ env: fx.env, scoutRoot: fx.scoutRoot });
     spawnSync("mkdir", ["-p", L.logsDir]);
@@ -181,7 +235,7 @@ describe("uninstall", () => {
     writeFileSync(join(L.scoutHome, "unlisted.txt"), "x");
     writeFileSync(join(L.nmhDir, "other.host.json"), "{}");
 
-    const r = uninstall();
+    const r = await uninstall();
     expect(r.code, r.text()).toBe(0);
     for (const p of [L.scoutConfig, L.pcConfig, L.wrapper, L.nmhManifest]) expect(existsSync(p)).toBe(false);
     expect(existsSync(L.binDir)).toBe(false);
@@ -193,13 +247,13 @@ describe("uninstall", () => {
     expect(json(L.installed).files.map((f) => f.kind)).toEqual(["key"]);
     expect(r.text()).toMatch(/--include-key/);
 
-    const r2 = uninstall(["--include-key"]);
+    const r2 = await uninstall(["--yes", "--include-key"]);
     expect(r2.code).toBe(0);
     expect(existsSync(L.keyPem)).toBe(false);
     expect(existsSync(L.installed)).toBe(false);
   });
 
-  it("refuses a file whose marker was tampered and keeps it listed", () => {
+  it("refuses a file whose marker was tampered and keeps it listed", async () => {
     expect(setup().code).toBe(0);
     const L = layout({ env: fx.env, scoutRoot: fx.scoutRoot });
     const nmh = json(L.nmhManifest);
@@ -207,7 +261,7 @@ describe("uninstall", () => {
     const wrapper = readFileSync(L.wrapper, "utf8").replace(/# scout-marker: .*/, "# replaced");
     writeFileSync(L.wrapper, wrapper);
 
-    const r = uninstall(["--include-key"]);
+    const r = await uninstall(["--yes", "--include-key"]);
     expect(r.code).toBe(2);
     expect(existsSync(L.nmhManifest)).toBe(true);
     expect(existsSync(L.wrapper)).toBe(true);
@@ -218,7 +272,93 @@ describe("uninstall", () => {
   });
 });
 
+describe("uninstall: merged personal-context config", () => {
+  const uninstall = async () => {
+    const c = capture();
+    const code = await runUninstall(["--yes"], { env: fx.env, out: c.out, err: c.err });
+    return { code, ...c };
+  };
+
+  it("strips only Scout's keys and keeps the file when other keys remain", async () => {
+    const L = layout({ env: fx.env, scoutRoot: fx.scoutRoot });
+    mkdirSync(L.pcHome, { recursive: true });
+    const sources = [{ id: "focus", kind: "focus_http", enabled: true }];
+    writeFileSync(L.pcConfig, JSON.stringify({ port: 47821, sources }));
+    expect(setup().code).toBe(0);
+    const r = await uninstall();
+    expect(r.code, r.text()).toBe(0);
+    expect(json(L.pcConfig)).toEqual({ port: 47821, sources });
+    expect(mode(L.pcConfig)).toBe(0o600);
+    expect(r.text()).toMatch(/remove x_scout_marker, nodePath, claudePath from .*keeping port, sources/);
+  });
+
+  it("deletes the file when only Scout's keys were in it", async () => {
+    expect(setup().code).toBe(0);
+    const L = layout({ env: fx.env, scoutRoot: fx.scoutRoot });
+    const r = await uninstall();
+    expect(r.code, r.text()).toBe(0);
+    expect(existsSync(L.pcConfig)).toBe(false);
+  });
+
+  it("leaves the file alone when its marker changed", async () => {
+    expect(setup().code).toBe(0);
+    const L = layout({ env: fx.env, scoutRoot: fx.scoutRoot });
+    const changed = { ...json(L.pcConfig), x_scout_marker: "someone-else" };
+    writeFileSync(L.pcConfig, JSON.stringify(changed));
+    const r = await uninstall();
+    expect(r.code).toBe(2);
+    expect(json(L.pcConfig)).toEqual(changed);
+  });
+});
+
+describe("uninstall confirmation", () => {
+  it("aborts without changes when the prompt is declined", async () => {
+    expect(setup().code).toBe(0);
+    const before = listTree(fx.root);
+    const c = capture();
+    const code = await runUninstall([], { env: fx.env, out: c.out, err: c.err, confirm: async () => false });
+    expect(code).toBe(1);
+    expect(c.text()).toMatch(/Aborted/);
+    expect(listTree(fx.root)).toEqual(before);
+  });
+
+  it("proceeds when the prompt is accepted", async () => {
+    expect(setup().code).toBe(0);
+    const L = layout({ env: fx.env, scoutRoot: fx.scoutRoot });
+    const c = capture();
+    const code = await runUninstall([], { env: fx.env, out: c.out, err: c.err, confirm: async () => true });
+    expect(code, c.text()).toBe(0);
+    expect(existsSync(L.wrapper)).toBe(false);
+  });
+
+  it("aborts without hanging when stdin is not a terminal and --yes is absent (subprocess)", () => {
+    expect(setup().code).toBe(0);
+    const before = listTree(fx.root);
+    const r = spawnSync(process.execPath, [join(HERE, "uninstall.mjs")], { env: fx.env, input: "", encoding: "utf8", timeout: 10000 });
+    expect(r.error).toBeUndefined();
+    expect(r.status).toBe(1);
+    expect(r.stderr).toMatch(/not a terminal; re-run with --yes/);
+    expect(listTree(fx.root)).toEqual(before);
+  });
+
+  it("--yes skips the prompt (subprocess)", () => {
+    expect(setup().code).toBe(0);
+    const L = layout({ env: fx.env, scoutRoot: fx.scoutRoot });
+    const r = spawnSync(process.execPath, [join(HERE, "uninstall.mjs"), "--yes"], { env: fx.env, input: "", encoding: "utf8", timeout: 10000 });
+    expect(r.status, r.stdout + r.stderr).toBe(0);
+    expect(existsSync(L.wrapper)).toBe(false);
+  });
+});
+
 describe("doctor", () => {
+  it("tells you to re-run setup when the built manifest has no key", () => {
+    expect(setup().code).toBe(0);
+    writeFileSync(join(fx.scoutRoot, "packages/browser-extension/dist/manifest.json"), JSON.stringify(FAKE_MANIFEST));
+    const r = runChecks(fx.env).find((x) => x.label === "built extension manifest key derives extensionId");
+    expect(r.status).toBe("FAIL");
+    expect(r.detail).toMatch(/has no key; re-run `npm run setup`/);
+  });
+
   it("reports all OK after a fresh setup", () => {
     expect(setup().code).toBe(0);
     const c = capture();

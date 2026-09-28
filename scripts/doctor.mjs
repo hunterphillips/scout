@@ -78,7 +78,7 @@ export function runChecks(env = process.env) {
   const key = em.value?.key;
   let derived = null;
   if (typeof key === "string") derived = tryRead(() => extensionIdFromManifestKey(key)).value ?? null;
-  check(derived !== null && derived === extensionId, "built extension manifest key derives extensionId", em.error ?? (typeof key === "string" ? `${L.extensionManifest} -> ${derived}` : `${L.extensionManifest} has no key`));
+  check(derived !== null && derived === extensionId, "built extension manifest key derives extensionId", em.error ?? (typeof key === "string" ? `${L.extensionManifest} -> ${derived}` : `${L.extensionManifest} has no key; re-run \`npm run setup\``));
 
   // Private dirs
   const uid = process.getuid();

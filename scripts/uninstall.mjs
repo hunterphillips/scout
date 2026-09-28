@@ -1,23 +1,28 @@
 #!/usr/bin/env node
 // Scout uninstall: remove only the files listed in <SCOUT_HOME>/installed.json,
-// and only those that still carry this install's Scout marker.
+// and only those that still carry this install's Scout marker. For a merged config
+// (the personal-context config), it removes only the keys setup added.
+// Lists the files and asks y/N before changing anything; --yes skips the prompt.
+// Without a terminal on stdin and without --yes, it aborts.
 //
-// Usage: node scripts/uninstall.mjs [--dry-run] [--include-key]
+// Usage: node scripts/uninstall.mjs [--dry-run] [--yes] [--include-key]
 // Env overrides: SCOUT_HOME (see lib/paths.mjs); every other path comes from installed.json.
 // Never touches ~/.rook, ~/.scout/logs, or anything not listed.
 
 import { lstatSync, readFileSync, rmdirSync, statSync, unlinkSync } from "node:fs";
 import { isAbsolute } from "node:path";
+import { createInterface } from "node:readline/promises";
 import { layout } from "./lib/paths.mjs";
 import { extensionIdFromPem } from "./lib/extension-key.mjs";
-import { readInstalled } from "./lib/installed.mjs";
+import { PC_MERGED_KEYS, readInstalled } from "./lib/installed.mjs";
 import { exists, fileMarker, readJsonObject, writeJson } from "./lib/files.mjs";
 import { isMain } from "./lib/is-main.mjs";
 
 export function parseArgs(argv) {
-  const opts = { dryRun: false, includeKey: false };
+  const opts = { dryRun: false, yes: false, includeKey: false };
   for (const a of argv) {
     if (a === "--dry-run") opts.dryRun = true;
+    else if (a === "--yes") opts.yes = true;
     else if (a === "--include-key") opts.includeKey = true;
     else throw new Error(`unknown argument: ${a}`);
   }
@@ -32,7 +37,21 @@ function isRegularFile(p) {
   }
 }
 
-/** Decide what to do with one entry: { action: "remove"|"strip-key"|"gone"|"keep"|"skip", reason }. */
+/**
+ * Ask `question` on the terminal. Resolves true for y/yes, false otherwise, and
+ * null without asking when stdin is not a terminal.
+ */
+export async function ttyConfirm(question, { input = process.stdin, output = process.stdout } = {}) {
+  if (!input.isTTY) return null;
+  const rl = createInterface({ input, output });
+  try {
+    return /^y(es)?$/i.test((await rl.question(question)).trim());
+  } finally {
+    rl.close();
+  }
+}
+
+/** Decide what to do with one entry: { action: "remove"|"strip-key"|"strip-merged"|"gone"|"keep"|"skip", reason }. */
 export function judge(entry, marker, { includeKey }) {
   const p = entry.path;
   if (typeof p !== "string" || !isAbsolute(p)) return { action: "skip", reason: "path is not absolute" };
@@ -45,6 +64,21 @@ export function judge(entry, marker, { includeKey }) {
       return fileMarker(p, entry.kind) === marker
         ? { action: "remove", reason: "marker matches" }
         : { action: "skip", reason: "Scout marker missing or different; not removing" };
+    case "config-merged": {
+      let m = null;
+      try {
+        m = readJsonObject(p);
+      } catch {
+        // malformed
+      }
+      if (!m) return { action: "skip", reason: "not a JSON object; not changing" };
+      if (m.x_scout_marker !== marker) return { action: "skip", reason: "Scout marker missing or different; not changing" };
+      const keys = mergedKeys(entry);
+      const others = Object.keys(m).filter((k) => !keys.includes(k));
+      return others.length
+        ? { action: "strip-merged", reason: `marker matches; keeping ${others.join(", ")}` }
+        : { action: "remove", reason: "marker matches and only Scout's keys remain" };
+    }
     case "key": {
       if (!includeKey) return { action: "keep", reason: "extension key kept so the extension ID survives a reinstall (pass --include-key to remove)" };
       let id = null;
@@ -75,6 +109,10 @@ export function judge(entry, marker, { includeKey }) {
   }
 }
 
+function mergedKeys(entry) {
+  return Array.isArray(entry.keys) && entry.keys.length ? entry.keys : PC_MERGED_KEYS;
+}
+
 function removeDirIfEmpty(dir, out, dryRun) {
   if (!exists(dir)) return;
   if (dryRun) {
@@ -90,7 +128,7 @@ function removeDirIfEmpty(dir, out, dryRun) {
   }
 }
 
-export function runUninstall(argv, { env = process.env, out = console.log, err = console.error } = {}) {
+export async function runUninstall(argv, { env = process.env, out = console.log, err = console.error, confirm = ttyConfirm } = {}) {
   let opts, record;
   const L = layout({ env });
   try {
@@ -108,6 +146,17 @@ export function runUninstall(argv, { env = process.env, out = console.log, err =
   out(`Files listed in ${L.installed}:`);
   for (const f of record.files) out(`  ${f.kind.padEnd(22)} ${f.path}`);
   if (opts.dryRun) out(`Dry run: nothing is changed.`);
+  else if (!opts.yes) {
+    const answer = await confirm("Remove the files above that still carry this install's marker? [y/N] ");
+    if (answer === null) {
+      err("uninstall: stdin is not a terminal; re-run with --yes to confirm. Nothing changed.");
+      return 1;
+    }
+    if (!answer) {
+      out("Aborted. Nothing changed.");
+      return 1;
+    }
+  }
 
   const remaining = [];
   let skipped = 0;
@@ -124,6 +173,14 @@ export function runUninstall(argv, { env = process.env, out = console.log, err =
         writeJson(entry.path, m, statSync(entry.path).mode & 0o777);
       }
       out(`${would}strip "key" from ${entry.path} (${reason})`);
+    } else if (action === "strip-merged") {
+      const keys = mergedKeys(entry);
+      if (!opts.dryRun) {
+        const m = readJsonObject(entry.path);
+        for (const k of keys) delete m[k];
+        writeJson(entry.path, m, statSync(entry.path).mode & 0o777);
+      }
+      out(`${would}remove ${keys.join(", ")} from ${entry.path} (${reason})`);
     } else if (action === "gone") {
       out(`skip ${entry.path} (${reason})`);
     } else {
@@ -146,4 +203,4 @@ export function runUninstall(argv, { env = process.env, out = console.log, err =
   return skipped > 0 ? 2 : 0;
 }
 
-if (isMain(import.meta.url)) process.exitCode = runUninstall(process.argv.slice(2));
+if (isMain(import.meta.url)) process.exitCode = await runUninstall(process.argv.slice(2));

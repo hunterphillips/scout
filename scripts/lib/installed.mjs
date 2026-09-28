@@ -1,12 +1,17 @@
 // Scout setup: ~/.scout/installed.json, the record of every file setup wrote.
 //
 // { "version": 1, "marker": "<token>", "files": [ { "path", "kind", ...extra } ] }
-// kinds: config | wrapper | nmh-manifest | key | extension-manifest-key
+// kinds: config | config-merged | wrapper | nmh-manifest | key | extension-manifest-key
+// config-merged: a file someone else owns (the personal-context config); setup added
+// only the keys in `keys`, and uninstall removes only those.
 
 import { randomBytes } from "node:crypto";
 import { readFileSync } from "node:fs";
 
-export const KINDS = ["config", "wrapper", "nmh-manifest", "key", "extension-manifest-key"];
+export const KINDS = ["config", "config-merged", "wrapper", "nmh-manifest", "key", "extension-manifest-key"];
+
+/** The keys setup merges into ~/.personal-context-mcp/config.json. */
+export const PC_MERGED_KEYS = ["x_scout_marker", "nodePath", "claudePath"];
 
 export function newMarker() {
   return randomBytes(16).toString("hex");
