@@ -7,12 +7,14 @@
 //
 // Usage: node scripts/setup.mjs [--dry-run] [--scout-root <dir>]
 // Env overrides: SCOUT_HOME, PERSONAL_CONTEXT_HOME, CHROME_NMH_DIR (see lib/paths.mjs).
-// With SCOUT_HOME set, --scout-root is required so a test install cannot re-key the
-// real built extension.
+// When the Scout home is not the real ~/.scout (SCOUT_HOME or HOME overridden),
+// --scout-root is required so a test install cannot re-key the real built extension.
 // Never touches ~/.rook or any process.
 
 import { chmodSync, lstatSync, mkdirSync, readFileSync, statSync } from "node:fs";
-import { DEFAULT_DESTINATIONS, HOST_NAME, REPO_ROOT, layout } from "./lib/paths.mjs";
+import { userInfo } from "node:os";
+import { join, resolve } from "node:path";
+import { DEFAULT_DESTINATIONS, HOST_NAME, REPO_ROOT, layout, scoutHome } from "./lib/paths.mjs";
 import { extensionIdFromPem, generateKeyPem, manifestKey } from "./lib/extension-key.mjs";
 import { defaultClaudeFallbacks, isExecutableFile, resolveClaude, resolveNode } from "./lib/executables.mjs";
 import { PC_MERGED_KEYS, newMarker, readInstalled, upsertEntry } from "./lib/installed.mjs";
@@ -182,9 +184,11 @@ export function runSetup(argv, { env = process.env, out = console.log, err = con
   let opts, plan;
   try {
     opts = parseArgs(argv);
-    if (env.SCOUT_HOME && !opts.scoutRootGiven) {
+    const home = resolve(scoutHome(env));
+    // userInfo() reads the account record, so an overridden HOME cannot make a temp dir look real.
+    if (home !== join(userInfo().homedir, ".scout") && !opts.scoutRootGiven) {
       throw new Error(
-        `SCOUT_HOME is set but --scout-root is not; a test install would re-key the real built extension in ${REPO_ROOT}.\n` +
+        `Scout home ${home} is not the real ~/.scout and --scout-root is not given; a test install would re-key the real built extension in ${REPO_ROOT}.\n` +
           `Pass --scout-root <dir> pointing at a separate built copy.`,
       );
     }

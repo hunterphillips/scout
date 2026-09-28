@@ -254,15 +254,24 @@ describe("setup", () => {
     expect(existsSync(L.installed)).toBe(false);
   });
 
-  it("refuses a SCOUT_HOME install without --scout-root, so the real extension is not re-keyed", () => {
+  it("refuses a non-default Scout home (SCOUT_HOME or HOME) without --scout-root, so the real extension is not re-keyed", () => {
     const real = join(REPO_ROOT, "packages/browser-extension/dist/manifest.json");
     const before = existsSync(real) ? readFileSync(real, "utf8") : null;
     const treeBefore = listTree(fx.root);
-    for (const args of [[], ["--dry-run"]]) {
-      const c = capture();
-      expect(runSetup(args, { env: fx.env, out: c.out, err: c.err })).toBe(1);
-      expect(c.text()).toMatch(/SCOUT_HOME is set but --scout-root is not/);
+    // SCOUT_HOME set, and SCOUT_HOME unset with HOME pointed at a temp dir.
+    for (const env of [fx.env, { ...fx.env, SCOUT_HOME: undefined }]) {
+      for (const args of [[], ["--dry-run"]]) {
+        const c = capture();
+        expect(runSetup(args, { env, out: c.out, err: c.err })).toBe(1);
+        expect(c.text()).toMatch(/is not the real ~\/\.scout and --scout-root is not given/);
+        expect(c.text()).not.toMatch(/would write/);
+      }
     }
+    // The CLI with HOME overridden for the whole process (os.homedir() then follows it).
+    const r = spawnSync(process.execPath, [join(HERE, "setup.mjs"), "--dry-run"], { env: { ...fx.env, SCOUT_HOME: undefined }, encoding: "utf8" });
+    expect(r.status).toBe(1);
+    expect(r.stderr).toMatch(/is not the real ~\/\.scout and --scout-root is not given/);
+    expect(r.stdout).not.toMatch(/would write/);
     expect(existsSync(real) ? readFileSync(real, "utf8") : null).toBe(before);
     expect(listTree(fx.root)).toEqual(treeBefore);
   });
