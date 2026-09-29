@@ -224,6 +224,18 @@ describe("createCatalogCache", () => {
     expect(events.find((e) => e.name === "catalog_cache_write_failed")?.fields).toEqual({ origin: ORIGIN, code: "enotdir" });
   });
 
+  it("reports not_directory when the cache directory path is a regular file", async () => {
+    mkdirSync(join(dir, ".."), { recursive: true });
+    writeFileSync(dir, "a file where the cache directory should be");
+    const cache = createCatalogCache({ dir, clock, diagnostics });
+
+    const result = await cache.resolve({ origin: ORIGIN, fetch: fakeSite({ "/sitemap.xml": sitemapWith("/a") }).fetch(clock) });
+
+    expect(result).toMatchObject({ ok: true, source: "miss" });
+    expect(events.find((e) => e.name === "catalog_cache_write_failed")?.fields).toEqual({ origin: ORIGIN, code: "not_directory" });
+    expect(readFileSync(dir, "utf8")).toBe("a file where the cache directory should be");
+  });
+
   it("refuses a symlinked cache directory without writing through it", async () => {
     const target = join(dir, "..", "elsewhere");
     mkdirSync(target, { recursive: true, mode: 0o700 });

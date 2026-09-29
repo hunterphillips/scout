@@ -113,6 +113,9 @@ function fsErrorCode(error: unknown): string {
   switch ((error as NodeJS.ErrnoException | null)?.code) {
     case "ENOTDIR":
       return "enotdir";
+    case "EEXIST":
+      // mkdir on a path that exists but is not a directory (the cache dir is a regular file).
+      return "not_directory";
     case "ENAMETOOLONG":
       return "enametoolong";
     case "EACCES":

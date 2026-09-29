@@ -253,7 +253,9 @@ describe("discoverCatalog", () => {
     expect(stats.capped).toBe(50_000 - MAX_ROBOTS_CHECKS);
     expect(catalog.truncated).toBe(true);
     expect(catalog.candidates).toEqual([]);
-    expect(elapsed).toBeLessThan(2000); // ~350 ms measured, including sitemap parsing
+    // ~350 ms measured with short paths and ~1.6 s with 1,500-character paths, including sitemap parsing;
+    // the bound leaves room for slow CI machines.
+    expect(elapsed).toBeLessThan(5000);
   });
 
   it("skips all per-entry work after the candidate cap", async () => {
