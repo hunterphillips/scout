@@ -134,6 +134,31 @@ function normalizeEncoding(text: string): string {
     });
 }
 
+/** A rule with its pattern split once, so matching a path does no per-call string work. */
+interface CompiledRule {
+  allow: boolean;
+  /** Length of the original pattern, for longest-match precedence. */
+  length: number;
+  anchored: boolean;
+  /** The pattern (minus any trailing `$`) split on `*`. */
+  pieces: string[];
+}
+
+/** Rules prepared by `compileRobots`; pass to `isAllowed` when checking many paths against one file. */
+export interface CompiledRobots {
+  readonly compiled: readonly CompiledRule[];
+}
+
+/** Split every rule pattern once. Use this before checking many paths against the same rules. */
+export function compileRobots(rules: Pick<RobotsRules, "rules">): CompiledRobots {
+  return {
+    compiled: rules.rules.map((rule) => {
+      const anchored = rule.pattern.endsWith("$");
+      return { allow: rule.allow, length: rule.pattern.length, anchored, pieces: (anchored ? rule.pattern.slice(0, -1) : rule.pattern).split("*") };
+    }),
+  };
+}
+
 /**
  * Match a robots path pattern: `*` matches any run of characters, a trailing `$` anchors
  * the end, otherwise the pattern is a prefix. The pattern is split on `*` and each piece is
@@ -141,9 +166,8 @@ function normalizeEncoding(text: string): string {
  * matching is correct when `*` is the only wildcard), so a rule costs about O(path) no
  * matter how many `*` it has. A `$` anywhere but the end is literal.
  */
-function patternMatches(pattern: string, path: string): boolean {
-  const anchored = pattern.endsWith("$");
-  const pieces = (anchored ? pattern.slice(0, -1) : pattern).split("*");
+function ruleMatches(rule: CompiledRule, path: string): boolean {
+  const { anchored, pieces } = rule;
   const first = pieces[0] ?? "";
   if (pieces.length === 1) return anchored ? path === first : path.startsWith(first);
   if (!path.startsWith(first)) return false;
@@ -163,14 +187,16 @@ function patternMatches(pattern: string, path: string): boolean {
 /**
  * Whether `path` (pathname plus any query string) may be used. The longest matching
  * pattern wins; on equal length `Allow` wins. No match means allowed. The path gets the
- * same encoding normalization as patterns.
+ * same encoding normalization as patterns. Accepts raw rules (compiled on every call) or
+ * the output of `compileRobots`.
  */
-export function isAllowed(rules: Pick<RobotsRules, "rules">, rawPath: string): boolean {
+export function isAllowed(rules: Pick<RobotsRules, "rules"> | CompiledRobots, rawPath: string): boolean {
+  const compiled = "compiled" in rules ? rules.compiled : compileRobots(rules).compiled;
   const path = normalizeEncoding(rawPath);
-  let best: RobotsRule | null = null;
-  for (const rule of rules.rules) {
-    if (!patternMatches(rule.pattern, path)) continue;
-    if (!best || rule.pattern.length > best.pattern.length || (rule.pattern.length === best.pattern.length && rule.allow && !best.allow)) {
+  let best: CompiledRule | null = null;
+  for (const rule of compiled) {
+    if (!ruleMatches(rule, path)) continue;
+    if (!best || rule.length > best.length || (rule.length === best.length && rule.allow && !best.allow)) {
       best = rule;
     }
   }

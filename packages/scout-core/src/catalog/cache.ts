@@ -1,5 +1,5 @@
-import { randomBytes } from "node:crypto";
-import { chmodSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { createHash, randomBytes } from "node:crypto";
+import { lstatSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { type SiteCatalog, SiteCatalogSchema } from "@scout/contracts";
 import { z } from "zod";
@@ -10,13 +10,19 @@ import type { PacedCatalogFetch } from "./pacing.js";
 import { type CatalogResource, discoverCatalog, type Discovery, type DiscoverOptions } from "./resolver.js";
 
 /** Bump when the file shape or the resolver's output changes meaning; every older file is then ignored. */
-export const CATALOG_CACHE_SCHEMA_VERSION = 1;
+export const CATALOG_CACHE_SCHEMA_VERSION = 2;
 
 /** A cached catalog is used without any network request for this long. */
 export const CATALOG_FRESH_MS = 24 * 60 * 60 * 1000;
 
 /** When a refresh fails, a cached catalog younger than this is still served, marked stale. */
 export const CATALOG_STALE_MAX_MS = 7 * 24 * 60 * 60 * 1000;
+
+/** A cached `fetchedAt` further than this in the future is treated as invalid (clock skew or tampering). */
+export const CATALOG_FUTURE_TOLERANCE_MS = 5 * 60 * 1000;
+
+/** Longest readable host prefix in a cache file name; the hash suffix keeps names unique. */
+const FILE_PREFIX_MAX = 100;
 
 const CacheFileSchema = z.object({
   schemaVersion: z.number(),
@@ -29,6 +35,7 @@ const CacheFileSchema = z.object({
       status: z.enum(["ok", "not_modified", "absent", "error"]),
       etag: z.string().optional(),
       lastModified: z.string().optional(),
+      maxBytes: z.number().int().positive().optional(),
     }),
   ),
   catalog: SiteCatalogSchema,
@@ -73,13 +80,47 @@ export interface CatalogCacheOptions {
   diagnostics?: Diagnostics;
 }
 
-/** File name for an origin: scheme dropped, host lowercased, `:` and any other unsafe character become `_`. */
+/**
+ * File name for an origin: a readable prefix (host lowercased, `:` and any other unsafe
+ * character turned into `_`, at most 100 characters) then `-` and the first 16 hex digits
+ * of the SHA-256 of the origin. The hash keeps names unique where the prefix collides
+ * (`a_8443` vs `a:8443`) or is cut short, and the length bound keeps the temp name under
+ * the file-system limit for any host.
+ */
 export function cacheFileName(origin: string): string {
   const url = new URL(origin);
   if (url.protocol !== "https:") throw new TypeError("catalog origin must be https");
   const name = url.host.toLowerCase().replace(/[^a-z0-9.-]/g, "_");
   if (!name || /^\.+$/.test(name)) throw new TypeError("catalog origin has no usable host");
-  return `${name}.json`;
+  const hash = createHash("sha256").update(url.origin).digest("hex").slice(0, 16);
+  return `${name.slice(0, FILE_PREFIX_MAX)}-${hash}.json`;
+}
+
+type DirRefusal = "symlink" | "not_directory" | "wrong_owner" | "not_private";
+
+/** Why `dir` is unsafe to use for the cache, or null if it is a private directory we own. Mirrors `ensurePrivateRunDir`. Throws if lstat fails. */
+function checkPrivateDir(dir: string, uid: number = process.getuid?.() ?? -1): DirRefusal | null {
+  const st = lstatSync(dir);
+  if (st.isSymbolicLink()) return "symlink";
+  if (!st.isDirectory()) return "not_directory";
+  if (st.uid !== uid) return "wrong_owner";
+  if ((st.mode & 0o077) !== 0) return "not_private";
+  return null;
+}
+
+/** A short code for a file-system error, safe for diagnostics. */
+function fsErrorCode(error: unknown): string {
+  switch ((error as NodeJS.ErrnoException | null)?.code) {
+    case "ENOTDIR":
+      return "enotdir";
+    case "ENAMETOOLONG":
+      return "enametoolong";
+    case "EACCES":
+    case "EPERM":
+      return "eacces";
+    default:
+      return "other";
+  }
 }
 
 /**
@@ -91,7 +132,7 @@ export function cacheFileName(origin: string): string {
 async function unchanged(resources: readonly CatalogResource[], fetch: PacedCatalogFetch): Promise<boolean> {
   if (resources.length === 0) return false;
   for (const resource of resources) {
-    const opts: CatalogFetchOptions = { maxBytes: SITEMAP_MAX_BYTES };
+    const opts: CatalogFetchOptions = { maxBytes: resource.maxBytes ?? SITEMAP_MAX_BYTES };
     if (resource.status === "ok" || resource.status === "not_modified") {
       if (!resource.etag && !resource.lastModified) return false;
       if (resource.etag) opts.ifNoneMatch = resource.etag;
@@ -105,8 +146,11 @@ async function unchanged(resources: readonly CatalogResource[], fetch: PacedCata
 }
 
 /**
- * The on-disk catalog cache, one JSON file per origin (dir 0700, files 0600, written
- * atomically).
+ * The on-disk catalog cache, one JSON file per origin (files 0600, written atomically).
+ * The directory is created 0700; an existing one is never chmodded, and is refused if it
+ * is a symlink, not a directory, owned by someone else, or has group/other permission
+ * bits. A refused directory means no write (a `catalog_cache_write_failed` event) and
+ * every load is a miss. A failed write never fails `resolve`: the catalog is still returned.
  *
  * Policy: a catalog under 24 h old is served with no network request. After that, every
  * stored resource is revalidated with a conditional request; if all come back unchanged,
@@ -115,7 +159,13 @@ async function unchanged(resources: readonly CatalogResource[], fetch: PacedCata
  * every file's body to rebuild it, and a 304 carries none, so a partial rebuild is not
  * possible. If rediscovery fails (throws, or yields nothing with a request error) a
  * cached catalog under 7 days old is served marked stale. A file from another schema
- * version, or one that fails to parse, is treated as missing and overwritten.
+ * version, for another origin, dated more than 5 minutes in the future, or one that fails
+ * to parse, is treated as missing and overwritten.
+ *
+ * Partial failures: any run that produces a non-empty catalog replaces the cached one,
+ * even if some of its requests failed (`catalog.errors` is non-empty). This is a deliberate
+ * proof-of-concept choice: a fresh catalog with gaps is preferred over a richer but stale
+ * one, and the next refresh fills the gaps.
  */
 export function createCatalogCache(options: CatalogCacheOptions): CatalogCache {
   const dir = options.dir ?? join(scoutHome(), "cache", "catalog");
@@ -123,6 +173,16 @@ export function createCatalogCache(options: CatalogCacheOptions): CatalogCache {
 
   const load = (origin: string): CatalogCacheFile | null => {
     const canonical = new URL(origin).origin;
+    let refusal: DirRefusal | null;
+    try {
+      refusal = checkPrivateDir(dir);
+    } catch {
+      return null; // no directory yet
+    }
+    if (refusal) {
+      diagnostics?.event("catalog_cache_invalid", { origin: canonical, code: `dir_${refusal}` });
+      return null;
+    }
     let raw: string;
     try {
       raw = readFileSync(join(dir, cacheFileName(canonical)), "utf8");
@@ -137,35 +197,59 @@ export function createCatalogCache(options: CatalogCacheOptions): CatalogCache {
       diagnostics?.event("catalog_cache_invalid", { origin: canonical, code: "parse" });
       return null;
     }
-    if (parsed.schemaVersion !== CATALOG_CACHE_SCHEMA_VERSION || parsed.origin !== canonical) {
-      diagnostics?.event("catalog_cache_invalid", { origin: canonical, code: parsed.origin !== canonical ? "origin" : "schema" });
+    const invalid =
+      parsed.schemaVersion !== CATALOG_CACHE_SCHEMA_VERSION
+        ? "schema"
+        : parsed.origin !== canonical || parsed.catalog.origin !== canonical
+          ? "origin"
+          : parsed.fetchedAt > clock.now() + CATALOG_FUTURE_TOLERANCE_MS
+            ? "future"
+            : null;
+    if (invalid) {
+      diagnostics?.event("catalog_cache_invalid", { origin: canonical, code: invalid });
       return null;
     }
     return parsed;
   };
 
   const save = (file: CatalogCacheFile): void => {
-    const path = join(dir, cacheFileName(file.origin));
-    const temp = `${path}.${randomBytes(6).toString("hex")}.tmp`;
+    const failed = (code: string) => diagnostics?.event("catalog_cache_write_failed", { origin: file.origin, code });
+    let temp: string | null = null;
     try {
       mkdirSync(dir, { recursive: true, mode: 0o700 });
-      chmodSync(dir, 0o700);
+      const refusal = checkPrivateDir(dir);
+      if (refusal) {
+        failed(refusal);
+        return;
+      }
+      const path = join(dir, cacheFileName(file.origin));
+      temp = `${path}.${randomBytes(6).toString("hex")}.tmp`;
       writeFileSync(temp, JSON.stringify(file), { mode: 0o600, flag: "wx" });
       renameSync(temp, path);
-    } catch {
-      rmSync(temp, { force: true });
-      diagnostics?.event("catalog_cache_write_failed", { origin: file.origin });
+    } catch (error) {
+      if (temp !== null) {
+        try {
+          unlinkSync(temp);
+        } catch {
+          // Never written, or already gone.
+        }
+      }
+      failed(fsErrorCode(error));
     }
   };
 
-  const fromDiscovery = (origin: string, discovery: Discovery): CatalogCacheFile => ({
-    schemaVersion: CATALOG_CACHE_SCHEMA_VERSION,
-    origin,
-    fetchedAt: discovery.catalog.fetchedAt,
-    ...(discovery.crawlDelayMs !== undefined ? { crawlDelayMs: discovery.crawlDelayMs } : {}),
-    resources: discovery.resources,
-    catalog: discovery.catalog,
-  });
+  const fromDiscovery = (origin: string, discovery: Discovery, cached: CatalogCacheFile | null): CatalogCacheFile => {
+    // Keep the cached crawl delay unless this run actually read robots.txt, matching what the resolver applied.
+    const crawlDelayMs = discovery.stats.robotsSource === "fetched" ? discovery.crawlDelayMs : cached?.crawlDelayMs;
+    return {
+      schemaVersion: CATALOG_CACHE_SCHEMA_VERSION,
+      origin,
+      fetchedAt: discovery.catalog.fetchedAt,
+      ...(crawlDelayMs !== undefined ? { crawlDelayMs } : {}),
+      resources: discovery.resources,
+      catalog: discovery.catalog,
+    };
+  };
 
   const resolve = async (request: ResolveWithCacheOptions): Promise<CatalogCacheResult> => {
     const origin = new URL(request.origin).origin;
@@ -209,7 +293,7 @@ export function createCatalogCache(options: CatalogCacheOptions): CatalogCache {
       discovery = null;
     }
     if (discovery && !discovery.failed) {
-      save(fromDiscovery(origin, discovery));
+      save(fromDiscovery(origin, discovery, cached));
       return report(cached ? "refetched" : "miss", discovery.catalog);
     }
     if (cached && clock.now() - cached.fetchedAt < CATALOG_STALE_MAX_MS) return report("stale", cached.catalog);

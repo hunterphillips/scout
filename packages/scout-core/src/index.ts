@@ -69,6 +69,7 @@ export { type CatalogFetch, SITEMAP_MAX_BYTES, TEXT_SOURCE_MAX_BYTES } from "./c
 export { MAX_URL_LENGTH, sameOriginAbsoluteHttpsUrl, sameOriginHttpsUrl } from "./catalog/sameOrigin.js";
 export { CANDIDATE_DESCRIPTION_MAX, CANDIDATE_TITLE_MAX, SANITIZE_INPUT_FACTOR, sanitizeLabel } from "./catalog/sanitizeLabel.js";
 export {
+  compileRobots,
   fetchRobots,
   isAllowed,
   MAX_CRAWL_DELAY_MS,
@@ -76,6 +77,7 @@ export {
   MAX_RULES,
   parseRobots,
   ROBOTS_PRODUCT_TOKEN,
+  type CompiledRobots,
   type FetchedRobots,
   type RobotsRule,
   type RobotsRules,
@@ -108,6 +110,7 @@ export { type CatalogFetchOptions } from "./catalog/catalogFetch.js";
 export {
   createPacedCatalogFetch,
   MAX_REQUESTS_PER_RUN,
+  RUN_DEADLINE_MS,
   type PacedCatalogFetch,
   type PacedCatalogFetchOptions,
   type Sleep,
@@ -116,6 +119,7 @@ export {
   discoverCatalog,
   MAX_CANDIDATES,
   MAX_LABEL_BYTES,
+  MAX_ROBOTS_CHECKS,
   normalizeUrl,
   slugTitle,
   TRACKING_PARAMS,
@@ -128,6 +132,7 @@ export {
   cacheFileName,
   CATALOG_CACHE_SCHEMA_VERSION,
   CATALOG_FRESH_MS,
+  CATALOG_FUTURE_TOLERANCE_MS,
   CATALOG_STALE_MAX_MS,
   createCatalogCache,
   type CatalogCache,

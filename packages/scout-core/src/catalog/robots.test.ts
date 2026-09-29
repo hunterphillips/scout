@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import type { GuardedFetchResult } from "../fetch/guardedFetch.js";
-import { fetchRobots, isAllowed, MAX_CRAWL_DELAY_MS, MAX_RULE_PATTERN_LENGTH, MAX_RULES, parseRobots } from "./robots.js";
+import { compileRobots, fetchRobots, isAllowed, MAX_CRAWL_DELAY_MS, MAX_RULE_PATTERN_LENGTH, MAX_RULES, parseRobots } from "./robots.js";
 
 const fixture = (name: string) => readFileSync(new URL(`../../test/fixtures/robots/${name}`, import.meta.url), "utf8");
 
@@ -18,6 +18,14 @@ describe("parseRobots", () => {
     expect(isAllowed(rules, "/collections/bags?oseid=12")).toBe(false); // * wildcard
     expect(isAllowed(rules, "/manuals/backpack.pdf")).toBe(false); // $ anchor
     expect(isAllowed(rules, "/manuals/backpack.pdf?download=1")).toBe(true);
+  });
+
+  it("gives the same answers from compiled rules", () => {
+    const rules = parseRobots(fixture("peak.txt"));
+    const compiled = compileRobots(rules);
+    for (const path of ["/products/everyday-backpack", "/admin/settings", "/cart", "/cart/shared/abc", "/collections/bags?oseid=12", "/manuals/backpack.pdf", "/manuals/backpack.pdf?download=1"]) {
+      expect(isAllowed(compiled, path)).toBe(isAllowed(rules, path));
+    }
   });
 
   it("uses a Scout group instead of * when one exists, matching the token case-insensitively", () => {
