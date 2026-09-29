@@ -37,7 +37,7 @@ describe("verifyTargets", () => {
   it("uses the HTML twin of a .md source on a 200 text/html answer", async () => {
     const { fetch, calls } = fakeFetch({ "/payments/subscriptions": (url) => ok(url, "<html></html>") });
 
-    const result = await verifyTargets([candidate("c0", "/payments/subscriptions.md")], { fetch });
+    const result = await verifyTargets([candidate("c0", "/payments/subscriptions.md")], { origin: ORIGIN, fetch });
 
     expect(calls.map((c) => c.url)).toEqual([`${ORIGIN}/payments/subscriptions`]);
     expect(calls[0]?.options.maxBytes).toBe(VERIFY_MAX_BYTES);
@@ -48,7 +48,7 @@ describe("verifyTargets", () => {
   it("keeps the .md source when the twin answers 200 but is not HTML", async () => {
     const { fetch } = fakeFetch({ "/a": (url) => ok(url, "# A", "text/markdown") });
 
-    const result = await verifyTargets([candidate("c0", "/a.md")], { fetch });
+    const result = await verifyTargets([candidate("c0", "/a.md")], { origin: ORIGIN, fetch });
 
     expect(result.verified[0]?.humanHref).toBe(`${ORIGIN}/a.md`);
   });
@@ -56,13 +56,13 @@ describe("verifyTargets", () => {
   it("keeps the .md source when the twin answers 2xx other than 200", async () => {
     const { fetch } = fakeFetch({ "/a": (url) => ok(url, "", "text/html", 203) });
 
-    expect((await verifyTargets([candidate("c0", "/a.md")], { fetch })).verified[0]?.humanHref).toBe(`${ORIGIN}/a.md`);
+    expect((await verifyTargets([candidate("c0", "/a.md")], { origin: ORIGIN, fetch })).verified[0]?.humanHref).toBe(`${ORIGIN}/a.md`);
   });
 
   it("keeps the .md source when the twin is a 404", async () => {
     const { fetch } = fakeFetch({});
 
-    const result = await verifyTargets([candidate("c0", "/a.md")], { fetch });
+    const result = await verifyTargets([candidate("c0", "/a.md")], { origin: ORIGIN, fetch });
 
     expect(result.verified).toEqual([expect.objectContaining({ id: "c0", humanHref: `${ORIGIN}/a.md` })]);
     expect(result.dropped).toEqual([]);
@@ -72,7 +72,7 @@ describe("verifyTargets", () => {
     const offHost = (): GuardedFetchResult => ({ kind: "error", reason: "policy", message: "redirect off host" });
     const { fetch } = fakeFetch({ "/a": offHost, "/b": offHost });
 
-    const result = await verifyTargets([candidate("c0", "/a.md"), candidate("c1", "/b")], { fetch });
+    const result = await verifyTargets([candidate("c0", "/a.md"), candidate("c1", "/b")], { origin: ORIGIN, fetch });
 
     expect(result.verified).toEqual([expect.objectContaining({ id: "c0", humanHref: `${ORIGIN}/a.md` })]);
     expect(result.verified[0]).not.toHaveProperty("displayTitle");
@@ -85,7 +85,7 @@ describe("verifyTargets", () => {
       "/b": () => ok("https://elsewhere.example/b", "<title>x</title>"),
     });
 
-    const result = await verifyTargets([candidate("c0", "/a.md"), candidate("c1", "/b")], { fetch });
+    const result = await verifyTargets([candidate("c0", "/a.md"), candidate("c1", "/b")], { origin: ORIGIN, fetch });
 
     expect(result.verified).toEqual([expect.objectContaining({ id: "c0", humanHref: `${ORIGIN}/a.md` })]);
     expect(result.verified[0]).not.toHaveProperty("displayTitle");
@@ -95,7 +95,7 @@ describe("verifyTargets", () => {
   it("drops a non-.md candidate that is a 404", async () => {
     const { fetch } = fakeFetch({});
 
-    const result = await verifyTargets([candidate("c0", "/gone")], { fetch });
+    const result = await verifyTargets([candidate("c0", "/gone")], { origin: ORIGIN, fetch });
 
     expect(result.verified).toEqual([]);
     expect(result.dropped).toEqual([{ candidateId: "c0", reason: "not_found" }]);
@@ -106,7 +106,7 @@ describe("verifyTargets", () => {
       <meta content="Tom &amp; Jerry&apos;s &lt;b&gt;guide&lt;/b&gt;" property="og:title"></head></html>`;
     const { fetch } = fakeFetch({ "/guide": (url) => ok(url, html) });
 
-    const result = await verifyTargets([candidate("c0", "/guide")], { fetch });
+    const result = await verifyTargets([candidate("c0", "/guide")], { origin: ORIGIN, fetch });
 
     expect(result.verified).toEqual([expect.objectContaining({ humanHref: `${ORIGIN}/guide`, displayTitle: "Tom & Jerry's guide" })]);
   });
@@ -117,7 +117,7 @@ describe("verifyTargets", () => {
       "/pdf": (url) => ok(url, "<title>not really</title>", "application/pdf"),
     });
 
-    const { verified } = await verifyTargets([candidate("c0", "/t"), candidate("c1", "/pdf")], { fetch });
+    const { verified } = await verifyTargets([candidate("c0", "/t"), candidate("c1", "/pdf")], { origin: ORIGIN, fetch });
 
     expect(verified[0]?.displayTitle).toBe('Only "title"');
     expect(verified[1]).toEqual(expect.objectContaining({ humanHref: `${ORIGIN}/pdf` }));
@@ -131,7 +131,7 @@ describe("verifyTargets", () => {
       "/boom": () => ({ kind: "error", reason: "http", status: 500, message: "t" }),
     });
 
-    const { verified, dropped } = await verifyTargets([candidate("c0", "/slow"), candidate("c1", "/big.md"), candidate("c2", "/boom")], { fetch });
+    const { verified, dropped } = await verifyTargets([candidate("c0", "/slow"), candidate("c1", "/big.md"), candidate("c2", "/boom")], { origin: ORIGIN, fetch });
 
     expect(dropped).toEqual([]);
     expect(verified.map((v) => v.humanHref)).toEqual([`${ORIGIN}/slow`, `${ORIGIN}/big.md`, `${ORIGIN}/boom`]);
@@ -141,7 +141,7 @@ describe("verifyTargets", () => {
   it("keeps a candidate whose fetch never answers once the budget is spent", async () => {
     const fetch: VerifyFetch = () => new Promise(() => undefined);
 
-    const result = await verifyTargets([candidate("c0", "/hang")], { fetch, budgetMs: 20 });
+    const result = await verifyTargets([candidate("c0", "/hang")], { origin: ORIGIN, fetch, budgetMs: 20 });
 
     expect(result.verified).toEqual([expect.objectContaining({ humanHref: `${ORIGIN}/hang` })]);
   });
@@ -152,7 +152,7 @@ describe("verifyTargets", () => {
       new Promise((resolve) => void pending.push({ url, timeoutMs: options.timeoutMs, resolve }));
     const candidates = ["/a", "/b", "/c", "/d", "/e"].map((p, i) => candidate(`c${i}`, p));
 
-    const run = verifyTargets(candidates, { fetch, budgetMs: 4000, clock: { now: () => 0 } });
+    const run = verifyTargets(candidates, { origin: ORIGIN, fetch, budgetMs: 4000, clock: { now: () => 0 } });
     await Promise.resolve();
     // All three started before any answered.
     expect(pending.map((p) => p.url)).toEqual([`${ORIGIN}/a`, `${ORIGIN}/b`, `${ORIGIN}/c`]);
@@ -176,7 +176,7 @@ describe("verifyTargets", () => {
       let reject: (error: Error) => void = () => undefined;
       const fetch: VerifyFetch = () => new Promise((_resolve, rej) => void (reject = rej));
 
-      const result = await verifyTargets([candidate("c0", "/late")], { fetch, budgetMs: 10 });
+      const result = await verifyTargets([candidate("c0", "/late")], { origin: ORIGIN, fetch, budgetMs: 10 });
       expect(result.verified).toEqual([expect.objectContaining({ humanHref: `${ORIGIN}/late` })]);
       reject(new Error("late failure"));
       await new Promise((resolve) => setTimeout(resolve, 20));
@@ -193,7 +193,7 @@ describe("verifyTargets", () => {
       "/y": (url) => ok(url, "<html></html>", "application/xhtml+xml; charset=utf-8"),
     });
 
-    const { verified } = await verifyTargets([candidate("c0", "/x"), candidate("c1", "/y.md")], { fetch });
+    const { verified } = await verifyTargets([candidate("c0", "/x"), candidate("c1", "/y.md")], { origin: ORIGIN, fetch });
 
     expect(verified[0]?.displayTitle).toBe("XHTML page");
     expect(verified[1]?.humanHref).toBe(`${ORIGIN}/y`);
@@ -202,7 +202,7 @@ describe("verifyTargets", () => {
   it("keeps the query on a .md twin", async () => {
     const { fetch, calls } = fakeFetch({ "/foo": (url) => ok(url, "<html></html>") });
 
-    const result = await verifyTargets([candidate("c0", "/foo.md?x=1")], { fetch });
+    const result = await verifyTargets([candidate("c0", "/foo.md?x=1")], { origin: ORIGIN, fetch });
 
     expect(calls.map((c) => c.url)).toEqual([`${ORIGIN}/foo?x=1`]);
     expect(result.verified[0]?.humanHref).toBe(`${ORIGIN}/foo?x=1`);
@@ -211,7 +211,7 @@ describe("verifyTargets", () => {
   it("does not treat a bare /.md as a twin candidate", async () => {
     const { fetch, calls } = fakeFetch({});
 
-    const result = await verifyTargets([candidate("c0", "/.md")], { fetch });
+    const result = await verifyTargets([candidate("c0", "/.md")], { origin: ORIGIN, fetch });
 
     expect(calls.map((c) => c.url)).toEqual([`${ORIGIN}/.md`]);
     expect(result.dropped).toEqual([{ candidateId: "c0", reason: "not_found" }]);
@@ -224,7 +224,7 @@ describe("verifyTargets", () => {
       { ...candidate("c1", "/c.md"), sourceUrl: "https://Docs.Example/x/../c.md" },
     ];
 
-    const { verified } = await verifyTargets(raw, { fetch });
+    const { verified } = await verifyTargets(raw, { origin: ORIGIN, fetch });
 
     expect(verified.map((v) => v.humanHref)).toEqual([`${ORIGIN}/a%20b`, `${ORIGIN}/c.md`]);
   });
@@ -237,10 +237,28 @@ describe("verifyTargets", () => {
       { ...candidate("c2", "/a"), sourceUrl: "not a url" },
     ];
 
-    const result = await verifyTargets([...bad, candidate("c3", "/a.md")], { fetch, maxCandidates: 4 });
+    const result = await verifyTargets([...bad, candidate("c3", "/a.md")], { origin: ORIGIN, fetch, maxCandidates: 4 });
 
     expect(calls.map((c) => new URL(c.url).origin)).toEqual([ORIGIN]);
     expect(result.dropped.map((d) => d.reason)).toEqual(["invalid_url", "invalid_url", "invalid_url"]);
+  });
+
+  it("drops candidates on another origin without fetching them", async () => {
+    const { fetch, calls } = fakeFetch({ "/a": (url) => ok(url, "<title>A</title>") });
+    const other: Candidate[] = [
+      { ...candidate("c0", "/a"), sourceUrl: "https://other.example/a" },
+      { ...candidate("c1", "/a"), sourceUrl: "https://docs.example:8443/a" },
+      candidate("c2", "/a"),
+    ];
+
+    const result = await verifyTargets(other, { origin: `${ORIGIN}/`, fetch });
+
+    expect(calls.map((c) => c.url)).toEqual([`${ORIGIN}/a`]);
+    expect(result.dropped).toEqual([
+      { candidateId: "c0", reason: "off_origin" },
+      { candidateId: "c1", reason: "off_origin" },
+    ]);
+    expect(result.verified.map((v) => v.id)).toEqual(["c2"]);
   });
 });
 

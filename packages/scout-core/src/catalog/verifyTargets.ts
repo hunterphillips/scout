@@ -1,6 +1,7 @@
 import type { Candidate } from "@scout/contracts";
 import { type Clock, systemClock } from "../clock.js";
 import { type GuardedFetchResult, guardedFetch } from "../fetch/guardedFetch.js";
+import { decodeEntities } from "./entities.js";
 import { sameOriginAbsoluteHttpsUrl } from "./sameOrigin.js";
 import { CANDIDATE_TITLE_MAX, sanitizeLabel } from "./sanitizeLabel.js";
 
@@ -24,11 +25,13 @@ export type VerifyFetch = (
   options: { maxBytes: number; accept: string; timeoutMs: number },
 ) => Promise<GuardedFetchResult>;
 
-export type VerifyDropReason = "not_found" | "off_host" | "invalid_url";
+export type VerifyDropReason = "not_found" | "off_host" | "invalid_url" | "off_origin";
 
 export type VerifiedCandidate = Candidate & { humanHref: string; displayTitle?: string };
 
 export interface VerifyOptions {
+  /** The site being verified. A candidate whose `sourceUrl` has another origin is dropped (`off_origin`) unfetched. */
+  origin: string;
   /** Defaults to the real `guardedFetch`. */
   fetch?: VerifyFetch;
   clock?: Clock;
@@ -44,23 +47,6 @@ export interface VerifyResult {
 }
 
 const defaultFetch: VerifyFetch = (url, { maxBytes, accept, timeoutMs }) => guardedFetch(url, { maxBytes, accept, timeoutMs });
-
-const ENTITIES: Record<string, string> = { "&amp;": "&", "&lt;": "<", "&gt;": ">", "&quot;": '"', "&apos;": "'" };
-
-/** A numeric character reference's code point, or null when it is not a valid non-surrogate scalar value. */
-function numericEntity(entity: string): string | null {
-  const hex = entity[2] === "x" || entity[2] === "X";
-  const code = Number.parseInt(entity.slice(hex ? 3 : 2, -1), hex ? 16 : 10);
-  if (!Number.isInteger(code) || code <= 0 || code > 0x10ffff || (code >= 0xd800 && code <= 0xdfff)) return null;
-  return String.fromCodePoint(code);
-}
-
-/** Decode the five named XML entities and bounded numeric references (`&#NNN;`, `&#xHH;`); anything else is left as is. */
-function decodeEntities(text: string): string {
-  return text.replace(/&(?:amp|lt|gt|quot|apos|#[0-9]{1,7}|#[xX][0-9a-fA-F]{1,6});/g, (entity) =>
-    entity[1] === "#" ? (numericEntity(entity) ?? entity) : (ENTITIES[entity] ?? entity),
-  );
-}
 
 function isHtml(contentType: string | undefined): boolean {
   const type = contentType?.split(";")[0]?.trim().toLowerCase();
@@ -99,7 +85,7 @@ type Outcome = { keep: true; humanHref: string; displayTitle?: string } | { keep
  *
  * Policy: only the first `maxCandidates` (default 3) are checked, in parallel under one
  * shared budget (default 4 s); their order is kept and nothing is re-ranked. Every fetch
- * goes through `guardedFetch` (1 MiB cap) to a URL on the candidate's own origin.
+ * goes through `guardedFetch` (1 MiB cap) to a URL on `origin`.
  * "The source URL" below means its normalized form (`new URL(sourceUrl).href`), which is
  * what a kept candidate's `humanHref` holds.
  *
@@ -114,11 +100,12 @@ type Outcome = { keep: true; humanHref: string; displayTitle?: string } | { keep
  *   is refused by policy or ends on another host (`off_host`) — a policy refusal is how
  *   `guardedFetch` reports a redirect off the host (it also covers the redirect limit and
  *   a disallowed address); a source URL that is not a valid credential-free `https:` URL
- *   (`invalid_url`).
+ *   (`invalid_url`); a valid source URL on another origin than `origin` (`off_origin`).
  * - A timeout, network error, too-large body or unexpected status keeps the candidate with
  *   `humanHref = sourceUrl` and no display title: verification failed, not the page.
  */
-export async function verifyTargets(candidates: readonly Candidate[], options: VerifyOptions = {}): Promise<VerifyResult> {
+export async function verifyTargets(candidates: readonly Candidate[], options: VerifyOptions): Promise<VerifyResult> {
+  const origin = new URL(options.origin).origin;
   const fetch = options.fetch ?? defaultFetch;
   const clock = options.clock ?? systemClock;
   const budgetMs = options.budgetMs ?? VERIFY_BUDGET_MS;
@@ -144,6 +131,7 @@ export async function verifyTargets(candidates: readonly Candidate[], options: V
   const verifyOne = async (candidate: Candidate): Promise<Outcome> => {
     const source = sameOriginAbsoluteHttpsUrl(candidate.sourceUrl, safeOrigin(candidate.sourceUrl));
     if (!source) return { keep: false, reason: "invalid_url" };
+    if (source.origin !== origin) return { keep: false, reason: "off_origin" };
     const keepSource: Outcome = { keep: true, humanHref: source.href };
     // A `.md` file needs a non-empty basename: `/.md` has no HTML twin to propose.
     const isMarkdown = /[^/]\.md$/i.test(source.pathname);

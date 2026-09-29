@@ -1,5 +1,6 @@
 import { XMLParser } from "fast-xml-parser";
 import { type CatalogFetch, SITEMAP_MAX_BYTES } from "./catalogFetch.js";
+import { decodeEntities } from "./entities.js";
 import { sameOriginAbsoluteHttpsUrl } from "./sameOrigin.js";
 import { CANDIDATE_DESCRIPTION_MAX, CANDIDATE_TITLE_MAX, sanitizeLabel } from "./sanitizeLabel.js";
 
@@ -89,23 +90,9 @@ const parser = new XMLParser({
   isArray: (tagName) => ARRAY_TAGS.has(tagName),
 });
 
-const PREDEFINED_ENTITIES: Record<string, string> = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'" };
-
-/**
- * Decode XML's five predefined entities and numeric character references in one pass.
- * The parser leaves entities alone (expansion is off), and sitemaps must escape `&` in
- * URLs. A single non-recursive pass cannot expand.
- */
-function decodeXmlText(text: string): string {
-  return text.replace(/&(?:#x([0-9a-f]{1,6})|#([0-9]{1,7})|(amp|lt|gt|quot|apos));/gi, (whole, hex?: string, dec?: string, name?: string) => {
-    if (name !== undefined) return PREDEFINED_ENTITIES[name.toLowerCase()] ?? whole;
-    const codePoint = hex !== undefined ? Number.parseInt(hex, 16) : Number(dec);
-    return codePoint > 0 && codePoint <= 0x10ffff && (codePoint < 0xd800 || codePoint > 0xdfff) ? String.fromCodePoint(codePoint) : "";
-  });
-}
-
 function textOf(value: unknown): string | undefined {
-  if (typeof value === "string") return decodeXmlText(value);
+  // The parser leaves entities alone (expansion is off), and sitemaps must escape `&` in URLs.
+  if (typeof value === "string") return decodeEntities(value);
   if (value !== null && typeof value === "object" && "#text" in value) return textOf((value as Record<string, unknown>)["#text"]);
   return undefined;
 }

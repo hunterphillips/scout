@@ -2,7 +2,7 @@
   "name": "scout-workspace",
   "private": true,
   "version": "0.0.0",
-  "description": "Scout Phase 0 workspace skeleton (not functional yet).",
+  "description": "Scout proof of concept workspace (Phase 2: plumbing + catalog discovery).",
   "type": "module",
   "engines": {
     "node": ">=22.12.0"

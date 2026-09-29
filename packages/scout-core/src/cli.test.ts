@@ -76,7 +76,8 @@ describe("runCli", () => {
     const out = run.out();
     expect(out).toMatch(/source\s+miss/);
     expect(out).toMatch(/candidates\s+30 \(published 0, image_title 0, slug 30\)/);
-    expect(out).toMatch(/requests\s+\d+, refused 0, \d+ decoded bytes received/);
+    // The request count is the paced fetch's own: every request that reached guardedFetch.
+    expect(out).toMatch(new RegExp(`requests\\s+${site.requests.length}, refused 0, \\d+ decoded bytes received`));
     expect(out).toMatch(/time\s+\d+ ms/);
     const rows = out.split("\n").filter((line) => /^c[0-9a-z]+ {2}slug {2}/.test(line));
     expect(rows).toHaveLength(20);
@@ -245,6 +246,31 @@ describe("runCli", () => {
     const ten = io({ verifyFetch });
     expect(await runCli(["verify", ...urls.slice(0, 10)], ten.io)).toBe(0);
     expect(calls).toHaveLength(10);
+  });
+
+  it("verify refuses URLs on more than one origin before fetching anything", async () => {
+    const { runCli } = await import("./cli.js");
+    const calls: string[] = [];
+    const verifyFetch: VerifyFetch = async (url) => {
+      calls.push(url);
+      return { kind: "absent", status: 404 };
+    };
+    const run = io({ verifyFetch });
+
+    expect(await runCli(["verify", `${ORIGIN}/a`, "https://other.example/b"], run.io)).toBe(1);
+    expect(run.err().startsWith("verify: all URLs must share one origin\nusage:")).toBe(true);
+    expect(run.err()).toContain("all on one origin");
+
+    const bad = io({ verifyFetch });
+    expect(await runCli(["verify", "not a url", `${ORIGIN}/a`], bad.io)).toBe(1);
+    expect(bad.err().startsWith("verify: the first URL is not a URL with an origin\nusage:")).toBe(true);
+    expect(calls).toEqual([]);
+  });
+
+  it("verifyOrigin takes the first URL's origin and lets unparseable later URLs through", async () => {
+    const { verifyOrigin } = await import("./cli.js");
+    expect(verifyOrigin([`${ORIGIN}/a`, "https://S.example:443/b", "not a url"])).toEqual({ ok: true, origin: ORIGIN });
+    expect(verifyOrigin([`${ORIGIN}/a`, "https://s.example:8443/b"])).toMatchObject({ ok: false });
   });
 
   it("verify prints one href or drop line per URL", async () => {

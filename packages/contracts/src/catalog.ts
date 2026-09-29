@@ -7,7 +7,10 @@ export const CANDIDATE_DESCRIPTION_MAX = 400;
 export const CandidateSchema = z.object({
   /** "c" + base36 index, stable per catalog version. */
   id: z.string().regex(/^c[0-9a-z]+$/),
-  /** Exactly as published. */
+  /**
+   * As published, after WHATWG URL normalization (resolved, dot segments removed, host
+   * lowercased). Any fragment and tracking parameters are kept; only the dedupe key drops them.
+   */
   sourceUrl: z.string(),
   /** Set only after verification. */
   humanHref: z.string().optional(),

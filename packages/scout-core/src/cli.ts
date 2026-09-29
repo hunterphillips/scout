@@ -1,14 +1,14 @@
 import { realpathSync } from "node:fs";
-import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Candidate } from "@scout/contracts";
-import { type CatalogCacheResult, createCatalogCache } from "./catalog/cache.js";
-import { createPacedCatalogFetch, type Sleep } from "./catalog/pacing.js";
+import type { CatalogCacheResult } from "./catalog/cache.js";
+import type { Sleep } from "./catalog/pacing.js";
+import { type CatalogResolveStats, createCatalogResolver } from "./catalog/resolveCatalog.js";
 import { slugTitle } from "./catalog/resolver.js";
 import { type VerifyFetch, type VerifyResult, verifyTargets } from "./catalog/verifyTargets.js";
 import { type Clock, systemClock } from "./clock.js";
 import { createDiagnostics, defaultDiagnosticsPath, type Diagnostics, scoutHome } from "./diagnostics.js";
-import { type GuardedFetchOptions, type GuardedFetchResult, guardedFetch } from "./fetch/guardedFetch.js";
+import type { GuardedFetchOptions, GuardedFetchResult } from "./fetch/guardedFetch.js";
 
 /**
  * Scout's developer CLI: `node packages/scout-core/dist/cli.js <command>`.
@@ -16,7 +16,8 @@ import { type GuardedFetchOptions, type GuardedFetchResult, guardedFetch } from 
  * - `catalog <origin> [--refresh] [--json]` resolves one site's catalog through the
  *   on-disk cache (`~/.scout/cache/catalog`, honoring `SCOUT_HOME`) and prints a summary.
  * - `verify <url>...` runs `verifyTargets` on up to `VERIFY_CLI_MAX_URLS` (10) URLs, all
- *   fetched in parallel; more is a usage error rather than a larger fan-out.
+ *   fetched in parallel; more is a usage error rather than a larger fan-out. The origin is
+ *   the first URL's; a URL on any other origin is a usage error.
  * - `rank <origin>` is not available until Phase 3.
  *
  * Only `catalog` and `verify` touch the network, and only when invoked. Importing this
@@ -28,7 +29,7 @@ export const VERIFY_CLI_MAX_URLS = 10;
 
 export const USAGE = `usage:
   cli.js catalog <https-origin> [--refresh] [--json]
-  cli.js verify <url>...            (at most ${VERIFY_CLI_MAX_URLS} URLs)
+  cli.js verify <url>...            (at most ${VERIFY_CLI_MAX_URLS} URLs, all on one origin)
   cli.js rank <https-origin>        (Phase 3)
 `;
 
@@ -36,14 +37,12 @@ export const USAGE = `usage:
 export const CATALOG_PREVIEW = 20;
 
 export interface CliDeps {
-  /** Defaults to the real `guardedFetch`; the catalog's paced fetch calls it. */
+  /** Defaults to the real `guardedFetch`; the catalog resolver's paced fetch calls it. */
   guardedFetch?: (url: string, options: GuardedFetchOptions) => Promise<GuardedFetchResult>;
   /** Defaults to the real `guardedFetch` with only the named verify options. */
   verifyFetch?: VerifyFetch;
   clock?: Clock;
   sleep?: Sleep;
-  /** Defaults to `<scout home>/cache/catalog`. */
-  cacheDir?: string;
   /** Defaults to the JSONL sink at `defaultDiagnosticsPath(env)`. */
   diagnostics?: Diagnostics;
 }
@@ -123,10 +122,13 @@ export async function runCli(argv: readonly string[], io: CliIo): Promise<number
         if (!parsed.ok) return usage(`catalog: ${parsed.reason}`);
         return await catalogCommand(parsed.origin, { refresh: flags.includes("--refresh"), json: flags.includes("--json") }, io);
       }
-      case "verify":
+      case "verify": {
         if (positional.length === 0 || flags.length > 0) return usage();
         if (positional.length > VERIFY_CLI_MAX_URLS) return usage(`verify: at most ${VERIFY_CLI_MAX_URLS} URLs`);
-        return await verifyCommand(positional, io);
+        const origin = verifyOrigin(positional);
+        if (!origin.ok) return usage(`verify: ${origin.reason}`);
+        return await verifyCommand(origin.origin, positional, io);
+      }
       case "rank":
         io.stderr("rank: not available until Phase 3\n");
         return EXIT_UNAVAILABLE;
@@ -143,38 +145,31 @@ async function catalogCommand(origin: string, opts: { refresh: boolean; json: bo
   const deps = io.deps ?? {};
   const env = io.env ?? process.env;
   const clock = deps.clock ?? systemClock;
-  const baseFetch = deps.guardedFetch ?? guardedFetch;
-  let requests = 0;
-  let bytesReceived = 0;
-  // Counts every request that reached guardedFetch and the decoded bytes of each `ok` body.
-  const countingFetch = async (url: string, options: GuardedFetchOptions): Promise<GuardedFetchResult> => {
-    requests += 1;
-    const result = await baseFetch(url, options);
-    if (result.kind === "ok") bytesReceived += result.bytes.byteLength;
-    return result;
-  };
-  const fetch = createPacedCatalogFetch({ origin, clock, guardedFetch: countingFetch, ...(deps.sleep ? { sleep: deps.sleep } : {}) });
   const diagnostics = deps.diagnostics ?? createDiagnostics({ path: defaultDiagnosticsPath(env), clock });
-  const cache = createCatalogCache({ clock, diagnostics, dir: deps.cacheDir ?? join(scoutHome(env), "cache", "catalog") });
+  const resolver = createCatalogResolver({
+    scoutHome: scoutHome(env),
+    clock,
+    diagnostics,
+    ...(deps.guardedFetch ? { guardedFetch: deps.guardedFetch } : {}),
+    ...(deps.sleep ? { sleep: deps.sleep } : {}),
+  });
 
-  const started = clock.now();
-  const result = await cache.resolve({ origin, fetch, refresh: opts.refresh });
-  const ms = clock.now() - started;
+  const { result, stats } = await resolver.resolve(origin, { refresh: opts.refresh });
 
   if (!result.ok) {
     io.stderr(`catalog failed: ${result.code}${result.errors.length ? ` (${result.errors.join(", ")})` : ""}\n`);
-    io.stderr(`requests ${requests}, refused ${fetch.refused}, ${bytesReceived} decoded bytes received, ${ms} ms\n`);
+    io.stderr(`requests ${stats.requests}, refused ${stats.refused}, ${stats.bytesReceived} decoded bytes received, ${stats.ms} ms\n`);
     return EXIT_FAIL;
   }
   if (opts.json) io.stdout(`${JSON.stringify(result.catalog, null, 2)}\n`);
-  else io.stdout(formatCatalog(result, { requests, bytesReceived, refused: fetch.refused, ms }));
+  else io.stdout(formatCatalog(result, stats));
   return result.catalog.candidates.length === 0 && result.catalog.errors.length > 0 ? EXIT_FAIL : EXIT_OK;
 }
 
 /** The human-readable `catalog` summary followed by the first `CATALOG_PREVIEW` candidates. */
 export function formatCatalog(
   result: Extract<CatalogCacheResult, { ok: true }>,
-  stats: { requests: number; bytesReceived: number; refused: number; ms: number },
+  stats: CatalogResolveStats,
 ): string {
   const { catalog } = result;
   const byQuality: Record<Candidate["labelQuality"], number> = { published: 0, image_title: 0, slug: 0 };
@@ -203,7 +198,29 @@ export function formatCatalog(
   return `${lines.join("\n")}\n`;
 }
 
-async function verifyCommand(urls: readonly string[], io: CliIo): Promise<number> {
+/**
+ * The origin every `verify` URL must share: the first URL's. A first URL that does not
+ * parse, or any later URL that parses to another origin, is refused; a later URL that
+ * does not parse is left for `verifyTargets` to drop as `invalid_url`.
+ */
+export function verifyOrigin(urls: readonly string[]): ParsedOrigin {
+  const originOf = (url: string): string | null => {
+    try {
+      return new URL(url).origin;
+    } catch {
+      return null;
+    }
+  };
+  const origin = originOf(urls[0] ?? "");
+  if (origin === null || origin === "null") return { ok: false, reason: "the first URL is not a URL with an origin" };
+  for (const url of urls.slice(1)) {
+    const other = originOf(url);
+    if (other !== null && other !== origin) return { ok: false, reason: "all URLs must share one origin" };
+  }
+  return { ok: true, origin };
+}
+
+async function verifyCommand(origin: string, urls: readonly string[], io: CliIo): Promise<number> {
   const deps = io.deps ?? {};
   const candidates: Candidate[] = urls.map((url, i) => ({
     id: `c${i.toString(36)}`,
@@ -213,6 +230,7 @@ async function verifyCommand(urls: readonly string[], io: CliIo): Promise<number
     provenance: "sitemap",
   }));
   const result = await verifyTargets(candidates, {
+    origin,
     maxCandidates: candidates.length,
     ...(deps.verifyFetch ? { fetch: deps.verifyFetch } : {}),
     ...(deps.clock ? { clock: deps.clock } : {}),

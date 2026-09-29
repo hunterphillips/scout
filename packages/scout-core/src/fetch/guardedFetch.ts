@@ -47,21 +47,26 @@ export type { FetchLike, GuardedRequestInit } from "./rawFetch.js";
 /** Builds the per-call dispatcher that pins connections to the screened addresses. */
 export type DispatcherFactory = (hostname: string, addresses: ScreenedAddress[]) => Dispatcher;
 
-export interface GuardedFetchOptions {
-  /** Injectable for tests; defaults to undici `request` through the pinned dispatcher. */
+/**
+ * Test-only replacements for the transport and address policy. Internal: passed to
+ * `createGuardedFetch`, never through the public options, and not exported from the
+ * package entry point.
+ */
+export interface GuardedFetchHooks {
+  /** Defaults to undici `request` through the pinned dispatcher. */
   fetch?: FetchLike;
-  /** Injectable for tests; defaults to `dns.promises.lookup` with `{ all: true }`. */
+  /** Defaults to `dns.promises.lookup` with `{ all: true }`. */
   lookup?: HostLookup;
-  /**
-   * Test hook: the address policy. Defaults to `isDisallowedAddress`; only tests that
-   * talk to a loopback server override it.
-   */
+  /** The address policy. Defaults to `isDisallowedAddress`; only tests that talk to a loopback server override it. */
   isDisallowed?: (address: string) => boolean;
   /**
-   * Test hook: builds the pinned dispatcher. Defaults to `createPinnedDispatcher`; tests
-   * use it to trust a self-signed certificate. It must still pin to `addresses`.
+   * Builds the pinned dispatcher. Defaults to `createPinnedDispatcher`; tests use it to
+   * trust a self-signed certificate. It must still pin to `addresses`.
    */
   dispatcherFactory?: DispatcherFactory;
+}
+
+export interface GuardedFetchOptions {
   timeoutMs?: number;
   /** Cap on decoded body bytes. */
   maxBytes?: number;
@@ -126,12 +131,21 @@ function rejectOnAbort(signal: AbortSignal): Promise<never> {
 
 const defaultLookup: HostLookup = (hostname) => dnsLookup(hostname, { all: true });
 
+export type GuardedFetch = (url: string, options?: GuardedFetchOptions) => Promise<GuardedFetchResult>;
+
+/** A `guardedFetch` with test hooks bound. Internal: tests use it; production code uses `guardedFetch`. */
+export function createGuardedFetch(hooks: GuardedFetchHooks): GuardedFetch {
+  return (url, options = {}) => guardedFetchWith(hooks, url, options);
+}
+
 /** Fetch a public HTTPS resource under the policy documented at the top of this module. */
-export async function guardedFetch(url: string, options: GuardedFetchOptions = {}): Promise<GuardedFetchResult> {
-  const doFetch = options.fetch ?? rawFetch;
-  const lookup = options.lookup ?? defaultLookup;
-  const isDisallowed = options.isDisallowed ?? isDisallowedAddress;
-  const dispatcherFactory: DispatcherFactory = options.dispatcherFactory ?? createPinnedDispatcher;
+export const guardedFetch: GuardedFetch = createGuardedFetch({});
+
+async function guardedFetchWith(hooks: GuardedFetchHooks, url: string, options: GuardedFetchOptions): Promise<GuardedFetchResult> {
+  const doFetch = hooks.fetch ?? rawFetch;
+  const lookup = hooks.lookup ?? defaultLookup;
+  const isDisallowed = hooks.isDisallowed ?? isDisallowedAddress;
+  const dispatcherFactory: DispatcherFactory = hooks.dispatcherFactory ?? createPinnedDispatcher;
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const maxBytes = options.maxBytes ?? DEFAULT_MAX_BYTES;
   const maxRedirects = options.maxRedirects ?? DEFAULT_MAX_REDIRECTS;

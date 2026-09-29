@@ -1,7 +1,8 @@
 // End-to-end through the real default transport: guardedFetch -> rawFetch -> pinned undici
 // Agent -> TLS -> readDecodedBody, against a self-signed HTTPS server on 127.0.0.1. The
 // test-only hooks `isDisallowed` (allow this one loopback address) and `dispatcherFactory`
-// (trust the fixture certificate) are the only departures from production defaults.
+// (trust the fixture certificate), bound through `createGuardedFetch`, are the only
+// departures from production defaults.
 
 import { readFileSync } from "node:fs";
 import { createServer, type Server } from "node:https";
@@ -9,9 +10,20 @@ import type { AddressInfo } from "node:net";
 import { gzipSync } from "node:zlib";
 import type { ServerResponse } from "node:http";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { type GuardedFetchOptions, guardedFetch, type HostLookup } from "./guardedFetch.js";
+import { createGuardedFetch, type GuardedFetchHooks, type GuardedFetchOptions, type HostLookup } from "./guardedFetch.js";
 import { isDisallowedAddress } from "./ipAddressPolicy.js";
 import { createPinnedDispatcher } from "./pinnedDispatcher.js";
+
+/** Split the test hooks from the request options and call through `createGuardedFetch`. */
+function guardedFetch(url: string, { fetch, lookup, isDisallowed, dispatcherFactory, ...options }: GuardedFetchHooks & GuardedFetchOptions = {}) {
+  const hooks: GuardedFetchHooks = {};
+  if (fetch) hooks.fetch = fetch;
+  if (lookup) hooks.lookup = lookup;
+  if (isDisallowed) hooks.isDisallowed = isDisallowed;
+  if (dispatcherFactory) hooks.dispatcherFactory = dispatcherFactory;
+  return createGuardedFetch(hooks)(url, options);
+}
+
 
 const fixture = (name: string) => readFileSync(new URL(`../../test/fixtures/tls/${name}`, import.meta.url));
 const cert = fixture("cert.pem");
@@ -39,7 +51,7 @@ describe("guardedFetch end to end over TLS", () => {
     await new Promise((done) => server.close(done));
   });
 
-  function options(lookup: HostLookup, extra: Partial<GuardedFetchOptions> = {}): GuardedFetchOptions {
+  function options(lookup: HostLookup, extra: GuardedFetchOptions = {}): GuardedFetchHooks & GuardedFetchOptions {
     return {
       lookup,
       // Only the test server's loopback address is let through; everything else keeps the real policy.

@@ -57,15 +57,13 @@ export {
   DEFAULT_TIMEOUT_MS,
   guardedFetch,
   SCOUT_USER_AGENT,
-  type FetchLike,
+  type GuardedFetch,
   type GuardedFetchErrorReason,
   type GuardedFetchOptions,
   type GuardedFetchResult,
-  type GuardedRequestInit,
-  type HostLookup,
 } from "./fetch/guardedFetch.js";
 export { isDisallowedAddress } from "./fetch/ipAddressPolicy.js";
-export { type CatalogFetch, SITEMAP_MAX_BYTES, TEXT_SOURCE_MAX_BYTES } from "./catalog/catalogFetch.js";
+export { type CatalogFetch, type CatalogFetchOptions, SITEMAP_MAX_BYTES, TEXT_SOURCE_MAX_BYTES } from "./catalog/catalogFetch.js";
 export { MAX_URL_LENGTH, sameOriginAbsoluteHttpsUrl, sameOriginHttpsUrl } from "./catalog/sameOrigin.js";
 export { CANDIDATE_DESCRIPTION_MAX, CANDIDATE_TITLE_MAX, SANITIZE_INPUT_FACTOR, sanitizeLabel } from "./catalog/sanitizeLabel.js";
 export {
@@ -107,7 +105,6 @@ export {
   type SitemapRejectReason,
   type SitemapUrl,
 } from "./catalog/sitemap.js";
-export { type CatalogFetchOptions } from "./catalog/catalogFetch.js";
 export {
   createPacedCatalogFetch,
   isRefusal,
@@ -145,6 +142,14 @@ export {
   type CatalogCacheSource,
   type ResolveWithCacheOptions,
 } from "./catalog/cache.js";
+export {
+  createCatalogResolver,
+  type CatalogResolution,
+  type CatalogResolveStats,
+  type CatalogResolver,
+  type CatalogResolverOptions,
+} from "./catalog/resolveCatalog.js";
+export { decodeEntities } from "./catalog/entities.js";
 export {
   extractDisplayTitle,
   TITLE_SCAN_CHARS,

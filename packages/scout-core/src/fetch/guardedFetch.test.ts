@@ -4,8 +4,28 @@
 
 import { brotliCompressSync, gzipSync } from "node:zlib";
 import { describe, expect, it } from "vitest";
-import { DEFAULT_ACCEPT, type FetchLike, type GuardedRequestInit, guardedFetch, type HostLookup } from "./guardedFetch.js";
+import {
+  createGuardedFetch,
+  DEFAULT_ACCEPT,
+  type FetchLike,
+  type GuardedFetchHooks,
+  type GuardedFetchOptions,
+  type GuardedRequestInit,
+  type HostLookup,
+  guardedFetch as publicGuardedFetch,
+} from "./guardedFetch.js";
 import { UnexpectedStatusError } from "./rawFetch.js";
+
+/** Split the test hooks from the request options and call through `createGuardedFetch`. */
+function guardedFetch(url: string, { fetch, lookup, isDisallowed, dispatcherFactory, ...options }: GuardedFetchHooks & GuardedFetchOptions = {}) {
+  const hooks: GuardedFetchHooks = {};
+  if (fetch) hooks.fetch = fetch;
+  if (lookup) hooks.lookup = lookup;
+  if (isDisallowed) hooks.isDisallowed = isDisallowed;
+  if (dispatcherFactory) hooks.dispatcherFactory = dispatcherFactory;
+  return createGuardedFetch(hooks)(url, options);
+}
+
 
 const PUBLIC_LOOKUP: HostLookup = async () => [{ address: "93.184.216.34", family: 4 }];
 
@@ -368,5 +388,15 @@ describe("guardedFetch", () => {
 
     expect(bomb.byteLength).toBeLessThan(100_000);
     expect(result).toMatchObject({ kind: "error", reason: "too_large" });
+  });
+
+  it("keeps the test hooks off the public entry points", async () => {
+    // Hook-shaped options passed to the public function are ignored: the real address policy still applies.
+    const result = await publicGuardedFetch("https://127.0.0.1/llms.txt", { isDisallowed: () => false } as GuardedFetchOptions);
+    expect(result).toMatchObject({ kind: "error", reason: "policy" });
+
+    const core = await import("../index.js");
+    expect("createGuardedFetch" in core).toBe(false);
+    expect("guardedFetch" in core).toBe(true);
   });
 });
