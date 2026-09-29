@@ -6,7 +6,7 @@ import { createDiagnostics, type DiagnosticFields, type Diagnostics } from "../d
 import type { GuardedFetchOptions, GuardedFetchResult } from "../fetch/guardedFetch.js";
 import { cacheFileName, CATALOG_CACHE_SCHEMA_VERSION, CATALOG_FRESH_MS, CATALOG_STALE_MAX_MS, createCatalogCache } from "./cache.js";
 import { SITEMAP_MAX_BYTES, TEXT_SOURCE_MAX_BYTES } from "./catalogFetch.js";
-import { createPacedCatalogFetch } from "./pacing.js";
+import { createPacedCatalogFetch, type PacedCatalogFetchOptions } from "./pacing.js";
 
 const ORIGIN = "https://shop.example";
 const HOUR = 60 * 60 * 1000;
@@ -343,6 +343,120 @@ describe("createCatalogCache", () => {
       },
     });
     expect(result).toMatchObject({ ok: true, source: "stale", stale: true });
+  });
+});
+
+/**
+ * A site with a sitemap index of `children` one-URL files and a robots crawl delay, on a
+ * fake clock where every request takes 200 ms and sleeping advances time. Changing
+ * `version` changes the last child's URL.
+ */
+function slowSite(children: number, delaySeconds: number) {
+  let version = 1;
+  const files = (): Record<string, string> => {
+    const f: Record<string, string> = { "/robots.txt": `User-agent: *\nCrawl-delay: ${delaySeconds}\n` };
+    let index = "<sitemapindex>";
+    for (let i = 0; i < children; i++) {
+      index += `<sitemap><loc>${ORIGIN}/s${i}.xml</loc></sitemap>`;
+      f[`/s${i}.xml`] = sitemapWith(`/p${i}-v${i === children - 1 ? version : 1}`);
+    }
+    f["/sitemap.xml"] = `${index}</sitemapindex>`;
+    return f;
+  };
+  let requests = 0;
+  const guardedFetch = async (url: string, options: GuardedFetchOptions): Promise<GuardedFetchResult> => {
+    requests += 1;
+    now += 200;
+    const path = new URL(url).pathname;
+    const body = files()[path];
+    if (body === undefined) return { kind: "absent", status: 404 };
+    const etag = `"${Buffer.from(body).toString("base64url")}"`; // changes only when the body does
+    if (options.ifNoneMatch === etag) return { kind: "not_modified", etag };
+    return { kind: "ok", status: 200, body, bytes: new TextEncoder().encode(body), etag, finalUrl: url };
+  };
+  return {
+    setVersion: (v: number) => void (version = v),
+    requests: () => requests,
+    fetch: (extra: Partial<PacedCatalogFetchOptions> = {}) =>
+      createPacedCatalogFetch({ origin: ORIGIN, clock, guardedFetch, sleep: async (ms) => void (now += ms), ...extra }),
+  };
+}
+
+describe("createCatalogCache run windows and refusals", () => {
+  it("rediscovers in its own window: one change under a 5 s crawl delay rebuilds the whole 10-child catalog", async () => {
+    const site = slowSite(10, 5);
+    const cache = createCatalogCache({ dir, clock, diagnostics });
+    const first = await cache.resolve({ origin: ORIGIN, fetch: site.fetch() });
+    expect(first.ok && first.catalog.candidates).toHaveLength(10);
+
+    now += 25 * HOUR;
+    site.setVersion(2);
+    const fetch = site.fetch();
+    const second = await cache.resolve({ origin: ORIGIN, fetch });
+
+    expect(second).toMatchObject({ ok: true, source: "refetched", stale: false });
+    expect(second.ok && second.catalog.errors).toEqual([]);
+    expect(second.ok && second.catalog.candidates.map((c) => c.sourceUrl)).toContain(`${ORIGIN}/p9-v2`);
+    expect(second.ok && second.catalog.candidates).toHaveLength(10);
+    expect(fetch.refused).toBe(0);
+  });
+
+  it("keeps a complete catalog, served stale, when a refused rediscovery finds fewer candidates", async () => {
+    const site = slowSite(10, 5);
+    const cache = createCatalogCache({ dir, clock, diagnostics });
+    const first = await cache.resolve({ origin: ORIGIN, fetch: site.fetch() });
+    expect(first.ok && first.catalog.candidates).toHaveLength(10);
+
+    now += 25 * HOUR;
+    site.setVersion(2);
+    events = [];
+    // A tighter window cuts rediscovery short partway through the children.
+    const second = await cache.resolve({ origin: ORIGIN, fetch: site.fetch({ runDeadlineMs: 30_000 }) });
+
+    expect(second).toMatchObject({ ok: true, source: "stale", stale: true });
+    expect(second.ok && first.ok && second.catalog).toEqual(first.ok && first.catalog);
+    expect(cache.load(ORIGIN)?.catalog).toEqual(first.ok && first.catalog);
+    expect(events.find((e) => e.name === "catalog_cache")?.fields).toMatchObject({ source: "stale", code: "rediscovery_refused" });
+  });
+
+  it("never freezes a deadline-cut catalog: refused resources force rediscovery next time", async () => {
+    const site = slowSite(10, 10);
+    const cache = createCatalogCache({ dir, clock, diagnostics });
+    const first = await cache.resolve({ origin: ORIGIN, fetch: site.fetch() });
+    const firstCount = first.ok ? first.catalog.candidates.length : 0;
+    expect(firstCount).toBeGreaterThan(0);
+    expect(firstCount).toBeLessThan(10);
+    const stored = cache.load(ORIGIN)?.resources ?? [];
+    expect(stored.some((r) => r.status === "refused")).toBe(true);
+    expect(stored.some((r) => r.status === "error")).toBe(false);
+
+    now += 25 * HOUR;
+    const before = site.requests();
+    const second = await cache.resolve({ origin: ORIGIN, fetch: site.fetch() });
+
+    expect(second).toMatchObject({ ok: true, source: "refetched" });
+    // No revalidation probes were spent: the refused resource marked the catalog as changed up front.
+    expect(site.requests() - before).toBeLessThanOrEqual(firstCount + 3);
+    expect(cache.load(ORIGIN)?.fetchedAt).toBe(now);
+  });
+
+  it("gives rediscovery its own window after a slow revalidation", async () => {
+    const site = slowSite(3, 10);
+    const cache = createCatalogCache({ dir, clock, diagnostics });
+    const first = await cache.resolve({ origin: ORIGIN, fetch: site.fetch() });
+    expect(first.ok && first.catalog.candidates).toHaveLength(3);
+
+    now += 25 * HOUR;
+    site.setVersion(2);
+    const started = now;
+    const fetch = site.fetch();
+    const second = await cache.resolve({ origin: ORIGIN, fetch });
+
+    expect(second).toMatchObject({ ok: true, source: "refetched", stale: false });
+    expect(second.ok && second.catalog.candidates.map((c) => c.sourceUrl)).toContain(`${ORIGIN}/p2-v2`);
+    expect(fetch.refused).toBe(0);
+    // Revalidation (~51 s) plus rediscovery (~51 s): more than one 90 s window in total.
+    expect(now - started).toBeGreaterThan(90_000);
   });
 });
 

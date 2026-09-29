@@ -5,6 +5,7 @@ import type { Diagnostics } from "../diagnostics.js";
 import type { GuardedFetchResult } from "../fetch/guardedFetch.js";
 import type { CatalogFetch, CatalogFetchOptions } from "./catalogFetch.js";
 import { fetchLlmsTxt } from "./llmsTxt.js";
+import { isRefusal } from "./pacing.js";
 import { compileRobots, fetchRobots, isAllowed, type RobotsSource } from "./robots.js";
 import { sameOriginHttpsUrl } from "./sameOrigin.js";
 import { CANDIDATE_TITLE_MAX, sanitizeLabel } from "./sanitizeLabel.js";
@@ -30,10 +31,15 @@ export const MAX_ROBOTS_CHECKS = 10_000;
  */
 export const TRACKING_PARAMS: ReadonlySet<string> = new Set(["gclid", "fbclid", "mc_cid", "mc_eid", "_hsenc", "_hsmi"]);
 
-/** One URL a discovery run requested, with what came back. Stored by the cache for revalidation. */
+/**
+ * One URL a discovery run requested, with what came back. Stored by the cache for
+ * revalidation. `refused` means the paced fetch never asked the site (budget or deadline),
+ * so the resource's real state is unknown; the cache treats it as changed. Discovery sends
+ * no validators, so a 304 it receives anyway is recorded as `error`, as the parsers treat it.
+ */
 export interface CatalogResource {
   url: string;
-  status: "ok" | "not_modified" | "absent" | "error";
+  status: "ok" | "absent" | "error" | "refused";
   etag?: string;
   lastModified?: string;
   /** The size cap discovery used for this URL, so revalidation probes use the same one. */
@@ -140,9 +146,10 @@ function catalogVersion(candidates: readonly Draft[]): string {
 }
 
 function recordResource(resources: Map<string, CatalogResource>, url: string, result: GuardedFetchResult, maxBytes: number | undefined): void {
-  const resource: CatalogResource = { url, status: result.kind };
-  if ((result.kind === "ok" || result.kind === "not_modified") && result.etag) resource.etag = result.etag;
-  if ((result.kind === "ok" || result.kind === "not_modified") && result.lastModified) resource.lastModified = result.lastModified;
+  const status: CatalogResource["status"] = isRefusal(result) ? "refused" : result.kind === "not_modified" ? "error" : result.kind;
+  const resource: CatalogResource = { url, status };
+  if (result.kind === "ok" && result.etag) resource.etag = result.etag;
+  if (result.kind === "ok" && result.lastModified) resource.lastModified = result.lastModified;
   if (maxBytes !== undefined) resource.maxBytes = maxBytes;
   resources.set(url, resource);
 }
@@ -300,7 +307,7 @@ export async function discoverCatalog(options: DiscoverOptions): Promise<Discove
     errors,
   });
   const resourceList = [...resources.values()];
-  const failed = catalog.candidates.length === 0 && resourceList.some((resource) => resource.status === "error");
+  const failed = catalog.candidates.length === 0 && resourceList.some((resource) => resource.status === "error" || resource.status === "refused");
 
   options.diagnostics?.event("catalog_discover", {
     origin,

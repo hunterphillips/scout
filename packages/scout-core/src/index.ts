@@ -109,6 +109,7 @@ export {
 export { type CatalogFetchOptions } from "./catalog/catalogFetch.js";
 export {
   createPacedCatalogFetch,
+  isRefusal,
   MAX_REQUESTS_PER_RUN,
   RUN_DEADLINE_MS,
   type PacedCatalogFetch,

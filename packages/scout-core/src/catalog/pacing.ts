@@ -3,15 +3,15 @@ import { DEFAULT_TIMEOUT_MS, type GuardedFetchOptions, type GuardedFetchResult, 
 import type { CatalogFetch, CatalogFetchOptions } from "./catalogFetch.js";
 
 /**
- * Most requests one paced fetch makes. A discovery run needs at most 62 (robots, 6
- * `llms.txt` files, 55 sitemap files) and a cache revalidation pass at most as many
- * again, so 128 is a safety net against a bug or a hostile site, not a normal limit.
- * This budget is Scout's own addition; the plan does not specify one.
+ * Most requests one run window makes. A discovery run needs at most 62 (robots, 6
+ * `llms.txt` files, 55 sitemap files) and a cache revalidation pass at most as many, each
+ * in its own window, so 128 is a safety net against a bug or a hostile site, not a normal
+ * limit. This budget is Scout's own addition; the plan does not specify one.
  */
 export const MAX_REQUESTS_PER_RUN = 128;
 
 /**
- * Longest one paced fetch keeps making requests, measured from its first request. With
+ * Longest one run window keeps making requests, measured from its first request. With
  * the 10 s crawl-delay ceiling and 8 s timeouts, the request budget alone could stretch a
  * run past half an hour; after this deadline further requests are refused like budget
  * overruns. Scout's own addition, like the budget.
@@ -23,8 +23,17 @@ export type Sleep = (ms: number) => Promise<void>;
 export interface PacedCatalogFetch extends CatalogFetch {
   /** Minimum gap between the end of one request and the start of the next (robots `Crawl-delay`). */
   setCrawlDelay(ms: number | undefined): void;
-  /** Requests refused because the budget was spent, the run deadline passed, or the URL left the origin. */
+  /**
+   * Start a new run window: the deadline restarts from the next request and the request
+   * budget is refilled. The crawl delay and the end time of the last request are kept, so
+   * the next request still waits out the delay. The cache opens one window for
+   * revalidation and another for rediscovery.
+   */
+  startWindow(): void;
+  /** Requests refused because the budget was spent, the run deadline passed, or the URL left the origin. Counts across windows. */
   readonly refused: number;
+  /** Requests that reached `guardedFetch`, across windows. */
+  readonly requests: number;
 }
 
 export interface PacedCatalogFetchOptions {
@@ -42,6 +51,18 @@ export interface PacedCatalogFetchOptions {
 
 const realSleep: Sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+/** Results a paced fetch refused without touching the network. */
+const refusals = new WeakSet<GuardedFetchResult>();
+
+/**
+ * Whether `result` is a paced-fetch refusal (budget, deadline, or origin) rather than an
+ * answer from the site. A refusal says nothing about the resource, so callers must not
+ * record it as the resource's state.
+ */
+export function isRefusal(result: GuardedFetchResult): boolean {
+  return refusals.has(result);
+}
+
 /**
  * Bind `guardedFetch` for one origin's catalog run.
  *
@@ -50,7 +71,9 @@ const realSleep: Sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms
  * before the first request (robots.txt, which is where the delay comes from). Only the
  * named options are forwarded to `guardedFetch`, with its default 8 s timeout. Requests
  * beyond `maxRequests`, after the run deadline (counted from the first request), or to
- * another origin return a `policy` error without touching the network.
+ * another origin return a `policy` error without touching the network; `isRefusal` tells
+ * those apart from the site's own answers. `startWindow` restarts the deadline and the
+ * budget without dropping the crawl delay.
  */
 export function createPacedCatalogFetch(options: PacedCatalogFetchOptions): PacedCatalogFetch {
   const doFetch = options.guardedFetch ?? guardedFetch;
@@ -63,6 +86,7 @@ export function createPacedCatalogFetch(options: PacedCatalogFetchOptions): Pace
   let made = 0;
   let startedAt: number | null = null;
   let refused = 0;
+  let requests = 0;
   let queue: Promise<unknown> = Promise.resolve();
 
   const run = async (url: string, opts: CatalogFetchOptions): Promise<GuardedFetchResult> => {
@@ -76,7 +100,9 @@ export function createPacedCatalogFetch(options: PacedCatalogFetchOptions): Pace
     const pastDeadline = () => options.clock.now() - (startedAt ?? 0) >= runDeadlineMs;
     const refuse = (message: string): GuardedFetchResult => {
       refused += 1;
-      return { kind: "error", reason: "policy", message };
+      const result: GuardedFetchResult = { kind: "error", reason: "policy", message };
+      refusals.add(result);
+      return result;
     };
     if (!sameOrigin) return refuse("catalog request left the origin");
     if (made >= maxRequests) return refuse("catalog request budget spent");
@@ -87,6 +113,7 @@ export function createPacedCatalogFetch(options: PacedCatalogFetchOptions): Pace
       if (pastDeadline()) return refuse("catalog run deadline passed");
     }
     made += 1;
+    requests += 1;
     const guarded: GuardedFetchOptions = { timeoutMs: DEFAULT_TIMEOUT_MS };
     if (opts.maxBytes !== undefined) guarded.maxBytes = opts.maxBytes;
     if (opts.accept !== undefined) guarded.accept = opts.accept;
@@ -107,6 +134,11 @@ export function createPacedCatalogFetch(options: PacedCatalogFetchOptions): Pace
   fetch.setCrawlDelay = (ms) => {
     crawlDelayMs = ms !== undefined && ms > 0 ? ms : 0;
   };
+  fetch.startWindow = () => {
+    startedAt = null;
+    made = 0;
+  };
   Object.defineProperty(fetch, "refused", { get: () => refused });
+  Object.defineProperty(fetch, "requests", { get: () => requests });
   return fetch;
 }
