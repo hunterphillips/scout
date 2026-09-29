@@ -202,13 +202,30 @@ describe("createCatalogCache", () => {
     const { cache } = await primed({ "/sitemap.xml": sitemapWith("/a") });
     const path = join(dir, cacheFileName(ORIGIN));
     const file = JSON.parse(readFileSync(path, "utf8"));
-    writeFileSync(path, JSON.stringify({ ...file, fetchedAt: now + 5 * 60 * 1000 }));
+    const dated = (fetchedAt: number) => JSON.stringify({ ...file, fetchedAt, catalog: { ...file.catalog, fetchedAt } });
+    writeFileSync(path, dated(now + 5 * 60 * 1000));
     expect(cache.load(ORIGIN)).not.toBeNull();
 
-    writeFileSync(path, JSON.stringify({ ...file, fetchedAt: now + 5 * 60 * 1000 + 1 }));
+    writeFileSync(path, dated(now + 5 * 60 * 1000 + 1));
     events = [];
     expect(cache.load(ORIGIN)).toBeNull();
     expect(events).toEqual([{ name: "catalog_cache_invalid", fields: { origin: ORIGIN, code: "future" } }]);
+  });
+
+  // Zod already rejects a non-finite number (`parse`); the explicit finiteness check backs it up.
+  it.each([
+    ["an inner fetchedAt that differs from the outer", "fetched_at", (file: { fetchedAt: number; catalog: object }) => ({ ...file, catalog: { ...file.catalog, fetchedAt: 1e20 } })],
+    ["a non-finite outer fetchedAt", "parse", (file: { fetchedAt: number }) => ({ ...file, fetchedAt: "__INF__" })],
+  ])("treats %s as a miss", async (_label, code, tamper) => {
+    const { site, cache } = await primed({ "/sitemap.xml": sitemapWith("/a") });
+    const path = join(dir, cacheFileName(ORIGIN));
+    const file = JSON.parse(readFileSync(path, "utf8"));
+    writeFileSync(path, JSON.stringify(tamper(file)).replace('"__INF__"', "1e400"));
+    events = [];
+
+    expect(cache.load(ORIGIN)).toBeNull();
+    expect(events).toEqual([{ name: "catalog_cache_invalid", fields: { origin: ORIGIN, code } }]);
+    expect(await cache.resolve({ origin: ORIGIN, fetch: site.fetch(clock) })).toMatchObject({ ok: true, source: "miss" });
   });
 
   it("still returns the catalog when the cache cannot be written", async () => {

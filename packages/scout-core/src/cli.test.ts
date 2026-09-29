@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SiteCatalogSchema } from "@scout/contracts";
@@ -76,7 +76,7 @@ describe("runCli", () => {
     const out = run.out();
     expect(out).toMatch(/source\s+miss/);
     expect(out).toMatch(/candidates\s+30 \(published 0, image_title 0, slug 30\)/);
-    expect(out).toMatch(/requests\s+\d+ \(0 refused\), \d+ bytes received/);
+    expect(out).toMatch(/requests\s+\d+, refused 0, \d+ decoded bytes received/);
     expect(out).toMatch(/time\s+\d+ ms/);
     const rows = out.split("\n").filter((line) => /^c[0-9a-z]+ {2}slug {2}/.test(line));
     expect(rows).toHaveLength(20);
@@ -89,7 +89,7 @@ describe("runCli", () => {
     expect(await runCli(["catalog", ORIGIN], again.io)).toBe(0);
     expect(site.requests).toEqual([]);
     expect(again.out()).toMatch(/source\s+fresh/);
-    expect(again.out()).toMatch(/requests\s+0 \(0 refused\), 0 bytes received/);
+    expect(again.out()).toMatch(/requests\s+0, refused 0, 0 decoded bytes received/);
   });
 
   it("catalog --refresh revalidates despite a fresh cache", async () => {
@@ -132,7 +132,6 @@ describe("runCli", () => {
     [["verify"]],
     [["nope"]],
     [[]],
-    [["--help"]],
   ])("rejects %j with usage and exit 1, touching nothing", async (argv) => {
     const { runCli } = await import("./cli.js");
     const site = fakeSite();
@@ -143,6 +142,109 @@ describe("runCli", () => {
     expect(run.out()).toBe("");
     expect(site.requests).toEqual([]);
     expect(readdirSync(home)).toEqual([]);
+  });
+
+  it.each([["--help"], ["-h"], ["catalog", "--help"]])("%s prints usage to stdout and exits 0, touching nothing", async (...argv) => {
+    const { runCli } = await import("./cli.js");
+    const site = fakeSite();
+    const run = io({ guardedFetch: site.guardedFetch });
+
+    expect(await runCli(argv, run.io)).toBe(0);
+    expect(run.out()).toContain("usage:");
+    expect(run.err()).toBe("");
+    expect(site.requests).toEqual([]);
+    expect(readdirSync(home)).toEqual([]);
+  });
+
+  it.each([
+    ["http://s.example", "catalog: origin must be https"],
+    ["https://s.example/path", "catalog: origin must not have a path"],
+    ["https://s.example/?q=1", "catalog: origin must not have a query or fragment"],
+    ["https://u:p@s.example", "catalog: origin must not carry credentials"],
+    ["not a url", "catalog: not a URL"],
+  ])("rejects origin %j with a one-line reason before the usage", async (origin, reason) => {
+    const { runCli } = await import("./cli.js");
+    const run = io({ guardedFetch: fakeSite().guardedFetch });
+
+    expect(await runCli(["catalog", origin], run.io)).toBe(1);
+    expect(run.err().startsWith(`${reason}\nusage:`)).toBe(true);
+  });
+
+  it("parseOrigin normalizes any bare https origin", async () => {
+    const { parseOrigin } = await import("./cli.js");
+    expect(parseOrigin("https://S.EXAMPLE")).toEqual({ ok: true, origin: "https://s.example" });
+    expect(parseOrigin("https://s.example:443/")).toEqual({ ok: true, origin: "https://s.example" });
+    expect(parseOrigin("https://s.example:8443")).toEqual({ ok: true, origin: "https://s.example:8443" });
+    expect(parseOrigin("https://bücher.example")).toEqual({ ok: true, origin: "https://xn--bcher-kva.example" });
+  });
+
+  it("catalog accepts --refresh before the origin and an uppercase host", async () => {
+    const { runCli } = await import("./cli.js");
+    const site = fakeSite();
+    const run = io({ guardedFetch: site.guardedFetch });
+
+    expect(await runCli(["catalog", "--refresh", "https://S.EXAMPLE"], run.io)).toBe(0);
+    expect(run.out()).toMatch(/origin\s+https:\/\/s\.example\n/);
+    expect(site.requests.every((url) => url.startsWith(`${ORIGIN}/`))).toBe(true);
+  });
+
+  it("a tampered inner fetchedAt is a cache miss, not a crash", async () => {
+    const { runCli } = await import("./cli.js");
+    const site = fakeSite();
+    expect(await runCli(["catalog", ORIGIN], io({ guardedFetch: site.guardedFetch }).io)).toBe(0);
+    const dir = join(home, "cache", "catalog");
+    const [name] = readdirSync(dir);
+    const path = join(dir, name as string);
+    const file = JSON.parse(readFileSync(path, "utf8"));
+    writeFileSync(path, JSON.stringify({ ...file, catalog: { ...file.catalog, fetchedAt: 1e20 } }));
+    events = [];
+
+    const run = io({ guardedFetch: site.guardedFetch });
+    expect(await runCli(["catalog", ORIGIN], run.io)).toBe(0);
+    expect(events).toContainEqual({ name: "catalog_cache_invalid", fields: { origin: ORIGIN, code: "fetched_at" } });
+    expect(run.out()).toMatch(/source\s+miss/);
+    expect(run.out()).toMatch(/fetched at\s+\d{4}-\d\d-\d\dT/);
+  });
+
+  it("formatTimestamp returns invalid for an unrepresentable date", async () => {
+    const { formatTimestamp } = await import("./cli.js");
+    expect(formatTimestamp(1e20)).toBe("invalid");
+    expect(formatTimestamp(Number.NaN)).toBe("invalid");
+    expect(formatTimestamp(0)).toBe("1970-01-01T00:00:00.000Z");
+  });
+
+  it("an unexpected throw exits 1 with a one-line error naming only its class", async () => {
+    const { runCli } = await import("./cli.js");
+    const throwing: Diagnostics = {
+      event: () => {
+        throw new RangeError(`bad value from ${ORIGIN}/secret-path`);
+      },
+      failures: 0,
+    };
+    const run = io({ guardedFetch: fakeSite().guardedFetch, diagnostics: throwing });
+
+    expect(await runCli(["catalog", ORIGIN], run.io)).toBe(1);
+    expect(run.err()).toBe("error: RangeError\n");
+    expect(run.out()).toBe("");
+  });
+
+  it("verify refuses more than 10 URLs before fetching anything", async () => {
+    const { runCli } = await import("./cli.js");
+    const calls: string[] = [];
+    const verifyFetch: VerifyFetch = async (url) => {
+      calls.push(url);
+      return { kind: "absent", status: 404 };
+    };
+    const urls = Array.from({ length: 11 }, (_, i) => `${ORIGIN}/p${i}`);
+    const run = io({ verifyFetch });
+
+    expect(await runCli(["verify", ...urls], run.io)).toBe(1);
+    expect(run.err().startsWith("verify: at most 10 URLs\nusage:")).toBe(true);
+    expect(calls).toEqual([]);
+
+    const ten = io({ verifyFetch });
+    expect(await runCli(["verify", ...urls.slice(0, 10)], ten.io)).toBe(0);
+    expect(calls).toHaveLength(10);
   });
 
   it("verify prints one href or drop line per URL", async () => {

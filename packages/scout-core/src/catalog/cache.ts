@@ -114,7 +114,7 @@ function fsErrorCode(error: unknown): string {
     case "ENOTDIR":
       return "enotdir";
     case "EEXIST":
-      // mkdir on a path that exists but is not a directory (the cache dir is a regular file).
+      // mkdir hit an existing non-directory: most likely the cache dir path is a regular file.
       return "not_directory";
     case "ENAMETOOLONG":
       return "enametoolong";
@@ -162,8 +162,9 @@ async function unchanged(resources: readonly CatalogResource[], fetch: PacedCata
  * every file's body to rebuild it, and a 304 carries none, so a partial rebuild is not
  * possible. If rediscovery fails (throws, or yields nothing with a request error) a
  * cached catalog under 7 days old is served marked stale. A file from another schema
- * version, for another origin, dated more than 5 minutes in the future, or one that fails
- * to parse, is treated as missing and overwritten.
+ * version, for another origin, whose outer and inner `fetchedAt` differ or are not finite,
+ * dated more than 5 minutes in the future, or one that fails to parse, is treated as
+ * missing and overwritten.
  *
  * Partial failures: any run that produces a non-empty catalog replaces the cached one,
  * even if some of its requests failed (`catalog.errors` is non-empty). This is a deliberate
@@ -205,7 +206,9 @@ export function createCatalogCache(options: CatalogCacheOptions): CatalogCache {
         ? "schema"
         : parsed.origin !== canonical || parsed.catalog.origin !== canonical
           ? "origin"
-          : parsed.fetchedAt > clock.now() + CATALOG_FUTURE_TOLERANCE_MS
+          : !Number.isFinite(parsed.fetchedAt) || !Number.isFinite(parsed.catalog.fetchedAt) || parsed.catalog.fetchedAt !== parsed.fetchedAt
+            ? "fetched_at"
+            : parsed.fetchedAt > clock.now() + CATALOG_FUTURE_TOLERANCE_MS
             ? "future"
             : null;
     if (invalid) {

@@ -47,8 +47,19 @@ const defaultFetch: VerifyFetch = (url, { maxBytes, accept, timeoutMs }) => guar
 
 const ENTITIES: Record<string, string> = { "&amp;": "&", "&lt;": "<", "&gt;": ">", "&quot;": '"', "&apos;": "'" };
 
+/** A numeric character reference's code point, or null when it is not a valid non-surrogate scalar value. */
+function numericEntity(entity: string): string | null {
+  const hex = entity[2] === "x" || entity[2] === "X";
+  const code = Number.parseInt(entity.slice(hex ? 3 : 2, -1), hex ? 16 : 10);
+  if (!Number.isInteger(code) || code <= 0 || code > 0x10ffff || (code >= 0xd800 && code <= 0xdfff)) return null;
+  return String.fromCodePoint(code);
+}
+
+/** Decode the five named XML entities and bounded numeric references (`&#NNN;`, `&#xHH;`); anything else is left as is. */
 function decodeEntities(text: string): string {
-  return text.replace(/&(?:amp|lt|gt|quot|apos);/g, (entity) => ENTITIES[entity] ?? entity);
+  return text.replace(/&(?:amp|lt|gt|quot|apos|#[0-9]{1,7}|#[xX][0-9a-fA-F]{1,6});/g, (entity) =>
+    entity[1] === "#" ? (numericEntity(entity) ?? entity) : (ENTITIES[entity] ?? entity),
+  );
 }
 
 function isHtml(contentType: string | undefined): boolean {
@@ -60,6 +71,10 @@ function isHtml(contentType: string | undefined): boolean {
  * A display title from an HTML body: `og:title` if present and non-empty after
  * sanitizing, else `<title>`. Only the first `TITLE_SCAN_CHARS` characters are searched,
  * and every pattern is length-bounded, so the work is linear in that prefix.
+ *
+ * Only `<meta property="og:title" content="...">` with quoted attribute values (either
+ * order) is read. An unquoted `content`, or `name="og:title"`, is not supported and falls
+ * back to `<title>`. Attribute names must stand alone, so `data-content=` does not match.
  */
 export function extractDisplayTitle(body: string): string | undefined {
   const head = body.slice(0, TITLE_SCAN_CHARS);
@@ -69,8 +84,8 @@ export function extractDisplayTitle(body: string): string | undefined {
     return label || undefined;
   };
   for (const [tag] of head.matchAll(/<meta\b[^>]{0,2048}>/gi)) {
-    if (!/\bproperty\s*=\s*["']og:title["']/i.test(tag)) continue;
-    const content = /\bcontent\s*=\s*(?:"([^"]*)"|'([^']*)')/i.exec(tag);
+    if (!/\sproperty\s*=\s*["']og:title["']/i.test(tag)) continue;
+    const content = /(?:^|\s)content\s*=\s*(?:"([^"]*)"|'([^']*)')/i.exec(tag);
     const og = clean(content?.[1] ?? content?.[2]);
     if (og) return og;
   }
@@ -85,11 +100,13 @@ type Outcome = { keep: true; humanHref: string; displayTitle?: string } | { keep
  * Policy: only the first `maxCandidates` (default 3) are checked, in parallel under one
  * shared budget (default 4 s); their order is kept and nothing is re-ranked. Every fetch
  * goes through `guardedFetch` (1 MiB cap) to a URL on the candidate's own origin.
+ * "The source URL" below means its normalized form (`new URL(sourceUrl).href`), which is
+ * what a kept candidate's `humanHref` holds.
  *
  * - A `.md` source URL: the same URL without `.md` is proposed as the human page. It
  *   becomes `humanHref` only on a 200 `text/html` response from the same host (the final
  *   URL after any same-host redirect). Any other answer, including a 404 on the twin or a
- *   twin that leaves the host, keeps the candidate with `humanHref = sourceUrl`: the `.md`
+ *   twin that leaves the host, keeps the candidate with `humanHref` = the source URL: the `.md`
  *   page itself is never fetched, so the twin's answer says nothing against it.
  * - Any other URL is fetched itself. A 200 keeps it with `humanHref = sourceUrl` and a
  *   `displayTitle` from `og:title` or `<title>` when the page is HTML.
@@ -127,8 +144,9 @@ export async function verifyTargets(candidates: readonly Candidate[], options: V
   const verifyOne = async (candidate: Candidate): Promise<Outcome> => {
     const source = sameOriginAbsoluteHttpsUrl(candidate.sourceUrl, safeOrigin(candidate.sourceUrl));
     if (!source) return { keep: false, reason: "invalid_url" };
-    const keepSource: Outcome = { keep: true, humanHref: candidate.sourceUrl };
-    const isMarkdown = /\.md$/i.test(source.pathname);
+    const keepSource: Outcome = { keep: true, humanHref: source.href };
+    // A `.md` file needs a non-empty basename: `/.md` has no HTML twin to propose.
+    const isMarkdown = /[^/]\.md$/i.test(source.pathname);
     const target = new URL(source.href);
     if (isMarkdown) target.pathname = target.pathname.replace(/\.md$/i, "");
     if (target.origin !== source.origin) return { keep: false, reason: "invalid_url" };
@@ -143,7 +161,7 @@ export async function verifyTargets(candidates: readonly Candidate[], options: V
     if (result.status !== 200) return keepSource;
     if (isMarkdown) return isHtml(result.contentType) ? { keep: true, humanHref: final.href } : keepSource;
     const displayTitle = isHtml(result.contentType) ? extractDisplayTitle(result.body) : undefined;
-    return displayTitle ? { keep: true, humanHref: candidate.sourceUrl, displayTitle } : keepSource;
+    return displayTitle ? { keep: true, humanHref: source.href, displayTitle } : keepSource;
   };
 
   const selected = candidates.slice(0, Math.max(0, maxCandidates));

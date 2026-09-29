@@ -168,6 +168,67 @@ describe("verifyTargets", () => {
     expect(result.dropped).toEqual([]);
   });
 
+  it("does not leak an unhandled rejection from a fetch that rejects after the budget", async () => {
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => void unhandled.push(reason);
+    process.on("unhandledRejection", onUnhandled);
+    try {
+      let reject: (error: Error) => void = () => undefined;
+      const fetch: VerifyFetch = () => new Promise((_resolve, rej) => void (reject = rej));
+
+      const result = await verifyTargets([candidate("c0", "/late")], { fetch, budgetMs: 10 });
+      expect(result.verified).toEqual([expect.objectContaining({ humanHref: `${ORIGIN}/late` })]);
+      reject(new Error("late failure"));
+      await new Promise((resolve) => setTimeout(resolve, 20));
+
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+    }
+  });
+
+  it("accepts application/xhtml+xml as HTML", async () => {
+    const { fetch } = fakeFetch({
+      "/x": (url) => ok(url, "<title>XHTML page</title>", "application/xhtml+xml"),
+      "/y": (url) => ok(url, "<html></html>", "application/xhtml+xml; charset=utf-8"),
+    });
+
+    const { verified } = await verifyTargets([candidate("c0", "/x"), candidate("c1", "/y.md")], { fetch });
+
+    expect(verified[0]?.displayTitle).toBe("XHTML page");
+    expect(verified[1]?.humanHref).toBe(`${ORIGIN}/y`);
+  });
+
+  it("keeps the query on a .md twin", async () => {
+    const { fetch, calls } = fakeFetch({ "/foo": (url) => ok(url, "<html></html>") });
+
+    const result = await verifyTargets([candidate("c0", "/foo.md?x=1")], { fetch });
+
+    expect(calls.map((c) => c.url)).toEqual([`${ORIGIN}/foo?x=1`]);
+    expect(result.verified[0]?.humanHref).toBe(`${ORIGIN}/foo?x=1`);
+  });
+
+  it("does not treat a bare /.md as a twin candidate", async () => {
+    const { fetch, calls } = fakeFetch({});
+
+    const result = await verifyTargets([candidate("c0", "/.md")], { fetch });
+
+    expect(calls.map((c) => c.url)).toEqual([`${ORIGIN}/.md`]);
+    expect(result.dropped).toEqual([{ candidateId: "c0", reason: "not_found" }]);
+  });
+
+  it("uses the normalized source URL as humanHref", async () => {
+    const { fetch } = fakeFetch({ "/a%20b": (url) => ok(url, "<title>T</title>"), "/c.md": () => ({ kind: "error", reason: "timeout", message: "t" }) });
+    const raw: Candidate[] = [
+      { ...candidate("c0", "/a"), sourceUrl: "https://DOCS.example:443/a b" },
+      { ...candidate("c1", "/c.md"), sourceUrl: "https://Docs.Example/x/../c.md" },
+    ];
+
+    const { verified } = await verifyTargets(raw, { fetch });
+
+    expect(verified.map((v) => v.humanHref)).toEqual([`${ORIGIN}/a%20b`, `${ORIGIN}/c.md`]);
+  });
+
   it("fetches only URLs on the candidate's own origin and rejects unusable source URLs", async () => {
     const { fetch, calls } = fakeFetch({ "/a": (url) => ok(url, "") });
     const bad: Candidate[] = [
@@ -195,6 +256,17 @@ describe("extractDisplayTitle", () => {
     expect(extractDisplayTitle(`${" ".repeat(TITLE_SCAN_CHARS - 40)}<title>early</title>`)).toBe("early");
   });
 
+  it("decodes numeric entities, leaving invalid ones as text", () => {
+    expect(extractDisplayTitle("<title>What&#39;s new &#x2014; Docs</title>")).toBe("What's new — Docs");
+    expect(extractDisplayTitle("<title>a &#xD800; b &#0; c &#x110000; d</title>")).toBe("a &#xD800; b &#0; c &#x110000; d");
+  });
+
+  it("does not read og:title content from a data-content attribute", () => {
+    expect(extractDisplayTitle(`<meta property="og:title" data-content="Wrong"><title>Right</title>`)).toBe("Right");
+    expect(extractDisplayTitle(`<meta data-property="og:title" content="Wrong"><title>Right</title>`)).toBe("Right");
+    expect(extractDisplayTitle(`<meta data-content="Wrong" property="og:title" content="OG"><title>T</title>`)).toBe("OG");
+  });
+
   it("ignores an empty og:title", () => {
     expect(extractDisplayTitle(`<meta property='og:title' content=''><title>T</title>`)).toBe("T");
   });
@@ -202,6 +274,14 @@ describe("extractDisplayTitle", () => {
   it("stays fast on a large pathological body", () => {
     const started = performance.now();
     extractDisplayTitle(`<meta ${"a".repeat(1_000_000)}<title ${"b".repeat(1_000_000)}`);
+    expect(performance.now() - started).toBeLessThan(1000);
+  });
+
+  it("stays fast on a 64 KiB prefix of repeated unterminated meta tags", () => {
+    const body = "<meta ".repeat(Math.ceil(TITLE_SCAN_CHARS / 6));
+    expect(body.length).toBeGreaterThanOrEqual(TITLE_SCAN_CHARS);
+    const started = performance.now();
+    expect(extractDisplayTitle(body)).toBeUndefined();
     expect(performance.now() - started).toBeLessThan(1000);
   });
 });

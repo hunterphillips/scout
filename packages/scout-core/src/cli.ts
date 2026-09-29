@@ -15,16 +15,20 @@ import { type GuardedFetchOptions, type GuardedFetchResult, guardedFetch } from 
  *
  * - `catalog <origin> [--refresh] [--json]` resolves one site's catalog through the
  *   on-disk cache (`~/.scout/cache/catalog`, honoring `SCOUT_HOME`) and prints a summary.
- * - `verify <url>...` runs `verifyTargets` on the given URLs.
+ * - `verify <url>...` runs `verifyTargets` on up to `VERIFY_CLI_MAX_URLS` (10) URLs, all
+ *   fetched in parallel; more is a usage error rather than a larger fan-out.
  * - `rank <origin>` is not available until Phase 3.
  *
  * Only `catalog` and `verify` touch the network, and only when invoked. Importing this
  * module does nothing; the process entry runs `runCli` only when this file is `argv[1]`.
  */
 
+/** Most URLs one `verify` run accepts; they are all fetched in parallel. */
+export const VERIFY_CLI_MAX_URLS = 10;
+
 export const USAGE = `usage:
   cli.js catalog <https-origin> [--refresh] [--json]
-  cli.js verify <url>...
+  cli.js verify <url>...            (at most ${VERIFY_CLI_MAX_URLS} URLs)
   cli.js rank <https-origin>        (Phase 3)
 `;
 
@@ -55,46 +59,83 @@ const EXIT_OK = 0;
 const EXIT_FAIL = 1;
 const EXIT_UNAVAILABLE = 2;
 
-/** `https://host[:port]` with nothing after it, or null. */
-export function parseOrigin(raw: string): string | null {
+export type ParsedOrigin = { ok: true; origin: string } | { ok: false; reason: string };
+
+/**
+ * Any string that parses to a bare `https:` origin: no path other than `/`, no query,
+ * fragment or credentials. Returns the normalized `url.origin`, so `https://S.example`,
+ * an IDN host and `https://h:443` are all accepted.
+ */
+export function parseOrigin(raw: string): ParsedOrigin {
   let url: URL;
   try {
     url = new URL(raw);
   } catch {
-    return null;
+    return { ok: false, reason: "not a URL" };
   }
-  if (url.protocol !== "https:" || url.username || url.password) return null;
-  if (url.pathname !== "/" || url.search || url.hash) return null;
-  if (raw !== url.origin && raw !== `${url.origin}/`) return null;
-  return url.origin;
+  if (url.protocol !== "https:") return { ok: false, reason: "origin must be https" };
+  if (url.username || url.password) return { ok: false, reason: "origin must not carry credentials" };
+  if (url.pathname !== "/") return { ok: false, reason: "origin must not have a path" };
+  if (url.search || url.hash) return { ok: false, reason: "origin must not have a query or fragment" };
+  return { ok: true, origin: url.origin };
 }
 
-/** Run one CLI command and return its exit code. Output goes only through `io`. */
+/** An ISO timestamp, or "invalid" when `ms` is not a representable date. */
+export function formatTimestamp(ms: number): string {
+  try {
+    return new Date(ms).toISOString();
+  } catch {
+    return "invalid";
+  }
+}
+
+/** A one-line error naming only the error's class; its message may carry URLs. */
+function errorLine(error: unknown): string {
+  const name = error instanceof Error && /^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(error.name) ? error.name : "Error";
+  return `error: ${name}\n`;
+}
+
+/**
+ * Run one CLI command and return its exit code. Output goes only through `io`.
+ * `--help`/`-h` prints usage to stdout and exits 0; misuse prints usage to stderr and
+ * exits 1. An unexpected throw is caught: one `error: <name>` line on stderr, exit 1.
+ */
 export async function runCli(argv: readonly string[], io: CliIo): Promise<number> {
-  const usage = (): number => {
+  const usage = (reason?: string): number => {
+    if (reason) io.stderr(`${reason}\n`);
     io.stderr(USAGE);
     return EXIT_FAIL;
   };
   const [command, ...rest] = argv;
-  if (command === undefined || argv.includes("--help") || argv.includes("-h")) return usage();
+  if (argv.includes("--help") || argv.includes("-h")) {
+    io.stdout(USAGE);
+    return EXIT_OK;
+  }
+  if (command === undefined) return usage();
   const flags = rest.filter((arg) => arg.startsWith("--"));
   const positional = rest.filter((arg) => !arg.startsWith("--"));
 
-  switch (command) {
-    case "catalog": {
-      if (positional.length !== 1 || flags.some((f) => f !== "--refresh" && f !== "--json")) return usage();
-      const origin = parseOrigin(positional[0] as string);
-      if (!origin) return usage();
-      return catalogCommand(origin, { refresh: flags.includes("--refresh"), json: flags.includes("--json") }, io);
+  try {
+    switch (command) {
+      case "catalog": {
+        if (positional.length !== 1 || flags.some((f) => f !== "--refresh" && f !== "--json")) return usage();
+        const parsed = parseOrigin(positional[0] as string);
+        if (!parsed.ok) return usage(`catalog: ${parsed.reason}`);
+        return await catalogCommand(parsed.origin, { refresh: flags.includes("--refresh"), json: flags.includes("--json") }, io);
+      }
+      case "verify":
+        if (positional.length === 0 || flags.length > 0) return usage();
+        if (positional.length > VERIFY_CLI_MAX_URLS) return usage(`verify: at most ${VERIFY_CLI_MAX_URLS} URLs`);
+        return await verifyCommand(positional, io);
+      case "rank":
+        io.stderr("rank: not available until Phase 3\n");
+        return EXIT_UNAVAILABLE;
+      default:
+        return usage();
     }
-    case "verify":
-      if (positional.length === 0 || flags.length > 0) return usage();
-      return verifyCommand(positional, io);
-    case "rank":
-      io.stderr("rank: not available until Phase 3\n");
-      return EXIT_UNAVAILABLE;
-    default:
-      return usage();
+  } catch (error) {
+    io.stderr(errorLine(error));
+    return EXIT_FAIL;
   }
 }
 
@@ -122,7 +163,7 @@ async function catalogCommand(origin: string, opts: { refresh: boolean; json: bo
 
   if (!result.ok) {
     io.stderr(`catalog failed: ${result.code}${result.errors.length ? ` (${result.errors.join(", ")})` : ""}\n`);
-    io.stderr(`requests ${requests}, ${bytesReceived} bytes received, ${ms} ms\n`);
+    io.stderr(`requests ${requests}, refused ${fetch.refused}, ${bytesReceived} decoded bytes received, ${ms} ms\n`);
     return EXIT_FAIL;
   }
   if (opts.json) io.stdout(`${JSON.stringify(result.catalog, null, 2)}\n`);
@@ -146,12 +187,12 @@ export function formatCatalog(
   const lines = [
     `origin       ${catalog.origin}`,
     `source       ${result.source}${result.stale ? " (stale)" : ""}`,
-    `fetched at   ${new Date(catalog.fetchedAt).toISOString()}`,
+    `fetched at   ${formatTimestamp(catalog.fetchedAt)}`,
     `candidates   ${catalog.candidates.length} (published ${byQuality.published}, image_title ${byQuality.image_title}, slug ${byQuality.slug})`,
     `truncated    ${catalog.truncated ? "yes" : "no"}`,
     `errors       ${catalog.errors.length ? catalog.errors.join(", ") : "none"}`,
     `label bytes  ${labelBytes}`,
-    `requests     ${stats.requests} (${stats.refused} refused), ${stats.bytesReceived} bytes received`,
+    `requests     ${stats.requests}, refused ${stats.refused}, ${stats.bytesReceived} decoded bytes received`,
     `time         ${stats.ms} ms`,
   ];
   const preview = catalog.candidates.slice(0, CATALOG_PREVIEW);
@@ -210,10 +251,16 @@ function isEntrypoint(): boolean {
 }
 
 if (isEntrypoint()) {
-  void runCli(process.argv.slice(2), {
+  runCli(process.argv.slice(2), {
     stdout: (text) => void process.stdout.write(text),
     stderr: (text) => void process.stderr.write(text),
-  }).then((code) => {
-    process.exitCode = code;
-  });
+  }).then(
+    (code) => {
+      process.exitCode = code;
+    },
+    (error: unknown) => {
+      process.stderr.write(errorLine(error));
+      process.exitCode = EXIT_FAIL;
+    },
+  );
 }
