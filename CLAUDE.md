@@ -4,14 +4,17 @@ Scout is a proof of concept. When Hunter lands on a website, Scout quietly shows
 links from that site that fit what he is working on. It never chats, never acts on the
 site, and opens a page only when he clicks.
 
-**Status (2026-09-28): Phase 1 is built, reviewed, and passed its manual check; Phase 2
-awaits Hunter's approval.**
+**Status (2026-09-29): Phases 1 and 2 are built, reviewed, and passed their live
+checks; Phase 3 (the personal-context service) is next and not started.**
 Phase 1 is the plumbing: the extension senses the focused tab, the native host relays
 it to the core over a Unix socket, the core tracks visits and forwards GitHub issue
-text to a no-op activity forwarder, and the Mac app shows the core's status. There is
-no catalog, no ranking, and no personal source. Don't describe any Phase 2+ feature as
-built. `scout/` is its own git repo; Phase 1 is on branch `phase-1` over the Phase 0
-baseline commit.
+text to a no-op activity forwarder, and the Mac app shows the core's status. Phase 2
+is catalog discovery: a site origin becomes up to 500 candidate links (llms.txt,
+sitemaps, robots), cached on disk, with a dev CLI. It is a library plus CLI only; the
+coordinator does not call it yet (that is Phase 4). There is still no ranking, no
+model call, and no personal source. Don't describe any Phase 3+ feature as built.
+`scout/` is its own git repo on `main` (Hunter's call: no branch ceremony for the PoC;
+merge and move on).
 
 ## Read first
 
@@ -26,7 +29,9 @@ baseline commit.
 ## Stack
 
 - Node 22.12+ with npm workspaces, TypeScript (strict, `exactOptionalPropertyTypes`,
-  `verbatimModuleSyntax`), zod v4, Vitest, esbuild (extension bundles).
+  `verbatimModuleSyntax`), zod v4, Vitest, esbuild (extension bundles), undici 7
+  (pinned-DNS HTTP transport in scout-core), fast-xml-parser (sitemaps; entities and
+  DTDs off).
 - Swift 6 package at `native/Scout` (macOS 14+): `ScoutApp` executable, `ScoutKit`
   library, `ScoutKitTests`.
 
@@ -56,8 +61,34 @@ baseline commit.
   (0700 run dir, socket published only after chmod 0600, stale-probe), `coordinator.ts`
   (`chromeBundleId` from config.json, default `com.google.Chrome`),
   (panel state, live sensor, page_text gate + ack), `visitTracker.ts`, `resumeCache.ts`
-  (keyed map, 30 s TTL, unused until Phase 2), `activityForwarder.ts` (Phase 1: counts
-  only), `diagnostics.ts` (JSONL, scalar fields, forbidden-name filter), `config.ts`.
+  (keyed map, 30 s TTL; constructed but not read until Phase 4 wires visit → resume
+  cache → catalog → rank), `activityForwarder.ts` (Phase 1: counts only),
+  `diagnostics.ts` (JSONL, scalar fields, forbidden-name filter), `config.ts`,
+  `version.ts` (`SCOUT_VERSION`, must track package.json).
+  - `fetch/`: the outbound HTTPS boundary. `guardedFetch.ts` and `ipAddressPolicy.ts`
+    are adapted from Rook (attribution headers list the changes): HTTPS only, same-host
+    redirects ≤3, 8 s deadline over DNS + hops + body, blocked private/loopback/
+    link-local/CGNAT/NAT64/6to4 ranges, decoded-size cap (2 MiB default). DNS is
+    pinned through an undici Agent (`pinnedDispatcher.ts`); `rawFetch.ts` uses undici
+    `request()` for raw bytes and a hand-rolled pull stream (never `Readable.toWeb`,
+    which threw on late chunks after cancel); `decodedBody.ts` streams gzip/brotli and
+    aborts past the cap. Test hooks live on `createGuardedFetch(hooks)`, which
+    `index.ts` does not export; callers pass named fields only.
+  - `catalog/`: `robots.ts` (`*`/`scout` groups, linear `*`/`$` matcher, rule/pattern/
+    wildcard caps, `compileRobots`), `llmsTxt.ts` (nested one level, ≤5 files),
+    `sitemap.ts` (DOCTYPE/ENTITY rejected pre-parse, index ≤10 children depth 1,
+    ≤5 roots, ≤50k entries), `sanitizeLabel.ts` (Cc/Cf stripped, markdown/tags
+    stripped, input pre-cut), `sameOrigin.ts` (every fetched URL passes it; 2048-char
+    max), `entities.ts`, `catalogFetch.ts`, `pacing.ts` (serial, crawl delay, 128
+    requests and 90 s per window, `startWindow()`), `resolver.ts` (llms > image_title
+    > slug; dedupe before robots; caps 500 / 256 KiB; robots check and work ceilings),
+    `cache.ts` (`~/.scout/cache/catalog/<host>-<hash>.json`, honors `SCOUT_HOME`,
+    schemaVersion 3, dir 0700 / file 0600, fresh 24 h then conditional probes, stale
+    ≤7 d, refusals never freeze a partial catalog), `verifyTargets.ts` (≤3 in parallel,
+    4 s; `.md` → HTML twin only on 200 text/html same host; requires `origin`),
+    `resolveCatalog.ts` (`createCatalogResolver`: the paced fetch + cache wiring the
+    CLI uses and Phase 4 will reuse).
+  - `cli.ts` (`dist/cli.js`): dev CLI; `runCli(argv, io)`; importing it does nothing.
 - `packages/personal-context-mcp` (`personal-context-mcp`): the independent
   personal-context MCP agent. Placeholder. **It must never import `@scout/*`**; Scout is
   only one of its clients.
@@ -83,9 +114,18 @@ Run from `scout/`:
 - `npm run setup [--dry-run] [--scout-root <dir>]`, `npm run doctor`,
   `npm run uninstall [--yes] [--include-key] [--dry-run]`
 - `cd native/Scout && swift build && swift test`; `swift run ScoutApp` to start the app
+- Catalog dev CLI (after a build; only these two touch the network, only when invoked):
+  `node packages/scout-core/dist/cli.js catalog <origin> [--refresh] [--json]` and
+  `… verify <url>...` (≤10 URLs, one origin). `… rank` is a Phase 3 stub (exit 2).
+  `--help` exits 0; misuse exits 1. Cache and diagnostics go under `SCOUT_HOME`
+  (default `~/.scout`); for an agent-driven live check use a throwaway `SCOUT_HOME`.
 
 Env overrides for tests only: `SCOUT_HOME`, `PERSONAL_CONTEXT_HOME`, `CHROME_NMH_DIR`.
 The Swift app reads only `~/.scout`.
+
+Diagnostics events added in Phase 2: `catalog_discover` (counts, ms, robots/llms/
+sitemap counters), `catalog_cache` (source, stale, ageMs), `catalog_cache_invalid`
+(code), `catalog_cache_write_failed` (code). All carry `origin` and scalars only.
 
 ## Rules
 

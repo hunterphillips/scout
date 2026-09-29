@@ -1,9 +1,11 @@
 # Scout
 
 Scout is a proof of concept. When Hunter lands on a website, it shows a few links from
-that site that fit what he is working on. Phase 1 is the plumbing only: a Chrome
+that site that fit what he is working on. Phase 1 is the plumbing: a Chrome
 extension senses the focused tab, a native host relays that to a local core process,
-and a Mac app shows the core's status. There is no ranking yet.
+and a Mac app shows the core's status. Phase 2 is catalog discovery: the core can turn
+a site into a cached list of candidate links, exposed through a dev CLI. Nothing ranks
+them yet, and the running app does not use the catalog yet.
 
 Pieces: a native Mac companion (`native/Scout`), a Chrome sensor
 (`packages/browser-extension` plus `packages/native-host`), shared code
@@ -28,6 +30,9 @@ Catalog dev CLI (after `npm run build`; opt-in, these two make network requests)
     node packages/scout-core/dist/cli.js verify https://docs.stripe.com/payments/subscriptions.md
 
 `catalog` caches under `~/.scout/cache/catalog` for 24 h; `--refresh` revalidates.
+`verify` takes up to 10 URLs from one origin. `rank` is a Phase 3 stub and exits 2.
+Both commands log to `~/.scout/logs/diagnostics.jsonl` (counts and codes only). Set
+`SCOUT_HOME` to keep a test run out of `~/.scout`.
 
 Native app:
 
