@@ -88,15 +88,16 @@ type Outcome = { keep: true; humanHref: string; displayTitle?: string } | { keep
  *
  * - A `.md` source URL: the same URL without `.md` is proposed as the human page. It
  *   becomes `humanHref` only on a 200 `text/html` response from the same host (the final
- *   URL after any same-host redirect). Any other answer, including a 404 on the twin,
- *   keeps the candidate with `humanHref = sourceUrl`: the `.md` page was published, only
- *   its HTML twin is missing.
+ *   URL after any same-host redirect). Any other answer, including a 404 on the twin or a
+ *   twin that leaves the host, keeps the candidate with `humanHref = sourceUrl`: the `.md`
+ *   page itself is never fetched, so the twin's answer says nothing against it.
  * - Any other URL is fetched itself. A 200 keeps it with `humanHref = sourceUrl` and a
  *   `displayTitle` from `og:title` or `<title>` when the page is HTML.
- * - Dropped: a 404/410 on a non-`.md` source (`not_found`); a policy refusal on either
- *   kind (`off_host`), which is how `guardedFetch` reports a redirect off the host (it
- *   also covers the redirect limit and a disallowed address); a source URL that is not a
- *   valid credential-free `https:` URL (`invalid_url`).
+ * - Dropped: a 404/410 on a non-`.md` source (`not_found`); a non-`.md` source whose fetch
+ *   is refused by policy or ends on another host (`off_host`) — a policy refusal is how
+ *   `guardedFetch` reports a redirect off the host (it also covers the redirect limit and
+ *   a disallowed address); a source URL that is not a valid credential-free `https:` URL
+ *   (`invalid_url`).
  * - A timeout, network error, too-large body or unexpected status keeps the candidate with
  *   `humanHref = sourceUrl` and no display title: verification failed, not the page.
  */
@@ -133,11 +134,12 @@ export async function verifyTargets(candidates: readonly Candidate[], options: V
     if (target.origin !== source.origin) return { keep: false, reason: "invalid_url" };
 
     const result = await fetchWithinBudget(target.href);
-    if (result.kind === "error") return result.reason === "policy" ? { keep: false, reason: "off_host" } : keepSource;
+    const offHost: Outcome = isMarkdown ? keepSource : { keep: false, reason: "off_host" };
+    if (result.kind === "error") return result.reason === "policy" ? offHost : keepSource;
     if (result.kind === "absent") return isMarkdown ? keepSource : { keep: false, reason: "not_found" };
     if (result.kind !== "ok") return keepSource;
     const final = sameOriginAbsoluteHttpsUrl(result.finalUrl, source.origin);
-    if (!final) return { keep: false, reason: "off_host" };
+    if (!final) return offHost;
     if (result.status !== 200) return keepSource;
     if (isMarkdown) return isHtml(result.contentType) ? { keep: true, humanHref: final.href } : keepSource;
     const displayTitle = isHtml(result.contentType) ? extractDisplayTitle(result.body) : undefined;

@@ -68,23 +68,28 @@ describe("verifyTargets", () => {
     expect(result.dropped).toEqual([]);
   });
 
-  it("drops a candidate whose fetch is refused for leaving the host", async () => {
+  it("drops a non-.md candidate refused for leaving the host, but keeps a .md whose twin is", async () => {
     const offHost = (): GuardedFetchResult => ({ kind: "error", reason: "policy", message: "redirect off host" });
     const { fetch } = fakeFetch({ "/a": offHost, "/b": offHost });
 
     const result = await verifyTargets([candidate("c0", "/a.md"), candidate("c1", "/b")], { fetch });
 
-    expect(result.verified).toEqual([]);
-    expect(result.dropped).toEqual([
-      { candidateId: "c0", reason: "off_host" },
-      { candidateId: "c1", reason: "off_host" },
-    ]);
+    expect(result.verified).toEqual([expect.objectContaining({ id: "c0", humanHref: `${ORIGIN}/a.md` })]);
+    expect(result.verified[0]).not.toHaveProperty("displayTitle");
+    expect(result.dropped).toEqual([{ candidateId: "c1", reason: "off_host" }]);
   });
 
-  it("drops a candidate whose final URL is on another host", async () => {
-    const { fetch } = fakeFetch({ "/b": () => ok("https://elsewhere.example/b", "<title>x</title>") });
+  it("drops a non-.md candidate whose final URL is on another host, but keeps a .md whose twin's is", async () => {
+    const { fetch } = fakeFetch({
+      "/a": () => ok("https://elsewhere.example/a", "<title>x</title>"),
+      "/b": () => ok("https://elsewhere.example/b", "<title>x</title>"),
+    });
 
-    expect((await verifyTargets([candidate("c0", "/b")], { fetch })).dropped).toEqual([{ candidateId: "c0", reason: "off_host" }]);
+    const result = await verifyTargets([candidate("c0", "/a.md"), candidate("c1", "/b")], { fetch });
+
+    expect(result.verified).toEqual([expect.objectContaining({ id: "c0", humanHref: `${ORIGIN}/a.md` })]);
+    expect(result.verified[0]).not.toHaveProperty("displayTitle");
+    expect(result.dropped).toEqual([{ candidateId: "c1", reason: "off_host" }]);
   });
 
   it("drops a non-.md candidate that is a 404", async () => {
