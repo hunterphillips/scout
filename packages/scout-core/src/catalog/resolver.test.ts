@@ -3,7 +3,8 @@ import { describe, expect, it } from "vitest";
 import type { Diagnostics, DiagnosticFields } from "../diagnostics.js";
 import type { GuardedFetchResult } from "../fetch/guardedFetch.js";
 import { type CatalogFetch, SITEMAP_MAX_BYTES, TEXT_SOURCE_MAX_BYTES } from "./catalogFetch.js";
-import { discoverCatalog, MAX_CANDIDATES, MAX_ROBOTS_CHECKS, normalizeUrl, slugTitle } from "./resolver.js";
+import { discoverCatalog, MAX_CANDIDATES, MAX_ROBOTS_CHECKS, MAX_ROBOTS_WORK, normalizeUrl, slugTitle } from "./resolver.js";
+import { compileRobots, MAX_RULES, MAX_WILDCARDS_PER_RULE, parseRobots } from "./robots.js";
 
 const ORIGIN = "https://shop.example";
 const clock = { now: () => 1_000 };
@@ -233,28 +234,78 @@ describe("discoverCatalog", () => {
     expect((await discoverCatalog({ origin: ORIGIN, fetch: refusing, clock })).catalog.errors).toContain("fetch:refused");
   });
 
-  it("bounds robots work: 50k entries against 2,000 wildcard rules", async () => {
+  it("stops at the robots check ceiling with a small rule set", async () => {
+    const locs = Array.from({ length: 50_000 }, (_, i) => `<url><loc>${ORIGIN}/p/item-${i}</loc></url>`).join("");
+    const { fetch } = fakeFetch({ [`${ORIGIN}/robots.txt`]: "User-agent: *\nDisallow: /*item-*", [`${ORIGIN}/sitemap.xml`]: `<urlset>${locs}</urlset>` });
+
+    const { catalog, stats } = await discoverCatalog({ origin: ORIGIN, fetch, clock });
+
+    expect(stats.disallowed).toBe(MAX_ROBOTS_CHECKS);
+    expect(stats.capped).toBe(50_000 - MAX_ROBOTS_CHECKS);
+    expect(catalog.truncated).toBe(true);
+  });
+
+  it("stops at the robots work budget: 50k entries against 2,000 wildcard rules", async () => {
     // One rule disallows every entry, so neither the candidate cap nor dedupe cuts the loop short;
     // the other 1,999 are wildcard patterns that scan each path without matching.
     const rules = Array.from({ length: 1999 }, (_, k) => `Disallow: /*zz${k}*q*r`);
     rules.push("Disallow: /*item-*");
+    const robots = `User-agent: *\n${rules.join("\n")}`;
     const locs = Array.from({ length: 50_000 }, (_, i) => `<url><loc>${ORIGIN}/p/item-${i}</loc></url>`).join("");
-    const { fetch } = fakeFetch({
-      [`${ORIGIN}/robots.txt`]: `User-agent: *\n${rules.join("\n")}`,
-      [`${ORIGIN}/sitemap.xml`]: `<urlset>${locs}</urlset>`,
-    });
+    const { fetch } = fakeFetch({ [`${ORIGIN}/robots.txt`]: robots, [`${ORIGIN}/sitemap.xml`]: `<urlset>${locs}</urlset>` });
+    const checks = Math.floor(MAX_ROBOTS_WORK / compileRobots(parseRobots(robots)).work);
+    expect(checks).toBeLessThan(MAX_ROBOTS_CHECKS);
 
     const started = performance.now();
     const { catalog, stats } = await discoverCatalog({ origin: ORIGIN, fetch, clock });
     const elapsed = performance.now() - started;
 
     expect(stats.sitemapEntries).toBe(50_000);
-    expect(stats.disallowed).toBe(MAX_ROBOTS_CHECKS);
-    expect(stats.capped).toBe(50_000 - MAX_ROBOTS_CHECKS);
+    expect(stats.disallowed).toBe(checks);
+    expect(stats.capped).toBe(50_000 - checks);
     expect(catalog.truncated).toBe(true);
     expect(catalog.candidates).toEqual([]);
-    // ~350 ms measured with short paths and ~1.6 s with 1,500-character paths, including sitemap parsing;
-    // the bound leaves room for slow CI machines.
+    expect(elapsed).toBeLessThan(5000);
+  });
+
+  it("dedupes before the robots check, so duplicates cost no robots work", async () => {
+    // Each check costs 32,000 pieces, so the work budget allows only 156 checks; 1,000 copies of one URL need one.
+    const rules = Array.from({ length: MAX_RULES }, (_, k) => `Disallow: /${`z${k}*`.repeat(MAX_WILDCARDS_PER_RULE - 1)}q`);
+    const locs = Array.from({ length: 1000 }, (_, i) => `<url><loc>${ORIGIN}/p/item?utm_source=${i}</loc></url>`).join("");
+    const { fetch } = fakeFetch({ [`${ORIGIN}/robots.txt`]: `User-agent: *\n${rules.join("\n")}`, [`${ORIGIN}/sitemap.xml`]: `<urlset>${locs}</urlset>` });
+
+    const { catalog, stats } = await discoverCatalog({ origin: ORIGIN, fetch, clock });
+
+    expect(catalog.candidates).toHaveLength(1);
+    expect(stats.duplicates).toBe(999);
+    expect(stats.capped).toBe(0);
+    expect(catalog.truncated).toBe(false);
+  });
+
+  it("finishes the hostile robots worst case quickly", async () => {
+    // 516 KB robots.txt: 1,000 rules of 250 wildcards each; a 10-child index of 1,000 entries each,
+    // every one the same 2,000-character URL.
+    let robots = "User-agent: *\n";
+    for (let i = 0; i < 1000; i++) robots += `Disallow: /*${"a*".repeat(250)}q${i.toString(36)}\n`;
+    const longPath = `/${"a".repeat(2000)}`;
+    const files: Record<string, string> = { [`${ORIGIN}/robots.txt`]: robots };
+    let index = "<sitemapindex>";
+    for (let f = 0; f < 10; f++) {
+      files[`${ORIGIN}/s${f}.xml`] = `<urlset>${`<url><loc>${ORIGIN}${longPath}</loc></url>`.repeat(1000)}</urlset>`;
+      index += `<sitemap><loc>${ORIGIN}/s${f}.xml</loc></sitemap>`;
+    }
+    files[`${ORIGIN}/sitemap.xml`] = `${index}</sitemapindex>`;
+    const { diagnostics, events } = recordingDiagnostics();
+
+    const started = performance.now();
+    const { catalog, stats } = await discoverCatalog({ origin: ORIGIN, fetch: fakeFetch(files).fetch, clock, diagnostics });
+    const elapsed = performance.now() - started;
+
+    expect(stats.sitemapEntries).toBe(10_000);
+    expect(stats.duplicates).toBe(9_999);
+    expect(catalog.candidates).toHaveLength(1);
+    expect(events.find((e) => e.name === "catalog_discover")?.fields).toMatchObject({ robotsRulesTooManyWildcards: 1000, robotsChecks: 0 });
+    // Measured at a few hundred ms (mostly sitemap parsing); the reviewer's probe took ~22 s before the fix.
     expect(elapsed).toBeLessThan(5000);
   });
 

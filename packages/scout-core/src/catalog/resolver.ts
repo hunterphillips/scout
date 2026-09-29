@@ -25,6 +25,15 @@ export const MAX_LABEL_BYTES = 256 * 1024;
 export const MAX_ROBOTS_CHECKS = 10_000;
 
 /**
+ * Most robots.txt work in one run, counted as rule pieces searched (`CompiledRobots.work`
+ * per check, summed over checks). With up to 2,000 rules of up to 16 pieces, a check can
+ * cost 32,000 searches, so `MAX_ROBOTS_CHECKS` alone would allow hundreds of millions.
+ * Past this budget the remaining entries are dropped as capped and the catalog is marked
+ * truncated, like the check ceiling.
+ */
+export const MAX_ROBOTS_WORK = 5_000_000;
+
+/**
  * Query parameters dropped when comparing URLs for duplicates, matched case-insensitively.
  * `utm_*` is matched by prefix. `ref` is deliberately absent: docs sites use it as a real
  * parameter (a git ref, an API reference).
@@ -52,15 +61,20 @@ export interface DiscoveryStats {
   sitemapEntries: number;
   /** Paths refused by robots.txt. */
   disallowed: number;
-  /** Entries whose normalized URL was already taken by a higher-priority entry. */
+  /**
+   * Entries whose normalized URL an earlier (higher-priority) entry already had. Dedupe
+   * runs before the robots check, so the first entry for a URL decides its fate and
+   * duplicates cost no robots work.
+   */
   duplicates: number;
   /** Entries with no usable label, even from the URL. */
   unlabeled: number;
   /** Entries that failed the resolver's own same-origin re-check. */
   offOrigin: number;
   /**
-   * Entries dropped by the candidate cap, the label-byte cap, or the robots-check ceiling
-   * (`MAX_ROBOTS_CHECKS`). Once any cap is hit, every later entry lands here unexamined.
+   * Entries dropped by the candidate cap, the label-byte cap, or the robots ceilings
+   * (`MAX_ROBOTS_CHECKS`, `MAX_ROBOTS_WORK`). Once any cap is hit, every later entry lands
+   * here unexamined.
    */
   capped: number;
 }
@@ -91,6 +105,7 @@ export interface DiscoverOptions {
  * dropped, no fragment, no tracking parameters (`TRACKING_PARAMS`, case-insensitive). The
  * path is kept as written. A non-empty query is re-serialized through `URLSearchParams`,
  * so equivalent spellings compare equal: `?x` becomes `?x=` and `%20` becomes `+`.
+ * Credentials are not part of the key; the resolver only passes credential-free URLs.
  * Accepts an already-parsed URL, which it does not modify.
  */
 export function normalizeUrl(input: string | URL): string {
@@ -105,8 +120,7 @@ export function normalizeUrl(input: string | URL): string {
     const serialized = params.toString();
     search = serialized ? `?${serialized}` : "";
   }
-  const credentials = url.username || url.password ? `${url.username}${url.password ? `:${url.password}` : ""}@` : "";
-  return `${url.protocol}//${credentials}${url.host}${url.pathname}${search}`;
+  return `${url.protocol}//${url.host}${url.pathname}${search}`;
 }
 
 /**
@@ -162,13 +176,13 @@ function recordResource(resources: Map<string, CatalogResource>, url: string, re
  * come in priority order: `llms.txt` links (`published`), then sitemap URLs with an image
  * title (`image_title`, caption as description), then everything else labeled from its
  * URL (`slug`); a published entry whose label sanitizes to nothing is relabeled from its
- * URL and ranks as `slug`. Paths robots.txt disallows are dropped. Duplicates by
- * `normalizeUrl` keep the first (highest-priority) entry, and `sourceUrl` stays exactly
- * as published. The caps (500 candidates, 256 KiB of label text) keep a prefix of that
+ * URL and ranks as `slug`. Duplicates by `normalizeUrl` keep the first (highest-priority)
+ * entry and are dropped before any robots check; then paths robots.txt disallows are
+ * dropped. `sourceUrl` stays exactly as published. The caps (500 candidates, 256 KiB of label text) keep a prefix of that
  * order, so whole classes survive before any lower class, and document order decides
  * within a class; `truncated` is set if either cap dropped anything. Robots evaluations
- * are also capped (`MAX_ROBOTS_CHECKS`); hitting that ceiling drops the rest and sets
- * `truncated` too. `errors` holds short codes only, never URLs or messages.
+ * are also capped, by count (`MAX_ROBOTS_CHECKS`) and by work (`MAX_ROBOTS_WORK`); hitting
+ * either ceiling drops the rest and sets `truncated` too. `errors` holds short codes only, never URLs or messages.
  */
 export async function discoverCatalog(options: DiscoverOptions): Promise<Discovery> {
   const origin = new URL(options.origin).origin;
@@ -235,6 +249,7 @@ export async function discoverCatalog(options: DiscoverOptions): Promise<Discove
   const compiledRobots = compileRobots(robots);
   const checkRobots = compiledRobots.compiled.length > 0;
   let robotsChecks = 0;
+  let robotsWork = 0;
   const seen = new Set<string>();
   const kept: Draft[] = [];
   let bytes = 0;
@@ -250,22 +265,24 @@ export async function discoverCatalog(options: DiscoverOptions): Promise<Discove
       stats.offOrigin += 1;
       continue;
     }
+    const key = normalizeUrl(url);
+    if (seen.has(key)) {
+      stats.duplicates += 1;
+      continue;
+    }
+    seen.add(key);
     if (checkRobots) {
-      if (robotsChecks >= MAX_ROBOTS_CHECKS) {
+      if (robotsChecks >= MAX_ROBOTS_CHECKS || robotsWork + compiledRobots.work > MAX_ROBOTS_WORK) {
         truncated = true;
         stats.capped += 1;
         continue;
       }
       robotsChecks += 1;
+      robotsWork += compiledRobots.work;
       if (!isAllowed(compiledRobots, url.pathname + url.search)) {
         stats.disallowed += 1;
         continue;
       }
-    }
-    const key = normalizeUrl(url);
-    if (seen.has(key)) {
-      stats.duplicates += 1;
-      continue;
     }
     if (kept.length >= maxCandidates) {
       truncated = true;
@@ -277,7 +294,6 @@ export async function discoverCatalog(options: DiscoverOptions): Promise<Discove
       stats.unlabeled += 1;
       continue;
     }
-    seen.add(key);
     const draft: Draft = { ...entry, title };
     const size = labelBytes(draft);
     if (bytes + size > maxLabelBytes) {
@@ -316,9 +332,23 @@ export async function discoverCatalog(options: DiscoverOptions): Promise<Discove
     truncated,
     failed,
     labelBytes: bytes,
-    requests: resourceList.length,
+    resourceCount: resourceList.length,
     errorCount: errors.length,
     ...stats,
+    llmsDroppedOffOrigin: llms.found ? llms.droppedOffOrigin : 0,
+    llmsSkippedLines: llms.found ? llms.skippedLines : 0,
+    llmsNestedSkipped: llms.found ? llms.nestedSkipped : 0,
+    llmsNestedFailed: llms.found ? llms.nestedFailed : 0,
+    sitemapChildrenSkipped: sitemaps.counters.childrenSkipped,
+    sitemapNestedIndexesIgnored: sitemaps.counters.nestedIndexesIgnored,
+    sitemapEntriesSkipped: sitemaps.counters.entriesSkipped,
+    sitemapDroppedOffOrigin: sitemaps.counters.droppedOffOrigin,
+    sitemapFilesAbsent: sitemaps.counters.filesAbsent,
+    robotsRulesTooLong: robots.skippedRules.tooLong,
+    robotsRulesOverLimit: robots.skippedRules.overLimit,
+    robotsRulesTooManyWildcards: robots.skippedRules.tooManyWildcards,
+    robotsChecks,
+    robotsWork,
   });
 
   return {

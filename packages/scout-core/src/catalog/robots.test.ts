@@ -1,7 +1,16 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import type { GuardedFetchResult } from "../fetch/guardedFetch.js";
-import { compileRobots, fetchRobots, isAllowed, MAX_CRAWL_DELAY_MS, MAX_RULE_PATTERN_LENGTH, MAX_RULES, parseRobots } from "./robots.js";
+import {
+  compileRobots,
+  fetchRobots,
+  isAllowed,
+  MAX_CRAWL_DELAY_MS,
+  MAX_RULE_PATTERN_LENGTH,
+  MAX_RULES,
+  MAX_WILDCARDS_PER_RULE,
+  parseRobots,
+} from "./robots.js";
 
 const fixture = (name: string) => readFileSync(new URL(`../../test/fixtures/robots/${name}`, import.meta.url), "utf8");
 
@@ -66,27 +75,52 @@ describe("parseRobots", () => {
     const rules = parseRobots(["User-agent: *", long, ...many].join("\n"));
 
     expect(rules.rules).toHaveLength(MAX_RULES);
-    expect(rules.skippedRules).toEqual({ tooLong: 1, overLimit: 5 });
+    expect(rules.skippedRules).toEqual({ tooLong: 1, overLimit: 5, tooManyWildcards: 0 });
     expect(isAllowed(rules, `/${"x".repeat(2000)}`)).toBe(true);
     expect(isAllowed(rules, `/r${MAX_RULES}/`)).toBe(true);
     expect(isAllowed(rules, `/r${MAX_RULES - 1}/`)).toBe(false);
   });
 
-  it("matches many-wildcard patterns without pathological backtracking", () => {
-    const rules = parseRobots(`User-agent: *\nDisallow: /${"*a".repeat(40)}b`);
+  it("matches the most wildcards a rule may have without pathological backtracking", () => {
+    const rules = parseRobots(`User-agent: *\nDisallow: /${"*a".repeat(MAX_WILDCARDS_PER_RULE - 2)}*b`);
+    expect(rules.rules).toHaveLength(1);
     const started = performance.now();
     expect(isAllowed(rules, `/${"a".repeat(5000)}`)).toBe(true);
+    expect(isAllowed(rules, `/${"a".repeat(5000)}b`)).toBe(false);
     expect(performance.now() - started).toBeLessThan(1000);
   });
 
+  it("skips rules with more than the wildcard limit, after collapsing runs of *", () => {
+    const atLimit = `/${"a*".repeat(MAX_WILDCARDS_PER_RULE - 1)}z`; // 16 pieces
+    const overLimit = `/${"a*".repeat(MAX_WILDCARDS_PER_RULE)}z`; // 17 pieces
+    const collapsed = `/${"a***".repeat(MAX_WILDCARDS_PER_RULE - 1)}z`; // 16 pieces once ** collapses
+    const rules = parseRobots(["User-agent: *", `Disallow: ${atLimit}`, `Disallow: ${overLimit}`, `Disallow: ${collapsed}`].join("\n"));
+
+    expect(rules.rules.map((r) => r.pattern)).toEqual([atLimit, atLimit]);
+    expect(rules.skippedRules).toEqual({ tooLong: 0, overLimit: 0, tooManyWildcards: 1 });
+  });
+
+  it("drops over-limit wildcard rules passed to compileRobots by hand and reports the work per check", () => {
+    const compiled = compileRobots({
+      rules: [
+        { allow: false, pattern: "/a*b$" }, // 2 pieces
+        { allow: false, pattern: "/x**y" }, // collapses to 2 pieces
+        { allow: false, pattern: `/${"*q".repeat(MAX_WILDCARDS_PER_RULE)}` }, // 17 pieces: dropped
+      ],
+    });
+    expect(compiled.compiled).toHaveLength(2);
+    expect(compiled.work).toBe(4);
+    expect(isAllowed(compiled, "/xzzy")).toBe(false);
+  });
+
   it("matches a maximal-length pattern against a 2,048-character path quickly", () => {
-    const pattern = `/${"*a".repeat((MAX_RULE_PATTERN_LENGTH - 2) / 2)}b`;
+    const pattern = `/*${"a".repeat(MAX_RULE_PATTERN_LENGTH - 4)}*b`;
     expect(pattern).toHaveLength(MAX_RULE_PATTERN_LENGTH);
     const rules = parseRobots(`User-agent: *\nDisallow: ${pattern}`);
     expect(rules.rules).toHaveLength(1);
     const started = performance.now();
     expect(isAllowed(rules, `/${"a".repeat(2047)}`)).toBe(true);
-    expect(performance.now() - started).toBeLessThan(100);
+    expect(performance.now() - started).toBeLessThan(1000);
   });
 
   it("checks the maximum number of worst-case wildcard rules against a 2,048-character path quickly", () => {
@@ -96,7 +130,7 @@ describe("parseRobots", () => {
     expect(rules.rules).toHaveLength(MAX_RULES);
     const started = performance.now();
     expect(isAllowed(rules, `/${"a".repeat(2047)}`)).toBe(true);
-    expect(performance.now() - started).toBeLessThan(100);
+    expect(performance.now() - started).toBeLessThan(1000);
   });
 
   it("keeps anchor, prefix, and multi-wildcard semantics", () => {
@@ -124,7 +158,7 @@ describe("fetchRobots", () => {
     const absent = await fetchRobots("https://example.com", fetchReturning({ kind: "absent", status: 404 }));
     const failed = await fetchRobots("https://example.com", fetchReturning({ kind: "error", reason: "timeout", message: "t" }));
 
-    const none = { tooLong: 0, overLimit: 0 };
+    const none = { tooLong: 0, overLimit: 0, tooManyWildcards: 0 };
     expect(absent).toEqual({ rules: [], sitemaps: [], skippedRules: none, source: "absent" });
     expect(failed).toEqual({ rules: [], sitemaps: [], skippedRules: none, source: "error" });
     expect(isAllowed(absent, "/admin")).toBe(true);

@@ -12,6 +12,13 @@ export const MAX_RULE_PATTERN_LENGTH = 512;
 /** Most `Allow`/`Disallow` rules kept from one file, across all groups; extra rules are skipped. */
 export const MAX_RULES = 2000;
 
+/**
+ * Most `*`-separated pieces in one kept pattern, after runs of `*` collapse to one
+ * (`/a*b*c` has 3). A rule with more is skipped: real robots.txt files use one or two
+ * wildcards, and each piece is a string search on every checked path.
+ */
+export const MAX_WILDCARDS_PER_RULE = 16;
+
 export interface RobotsRule {
   allow: boolean;
   /**
@@ -34,6 +41,8 @@ export interface RobotsRules {
     tooLong: number;
     /** Rules beyond `MAX_RULES`. */
     overLimit: number;
+    /** Patterns with more than `MAX_WILDCARDS_PER_RULE` pieces. */
+    tooManyWildcards: number;
   };
 }
 
@@ -59,14 +68,15 @@ interface Group {
  * the `*` groups apply; otherwise nothing applies. Several groups for the same agent are
  * merged. An empty `Disallow:` is not a rule. `Sitemap:` lines are global.
  *
- * Bounds: patterns over `MAX_RULE_PATTERN_LENGTH` and rules beyond `MAX_RULES` are skipped
- * and counted in `skippedRules`. `Crawl-delay` must be a plain decimal number of seconds;
+ * Bounds: runs of `*` collapse to one `*`. Patterns over `MAX_RULE_PATTERN_LENGTH`, patterns
+ * with more than `MAX_WILDCARDS_PER_RULE` pieces, and rules beyond `MAX_RULES` are skipped
+ * and counted in `skippedRules`; a skipped rule does not use up a `MAX_RULES` slot. `Crawl-delay` must be a plain decimal number of seconds;
  * any other value is ignored, so a later valid line in the group still applies.
  */
 export function parseRobots(text: string): RobotsRules {
   const groups: Group[] = [];
   const sitemaps: string[] = [];
-  const skippedRules = { tooLong: 0, overLimit: 0 };
+  const skippedRules = { tooLong: 0, overLimit: 0, tooManyWildcards: 0 };
   let ruleCount = 0;
   let current: Group | null = null;
   let lastWasAgent = false;
@@ -96,9 +106,11 @@ export function parseRobots(text: string): RobotsRules {
     if (key === "allow" || key === "disallow") {
       if (!value) continue;
       // Check the raw length first so normalization never runs on a huge value.
-      const pattern = value.length > MAX_RULE_PATTERN_LENGTH ? null : normalizeEncoding(value);
+      const pattern = value.length > MAX_RULE_PATTERN_LENGTH ? null : collapseWildcards(normalizeEncoding(value));
       if (pattern === null || pattern.length > MAX_RULE_PATTERN_LENGTH) {
         skippedRules.tooLong += 1;
+      } else if (pieceCount(pattern) > MAX_WILDCARDS_PER_RULE) {
+        skippedRules.tooManyWildcards += 1;
       } else if (ruleCount >= MAX_RULES) {
         skippedRules.overLimit += 1;
       } else {
@@ -134,6 +146,16 @@ function normalizeEncoding(text: string): string {
     });
 }
 
+/** `**` matches exactly what `*` does. */
+function collapseWildcards(pattern: string): string {
+  return pattern.replace(/\*{2,}/g, "*");
+}
+
+/** Pieces the matcher searches for: the pattern (minus a trailing `$`) split on `*`. */
+function pieceCount(pattern: string): number {
+  return (pattern.endsWith("$") ? pattern.slice(0, -1) : pattern).split("*").length;
+}
+
 /** A rule with its pattern split once, so matching a path does no per-call string work. */
 interface CompiledRule {
   allow: boolean;
@@ -147,16 +169,27 @@ interface CompiledRule {
 /** Rules prepared by `compileRobots`; pass to `isAllowed` when checking many paths against one file. */
 export interface CompiledRobots {
   readonly compiled: readonly CompiledRule[];
+  /** Total pieces across all rules: the work one `isAllowed` call does, in string searches. */
+  readonly work: number;
 }
 
-/** Split every rule pattern once. Use this before checking many paths against the same rules. */
+/**
+ * Split every rule pattern once. Use this before checking many paths against the same
+ * rules. Applies the same wildcard bounds as `parseRobots` to rules built by hand: runs of
+ * `*` collapse, and a pattern with more than `MAX_WILDCARDS_PER_RULE` pieces is dropped.
+ */
 export function compileRobots(rules: Pick<RobotsRules, "rules">): CompiledRobots {
-  return {
-    compiled: rules.rules.map((rule) => {
-      const anchored = rule.pattern.endsWith("$");
-      return { allow: rule.allow, length: rule.pattern.length, anchored, pieces: (anchored ? rule.pattern.slice(0, -1) : rule.pattern).split("*") };
-    }),
-  };
+  const compiled: CompiledRule[] = [];
+  let work = 0;
+  for (const rule of rules.rules) {
+    const pattern = collapseWildcards(rule.pattern);
+    const anchored = pattern.endsWith("$");
+    const pieces = (anchored ? pattern.slice(0, -1) : pattern).split("*");
+    if (pieces.length > MAX_WILDCARDS_PER_RULE) continue;
+    work += pieces.length;
+    compiled.push({ allow: rule.allow, length: pattern.length, anchored, pieces });
+  }
+  return { compiled, work };
 }
 
 /**
@@ -214,5 +247,5 @@ export function isAllowed(rules: Pick<RobotsRules, "rules"> | CompiledRobots, ra
 export async function fetchRobots(origin: string, fetch: CatalogFetch): Promise<FetchedRobots> {
   const result = await fetch(`${origin}/robots.txt`, { maxBytes: TEXT_SOURCE_MAX_BYTES, accept: "text/plain" });
   if (result.kind === "ok") return { ...parseRobots(result.body), source: "fetched" };
-  return { rules: [], sitemaps: [], skippedRules: { tooLong: 0, overLimit: 0 }, source: result.kind === "absent" ? "absent" : "error" };
+  return { rules: [], sitemaps: [], skippedRules: { tooLong: 0, overLimit: 0, tooManyWildcards: 0 }, source: result.kind === "absent" ? "absent" : "error" };
 }

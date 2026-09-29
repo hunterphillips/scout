@@ -329,6 +329,28 @@ describe("createCatalogCache", () => {
 
     expect(lines.map((l) => JSON.parse(l).event)).toEqual(["catalog_discover", "catalog_cache", "catalog_cache", "catalog_discover", "catalog_cache"]);
     expect(warnings).toEqual([]);
+    // The parser counters reach the sink under their prefixed names, none dropped by the key filter.
+    const discover = JSON.parse(lines[0] as string);
+    for (const key of [
+      "resourceCount",
+      "llmsDroppedOffOrigin",
+      "llmsSkippedLines",
+      "llmsNestedSkipped",
+      "llmsNestedFailed",
+      "sitemapChildrenSkipped",
+      "sitemapNestedIndexesIgnored",
+      "sitemapEntriesSkipped",
+      "sitemapDroppedOffOrigin",
+      "sitemapFilesAbsent",
+      "robotsRulesTooLong",
+      "robotsRulesOverLimit",
+      "robotsRulesTooManyWildcards",
+      "robotsChecks",
+      "robotsWork",
+    ]) {
+      expect(JSON.stringify(discover), key).toContain(`"${key}":`);
+    }
+    expect(JSON.stringify(discover)).not.toContain('"requests":');
   });
 
   it("serves stale when discovery throws", async () => {
