@@ -7,6 +7,7 @@ import { readFileSync } from "node:fs";
 import { createServer, type Server } from "node:https";
 import type { AddressInfo } from "node:net";
 import { gzipSync } from "node:zlib";
+import type { ServerResponse } from "node:http";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { type GuardedFetchOptions, guardedFetch, type HostLookup } from "./guardedFetch.js";
 import { isDisallowedAddress } from "./ipAddressPolicy.js";
@@ -104,5 +105,94 @@ describe("guardedFetch end to end over TLS", () => {
       socketClosed.then(() => "closed"),
       new Promise((done) => setTimeout(() => done("still open"), 2_000)),
     ])).resolves.toBe("closed");
+  });
+  // Regression: a non-2xx or redirect body that keeps arriving after guarded fetch has
+  // cancelled it used to be pushed into a closed web-stream controller, which threw
+  // ERR_INVALID_STATE from a stream event, outside any promise, and killed the process.
+  describe("bodies that keep arriving after cancel", () => {
+    const uncaught: unknown[] = [];
+    const record = (error: unknown) => { uncaught.push(error); };
+
+    beforeEach(() => {
+      uncaught.length = 0;
+      process.on("uncaughtException", record);
+      process.on("unhandledRejection", record);
+    });
+
+    afterEach(() => {
+      process.off("uncaughtException", record);
+      process.off("unhandledRejection", record);
+    });
+
+    /** Write `total` bytes in `chunks` chunked-encoding writes, `delayMs` apart. */
+    async function trickle(res: ServerResponse, total: number, chunks: number, delayMs: number): Promise<void> {
+      const size = Math.ceil(total / chunks);
+      for (let sent = 0; sent < total && !res.destroyed; sent += size) {
+        res.write(Buffer.alloc(Math.min(size, total - sent), 0x61));
+        await new Promise((done) => setTimeout(done, delayMs));
+      }
+      if (!res.destroyed) res.end();
+    }
+
+    /** Let any late chunks reach the client before checking nothing escaped. */
+    const settle = () => new Promise((done) => setTimeout(done, 400));
+    const lookup: HostLookup = async () => [{ address: SERVER_ADDRESS, family: 4 }];
+
+    it("reports a 404 with a large trickled body as absent without an uncaught error", async () => {
+      handler = (_req, res) => {
+        res.writeHead(404, { "content-type": "text/html" });
+        void trickle(res, 200 * 1024, 8, 10);
+      };
+
+      const result = await guardedFetch(`https://${HOST}:${port}/llms.txt`, options(lookup));
+      await settle();
+
+      expect(result).toEqual({ kind: "absent", status: 404 });
+      expect(uncaught).toEqual([]);
+    });
+
+    it("reports a 404 whose body is sent in one write as absent without an uncaught error", async () => {
+      handler = (_req, res) => {
+        res.writeHead(404, { "content-type": "text/html" });
+        res.end(Buffer.alloc(512 * 1024, 0x61));
+      };
+
+      const result = await guardedFetch(`https://${HOST}:${port}/llms.txt`, options(lookup));
+      await settle();
+
+      expect(result).toEqual({ kind: "absent", status: 404 });
+      expect(uncaught).toEqual([]);
+    });
+
+    it("follows a redirect that carries a large trickled body without an uncaught error", async () => {
+      handler = (req, res) => {
+        if (req.url === "/start") {
+          res.writeHead(301, { location: "/final", "content-type": "text/html" });
+          void trickle(res, 200 * 1024, 8, 10);
+        } else {
+          res.writeHead(200, { "content-type": "text/plain" });
+          res.end("arrived");
+        }
+      };
+
+      const result = await guardedFetch(`https://${HOST}:${port}/start`, options(lookup));
+      await settle();
+
+      expect(result).toMatchObject({ kind: "ok", body: "arrived", finalUrl: `https://${HOST}:${port}/final` });
+      expect(uncaught).toEqual([]);
+    });
+
+    it("stops a trickled body at the cap without an uncaught error", async () => {
+      handler = (_req, res) => {
+        res.writeHead(200, { "content-type": "text/plain" });
+        void trickle(res, 400 * 1024, 16, 10);
+      };
+
+      const result = await guardedFetch(`https://${HOST}:${port}/sitemap.xml`, options(lookup, { maxBytes: 64 * 1024 }));
+      await settle();
+
+      expect(result).toMatchObject({ kind: "error", reason: "too_large" });
+      expect(uncaught).toEqual([]);
+    });
   });
 });

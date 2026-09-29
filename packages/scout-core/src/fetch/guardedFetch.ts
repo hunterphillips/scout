@@ -107,7 +107,11 @@ function hostnameOf(url: URL): string {
  * opens a fresh connection; that costs little because the dispatcher is per call.
  */
 async function drain(response: Response): Promise<void> {
-  await response.body?.cancel().catch(() => undefined);
+  try {
+    await response.body?.cancel();
+  } catch {
+    // A locked or already-errored body is already on its way down; nothing to do.
+  }
 }
 
 function rejectOnAbort(signal: AbortSignal): Promise<never> {

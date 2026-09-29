@@ -1,4 +1,4 @@
-import { Readable } from "node:stream";
+import type { Readable } from "node:stream";
 import { request, type Dispatcher } from "undici";
 
 /** The request shape guarded fetch hands to its transport. */
@@ -56,7 +56,47 @@ export const rawFetch: FetchLike = async (url, init) => {
     await response.body.dump();
     return new Response(null, { status: response.statusCode, headers });
   }
-  // Readable.toWeb honours backpressure here (verified on Node 24): the socket is read only as the decoder pulls.
-  const body = Readable.toWeb(response.body) as ReadableStream<Uint8Array>;
-  return new Response(body, { status: response.statusCode, headers });
+  return new Response(pullStream(response.body), { status: response.statusCode, headers });
 };
+
+/**
+ * Wrap a Node body as a web stream that reads one chunk per `pull`, so the socket is
+ * read only as the consumer asks, and destroys the body on `cancel`.
+ *
+ * Why not `Readable.toWeb`: its adapter pushes from the Node stream's `data` events. After
+ * a cancel, chunks already buffered keep arriving and are enqueued on the closed
+ * controller, which throws from an event handler, outside any promise, and kills the
+ * process. Here every read happens inside `pull`'s promise, nothing listens for `data`,
+ * and a stray `error` event (say, the dispatcher closing the socket mid-body) has a
+ * listener, so no stream event can throw outside the fetch promise.
+ */
+function pullStream(body: Readable): ReadableStream<Uint8Array> {
+  body.on("error", () => undefined); // errors reach the reader through the iterator below
+  const chunks = body[Symbol.asyncIterator]() as AsyncIterator<Uint8Array>;
+  let done = false;
+  return new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      let next: IteratorResult<Uint8Array>;
+      try {
+        next = await chunks.next();
+      } catch (error) {
+        if (!done) {
+          done = true;
+          controller.error(error);
+        }
+        return;
+      }
+      if (done) return; // cancelled while this read was pending
+      if (next.done) {
+        done = true;
+        controller.close();
+      } else {
+        controller.enqueue(next.value);
+      }
+    },
+    cancel() {
+      done = true;
+      body.destroy();
+    },
+  });
+}
