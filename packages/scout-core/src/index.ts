@@ -142,3 +142,16 @@ export {
   type CatalogCacheSource,
   type ResolveWithCacheOptions,
 } from "./catalog/cache.js";
+export {
+  extractDisplayTitle,
+  TITLE_SCAN_CHARS,
+  VERIFY_BUDGET_MS,
+  VERIFY_MAX_BYTES,
+  VERIFY_MAX_CANDIDATES,
+  verifyTargets,
+  type VerifiedCandidate,
+  type VerifyDropReason,
+  type VerifyFetch,
+  type VerifyOptions,
+  type VerifyResult,
+} from "./catalog/verifyTargets.js";

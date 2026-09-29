@@ -22,6 +22,13 @@ Run from this directory (Node 22.12+, npm):
     npm run test:e2e    # real native host against the real core (needs npm run build)
     npm run test:all    # build, then both of the above
 
+Catalog dev CLI (after `npm run build`; opt-in, these two make network requests):
+
+    node packages/scout-core/dist/cli.js catalog https://docs.stripe.com [--refresh] [--json]
+    node packages/scout-core/dist/cli.js verify https://docs.stripe.com/payments/subscriptions.md
+
+`catalog` caches under `~/.scout/cache/catalog` for 24 h; `--refresh` revalidates.
+
 Native app:
 
     cd native/Scout && swift build && swift test
