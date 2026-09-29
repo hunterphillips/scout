@@ -104,3 +104,36 @@ export {
   type SitemapRejectReason,
   type SitemapUrl,
 } from "./catalog/sitemap.js";
+export { type CatalogFetchOptions } from "./catalog/catalogFetch.js";
+export {
+  createPacedCatalogFetch,
+  MAX_REQUESTS_PER_RUN,
+  type PacedCatalogFetch,
+  type PacedCatalogFetchOptions,
+  type Sleep,
+} from "./catalog/pacing.js";
+export {
+  discoverCatalog,
+  MAX_CANDIDATES,
+  MAX_LABEL_BYTES,
+  normalizeUrl,
+  slugTitle,
+  TRACKING_PARAMS,
+  type CatalogResource,
+  type DiscoverOptions,
+  type Discovery,
+  type DiscoveryStats,
+} from "./catalog/resolver.js";
+export {
+  cacheFileName,
+  CATALOG_CACHE_SCHEMA_VERSION,
+  CATALOG_FRESH_MS,
+  CATALOG_STALE_MAX_MS,
+  createCatalogCache,
+  type CatalogCache,
+  type CatalogCacheFile,
+  type CatalogCacheOptions,
+  type CatalogCacheResult,
+  type CatalogCacheSource,
+  type ResolveWithCacheOptions,
+} from "./catalog/cache.js";
