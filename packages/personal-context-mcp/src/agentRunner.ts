@@ -33,7 +33,8 @@
 // queue as `cancelled` without spawning.
 //
 // Logging: `<home>/runs.jsonl` (0600) gets one line per run with timings, turns, token
-// counts, tool-call count, source ids, droppedCount, status and fixed reason codes. The
+// counts, tool-call count, source ids, the model the CLI reported in its init event,
+// droppedCount, status and fixed reason codes. The
 // request id is hashed. Never prompts, snippets, candidate text, titles or paths. The
 // `log` callback gets fixed codes only.
 
@@ -55,6 +56,7 @@ import {
   type LaunchProfileOptions,
 } from "./launchProfile.js";
 import type { ObservationSnapshot } from "./observationStore.js";
+import { MODEL_RE } from "./model.js";
 import { OwnedTree, psSnapshot, type PsSnapshot } from "./processTree.js";
 import { buildPrompt, buildSystemMd } from "./prompt.js";
 import {
@@ -177,6 +179,8 @@ export interface RunContext {
 
 export interface RunStats {
   ms: number;
+  /** The model the CLI reported in its init event, when it matches MODEL_RE. */
+  model?: string;
   turns?: number;
   tokensIn?: number;
   tokensOut?: number;
@@ -479,6 +483,7 @@ export function createAgentRunner(deps: AgentRunnerDeps): AgentRunner {
     const s = out.stats;
     if (s) {
       line.cliMs = s.ms;
+      if (s.model !== undefined) line.model = s.model;
       for (const k of ["turns", "tokensIn", "tokensOut", "cacheReadTokens", "cacheWriteTokens"] as const) if (s[k] !== undefined) line[k] = s[k];
       line.toolCalls = s.toolCalls;
       line.sourceIds = s.sourceIds;
@@ -727,6 +732,7 @@ export function createAgentRunner(deps: AgentRunnerDeps): AgentRunner {
       const audit = readAuditIndex(join(runDir, AUDIT_FILE));
       const usage = isRec(resultEv?.usage) ? resultEv.usage : {};
       const stats: RunStats = { ms, toolCalls: audit.toolCalls, sourceIds: audit.sourceIds };
+      if (typeof init?.model === "string" && MODEL_RE.test(init.model)) stats.model = init.model;
       const turns = num(resultEv?.num_turns);
       if (turns !== undefined) stats.turns = turns;
       const tIn = num(usage.input_tokens);

@@ -157,6 +157,9 @@ export type FocusHttpSource = z.infer<typeof FocusHttpSourceSchema>;
 
 export const DEFAULT_PORT = 47821;
 
+/** The model every run uses unless config.json says otherwise. Pinned so runs never follow Hunter's Claude Code default. */
+export const DEFAULT_MODEL = "claude-sonnet-5-5";
+
 /** Every default source ships disabled; setup never enables anything. */
 export const DEFAULT_SOURCES: readonly SourceConfig[] = Object.freeze([
   { id: "second-brain-notes", kind: "markdown_dir", enabled: false, root: "~/workspace/second-brain/notes", exclude: [] },
@@ -176,7 +179,7 @@ const absolutePath = z.string().refine((p) => isAbsolute(p));
 /** Field-by-field so an error can name the top-level key. Unknown top-level keys are kept. */
 const FIELD_SCHEMAS = {
   port: z.int().min(1).max(65_535),
-  /** `null`: no `--model` flag, so Hunter's normal Claude Code choice applies. */
+  /** Defaults to DEFAULT_MODEL. An explicit `null`: no `--model` flag, so Hunter's normal Claude Code choice applies. */
   model: z.string().regex(MODEL_RE).nullable(),
   maxRankMs: z.int().min(1).max(MAX_DEADLINE_MS),
   nodePath: absolutePath,
@@ -198,7 +201,7 @@ export interface ConfigFile {
 function defaultConfigFile(): ConfigFile {
   return {
     port: DEFAULT_PORT,
-    model: null,
+    model: DEFAULT_MODEL,
     maxRankMs: MAX_DEADLINE_MS,
     sources: structuredClone(DEFAULT_SOURCES) as SourceConfig[],
   };
@@ -371,7 +374,7 @@ export type ResolvedSource = SourceConfig;
 /** The config the service runs on: `~` expanded, every source path absolute. */
 export interface PcmConfig {
   port: number;
-  /** `null`: no `--model` flag. */
+  /** DEFAULT_MODEL unless config.json overrides it; `null` (set explicitly): no `--model` flag. */
   model: string | null;
   maxRankMs: number;
   nodePath?: string;

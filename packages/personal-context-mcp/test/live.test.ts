@@ -8,7 +8,8 @@
 // The run dir (and its audit.jsonl) is removed when the run ends, so "the audit recorded
 // read_recent_activity" is checked through what the runner derived from that audit:
 // runs.jsonl `sourceIds` contains `activity` (only an ok read_recent_activity call issues
-// activity evidence), and the response cites `activity` evidence.
+// activity evidence), and the response cites `activity` evidence. The config sets no model,
+// so runs.jsonl must record the pinned DEFAULT_MODEL as the model the CLI reported.
 
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -19,6 +20,7 @@ import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { afterAll, describe, expect, it } from "vitest";
 import { RankResponseSchema, type RankCandidate } from "../src/api.js";
 import { resolveOnPath } from "../src/authPreflight.js";
+import { DEFAULT_MODEL } from "../src/config.js";
 import { runServer, type RunningServer } from "../src/server.js";
 
 if (process.env.SCOUT_LIVE !== "1") {
@@ -113,6 +115,7 @@ describe("live: one real rank through the service", () => {
       const runs = readFileSync(join(home, "runs.jsonl"), "utf8").trim().split("\n").map((l) => JSON.parse(l) as Record<string, unknown>);
       const run = runs.at(-1)!;
       expect(run.status).toBe("ok");
+      expect(run.model).toBe(DEFAULT_MODEL); // config.json sets no model, so the pinned default applies
       expect(run.toolCalls as number).toBeGreaterThanOrEqual(1);
       expect(run.sourceIds).toContain("activity"); // from the run's audit: read_recent_activity issued evidence
       // The init capability check passed: an ok run requires it, and nothing logged a failure.

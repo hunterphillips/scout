@@ -7,6 +7,7 @@ import {
   ConfigError,
   isExcludedAncestry,
   prepareRoot,
+  DEFAULT_MODEL,
   DEFAULT_PORT,
   isAlwaysExcluded,
   loadConfig,
@@ -59,7 +60,7 @@ describe("loading", () => {
   it("returns defaults with every source disabled when the file is missing", () => {
     const cfg = loadConfig(tempHome(), ENV);
     expect(cfg.port).toBe(DEFAULT_PORT);
-    expect(cfg.model).toBeNull();
+    expect(cfg.model).toBe(DEFAULT_MODEL);
     expect(cfg.maxRankMs).toBe(26_000);
     expect(cfg.sources.map((s) => s.id)).toEqual(["second-brain-notes", "project-thoughts", "focus"]);
     expect(cfg.sources.every((s) => !s.enabled)).toBe(true);
@@ -82,6 +83,12 @@ describe("loading", () => {
     const byId = Object.fromEntries(cfg.sources.map((s) => [s.id, s]));
     expect(byId["second-brain-notes"]).toMatchObject({ root: "/Users/tester/workspace/second-brain/notes" });
     expect(byId["project-thoughts"]).toMatchObject({ registry: "/Users/tester/workspace/second-brain/notes", subpath: "thoughts/shared" });
+  });
+
+  it("pins the model to claude-sonnet-5-5 by default and keeps an explicit null (inherit)", () => {
+    expect(DEFAULT_MODEL).toBe("claude-sonnet-5-5");
+    expect(parseConfigFile({}).model).toBe("claude-sonnet-5-5");
+    expect(parseConfigFile({ model: null }).model).toBeNull();
   });
 
   it("accepts a task_recall markdown source and a model name", () => {

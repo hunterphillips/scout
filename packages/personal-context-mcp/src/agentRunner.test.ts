@@ -20,7 +20,7 @@ import {
   type AgentRunnerDeps,
   type SpawnFn,
 } from "./agentRunner.js";
-import type { PcmConfig } from "./config.js";
+import { DEFAULT_MODEL, parseConfigFile, type PcmConfig } from "./config.js";
 import { FORWARD_KEYS, runDirectPreflight } from "./launchProfile.js";
 import type { ObservationSnapshot } from "./observationStore.js";
 import { cleanupSandboxes, expectNoSentinels, fakeClaude, gatewayParentEnv, makeSandbox, SENTINELS } from "./test-support/preflightSandbox.js";
@@ -104,7 +104,8 @@ function setup(opts: { mode?: string; model?: string | null; maxRankMs?: number;
   };
   const config: PcmConfig = {
     port: 47821,
-    model: opts.model === undefined ? null : opts.model,
+    // No override: the config default, as a config.json without `model` resolves.
+    model: opts.model === undefined ? parseConfigFile({}).model : opts.model,
     maxRankMs: opts.maxRankMs ?? 26_000,
     nodePath: process.execPath,
     claudePath: claude,
@@ -222,16 +223,15 @@ describe("agent runner: happy path", () => {
       { id: "e1", kind: "activity", label: "recent page: Billing issue" },
       expect.objectContaining({ kind: "note", label: expect.stringMatching(/^notes: /) }),
     ]);
-    expect(out.stats).toMatchObject({ turns: 3, tokensIn: 100, tokensOut: 20, toolCalls: 3, sourceIds: ["activity", "notes"] });
+    expect(out.stats).toMatchObject({ model: "fake-model-1", turns: 3, tokensIn: 100, tokensOut: 20, toolCalls: 3, sourceIds: ["activity", "notes"] });
 
     // Run dir removed; nothing left in the scratch root.
     expect(scratchEntries(e)).toEqual([]);
 
     const [call, ...rest] = fakeLines(e);
-    // argv exactly: the Phase 0B flag set, streamed, no --model when config.model is null.
-    expect(call!.argv).toEqual(buildArgv([], call!.cwd!));
-    expect(call!.argv).not.toContain("--model");
-    expect(call!.argv!.slice(0, 5)).toEqual(["-p", "--output-format", "stream-json", "--verbose", "--json-schema"]);
+    // argv exactly: the pinned default model, then the Phase 0B flag set, streamed.
+    expect(call!.argv).toEqual(buildArgv(["--model", DEFAULT_MODEL], call!.cwd!));
+    expect(call!.argv!.slice(2, 7)).toEqual(["-p", "--output-format", "stream-json", "--verbose", "--json-schema"]);
     // cwd is the run dir: fresh, under the scratch root, and gone now.
     expect(dirname(call!.cwd!)).toBe(e.scratch);
     expect(existsSync(call!.cwd!)).toBe(false);
@@ -263,6 +263,7 @@ describe("agent runner: happy path", () => {
       req: hashRequestId(REQ_SENTINEL),
       status: "ok",
       grant: "grant-rev-1",
+      model: "fake-model-1", // what the fake's init event reports
       turns: 3,
       tokensIn: 100,
       tokensOut: 20,
@@ -279,6 +280,21 @@ describe("agent runner: happy path", () => {
   });
 
   it("passes --model only when config.model is set", async () => {
+    // Default: the pinned model.
+    const d = setup({ mode: "empty" });
+    expect((await d.runner.run(request(), ctx())).result).toEqual({ status: "empty" });
+    const dCall = fakeLines(d)[0]!;
+    expect(dCall.argv!.slice(0, 2)).toEqual(["--model", "claude-sonnet-5-5"]);
+    expect(dCall.argv).toEqual(buildArgv(["--model", "claude-sonnet-5-5"], dCall.cwd!));
+
+    // Explicit null: inherit the CLI default, so no flag.
+    const n = setup({ mode: "empty", model: null });
+    expect((await n.runner.run(request(), ctx())).result).toEqual({ status: "empty" });
+    const nCall = fakeLines(n)[0]!;
+    expect(nCall.argv).not.toContain("--model");
+    expect(nCall.argv).toEqual(buildArgv([], nCall.cwd!));
+
+    // Explicit other id: that id.
     const e = setup({ mode: "empty", model: "opus" });
     const out = await e.runner.run(request(), ctx());
     expect(out.result).toEqual({ status: "empty" });

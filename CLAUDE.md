@@ -115,6 +115,8 @@ branch ceremony for the PoC; merge and move on).
     `log/`, everything under `~/workspace/personal-context/`), `checkReadable`
     (realpath containment, excluded ancestry, too-broad roots), `writeConfig`.
     Sources: `markdown_dir`, `registry_projects`, `focus_http`; all disabled by default.
+    The model is pinned to `claude-sonnet-5-5` (`DEFAULT_MODEL`) by default;
+    `"model": null` in `config.json` inherits the CLI default, any other string overrides.
   - `observationStore.ts`: in memory only; 15 min TTL, 10 entries, 8 KiB text.
   - `launchProfile.ts`, `authPreflight.ts`: the Phase 0 direct launch profile and
     billing preflight, now library code. `runDirectPreflight` is blocking; the server

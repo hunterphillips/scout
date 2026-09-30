@@ -49,7 +49,9 @@ Personal-context service (after `npm run build`):
 The service keeps its files under `~/.personal-context-mcp` (`PERSONAL_CONTEXT_HOME`
 overrides): `config.json` (port, model, sources; every source ships disabled), `token`
 (bearer token every client must send), `runs.jsonl` (per-run counts, never content),
-`run/server.json`. On start it runs the billing preflight against its own launch
+`run/server.json`. Runs use `claude-sonnet-5-5` unless `config.json` says otherwise:
+`"model": null` inherits the Claude Code default, and any other model name overrides it.
+On start it runs the billing preflight against its own launch
 profile and refuses to rank unless the verdict is `subscription`. `pcm rank` accepts a
 candidate array or the catalog CLI's `--json` output and makes one real model call.
 `SCOUT_LIVE=1 npm run test:live -w personal-context-mcp` is the opt-in smoke test (one
