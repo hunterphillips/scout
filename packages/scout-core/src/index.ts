@@ -31,6 +31,40 @@ export {
   type ActivitySend,
 } from "./activityForwarder.js";
 export {
+  createRankClient,
+  SCOUT_SENSOR,
+  type RankClient,
+  type RankClientOptions,
+  type RankClientResult,
+} from "./rankClient.js";
+export {
+  ACK_WAIT_MS,
+  createRankJob,
+  MIN_RANK_MS,
+  RANK_MAX_RESULTS,
+  UNKNOWN_CONTEXT_STATUS,
+  VERIFY_RESERVE_MS,
+  VISIT_DEADLINE_MS,
+  type RankCall,
+  type RankJob,
+  type RankJobOptions,
+  type RankJobOutcome,
+  type RankJobState,
+  type Timers,
+} from "./rankClient/rankJob.js";
+export { type AckTracker, createAckTracker } from "./rankClient/ackTracker.js";
+export {
+  createServiceTransport,
+  DEFAULT_SERVICE_URL,
+  personalContextHome,
+  type CallOptions,
+  type ServiceTransport,
+  type ServiceTransportOptions,
+  type TransportFailure,
+  type TransportFailureReason,
+  type TransportResult,
+} from "./rankClient/transport.js";
+export {
   createCoordinator,
   type Coordinator,
   type CoordinatorConfig,
