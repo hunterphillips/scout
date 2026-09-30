@@ -42,10 +42,13 @@ export interface RankClientOptions {
 
 export interface RankClient {
   /**
-   * Rank a visit's catalog. One job per epoch: a second call for the same epoch returns the
-   * first call's promise, and a call for a new epoch cancels every other epoch's job.
-   * Resolves with the final result, or null when the job was cancelled or its epoch is no
-   * longer current. It always settles, so the caller never stays `working`.
+   * Rank a visit's catalog. Epochs are monotonic: call once per epoch, never for an epoch
+   * older than the current one. One job per epoch: a second call for the same epoch returns
+   * the first call's promise, and a call for a newer epoch cancels every other epoch's job.
+   * A call for an older epoch resolves null at once (`rank_skipped`, reason `stale`) and
+   * leaves the current job alone. Resolves with the final result, or null when the job was
+   * cancelled or its epoch is no longer current. It always settles, so the caller never
+   * stays `working`. Phase 4 must call `close()` at core shutdown.
    */
   rankForVisit(visit: ActiveVisit, catalog: SiteCatalog): Promise<RankClientResult | null>;
   /** The visit changed; cancels jobs for any other epoch. */
@@ -114,6 +117,10 @@ export function createRankClient(options: RankClientOptions): RankClient {
     rankForVisit(visit, catalog) {
       const existing = jobs.get(visit.epoch);
       if (existing) return existing.result;
+      if (currentEpoch !== null && visit.epoch < currentEpoch) {
+        diagnostics?.event("rank_skipped", { epoch: visit.epoch, reason: "stale" });
+        return Promise.resolve(null);
+      }
       setCurrentEpoch(visit.epoch);
       const epoch = visit.epoch;
       const job = createRankJob({

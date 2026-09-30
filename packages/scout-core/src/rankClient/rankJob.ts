@@ -79,6 +79,13 @@ export interface RankJob {
   readonly finished: boolean;
 }
 
+interface RoundContext {
+  /** The last discarded request, which the next round supersedes. */
+  previousRequestId: string | null;
+  /** The contextRevision the latest round ranked against. */
+  rev: number;
+}
+
 const globalTimers: Timers = {
   setTimeout: (fn, ms) => setTimeout(fn, ms),
   clearTimeout: (h) => clearTimeout(h as ReturnType<typeof setTimeout>),
@@ -94,9 +101,15 @@ const globalTimers: Timers = {
  * contextRevision change while ranking makes the job dirty: when the call returns its
  * result is discarded and exactly one re-rank starts for the newest revision, with
  * `supersedes` naming the discarded request. Any number of changes during one rank
- * coalesce into that one re-rank; the chain repeats while time remains. If the call runs
- * past its budget it is aborted and the job ends `unavailable: "timed out"`, never
- * `empty`. Every outcome is final and emitted once, so the caller never stays `working`.
+ * coalesce into that one re-rank. Re-ranks chain: a change during a re-rank discards it
+ * too and starts one more, once per discard while at least 5 s of model time remain,
+ * because the plan says further observations during the re-rank coalesce into it the same
+ * way. In practice the chain is short: `page_text` observations are rare, and the 30 s
+ * visit budget caps it. If the call runs past its budget it is aborted and the job ends
+ * `unavailable: "timed out"`, never `empty`. A cancel or a local timeout always aborts
+ * the call in flight, so the service never keeps running a model for a dead visit. A
+ * throw from any injected dependency ends the job `unavailable: "service unreachable"`.
+ * Every outcome is final and emitted once, so the caller never stays `working`.
  */
 export function createRankJob(options: RankJobOptions): RankJob {
   const { clock, diagnostics, epoch } = options;
@@ -115,11 +128,23 @@ export function createRankJob(options: RankJobOptions): RankJob {
   });
 
   const setState = (next: RankJobState): void => {
+    // idle -> idle is not a change; cancel() and the loop's finish would otherwise both emit it.
+    if (next.kind === "idle" && state.kind === "idle") return;
     state = next;
-    options.onState?.(next);
+    try {
+      options.onState?.(next);
+    } catch {
+      // A throwing listener must not keep the job from settling.
+    }
   };
 
-  const statusFields = (): ContextStatus => ({ ...(options.lastContextStatus?.() ?? UNKNOWN_CONTEXT_STATUS) });
+  const statusFields = (): ContextStatus => {
+    try {
+      return { ...(options.lastContextStatus?.() ?? UNKNOWN_CONTEXT_STATUS) };
+    } catch {
+      return { ...UNKNOWN_CONTEXT_STATUS };
+    }
+  };
 
   const local = (
     status: "unavailable" | "error" | "cancelled",
@@ -135,74 +160,93 @@ export function createRankJob(options: RankJobOptions): RankJob {
   };
 
   async function loop(site: { origin: string; name?: string }, candidates: readonly Candidate[]): Promise<RankJobOutcome> {
-    let previousRequestId: string | null = null;
+    const ctx: RoundContext = { previousRequestId: null, rev: 0 };
     for (;;) {
-      if ((await Promise.race([options.waitForAcks(ACK_WAIT_MS).then(() => "acked" as const), cancelSignal])) === "cancelled") {
-        return finish({ kind: "cancelled" });
+      let step: RankJobOutcome | "again";
+      try {
+        step = await round(site, candidates, ctx);
+      } catch {
+        // An injected dependency threw (e.g. a rejecting ack wait); the job still settles.
+        step = cancelled ? { kind: "cancelled" } : local("unavailable", "service unreachable", ctx.rev, ctx.previousRequestId);
       }
-      const rev = options.getContextRevision();
-      const deadlineMs = Math.min(visitDeadline - clock.now() - VERIFY_RESERVE_MS, MAX_DEADLINE_MS);
-      if (deadlineMs < MIN_RANK_MS) {
-        const reason = previousRequestId === null ? "no time left" : "timed out";
-        diagnostics?.event("rank_skipped", { epoch, reason });
-        return finish(local("unavailable", reason, rev, previousRequestId));
-      }
+      if (step !== "again") return finish(step);
+    }
+  }
 
-      const requestId = newRequestId();
-      const request: RankRequest = {
-        requestId,
-        site: site.name === undefined ? { origin: site.origin } : { origin: site.origin, name: site.name },
-        candidates: candidates.map(toRankCandidate),
-        maxResults: RANK_MAX_RESULTS,
-        deadlineMs: Math.floor(deadlineMs),
-      };
-      if (previousRequestId !== null) request.supersedes = previousRequestId;
+  /** One rank round: returns the job's outcome, or `again` when its result was discarded for a re-rank. */
+  async function round(
+    site: { origin: string; name?: string },
+    candidates: readonly Candidate[],
+    ctx: RoundContext,
+  ): Promise<RankJobOutcome | "again"> {
+    if (cancelled) return { kind: "cancelled" };
+    const acked = await Promise.race([options.waitForAcks(ACK_WAIT_MS).then(() => "acked" as const), cancelSignal]);
+    // cancel() can run in the microtasks between the ack wait settling and this line; the
+    // race above still reads "acked" then, so the flag is the check that counts.
+    if (acked === "cancelled" || cancelled) return { kind: "cancelled" };
+    const rev = options.getContextRevision();
+    ctx.rev = rev;
+    const deadlineMs = Math.min(visitDeadline - clock.now() - VERIFY_RESERVE_MS, MAX_DEADLINE_MS);
+    if (deadlineMs < MIN_RANK_MS) {
+      const reason = ctx.previousRequestId === null ? "no time left" : "timed out";
+      diagnostics?.event("rank_skipped", { epoch, reason });
+      return local("unavailable", reason, rev, ctx.previousRequestId);
+    }
 
-      controller = new AbortController();
-      const signal = controller.signal;
-      let timedOut = false;
-      let fireTimeout: () => void = () => {};
-      const deadlineHit = new Promise<"timed out">((resolve) => {
-        fireTimeout = () => resolve("timed out");
-      });
-      const watchdog = timers.setTimeout(() => {
-        timedOut = true;
-        controller?.abort();
-        fireTimeout();
-      }, deadlineMs);
+    const requestId = newRequestId();
+    const request: RankRequest = {
+      requestId,
+      site: site.name === undefined ? { origin: site.origin } : { origin: site.origin, name: site.name },
+      candidates: candidates.map(toRankCandidate),
+      maxResults: RANK_MAX_RESULTS,
+      deadlineMs: Math.floor(deadlineMs),
+    };
+    if (ctx.previousRequestId !== null) request.supersedes = ctx.previousRequestId;
+
+    const roundController = new AbortController();
+    controller = roundController;
+    let timedOut = false;
+    let fireTimeout: () => void = () => {};
+    const deadlineHit = new Promise<"timed out">((resolve) => {
+      fireTimeout = () => resolve("timed out");
+    });
+    const watchdog = timers.setTimeout(() => {
+      timedOut = true;
+      roundController.abort();
+      fireTimeout();
+    }, deadlineMs);
+
+    let result: TransportResult<RankResponse> | "cancelled" | "timed out";
+    try {
       setState({ kind: "ranking", rev, requestId });
       diagnostics?.event("rank_start", { epoch, rev, deadlineMs: request.deadlineMs });
-
-      let result: TransportResult<RankResponse> | "cancelled" | "timed out";
-      try {
-        // The races keep cancel() and the deadline prompt even if `rank` ignores its signal.
-        result = await Promise.race([options.rank(request, signal), cancelSignal, deadlineHit]);
-      } catch {
-        result = { ok: false, status: "unavailable", reason: "service unreachable" };
-      } finally {
-        timers.clearTimeout(watchdog);
-        controller = null;
-      }
-      if (cancelled || result === "cancelled") return finish({ kind: "cancelled" });
-
-      const invalidated = state.kind === "dirty" || options.getContextRevision() !== rev;
-      if (invalidated && !timedOut) {
-        diagnostics?.event("rank_discarded", { epoch });
-        previousRequestId = requestId;
-        continue;
-      }
-      let outcome: RankJobOutcome;
-      if (timedOut || result === "timed out") outcome = local("unavailable", "timed out", rev, requestId);
-      else if (!result.ok) outcome = local(result.status === "cancelled" ? "unavailable" : result.status, result.reason, rev, requestId);
-      // The service cancels a run at its deadline; to the panel that is a quiet timeout.
-      else if (result.value.status === "cancelled") {
-        const { serviceInstanceId, activityRevision, sourceGrantRevision } = result.value;
-        const response: RankResponse = { status: "unavailable", reason: "timed out", serviceInstanceId, activityRevision, sourceGrantRevision };
-        outcome = { kind: "result", response, source: "local", rev, requestId };
-      }
-      else outcome = { kind: "result", response: result.value, source: "service", rev, requestId };
-      return finish(outcome);
+      // The races keep cancel() and the deadline prompt even if `rank` ignores its signal.
+      result = await Promise.race([options.rank(request, roundController.signal), cancelSignal, deadlineHit]);
+    } catch {
+      result = { ok: false, status: "unavailable", reason: "service unreachable" };
+    } finally {
+      timers.clearTimeout(watchdog);
+      controller = null;
+      // A call this job no longer waits for must not keep the service running a model.
+      if (cancelled || timedOut) roundController.abort();
     }
+    if (cancelled || result === "cancelled") return { kind: "cancelled" };
+
+    const invalidated = state.kind === "dirty" || options.getContextRevision() !== rev;
+    if (invalidated && !timedOut) {
+      diagnostics?.event("rank_discarded", { epoch });
+      ctx.previousRequestId = requestId;
+      return "again";
+    }
+    if (timedOut || result === "timed out") return local("unavailable", "timed out", rev, requestId);
+    if (!result.ok) return local(result.status === "cancelled" ? "unavailable" : result.status, result.reason, rev, requestId);
+    // The service cancels a run at its deadline; to the panel that is a quiet timeout.
+    if (result.value.status === "cancelled") {
+      const { serviceInstanceId, activityRevision, sourceGrantRevision } = result.value;
+      const response: RankResponse = { status: "unavailable", reason: "timed out", serviceInstanceId, activityRevision, sourceGrantRevision };
+      return { kind: "result", response, source: "local", rev, requestId };
+    }
+    return { kind: "result", response: result.value, source: "service", rev, requestId };
   }
 
   return {

@@ -120,7 +120,7 @@ afterEach(async () => {
   rmSync(dir, { recursive: true, force: true });
 });
 
-function connect(overrides: { baseUrl?: string; tokenPath?: string } = {}): ServiceTransport {
+function connect(overrides: { baseUrl?: string; tokenPath?: string; connectTimeoutMs?: number } = {}): ServiceTransport {
   transport = createServiceTransport({ baseUrl: stub.url, tokenPath, ...overrides });
   return transport;
 }
@@ -223,6 +223,48 @@ describe("service transport", () => {
     stub.dropSessions();
     expect(await t.contextStatus()).toMatchObject({ ok: false, status: "unavailable", reason: "service unreachable" });
     expect(await t.contextStatus()).toEqual({ ok: true, value: STATUS });
+  });
+
+  it("an abort during a failing connect still drops the session, so the next call reconnects", async () => {
+    const port = stub.port;
+    await stub.close();
+    const t = connect({ baseUrl: `http://127.0.0.1:${port}/mcp` });
+    const controller = new AbortController();
+    const pending = t.contextStatus({ signal: controller.signal });
+    controller.abort();
+    expect(await pending).toEqual({ ok: false, status: "cancelled", reason: "aborted" });
+    stub = await startStub(port);
+    expect(await t.contextStatus()).toEqual({ ok: true, value: STATUS });
+  });
+
+  it("fails a hung handshake at the connect timeout and retries it on the next call", async () => {
+    let requests = 0;
+    const hung = createServer(() => {
+      requests += 1;
+    });
+    await new Promise<void>((resolve) => hung.listen(0, "127.0.0.1", resolve));
+    try {
+      const t = connect({ baseUrl: `http://127.0.0.1:${(hung.address() as AddressInfo).port}/mcp`, connectTimeoutMs: 100 });
+      const startedAt = Date.now();
+      expect(await t.contextStatus()).toMatchObject({ ok: false, status: "unavailable" });
+      expect(Date.now() - startedAt).toBeLessThan(1000);
+      expect(requests).toBe(1);
+      expect(await t.contextStatus()).toMatchObject({ ok: false, status: "unavailable" });
+      expect(requests).toBe(2);
+    } finally {
+      hung.closeAllConnections();
+      await new Promise<void>((resolve) => hung.close(() => resolve()));
+    }
+  });
+
+  it("fails every call after close() without reconnecting", async () => {
+    const t = connect();
+    expect((await t.contextStatus()).ok).toBe(true);
+    await t.close();
+    const seen = stub.authHeaders.length;
+    expect(await t.contextStatus()).toEqual({ ok: false, status: "unavailable", reason: "service unreachable" });
+    expect(await t.rankSiteLinks(REQUEST)).toEqual({ ok: false, status: "unavailable", reason: "service unreachable" });
+    expect(stub.authHeaders).toHaveLength(seen);
   });
 
   it("reconnects after the service comes back on the same port", async () => {

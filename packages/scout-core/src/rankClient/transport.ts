@@ -62,6 +62,8 @@ export interface ServiceTransportOptions {
   /** Injected for tests; passed to the SDK transport. */
   fetch?: typeof fetch;
   env?: NodeJS.ProcessEnv;
+  /** Longest the MCP handshake may take before the connect fails; defaults to 10 s. */
+  connectTimeoutMs?: number;
 }
 
 /** ~/.personal-context-mcp, or PERSONAL_CONTEXT_HOME when set (the service's own convention). */
@@ -73,14 +75,18 @@ class NoTokenError extends Error {}
 
 /** SDK default is 60 s; nothing Scout sends should wait that long. */
 const DEFAULT_CALL_TIMEOUT_MS = 10_000;
+/** A hung handshake fails this fast instead of after the SDK's 60 s. */
+const DEFAULT_CONNECT_TIMEOUT_MS = 10_000;
 
 /**
  * The one MCP client session Scout holds with the personal-context service.
  *
  * Policy: the bearer token is read lazily at connect, from a regular file only, and is
- * re-read on every reconnect. After a connection failure, a 401, or a lost session, the
- * session is dropped and the next call reconnects; a malformed answer, a JSON-RPC error,
- * a timeout, or the caller's own abort keeps it. Aborting a
+ * re-read on every reconnect. After a connection failure (including a handshake that runs
+ * past `connectTimeoutMs`), a 401, or a lost session, the session is dropped and the next
+ * call reconnects, even when the caller aborted meanwhile; a malformed answer, a JSON-RPC
+ * error, a call timeout, or the abort itself keeps it. After `close()` every call fails
+ * `unavailable` without connecting. Aborting a
  * call's signal makes the SDK send `notifications/cancelled` for that request (the
  * service treats it as an abort) and fail the call at once. `supersedes` only works
  * within one session, which is why the session is kept rather than opened per call.
@@ -89,7 +95,9 @@ const DEFAULT_CALL_TIMEOUT_MS = 10_000;
 export function createServiceTransport(options: ServiceTransportOptions = {}): ServiceTransport {
   const baseUrl = new URL(options.baseUrl ?? DEFAULT_SERVICE_URL);
   const tokenPath = options.tokenPath ?? join(personalContextHome(options.env), "token");
+  const connectTimeoutMs = options.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS;
   let connecting: Promise<Client> | null = null;
+  let closed = false;
   let lastStatus: ContextStatus | null = null;
 
   const readToken = async (): Promise<string> => {
@@ -113,17 +121,12 @@ export function createServiceTransport(options: ServiceTransportOptions = {}): S
     const client = new Client({ name: "scout-core", version: SCOUT_VERSION });
     try {
       // The SDK's own class trips exactOptionalPropertyTypes on `sessionId`; it is the documented pairing.
-      await client.connect(transport as Transport);
+      await client.connect(transport as Transport, { timeout: connectTimeoutMs });
     } catch (err) {
       await client.close().catch(() => {});
       throw err;
     }
     return client;
-  };
-
-  const getClient = (): Promise<Client> => {
-    connecting ??= connect();
-    return connecting;
   };
 
   const reset = (failed: Promise<Client>): void => {
@@ -133,7 +136,18 @@ export function createServiceTransport(options: ServiceTransportOptions = {}): S
     void failed.then((c) => c.close()).catch(() => {});
   };
 
+  const getClient = (): Promise<Client> => {
+    if (connecting === null) {
+      const attempt = connect();
+      connecting = attempt;
+      // A failed connect is never reused, whoever was waiting on it and however it failed.
+      attempt.catch(() => reset(attempt));
+    }
+    return connecting;
+  };
+
   async function call<T>(name: string, args: Record<string, unknown>, schema: z.ZodType<T>, opts: CallOptions): Promise<TransportResult<T>> {
+    if (closed) return { ok: false, status: "unavailable", reason: "service unreachable" };
     const pending = getClient();
     let structured: unknown;
     try {
@@ -146,11 +160,15 @@ export function createServiceTransport(options: ServiceTransportOptions = {}): S
       if (result.isError === true) return { ok: false, status: "error", reason: "service error" };
       structured = result.structuredContent;
     } catch (err) {
-      if (opts.signal?.aborted) return { ok: false, status: "cancelled", reason: "aborted" };
+      const aborted = opts.signal?.aborted === true;
       const failure = classify(err);
-      // A JSON-RPC error answer or a timeout leaves the session usable; closing it on a
-      // timeout would also cut off the SDK's `notifications/cancelled` for that request.
-      if (failure.reason !== "service error" && failure.reason !== "timed out") reset(pending);
+      // The abort itself, a JSON-RPC error answer, or a call timeout leaves the session
+      // usable; closing it then would also cut off the SDK's `notifications/cancelled`.
+      // Anything else (connect failure, 401, lost session) drops it even if the caller
+      // aborted meanwhile, so the next call reconnects instead of failing again.
+      const isAbort = aborted && err === opts.signal?.reason;
+      if (!isAbort && failure.reason !== "service error" && failure.reason !== "timed out") reset(pending);
+      if (aborted) return { ok: false, status: "cancelled", reason: "aborted" };
       return failure;
     }
     const parsed = schema.safeParse(structured);
@@ -178,6 +196,7 @@ export function createServiceTransport(options: ServiceTransportOptions = {}): S
     },
     lastContextStatus: () => (lastStatus === null ? null : { ...lastStatus }),
     async close() {
+      closed = true;
       const current = connecting;
       connecting = null;
       if (current) await current.then((c) => c.close()).catch(() => {});

@@ -105,6 +105,16 @@ describe("ack wait", () => {
     expect(calls[0]!.at - t0).toBe(1000);
   });
 
+  it("clears the cap's timer once every ack has arrived", async () => {
+    const acks = createAckTracker();
+    acks.track(new Promise((resolve) => setTimeout(resolve, 100)));
+    const waited = acks.waitForAcks(1000);
+    expect(vi.getTimerCount()).toBe(2);
+    await vi.advanceTimersByTimeAsync(100);
+    await waited;
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   it("records the revision after the ack wait, not before", async () => {
     const { job, calls } = makeJob({
       waitForAcks: () =>
@@ -305,6 +315,50 @@ describe("cancel and failure", () => {
     calls[0]!.resolve(ok("c0"));
     await flush();
     expect(calls).toHaveLength(1);
+  });
+
+  it("cancel() emits idle once", async () => {
+    const { job, states } = makeJob();
+    const result = job.run(SITE, CANDIDATES);
+    await flush();
+    job.cancel();
+    await result;
+    expect(states.map((s) => s.kind)).toEqual(["ranking", "idle"]);
+  });
+
+  // cancel() can land in any microtask after the ack wait settles; at no depth may a rank
+  // call be left running for the dead visit.
+  it("a cancel right after the ack wait never leaves a live rank call", async () => {
+    for (let depth = 0; depth < 10; depth++) {
+      let ackResolve!: () => void;
+      const { job, calls } = makeJob({ waitForAcks: () => new Promise<void>((resolve) => (ackResolve = resolve)) });
+      const result = job.run(SITE, CANDIDATES);
+      await flush();
+      ackResolve();
+      let q = Promise.resolve();
+      for (let i = 0; i < depth; i++) q = q.then(() => {});
+      void q.then(() => job.cancel());
+      expect(await result).toEqual({ kind: "cancelled" });
+      expect(calls.length).toBeLessThanOrEqual(1);
+      for (const call of calls) expect(call.signal.aborted).toBe(true);
+    }
+  });
+
+  it("cancel() before run() ends the job without calling the service", async () => {
+    const { job, calls } = makeJob();
+    job.cancel();
+    expect(await job.run(SITE, CANDIDATES)).toEqual({ kind: "cancelled" });
+    expect(calls).toHaveLength(0);
+  });
+
+  it("a rejecting ack wait still finishes the job as unavailable", async () => {
+    const { job, calls } = makeJob({ waitForAcks: async () => Promise.reject(new Error("boom")) });
+    const outcome = await job.run(SITE, CANDIDATES);
+    expect(calls).toHaveLength(0);
+    expect(outcome).toMatchObject({ kind: "result", source: "local", response: { status: "unavailable", reason: "service unreachable" } });
+    expectContextStatus(outcome);
+    expect(job.finished).toBe(true);
+    expect(job.state).toEqual({ kind: "idle" });
   });
 
   it("cancel() during the ack wait ends the job without calling the service", async () => {

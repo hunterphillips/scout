@@ -135,6 +135,20 @@ describe("rank client epochs", () => {
     expect(await second).toMatchObject({ epoch: 2, source: "service", response: OK });
   });
 
+  it("an older epoch does not take over from the current one", async () => {
+    const events: [string, Record<string, unknown>][] = [];
+    const { client, ranks } = makeClient({ diagnostics: { event: (name, fields = {}) => void events.push([name, fields]), failures: 0 } });
+    const current = client.rankForVisit(visit(6), CATALOG);
+    await flush();
+    expect(await client.rankForVisit(visit(5), CATALOG)).toBeNull();
+    await flush();
+    expect(ranks).toHaveLength(1);
+    expect(ranks[0]!.signal?.aborted).toBe(false);
+    expect(events).toContainEqual(["rank_skipped", { epoch: 5, reason: "stale" }]);
+    ranks[0]!.reply.resolve({ ok: true, value: OK });
+    expect(await current).toMatchObject({ epoch: 6, source: "service", response: OK });
+  });
+
   it("setCurrentEpoch cancels jobs for other epochs", async () => {
     const { client, ranks } = makeClient();
     const first = client.rankForVisit(visit(1), CATALOG);
@@ -251,6 +265,23 @@ describe("sendObservation", () => {
     expect(ranks[1]!.req.supersedes).toBe("r1");
     ranks[1]!.reply.resolve({ ok: true, value: { status: "empty", ...STATUS } });
     expect(await result).toMatchObject({ contextRevision: 1, response: { status: "empty" } });
+  });
+});
+
+describe("close", () => {
+  it("cancels the running job, and later calls fail cleanly", async () => {
+    const { client, ranks, setObserve } = makeClient();
+    const running = client.rankForVisit(visit(1), CATALOG);
+    await flush();
+    let closed = false;
+    const unavailable = async (): Promise<TransportResult<ObserveActivityResult>> =>
+      closed ? { ok: false, status: "unavailable", reason: "service unreachable" } : { ok: true, value: { accepted: true, observationId: "o" } };
+    setObserve(unavailable);
+    await client.close();
+    closed = true;
+    expect(await running).toBeNull();
+    expect(ranks[0]!.signal?.aborted).toBe(true);
+    await expect(client.sendObservation(PAGE)).rejects.toThrow(/observe_activity failed/);
   });
 });
 

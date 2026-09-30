@@ -1,5 +1,5 @@
-/** Waits `ms` milliseconds; injected so tests can drive time. */
-export type Sleep = (ms: number) => Promise<void>;
+/** Waits `ms` milliseconds, or until `signal` aborts; injected so tests can drive time. */
+export type Sleep = (ms: number, signal?: AbortSignal) => Promise<void>;
 
 export interface AckTracker {
   /** Track one in-flight `observe_activity` send until it settles either way. */
@@ -9,12 +9,24 @@ export interface AckTracker {
   readonly pendingCount: number;
 }
 
-const realSleep: Sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const realSleep: Sleep = (ms, signal) =>
+  new Promise((resolve) => {
+    const handle = setTimeout(resolve, ms);
+    signal?.addEventListener(
+      "abort",
+      () => {
+        clearTimeout(handle);
+        resolve();
+      },
+      { once: true },
+    );
+  });
 
 /**
  * The observations a rank must wait for. Policy: a rank waits only for sends that were
  * already in flight when it started; sends tracked during the wait do not extend it, and
- * the wait never exceeds its cap.
+ * the wait never exceeds its cap. The cap's timer is cleared once the wait settles, so it
+ * never keeps the process alive.
  */
 export function createAckTracker(options: { sleep?: Sleep } = {}): AckTracker {
   const sleep = options.sleep ?? realSleep;
@@ -34,7 +46,12 @@ export function createAckTracker(options: { sleep?: Sleep } = {}): AckTracker {
     },
     async waitForAcks(maxMs) {
       if (pending.size === 0) return;
-      await Promise.race([Promise.all([...pending]), sleep(maxMs)]);
+      const stop = new AbortController();
+      try {
+        await Promise.race([Promise.all([...pending]), sleep(maxMs, stop.signal)]);
+      } finally {
+        stop.abort();
+      }
     },
   };
 }
