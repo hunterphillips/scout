@@ -9,7 +9,17 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import type { RankRequest } from "./api.js";
-import { buildArgv, createAgentRunner, hashRequestId, redactReason, type AgentRunner, type AgentRunnerDeps, type SpawnFn } from "./agentRunner.js";
+import {
+  buildArgv,
+  checkInit,
+  createAgentRunner,
+  hashRequestId,
+  redactReason,
+  SOURCE_TOOLS as SOURCE_TOOL_NAMES,
+  type AgentRunner,
+  type AgentRunnerDeps,
+  type SpawnFn,
+} from "./agentRunner.js";
 import type { PcmConfig } from "./config.js";
 import { FORWARD_KEYS, runDirectPreflight } from "./launchProfile.js";
 import type { ObservationSnapshot } from "./observationStore.js";
@@ -116,6 +126,8 @@ function setup(opts: { mode?: string; model?: string | null; maxRankMs?: number;
     preflight: () => ({ verdict: "subscription", reasons: [] }),
     log: (l) => e.logs.push(l),
     nonce: () => "n0nce",
+    // Short grace in tests; one test keeps the real 2 s.
+    killGraceMs: 500,
     ...opts.deps,
   });
   e.runner.refreshPreflight();
@@ -303,7 +315,7 @@ describe("agent runner: outcomes", () => {
     ["all-invalid", { status: "error", reason: "validation_failed", droppedCount: 2 }],
     ["path-citation", { status: "error", reason: "validation_failed", droppedCount: 1 }],
     ["unknown-id", { status: "ok", droppedCount: 1 }],
-    ["four-items", { status: "ok", droppedCount: 1 }],
+    ["four-items", { status: "ok", droppedCount: 0 }],
     ["duplicate-id", { status: "ok", droppedCount: 1 }],
     ["unissued-evidence", { status: "ok", droppedCount: 1 }],
   ])("%s", async (mode, expected) => {
@@ -317,6 +329,57 @@ describe("agent runner: outcomes", () => {
     }
     expect(scratchEntries(e)).toEqual([]);
     expect(runLines(e).at(-1)).toMatchObject({ status: expected.status });
+  });
+
+  it("auth-result: an error result naming login is unavailable: auth or quota", async () => {
+    const e = setup({ mode: "auth-result" });
+    const out = await e.runner.run(request(), ctx());
+    expect(out.result).toEqual({ status: "unavailable", reason: "auth or quota" });
+    expect(runLines(e).at(-1)).toMatchObject({ status: "unavailable", reason: "auth or quota" });
+  });
+
+  it("quota-retry: a 429 api_retry stops the run as unavailable: auth or quota", async () => {
+    const e = setup({ mode: "quota-retry" });
+    const out = await e.runner.run(request(), ctx());
+    expect(out.result).toEqual({ status: "unavailable", reason: "auth or quota" });
+    await expectAllGoneWithin(allPids(e), 3000);
+    expect(scratchEntries(e)).toEqual([]);
+  });
+
+  it("a multi-byte character split across stdout chunks survives intact", async () => {
+    const e = setup({ mode: "split-utf8" });
+    const out = await e.runner.run(request(), ctx());
+    expect(out.result).toMatchObject({ status: "ok", items: [{ id: "c1", reason: "Café naïve ✓ 日本 fits" }] });
+  });
+
+  it("a final result line without a trailing newline still counts", async () => {
+    const e = setup({ mode: "no-newline" });
+    const out = await e.runner.run(request(), ctx());
+    expect(out.result).toMatchObject({ status: "ok", droppedCount: 0, items: [{ id: "c1" }] });
+  });
+
+  it("a throwing log callback never breaks a run", async () => {
+    const e = setup({
+      mode: "extra-tool-use",
+      deps: {
+        log: () => {
+          throw new Error("logger down");
+        },
+      },
+    });
+    const out = await e.runner.run(request(), ctx());
+    expect(out.result).toEqual({ status: "error", reason: "capability check failed" });
+    await expectAllGoneWithin(allPids(e), 3000);
+  });
+
+  it("narrows a pre-existing 0644 runs.jsonl to 0600", async () => {
+    const e = setup({ mode: "empty" });
+    const runsPath = join(e.home, "runs.jsonl");
+    writeFileSync(runsPath, "", { mode: 0o644 });
+    chmodSync(runsPath, 0o644);
+    await e.runner.run(request(), ctx());
+    expect(statSync(runsPath).mode & 0o777).toBe(0o600);
+    expect(runLines(e)).toHaveLength(1);
   });
 
   it("strips URLs from reasons", async () => {
@@ -401,6 +464,57 @@ describe("agent runner: billing preflight", () => {
     expect(e.runner.refreshPreflight()).toMatchObject({ verdict: "ambiguous", reasons: ["internal: preflight failed unexpectedly"] });
     expect(e.logs.join("\n")).not.toContain("SENTINEL");
   });
+
+  it("a queued run whose config changed while it waited never spawns", async () => {
+    const e = setup({ mode: "hang" });
+    const acs = [new AbortController(), new AbortController()];
+    const running = acs.map((ac, i) => e.runner.run({ ...request(), requestId: `r${i}` }, ctx(ac.signal)));
+    await waitFor(() => fakeLines(e).filter((l) => l.sourcesPid !== undefined).length >= 2);
+    const queued = e.runner.run({ ...request(), requestId: "queued" }, ctx());
+    await waitFor(() => e.runner.queued === 1);
+    // Passed the gate before this; the new claude path is unverified.
+    e.runner.setConfig({ ...e.config, claudePath: join(e.base, "bin", "other-claude") });
+    for (const ac of acs) ac.abort("supersedes");
+    for (const r of running) expect((await r).result).toEqual({ status: "cancelled", reason: "supersedes" });
+    expect((await queued).result).toEqual({ status: "unavailable", reason: "billing route unverified" });
+    expect(e.spawnCalls).toBe(2);
+    expect(runLines(e).find((l) => l.req === hashRequestId("queued"))).toMatchObject({ status: "unavailable", reason: "billing route unverified" });
+    await expectAllGoneWithin(allPids(e), 3000);
+  });
+});
+
+// ---------- checkInit ----------
+
+describe("checkInit", () => {
+  const good = () => ({
+    type: "system",
+    subtype: "init",
+    tools: [...SOURCE_TOOL_NAMES, "StructuredOutput"],
+    mcp_servers: [{ name: "sources", status: "connected" }],
+    permissionMode: "dontAsk",
+    apiKeySource: "none",
+  });
+
+  it("accepts the granted set, with or without a first-party apiProvider", () => {
+    expect(checkInit(good())).toEqual([]);
+    expect(checkInit({ ...good(), apiProvider: "firstParty" })).toEqual([]);
+  });
+
+  it.each<[string, Record<string, unknown>, string]>([
+    ["an extra tool", { tools: [...SOURCE_TOOL_NAMES, "StructuredOutput", "Bash"] }, "init: unexpected tools"],
+    ["a missing source tool", { tools: [...SOURCE_TOOL_NAMES.slice(1), "StructuredOutput"] }, "init: source tools missing"],
+    ["permission mode not dontAsk", { permissionMode: "default" }, "init: permission mode is not dontAsk"],
+    ["a non-first-party apiProvider", { apiProvider: "bedrock" }, "init: unexpected auth route"],
+    ["apiKeySource not none", { apiKeySource: "ANTHROPIC_API_KEY" }, "init: unexpected auth route"],
+    [
+      "an extra MCP server",
+      { mcp_servers: [{ name: "sources", status: "connected" }, { name: "other", status: "connected" }] },
+      "init: mcp servers are not exactly sources/connected",
+    ],
+    ["sources not connected", { mcp_servers: [{ name: "sources", status: "failed" }] }, "init: mcp servers are not exactly sources/connected"],
+  ])("rejects %s", (_l, patch, reason) => {
+    expect(checkInit({ ...good(), ...patch })).toEqual([reason]);
+  });
 });
 
 // ---------- capability check ----------
@@ -462,7 +576,8 @@ describe("agent runner: aborts", () => {
   );
 
   it("a CLI that ignores SIGTERM is SIGKILLed after 2 s", async () => {
-    const e = setup({ mode: "ignore-term" });
+    // The one test on the real grace period.
+    const e = setup({ mode: "ignore-term", deps: { killGraceMs: 2000 } });
     const ac = new AbortController();
     const p = e.runner.run(request(), ctx(ac.signal));
     await waitFor(sourcesStarted(e));
@@ -485,6 +600,44 @@ describe("agent runner: aborts", () => {
     expect((await a).result).toEqual({ status: "cancelled", reason: "sigterm" });
     expect((await b).result).toEqual({ status: "cancelled", reason: "sigterm" });
     expect(e.runner.active).toBe(0);
+    await expectAllGoneWithin(allPids(e), 3000);
+    expect(scratchEntries(e)).toEqual([]);
+  });
+
+  it("ps failing: the group is still signalled directly; cancelled within 3 s of the deadline", async () => {
+    const e = setup({ mode: "hang", deps: { psSnapshot: () => new Map() } });
+    const t0 = Date.now();
+    const out = await e.runner.run(request({ deadlineMs: 1500 }), ctx());
+    expect(out.result).toEqual({ status: "cancelled", reason: "deadline" });
+    expect(Date.now() - t0).toBeLessThan(1500 + 3000);
+    const pids = allPids(e);
+    expect(pids).toHaveLength(2);
+    await expectAllGoneWithin(pids, 3000);
+    expect(scratchEntries(e)).toEqual([]);
+  });
+
+  it("an exit that is never observed is capped at grace + 2 s and logged as reap_timeout", async () => {
+    const e = setup({
+      mode: "hang",
+      deps: {
+        spawn: (c, a, o) => {
+          const child = nodeSpawn(c, [...a], o);
+          const once = child.once.bind(child);
+          // Swallow the exit listener: the runner never sees the CLI exit.
+          child.once = ((ev: string, fn: (...args: unknown[]) => void) => (ev === "exit" ? child : once(ev, fn))) as typeof child.once;
+          return child;
+        },
+      },
+    });
+    const ac = new AbortController();
+    const p = e.runner.run(request(), ctx(ac.signal));
+    await waitFor(() => fakeLines(e).some((l) => l.sourcesPid !== undefined));
+    const t0 = Date.now();
+    ac.abort("supersedes");
+    const out = await p;
+    expect(out.result).toEqual({ status: "cancelled", reason: "supersedes" });
+    expect(Date.now() - t0).toBeGreaterThanOrEqual(500 + 2000 - 100);
+    expect(e.logs).toContain("reap_timeout");
     await expectAllGoneWithin(allPids(e), 3000);
     expect(scratchEntries(e)).toEqual([]);
   });

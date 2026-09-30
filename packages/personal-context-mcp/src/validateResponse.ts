@@ -6,7 +6,8 @@
 // others: an item is dropped when its candidate id is unknown or repeated, when it has no
 // string reason, or when none of its evidence ids was issued by this run's source tools
 // (a path, title or URL in place of an id is simply not an issued id). At most
-// `maxResults` surviving items are kept. Reasons are cut to 140 characters with URL-like
+// `maxResults` surviving items are kept; once that many survive, the rest are neither
+// examined nor counted as dropped. Reasons are cut to 140 characters with URL-like
 // strings removed. Evidence labels are written here from the audit map; any label, path
 // or other extra field the model put on an item is never read.
 //
@@ -28,6 +29,10 @@ import type { EvidenceLocation } from "./sourceTools/evidence.js";
 export interface RankOkResult {
   status: "ok";
   items: RankItem[];
+  /**
+   * Items the model returned that failed validation (unknown or repeated id, bad reason,
+   * no issued evidence). Items past `maxResults` are cut, not dropped, and never counted.
+   */
   droppedCount: number;
 }
 export interface RankEmptyResult {
@@ -36,6 +41,7 @@ export interface RankEmptyResult {
 export interface RankFailureResult {
   status: "unavailable" | "cancelled" | "error";
   reason: string;
+  /** On `validation_failed`: items rejected by validation, as on RankOkResult. */
   droppedCount?: number;
 }
 /** A rank_site_links response without its ContextStatus fields (the server adds those). */
@@ -51,14 +57,34 @@ const MAX_LABEL_CHARS = 120;
 
 export type LabelFor = (loc: EvidenceLocation) => string;
 
-/** Short service-written labels. Never content, never anything the model wrote. */
+/**
+ * Short service-written labels, never anything the model wrote. Labels may carry Hunter's
+ * own page titles (the runner's activity labels) and relative note paths; never absolute
+ * paths or snippet text.
+ */
 export const defaultLabelFor: LabelFor = (loc) => {
   if (loc.kind === "activity") return "recent page";
   if (loc.kind === "focus") return "focus item";
   return loc.path === undefined ? loc.sourceId : `${loc.sourceId}: ${loc.path}`;
 };
 
-const URL_LIKE = /(?:\b[a-z][a-z0-9+.-]*:\/\/|\bwww\.|\b(?:javascript|data|mailto|file):)\S*/giu;
+const HOST_TLDS = "com|org|net|io|dev|ai|co|md|app|edu|gov";
+/**
+ * URL-like strings: `scheme://…`, `www.…`, a `javascript:`/`data:`/`mailto:`/`file:` word
+ * followed by a non-space (so "config file: X" survives), a dotted name followed by a path
+ * (`evil.example/x`), and a bare host ending in a common TLD (`evil.com`). "e.g." and
+ * "v1.2" are not URL-like.
+ */
+const URL_LIKE = new RegExp(
+  [
+    String.raw`\b[a-z][a-z0-9+.-]*:\/\/\S*`,
+    String.raw`\bwww\.\S*`,
+    String.raw`\b(?:javascript|data|mailto|file):(?=\S)\S*`,
+    String.raw`\b[\w-]+(?:\.[\w-]+)+\/\S*`,
+    String.raw`\b[\w-]+(?:\.[\w-]+)*\.(?:${HOST_TLDS})(?![\w-])\S*`,
+  ].join("|"),
+  "giu",
+);
 
 /** Remove URL-like strings, control and format characters; collapse whitespace; cap at 140 characters. */
 export function cleanReason(reason: string): string {
@@ -104,8 +130,10 @@ export function validateResponse({ output, req, audit, labelFor = defaultLabelFo
   const known = new Set(req.candidates.map((c) => c.id));
   const seen = new Set<string>();
   const kept: RankItem[] = [];
+  let droppedCount = 0;
   for (const raw of items) {
-    if (kept.length >= req.maxResults) break; // the rest count as dropped
+    if (kept.length >= req.maxResults) break; // cut, not dropped: never examined or counted
+    droppedCount++; // undone below once the item survives
     if (!isRecord(raw)) continue;
     const { id, reason, evidenceIds } = raw;
     if (typeof id !== "string" || !known.has(id) || seen.has(id)) continue;
@@ -123,8 +151,8 @@ export function validateResponse({ output, req, audit, labelFor = defaultLabelFo
     }
     if (evidence.length === 0) continue;
     kept.push({ id, reason: cleanReason(reason), evidence });
+    droppedCount--;
   }
-  const droppedCount = items.length - kept.length;
   if (kept.length === 0) return { status: "error", reason: VALIDATION_FAILED, droppedCount };
   return { status: "ok", items: kept, droppedCount };
 }

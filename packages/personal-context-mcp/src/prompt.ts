@@ -34,13 +34,16 @@ Rules:
 `;
 }
 
-/** One line of display text: no control or format characters, whitespace collapsed, capped, `|` escaped. */
+/**
+ * One line of display text: no control or format characters, whitespace collapsed, capped,
+ * `\` then `|` escaped (so `a\|b` cannot forge a field separator).
+ */
 export function sanitizeField(s: string, maxChars: number): string {
   const flat = s
     .replace(/\p{Cc}|\p{Cf}/gu, " ")
     .replace(/\s+/gu, " ")
     .trim();
-  return [...flat].slice(0, maxChars).join("").replaceAll("|", "\\|");
+  return [...flat].slice(0, maxChars).join("").replaceAll("\\", "\\\\").replaceAll("|", "\\|");
 }
 
 /**

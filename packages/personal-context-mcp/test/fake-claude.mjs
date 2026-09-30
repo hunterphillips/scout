@@ -224,6 +224,48 @@ switch (mode) {
     hang();
     break;
   }
+  case "split-utf8": {
+    // The result line in two writes, split inside a multi-byte character.
+    emit(init());
+    const ev = await retrieve();
+    const bytes = Buffer.from(
+      JSON.stringify({
+        type: "result",
+        subtype: "success",
+        is_error: false,
+        num_turns: 3,
+        result: "",
+        structured_output: { status: "ok", items: [item(ids[0], [ev.noteIds[0]], "Café naïve ✓ 日本 fits")] },
+      }) + "\n",
+    );
+    const cut = bytes.indexOf(Buffer.from("✓")) + 1; // one byte into the three-byte check mark
+    await new Promise((r) => process.stdout.write(bytes.subarray(0, cut), r));
+    await new Promise((r) => setTimeout(r, 150));
+    process.stdout.write(bytes.subarray(cut));
+    break;
+  }
+  case "no-newline": {
+    // The final result line has no trailing newline.
+    emit(init());
+    const ev = await retrieve();
+    process.stdout.write(
+      JSON.stringify({ type: "result", subtype: "success", is_error: false, num_turns: 3, result: "", structured_output: { status: "ok", items: [item(ids[0], [ev.noteIds[0]])] } }),
+    );
+    break;
+  }
+  case "auth-result":
+    // The CLI's own auth failure: an error result naming the login problem.
+    emit(init());
+    result({ subtype: "success", is_error: true, api_error_status: 401, result: "Invalid API key · Please run /login" });
+    process.exitCode = 1;
+    break;
+  case "quota-retry":
+    // A rate-limit retry notice mid-run; the runner stops the run on it.
+    emit(init());
+    await connectSources();
+    emit({ type: "system", subtype: "api_retry", attempt: 1, max_retries: 10, retry_delay_ms: 5000, error_status: 429, error: "rate_limit" });
+    hang();
+    break;
   default:
     process.stderr.write("fake: unknown mode\n");
     process.exitCode = 99;

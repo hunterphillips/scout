@@ -18,13 +18,17 @@
 // Billing gate: refreshPreflight() runs the direct preflight (blocking; call it at service
 // start and after a config change, never on the request path) and caches the verdict.
 // Unless the cached verdict is `subscription`, every run returns
-// `unavailable: "billing route unverified"` and nothing is spawned.
+// `unavailable: "billing route unverified"` and nothing is spawned. A run captures the
+// config when it passes the gate and re-checks the verdict and a config generation after
+// it gets a slot, so a setConfig while it waits also ends it as unverified.
 //
 // Aborts: each run has one abort path. The deadline (min(req.deadlineMs,
 // config.maxRankMs), counted from run()), the caller's AbortSignal (one
 // `controller.abort(reason)` per HTTP-level trigger), and abortAll() all end there. Abort
-// sends SIGTERM to the CLI's process group, SIGKILL 2 s later, then SIGKILL to any PID
-// still alive from the tree recorded since spawn, waits for exit, and removes the run dir.
+// sends SIGTERM to the CLI's process group (directly, without ps, while the CLI is
+// unreaped), SIGKILL 2 s later, then SIGKILL to any PID still alive from the tree recorded
+// since spawn. The wait for exit is capped at grace + 2 s (logged as `reap_timeout`), then
+// the run dir is removed.
 // A counting semaphore allows 2 concurrent runs; a queued run that is aborted leaves the
 // queue as `cancelled` without spawning.
 //
@@ -35,7 +39,7 @@
 
 import { spawn as nodeSpawn, type ChildProcess, type SpawnOptions } from "node:child_process";
 import { createHash } from "node:crypto";
-import { closeSync, constants as fsc, openSync, statSync, writeFileSync, writeSync } from "node:fs";
+import { closeSync, constants as fsc, fchmodSync, fstatSync, openSync, statSync, writeFileSync, writeSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { AGENT_OUTPUT_JSON_SCHEMA, type RankRequest } from "./api.js";
@@ -272,6 +276,11 @@ export function checkInit(init: Rec): string[] {
   }
   if (init.permissionMode !== "dontAsk") reasons.push("init: permission mode is not dontAsk");
   // apiProvider is optional in the init event; when present it must be first-party.
+  // Absence is accepted because the cached direct preflight already proved the provider
+  // route for this launch profile (no provider env keys forwarded, no provider settings,
+  // CLI logged in to a subscription). The window left is a change to settings or login
+  // between that preflight and this run, on a CLI build that omits apiProvider; the
+  // apiKeySource check below still catches an API-key route inside that window.
   if (init.apiKeySource !== "none" || (init.apiProvider !== undefined && init.apiProvider !== "firstParty")) {
     reasons.push("init: unexpected auth route");
   }
@@ -314,7 +323,10 @@ export function toRunSnapshot(snap: ObservationSnapshot, candidateCount: number)
   };
 }
 
-/** Labels from the run's own snapshot: `recent page: <title>` for activity. */
+/**
+ * Labels from the run's own snapshot: `recent page: <title>` for activity. The title is
+ * Hunter's own browsing history, shown only in his native panel, which the site cannot read.
+ */
 function labelsFrom(snap: RunSnapshot): LabelFor {
   const titles = new Map(snap.observations.map((o) => [o.observationId, o.title]));
   return (loc: EvidenceLocation) => {
@@ -392,7 +404,15 @@ interface CliOutcome {
 export function createAgentRunner(deps: AgentRunnerDeps): AgentRunner {
   const clock = deps.clock ?? systemClock;
   const spawn: SpawnFn = deps.spawn ?? ((c, a, o) => nodeSpawn(c, [...a], o));
-  const log = deps.log ?? (() => {});
+  const rawLog = deps.log ?? (() => {});
+  // A throwing logger must never break a run (the stdout handler calls this).
+  const log = (line: string): void => {
+    try {
+      rawLog(line);
+    } catch {
+      // ignored
+    }
+  };
   const preflightFn: PreflightFn = deps.preflight ?? runDirectPreflight;
   const killGraceMs = deps.killGraceMs ?? KILL_GRACE_MS;
   const maxStdout = deps.maxStdoutBytes ?? MAX_STDOUT_BYTES;
@@ -402,12 +422,14 @@ export function createAgentRunner(deps: AgentRunnerDeps): AgentRunner {
   const handles = new Set<RunHandle>();
   const inflight = new Set<Promise<unknown>>();
   let config = deps.config;
+  /** Bumped by setConfig; a queued run whose config generation moved never spawns. */
+  let configGen = 0;
   let preflight: PreflightState = { verdict: "unchecked", reasons: [] };
 
-  function profileOptions(): LaunchProfileOptions {
+  function profileOptions(cfg: PcmConfig = config): LaunchProfileOptions {
     const o: LaunchProfileOptions = { parentEnv: deps.parentEnv, scratchRoot: deps.scratchRoot, workspaceRoots: deps.workspaceRoots };
-    if (config.model !== null) o.model = config.model;
-    if (config.claudePath !== undefined) o.claudePath = config.claudePath;
+    if (cfg.model !== null) o.model = cfg.model;
+    if (cfg.claudePath !== undefined) o.claudePath = cfg.claudePath;
     return o;
   }
 
@@ -430,6 +452,8 @@ export function createAgentRunner(deps: AgentRunnerDeps): AgentRunner {
     try {
       const fd = openSync(join(deps.home, RUNS_FILE), fsc.O_WRONLY | fsc.O_APPEND | fsc.O_CREAT | fsc.O_NOFOLLOW, 0o600);
       try {
+        // A pre-existing file keeps its mode on open; narrow it before writing.
+        if ((fstatSync(fd).mode & 0o077) !== 0) fchmodSync(fd, 0o600);
         writeSync(fd, JSON.stringify(line) + "\n");
       } finally {
         closeSync(fd);
@@ -472,11 +496,14 @@ export function createAgentRunner(deps: AgentRunnerDeps): AgentRunner {
       return out;
     };
     const cancelled = (): RunOutcome => finish({ result: { status: "cancelled", reason: handle.reason ?? "aborted" }, audit: EMPTY_AUDIT });
+    const unverified = (): RunOutcome => finish({ result: { status: "unavailable", reason: REASONS.billing }, audit: EMPTY_AUDIT });
     try {
-      if (preflight.verdict !== "subscription") {
-        return finish({ result: { status: "unavailable", reason: REASONS.billing }, audit: EMPTY_AUDIT });
-      }
-      const deadlineMs = Math.min(req.deadlineMs, config.maxRankMs);
+      if (preflight.verdict !== "subscription") return unverified();
+      // The config the verdict covers, captured now: a setConfig while this run waits for a
+      // slot must not hand it an unverified claude path, model or node path.
+      const gen = configGen;
+      const cfg = config;
+      const deadlineMs = Math.min(req.deadlineMs, cfg.maxRankMs);
       const timer = setTimeout(() => handle.abort("deadline"), deadlineMs);
       cleanups.push(() => clearTimeout(timer));
       if (ctx.signal) {
@@ -490,7 +517,8 @@ export function createAgentRunner(deps: AgentRunnerDeps): AgentRunner {
       }
       holdsSlot = await sem.acquire(handle);
       if (!holdsSlot || handle.reason !== undefined) return cancelled();
-      return finish(await execute(req, ctx, handle));
+      if (preflight.verdict !== "subscription" || configGen !== gen) return unverified();
+      return finish(await execute(req, ctx, handle, cfg));
     } finally {
       for (const c of cleanups) c();
       if (holdsSlot) sem.release();
@@ -498,10 +526,10 @@ export function createAgentRunner(deps: AgentRunnerDeps): AgentRunner {
     }
   }
 
-  async function execute(req: RankRequest, ctx: RunContext, handle: RunHandle): Promise<RunOutcome> {
+  async function execute(req: RankRequest, ctx: RunContext, handle: RunHandle, cfg: PcmConfig): Promise<RunOutcome> {
     let profile: LaunchProfile;
     try {
-      profile = createLaunchProfile(profileOptions());
+      profile = createLaunchProfile(profileOptions(cfg));
     } catch {
       return { result: { status: "unavailable", reason: REASONS.profile }, audit: EMPTY_AUDIT };
     }
@@ -526,7 +554,7 @@ export function createAgentRunner(deps: AgentRunnerDeps): AgentRunner {
       const snap = parsedSnap.data;
 
       try {
-        const server: Rec = { type: "stdio", command: config.nodePath ?? process.execPath, args: [sourceToolsPath, "--run-dir", runDir] };
+        const server: Rec = { type: "stdio", command: cfg.nodePath ?? process.execPath, args: [sourceToolsPath, "--run-dir", runDir] };
         // The default home is excluded by path already; an override has to be passed on.
         const parentHome = deps.parentEnv.HOME;
         if (parentHome === undefined || deps.home !== join(parentHome, ".personal-context-mcp")) server.env = { PERSONAL_CONTEXT_HOME: deps.home };
@@ -534,6 +562,7 @@ export function createAgentRunner(deps: AgentRunnerDeps): AgentRunner {
         writePrivate(join(runDir, SOURCES_FILE), JSON.stringify({ sources }));
         writePrivate(join(runDir, "mcp.json"), JSON.stringify({ mcpServers: { sources: server } }, null, 2));
         writePrivate(join(runDir, "system.md"), buildSystemMd(req.maxResults));
+        // A debugging copy only: --json-schema gets the schema inline (buildArgv), never this file.
         writePrivate(join(runDir, "schema.json"), JSON.stringify(AGENT_OUTPUT_JSON_SCHEMA, null, 2));
       } catch {
         return { result: { status: "error", reason: REASONS.setup }, audit: EMPTY_AUDIT };
@@ -578,15 +607,33 @@ export function createAgentRunner(deps: AgentRunnerDeps): AgentRunner {
       let cancelReason: AbortReason | undefined;
       let terminating = false;
       let killTimer: NodeJS.Timeout | undefined;
+      let capTimer: NodeJS.Timeout | undefined;
+      let resolveCap: (v: "reap_timeout") => void = () => {};
+      const capped = new Promise<"reap_timeout">((r) => (resolveCap = r));
+      // The CLI's own group, signalled without ps. Safe only while the child is unreaped:
+      // until then its pid (and so its group id) cannot have been reused.
+      const signalGroup = (sig: NodeJS.Signals): void => {
+        if (child.pid === undefined || child.exitCode !== null || child.signalCode !== null) return;
+        try {
+          process.kill(-child.pid, sig);
+        } catch {
+          // group gone
+        }
+      };
       const terminate = (): void => {
         if (terminating) return;
         terminating = true;
+        signalGroup("SIGTERM");
+        // The ps-based tree covers stragglers and processes that left the group.
         tree?.poll();
         tree?.signalAll("SIGTERM");
         killTimer = setTimeout(() => {
+          signalGroup("SIGKILL");
           tree?.poll();
           if (tree && tree.alive().length) tree.signalAll("SIGKILL");
         }, killGraceMs);
+        // However the signals went, the wait for exit is bounded.
+        capTimer = setTimeout(() => resolveCap("reap_timeout"), killGraceMs + 2000);
       };
       const fail = (reason: string): void => {
         if (failure === undefined && cancelReason === undefined) failure = reason;
@@ -621,44 +668,59 @@ export function createAgentRunner(deps: AgentRunnerDeps): AgentRunner {
         if (ev.type !== "result" && isAuthOrQuota(ev)) fail(REASONS.authOrQuota);
       };
 
+      const parseLine = (raw: string): void => {
+        const line = raw.trim();
+        if (!line) return;
+        let ev: unknown;
+        try {
+          ev = JSON.parse(line);
+        } catch {
+          return;
+        }
+        if (isRec(ev)) onEvent(ev);
+      };
       let stdoutBytes = 0;
       let lineBuf = "";
-      child.stdout?.on("data", (buf: Buffer) => {
+      // Decoded as a stream, so a character split across chunks survives.
+      child.stdout?.setEncoding("utf8");
+      child.stdout?.on("data", (chunk: string) => {
         if (failure === REASONS.outputTooLarge) return;
-        stdoutBytes += buf.length;
+        stdoutBytes += Buffer.byteLength(chunk, "utf8");
         if (stdoutBytes > maxStdout) return fail(REASONS.outputTooLarge);
-        lineBuf += buf.toString("utf8");
+        lineBuf += chunk;
         let nl: number;
         while ((nl = lineBuf.indexOf("\n")) >= 0) {
-          const line = lineBuf.slice(0, nl).trim();
+          const line = lineBuf.slice(0, nl);
           lineBuf = lineBuf.slice(nl + 1);
-          if (!line) continue;
-          let ev: unknown;
-          try {
-            ev = JSON.parse(line);
-          } catch {
-            continue;
-          }
-          if (isRec(ev)) onEvent(ev);
+          parseLine(line);
         }
       });
       child.stderr?.resume(); // never read: it may quote config or content
       child.stdin?.on("error", () => {}); // EPIPE if the CLI exits early
       child.stdin?.end(prompt);
 
-      const exit = await exited;
+      const raced = await Promise.race([exited, capped]);
+      if (raced === "reap_timeout") log("reap_timeout");
+      const exit = raced === "reap_timeout" ? { spawnError: false } : raced;
       offAbort();
       // Let stdout drain briefly; a descendant holding it open must not stall us.
       const stdout = child.stdout;
       if (stdout) await Promise.race([new Promise<void>((r) => (stdout.readableEnded ? r() : stdout.once("end", () => r()))), sleep(500)]);
       child.stdout?.destroy();
       child.stderr?.destroy();
+      // A last line without a trailing newline still counts.
+      if (lineBuf && failure !== REASONS.outputTooLarge) {
+        const rest = lineBuf;
+        lineBuf = "";
+        parseLine(rest);
+      }
       const ms = clock.now() - t0;
 
       // Reap the rest of the tree: wait briefly, then SIGTERM, then SIGKILL what is left.
       await reap(tree, terminating);
       clearInterval(poller);
       clearTimeout(killTimer);
+      clearTimeout(capTimer);
 
       const audit = readAuditIndex(join(runDir, AUDIT_FILE));
       const usage = isRec(resultEv?.usage) ? resultEv.usage : {};
@@ -729,6 +791,7 @@ export function createAgentRunner(deps: AgentRunnerDeps): AgentRunner {
     },
     setConfig(next) {
       config = next;
+      configGen++;
       preflight = { verdict: "unchecked", reasons: [] };
     },
     run: (req, ctx) => track(run(req, ctx)),

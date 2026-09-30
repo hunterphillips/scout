@@ -80,12 +80,15 @@ describe("validateResponse", () => {
     expect(r).toEqual({ status: "error", reason: "validation_failed", droppedCount: 1 });
   });
 
-  it("keeps at most maxResults items; the fourth is dropped", () => {
+  it("keeps at most maxResults items; items past the cap are cut, not counted as dropped", () => {
     const r = validateResponse({ output: ok(item("c1", ["e2"]), item("c2", ["e2"]), item("c3", ["e3"]), item("c4", ["e3"])), req, audit });
-    expect(r).toMatchObject({ status: "ok", droppedCount: 1 });
+    expect(r).toMatchObject({ status: "ok", droppedCount: 0 });
     expect(r.status === "ok" && r.items.map((i) => i.id)).toEqual(["c1", "c2", "c3"]);
     const r1 = validateResponse({ output: ok(item("c1", ["e2"]), item("c2", ["e2"])), req: { ...req, maxResults: 1 }, audit });
-    expect(r1).toMatchObject({ status: "ok", droppedCount: 1, items: [{ id: "c1" }] });
+    expect(r1).toMatchObject({ status: "ok", droppedCount: 0, items: [{ id: "c1" }] });
+    // A rejected item before the cap counts; an invalid one after it is never examined.
+    const r2 = validateResponse({ output: ok(item("c99", ["e2"]), item("c1", ["e2"]), item("c98", ["e2"])), req: { ...req, maxResults: 1 }, audit });
+    expect(r2).toMatchObject({ status: "ok", droppedCount: 1, items: [{ id: "c1" }] });
   });
 
   it("drops a duplicated candidate id", () => {
@@ -105,6 +108,30 @@ describe("validateResponse", () => {
     expect([...reason].length).toBeLessThanOrEqual(140);
     expect(reason.startsWith("See and or —")).toBe(true);
     expect(cleanReason("a\u0000b‮c\n\nd")).toBe("a b c d");
+  });
+
+  it.each([
+    ["scheme URL", "see https://evil.example/x?y=1 now", "see now"],
+    ["www host", "see www.evil.example now", "see now"],
+    ["javascript scheme", "run javascript:alert(1) now", "run now"],
+    ["data scheme", "a data:text/html,x b", "a b"],
+    ["mailto scheme", "mail mailto:x@y.z now", "mail now"],
+    ["file scheme", "open file:/etc/passwd now", "open now"],
+    ["bare domain with path", "see evil.example/x?y=1 now", "see now"],
+    ["bare host with common TLD", "visit evil.com today", "visit today"],
+    ["bare subdomain with TLD", "visit docs.evil.io:8080 today", "visit today"],
+    ["note name ending in .md", "matches README.md here", "matches here"],
+    ["scheme word followed by a space", "config file: X matches", "config file: X matches"],
+    ["data: in prose", "raw data: counts", "raw data: counts"],
+    ["e.g. and versions", "e.g. the v1.2 billing API", "e.g. the v1.2 billing API"],
+    ["TLD as a word prefix", "the example.company plan", "the example.company plan"],
+  ])("cleanReason strips %s", (_l, input, expected) => {
+    expect(cleanReason(input)).toBe(expected);
+  });
+
+  it("strips before the 140-character cut", () => {
+    const r = cleanReason("x".repeat(130) + " evil.com/abcdefghijklmnop " + "y".repeat(20));
+    expect(r).toBe(`${"x".repeat(130)} ${"y".repeat(9)}`);
   });
 
   it("all picks failing validation is error: validation_failed with droppedCount, not empty", () => {
