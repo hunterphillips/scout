@@ -140,6 +140,17 @@ describe("observation store bounds", () => {
   });
 });
 
+describe("observation store url bound", () => {
+  it("cuts a url past 8 KiB even when the schema was skipped", () => {
+    const store = createObservationStore({ clock: fakeClock() });
+    store.add(obs(1, { url: `https://x.dev/${"é".repeat(1024 * 1024)}` }));
+    const url = store.list()[0]!.url;
+    expect(Buffer.byteLength(url, "utf8")).toBeLessThanOrEqual(8 * 1024);
+    expect(url.startsWith("https://x.dev/")).toBe(true);
+    expect(url.endsWith("\uFFFD")).toBe(false);
+  });
+});
+
 describe("truncateUtf8", () => {
   it("never splits a multi-byte character", () => {
     expect(truncateUtf8("a😀", 3)).toEqual({ text: "a", cut: true });

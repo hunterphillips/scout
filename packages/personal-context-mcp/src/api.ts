@@ -25,6 +25,7 @@ export const MAX_ORIGIN_CHARS = 2048;
 export const MAX_OBSERVATION_URL_CHARS = 8 * 1024;
 export const MAX_OBSERVATION_TITLE_CHARS = 1024;
 export const MAX_SENSOR_CHARS = 64;
+export const MAX_SITE_NAME_CHARS = 120;
 export const MAX_OBSERVED_AT_CHARS = 64;
 
 /** True when `v` is exactly an https origin (`https://host[:port]`, no path, query or credentials). */
@@ -50,7 +51,7 @@ export const RankRequestSchema = z.object({
   requestId: z.string().min(1).max(MAX_ID_CHARS),
   site: z.object({
     origin: z.string().min(1).max(MAX_ORIGIN_CHARS).refine(isHttpsOrigin),
-    name: z.string().optional(),
+    name: z.string().max(MAX_SITE_NAME_CHARS).optional(),
   }),
   candidates: z.array(RankCandidateSchema).max(MAX_CANDIDATES),
   maxResults: z.int().min(1).max(MAX_RESULTS),

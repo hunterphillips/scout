@@ -39,6 +39,7 @@ describe("RankRequestSchema", () => {
     ["origin with a path", { site: { origin: "https://docs.stripe.com/billing" } }],
     ["origin with credentials", { site: { origin: "https://u:p@docs.stripe.com" } }],
     ["not a URL", { site: { origin: "docs.stripe.com" } }],
+    ["site name over 120", { site: { origin: "https://docs.stripe.com", name: "n".repeat(121) } }],
     ["candidate title over 160", { candidates: [{ id: "c1", title: "t".repeat(161), labelQuality: "slug" }] }],
     ["candidate description over 400", { candidates: [{ id: "c1", title: "t", description: "d".repeat(401), labelQuality: "slug" }] }],
     ["labelQuality over 32", { candidates: [{ id: "c1", title: "t", labelQuality: "q".repeat(33) }] }],

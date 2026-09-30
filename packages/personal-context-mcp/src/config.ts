@@ -87,10 +87,10 @@ const pathString = z.string().min(1);
 export const SOURCE_ID_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
 const sourceId = z.string().regex(SOURCE_ID_RE);
 
-/** A path inside a project: relative, no leading `/`, no `..` segment. */
+/** A path inside a project: relative, no leading `/`, and no empty, `.` or `..` segment. */
 export function isSafeSubpath(p: string): boolean {
-  if (p.length === 0 || isAbsolute(p) || p.startsWith("/") || p.startsWith("\\")) return false;
-  return !p.split(/[\\/]/).some((seg) => seg === "..");
+  if (p.length === 0 || p.includes("\0") || isAbsolute(p) || p.startsWith("/") || p.startsWith("\\")) return false;
+  return !p.split(/[\\/]/).some((seg) => seg === "" || seg === "." || seg === "..");
 }
 
 /** One plain directory name: letters, digits, `.`, `_`, `-`; never `.` or `..`. */
@@ -398,9 +398,19 @@ function fold(p: string): string {
  */
 function sourceLocation(p: string, env: EnvLike): string {
   const abs = expandHomePath(p, env);
-  const home = resolve(env.HOME || homedir());
-  if (abs === resolve("/") || isInside(fold(home), fold(abs))) throw new ConfigError("config-source-root-too-broad");
+  if (isTooBroadRoot(abs, env.HOME || homedir())) throw new ConfigError("config-source-root-too-broad");
   return abs;
+}
+
+/**
+ * The too-broad rule on an absolute path: true for `/`, for `home` itself, and for any
+ * ancestor of `home`. Compared case-insensitively after NFC normalization. A relative
+ * path or home fails closed (too broad).
+ */
+export function isTooBroadRoot(absPath: string, home: string): boolean {
+  if (!isAbsolute(absPath) || !isAbsolute(home)) return true;
+  const abs = resolve(absPath);
+  return abs === resolve("/") || isInside(fold(resolve(home)), fold(abs));
 }
 
 export function resolveConfig(file: ConfigFile, env: EnvLike = process.env): PcmConfig {
@@ -553,7 +563,7 @@ export function isAlwaysExcluded(absPath: string, sourceRoot: string, opts: Excl
   return first !== undefined && SECOND_BRAIN_EXCLUDED.has(fold(first)) && isSecondBrainRoot(root);
 }
 
-export type ReadableRefusal = "not-absolute" | "unresolvable" | "outside-root" | "excluded";
+export type ReadableRefusal = "not-absolute" | "unresolvable" | "outside-root" | "excluded" | "too-broad";
 export type ReadableResult = { ok: true; realPath: string } | { ok: false; code: ReadableRefusal };
 
 export interface CheckReadableOptions extends ExclusionOptions {
@@ -566,7 +576,10 @@ export interface CheckReadableOptions extends ExclusionOptions {
  * and on-disk spelling), fails closed on any fs error, requires the real path inside the
  * real root, then applies isAlwaysExcluded to both the real and the given spelling. The
  * absolute exclusions are matched against their real paths too, so a symlinked
- * ~/workspace can't route around them.
+ * ~/workspace can't route around them. The too-broad rule (never `/`, $HOME or an
+ * ancestor of it) applies to the given root and to its real path, so a `~/notes-link`
+ * symlink to `~` is refused. Open the returned `realPath` with `O_NOFOLLOW`, so a
+ * symlink swapped in after this check fails the open instead of being followed.
  */
 export function checkReadable(absPath: string, sourceRoot: string, opts: CheckReadableOptions = {}): ReadableResult {
   const { realpath = realpathSync.native, ...excl } = opts;
@@ -582,11 +595,20 @@ export function checkReadable(absPath: string, sourceRoot: string, opts: CheckRe
     return { ok: false, code: "unresolvable" };
   }
   if (!isAbsolute(realPath) || !isAbsolute(realRoot)) return { ok: false, code: "unresolvable" };
+  const home = excl.home ?? (process.env.HOME || homedir());
+  let realHome = home;
+  try {
+    realHome = realpath(home);
+  } catch {
+    // no real home to compare against: the lexical form is checked below
+  }
+  if (isTooBroadRoot(sourceRoot, home) || isTooBroadRoot(realRoot, home) || isTooBroadRoot(realRoot, realHome)) {
+    return { ok: false, code: "too-broad" };
+  }
   if (!isInside(realPath, realRoot)) return { ok: false, code: "outside-root" };
   if (isAlwaysExcluded(absPath, sourceRoot, excl) || isAlwaysExcluded(realPath, realRoot, excl)) {
     return { ok: false, code: "excluded" };
   }
-  const home = excl.home ?? (process.env.HOME || homedir());
   const foldedReal = fold(realPath);
   for (const dir of absoluteExcludedDirs(home, excl)) {
     let realDir: string;

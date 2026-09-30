@@ -368,6 +368,9 @@ describe("grant shapes", () => {
     ["absolute subpath", reg({ subpath: "/etc" })],
     ["subpath with ..", reg({ subpath: "thoughts/../../.." })],
     ["subpath that is ..", reg({ subpath: ".." })],
+    ["subpath that is .", reg({ subpath: "." })],
+    ["subpath starting ./", reg({ subpath: "./thoughts" })],
+    ["subpath with an empty segment", reg({ subpath: "thoughts//shared" })],
     ["project with a slash", reg({ enabledProjects: ["a/b"] })],
     ["project ..", reg({ enabledProjects: [".."] })],
     ["project .", reg({ enabledProjects: ["."] })],
@@ -521,6 +524,24 @@ describe("checkReadable", () => {
     mkdirSync(home2);
     symlinkSync(realWs, join(home2, "workspace"));
     expect(checkReadable(join(realWs, "personal-context", "p.md"), realWs, { home: home2 })).toEqual({ ok: false, code: "excluded" });
+  });
+
+  it("refuses a root that is really $HOME through a symlink", () => {
+    const { root, home } = tree();
+    const link = join(home, "notes-link");
+    symlinkSync(home, link);
+    writeFileSync(join(home, "top.md"), "t");
+    expect(checkReadable(join(link, "top.md"), link, { home })).toEqual({ ok: false, code: "too-broad" });
+    // An ancestor of $HOME through a symlink is refused the same way.
+    const up = join(home, "up-link");
+    symlinkSync(root, up);
+    expect(checkReadable(join(up, "home", "top.md"), up, { home })).toEqual({ ok: false, code: "too-broad" });
+  });
+
+  it("refuses a lexically too-broad root", () => {
+    const { home } = tree();
+    writeFileSync(join(home, "top.md"), "t");
+    expect(checkReadable(join(home, "top.md"), home, { home })).toEqual({ ok: false, code: "too-broad" });
   });
 
   it("refuses a case-variant spelling of an excluded directory", () => {
