@@ -1,13 +1,28 @@
 // `pcm` against temp homes and an in-process test server (fake CLI wrapper). No real
 // claude, no network beyond 127.0.0.1.
 
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { ContextStatusSchema } from "./api.js";
 import { candidatesFromJson, runCli, USAGE } from "./cli.js";
 import { loadConfig, sourceGrantRevision } from "./config.js";
-import { cleanupAll, CLI_JS, makeServerFixture, rankRequest, startServer, token, type ServerFixture } from "./test-support/serverFixture.js";
+import { serverFilePath } from "./serviceFiles.js";
+import {
+  alive,
+  cleanupAll,
+  CLI_JS,
+  connect,
+  makeServerFixture,
+  notesSource,
+  rankRequest,
+  spawnServer,
+  startServer,
+  token,
+  waitFor,
+  type ServerFixture,
+} from "./test-support/serverFixture.js";
 
 afterEach(cleanupAll);
 
@@ -54,17 +69,40 @@ describe("pcm: help and misuse", () => {
 });
 
 describe("pcm: candidates files", () => {
-  it("maps a Scout catalog (and a cache file) to c1..cN", () => {
+  it("maps a Scout catalog (and a cache file), keeping the catalog's own ids", () => {
     const want = [
-      { id: "c1", title: "Usage billing guide", description: "metering", labelQuality: "published" },
-      { id: "c2", title: "Webhooks", labelQuality: "slug" },
-      { id: "c3", title: "Team offsite", labelQuality: "image_title" },
+      { id: "c0", title: "Usage billing guide", description: "metering", labelQuality: "published" },
+      { id: "c1", title: "Webhooks", labelQuality: "slug" },
+      { id: "c2", title: "Team offsite", labelQuality: "image_title" },
     ];
     expect(candidatesFromJson(catalog)).toEqual(want);
     expect(candidatesFromJson({ schemaVersion: 3, catalog })).toEqual(want);
     expect(candidatesFromJson([{ id: "x", title: "t", labelQuality: "slug" }])).toEqual([{ id: "x", title: "t", labelQuality: "slug" }]);
     expect(candidatesFromJson({ nope: 1 })).toBeUndefined();
     expect(candidatesFromJson([{ id: "x" }])).toBeUndefined();
+  });
+
+  it("gives non-Scout or repeated ids an unused c<n>", () => {
+    const got = candidatesFromJson({
+      candidates: [
+        { id: "custom/1", title: "A" },
+        { id: "c1", title: "B" },
+        { title: "C" },
+        { id: "c1", title: "D" },
+        { id: "cz", title: "E" },
+      ],
+    });
+    expect(got?.map((c) => c.id)).toEqual(["c2", "c1", "c3", "c4", "cz"]);
+  });
+
+  it("skips entries without a title and keeps the first 500, with one stderr note each", () => {
+    const notes: string[] = [];
+    const entries = Array.from({ length: 510 }, (_, i) => ({ id: `c${i.toString(36)}`, title: `t${i}` }));
+    const got = candidatesFromJson({ candidates: [{ id: "cx0" }, { id: "cx1", title: 5 }, ...entries] }, (l) => notes.push(l));
+    expect(got).toHaveLength(500);
+    expect(got?.[0]).toEqual({ id: "c0", title: "t0", labelQuality: "slug" });
+    expect(got?.[499]?.id).toBe(`c${(499).toString(36)}`);
+    expect(notes).toEqual(["skipped 2 catalog entries without a title", "catalog has 510 candidates; ranking the first 500"]);
   });
 });
 
@@ -86,7 +124,7 @@ describe("pcm: rank and status against a running server", () => {
     expect(r2.code).toBe(0);
     const out = JSON.parse(r2.out);
     expect(out.status).toBe("ok");
-    expect(out.items[0].id).toMatch(/^c[123]$/);
+    expect(out.items[0].id).toMatch(/^c[012]$/); // the catalog's own ids
     expect(r2.out + r2.err).not.toContain(token(fx));
   });
 
@@ -98,7 +136,13 @@ describe("pcm: rank and status against a running server", () => {
     const r = await pcm(fx, "rank", "--origin", "https://docs.example.com", "--candidates", arr);
     expect(r.code).toBe(2);
     expect(JSON.parse(r.out)).toMatchObject({ status: "error" });
-    expect((await pcm(fx, "rank", "--origin", "http://docs.example.com", "--candidates", arr)).code).toBe(1);
+    const badOrigin = await pcm(fx, "rank", "--origin", "http://docs.example.com", "--candidates", arr);
+    expect(badOrigin.code).toBe(1);
+    expect(badOrigin.err).toContain("https origin");
+    writeFileSync(arr, JSON.stringify([{ id: "", title: "t", labelQuality: "slug" }]));
+    const badId = await pcm(fx, "rank", "--origin", "https://docs.example.com", "--candidates", arr);
+    expect(badId.code).toBe(1);
+    expect(badId.err).toContain("invalid candidate array at candidates.0.id\n");
     writeFileSync(arr, "not json");
     expect((await pcm(fx, "rank", "--origin", "https://docs.example.com", "--candidates", arr)).code).toBe(1);
   });
@@ -135,6 +179,47 @@ describe("pcm: rank and status against a running server", () => {
     const r = await pcm(fx, "reload");
     expect(r.code).toBe(1);
     expect(r.err).toContain("not running");
+  });
+
+  it("reload and status refuse a server.json whose live pid is not the service (no signal sent)", async () => {
+    const fx = makeServerFixture();
+    await (await startServer(fx)).server.shutdown("sigterm"); // leaves a token
+    // A live, unrelated process whose default SIGHUP action is to terminate.
+    const sleeper = spawn("/bin/sleep", ["30"], { stdio: "ignore" });
+    try {
+      await new Promise((r) => sleeper.once("spawn", r));
+      writeFileSync(serverFilePath(fx.pcmHome), JSON.stringify({ pid: sleeper.pid, port: 1, serviceInstanceId: "old", startedAt: "x" }), { mode: 0o600 });
+      const r = await pcm(fx, "reload");
+      expect(r.code).toBe(1);
+      expect(r.err).toContain("no signal sent");
+      const st = await pcm(fx, "status");
+      expect(st.code).toBe(1);
+      expect(st.out).toContain("stale run/server.json");
+      await new Promise((r) => setTimeout(r, 200));
+      expect(sleeper.exitCode).toBeNull();
+      expect(sleeper.signalCode).toBeNull();
+      expect(alive(sleeper.pid!)).toBe(true);
+    } finally {
+      sleeper.kill("SIGKILL");
+    }
+  });
+
+  it("reload against a running child server exits 0 and applies a new sourceGrantRevision", async () => {
+    const fx = makeServerFixture();
+    const { port, stderr } = await spawnServer(fx);
+    const { client } = await connect(fx, port);
+    const status = async () => ContextStatusSchema.parse((await client.callTool({ name: "context_status", arguments: {} })).structuredContent);
+    const before = await status();
+    const extra = join(fx.home, "more-notes");
+    mkdirSync(extra);
+    fx.writeConfig({ sources: [notesSource(fx.notes), { id: "more", kind: "markdown_dir", enabled: true, root: extra, exclude: [] }] });
+    const r = await pcm(fx, "reload");
+    expect(r.err).toBe("");
+    expect(r.code).toBe(0);
+    await waitFor(() => stderr().includes('"code":"reload"'), 10_000);
+    const after = await status();
+    expect(after.sourceGrantRevision).not.toBe(before.sourceGrantRevision);
+    expect(after.serviceInstanceId).toBe(before.serviceInstanceId);
   });
 });
 

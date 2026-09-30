@@ -9,6 +9,9 @@
 //   tools' own bounded walker. It never reads note contents; for a project registry it
 //   reads only each note's frontmatter, as the source tools do, to find `repo:` projects.
 // - `sources enable|disable` flips one grant in config.json; `reload` sends SIGHUP.
+// - `status` and `reload` trust run/server.json only when the service on its port answers
+//   with the file's serviceInstanceId (serviceProbe.ts): a live pid alone may be a reused
+//   one, and SIGHUP would terminate an unrelated process.
 // Nothing here prints the token.
 
 import { randomUUID } from "node:crypto";
@@ -18,11 +21,12 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import {
-  ContextStatusSchema,
+  type ContextStatus,
   MAX_CANDIDATE_DESCRIPTION_CHARS,
   MAX_CANDIDATE_TITLE_CHARS,
   MAX_CANDIDATES,
   MAX_DEADLINE_MS,
+  MAX_ID_CHARS,
   MAX_LABEL_QUALITY_CHARS,
   MAX_RESULTS,
   MAX_SITE_NAME_CHARS,
@@ -44,7 +48,8 @@ import {
   type ExclusionOptions,
   type SourceConfig,
 } from "./config.js";
-import { pidAlive, readServerInfo, readToken, ServiceFileError } from "./serviceFiles.js";
+import { pidAlive, readServerInfo, readToken, ServiceFileError, type ServerInfo } from "./serviceFiles.js";
+import { probeService } from "./serviceProbe.js";
 import { rootAvailability, walkFiles, type TreeOptions } from "./sourceTools/markdownDir.js";
 import { discoverProjects } from "./sourceTools/registryProjects.js";
 
@@ -134,7 +139,7 @@ export async function runCli(argv: readonly string[], io: CliIo): Promise<number
         return usage();
       case "reload":
         if (rest.length) return usage();
-        return reloadCommand(home, io);
+        return await reloadCommand(home, io);
       default:
         return usage();
     }
@@ -201,30 +206,54 @@ function readBoundedFile(path: string, max: number): string {
 const cut = (s: string, n: number): string => (s.length > n ? s.slice(0, n) : s);
 const isRec = (v: unknown): v is Record<string, unknown> => v !== null && typeof v === "object" && !Array.isArray(v);
 
+/** Scout's catalog ids: `c` plus a base-36 index. */
+const CATALOG_ID = /^c[0-9a-z]+$/;
+
 /**
  * Candidates from a file: a RankCandidate array as-is, or a Scout catalog (`{candidates}`
  * from `catalog --json`, or a cache file's `{catalog: {candidates}}`) mapped to
- * `c1..cN` with its title, description and labelQuality. Undefined when neither.
+ * RankCandidates with its title, description and labelQuality. A catalog entry keeps its
+ * own id when it looks like Scout's (`c` + base-36), so results join back to the catalog;
+ * any other or repeated id gets an unused `c<n>`. An entry without a title is skipped,
+ * and only the first MAX_CANDIDATES titled entries are kept; `note` hears one line for
+ * each, and the first failing field of an invalid array. Undefined when the value is
+ * neither shape.
  */
-export function candidatesFromJson(value: unknown): RankCandidate[] | undefined {
+export function candidatesFromJson(value: unknown, note: (line: string) => void = () => {}): RankCandidate[] | undefined {
   if (Array.isArray(value)) {
     const r = RankCandidateSchema.array().max(MAX_CANDIDATES).safeParse(value);
+    if (!r.success) note(`invalid candidate array at ${["candidates", ...(r.error.issues[0]?.path ?? []).map(String)].join(".")}`);
     return r.success ? r.data : undefined;
   }
   const catalog = isRec(value) && isRec(value.catalog) ? value.catalog : value;
   if (!isRec(catalog) || !Array.isArray(catalog.candidates)) return undefined;
-  const out: RankCandidate[] = [];
-  for (const entry of catalog.candidates.slice(0, MAX_CANDIDATES)) {
-    if (!isRec(entry) || typeof entry.title !== "string") return undefined;
+  const titled = catalog.candidates.filter(
+    (e): e is Record<string, unknown> & { title: string } => isRec(e) && typeof e.title === "string" && e.title.trim() !== "",
+  );
+  const untitled = catalog.candidates.length - titled.length;
+  if (untitled > 0) note(`skipped ${untitled} catalog ${untitled === 1 ? "entry" : "entries"} without a title`);
+  if (titled.length > MAX_CANDIDATES) note(`catalog has ${titled.length} candidates; ranking the first ${MAX_CANDIDATES}`);
+  const kept = titled.slice(0, MAX_CANDIDATES);
+  const own = kept.map((e) => (typeof e.id === "string" && CATALOG_ID.test(e.id) && e.id.length <= MAX_ID_CHARS ? e.id : undefined));
+  const reserved = new Set(own.filter((id): id is string => id !== undefined));
+  const used = new Set<string>();
+  let next = 1;
+  const fresh = (): string => {
+    while (reserved.has(`c${next}`) || used.has(`c${next}`)) next++;
+    return `c${next++}`;
+  };
+  return kept.map((entry, i) => {
+    const mine = own[i];
+    const id = mine !== undefined && !used.has(mine) ? mine : fresh();
+    used.add(id);
     const c: RankCandidate = {
-      id: `c${out.length + 1}`,
+      id,
       title: cut(entry.title, MAX_CANDIDATE_TITLE_CHARS),
       labelQuality: cut(typeof entry.labelQuality === "string" ? entry.labelQuality : "slug", MAX_LABEL_QUALITY_CHARS),
     };
     if (typeof entry.description === "string") c.description = cut(entry.description, MAX_CANDIDATE_DESCRIPTION_CHARS);
-    out.push(c);
-  }
-  return out;
+    return c;
+  });
 }
 
 async function rankCommand(argv: readonly string[], home: string, env: EnvLike, io: CliIo): Promise<number> {
@@ -239,7 +268,7 @@ async function rankCommand(argv: readonly string[], home: string, env: EnvLike, 
 
   let candidates: RankCandidate[] | undefined;
   try {
-    candidates = candidatesFromJson(JSON.parse(readBoundedFile(file, MAX_CANDIDATES_FILE_BYTES)));
+    candidates = candidatesFromJson(JSON.parse(readBoundedFile(file, MAX_CANDIDATES_FILE_BYTES)), (line) => io.stderr(`${line}\n`));
   } catch {
     candidates = undefined;
   }
@@ -254,8 +283,10 @@ async function rankCommand(argv: readonly string[], home: string, env: EnvLike, 
     maxResults,
     deadlineMs,
   };
-  if (!RankRequestSchema.safeParse(req).success) {
-    io.stderr("origin must be an https origin (https://host[:port])\n");
+  const checked = RankRequestSchema.safeParse(req);
+  if (!checked.success) {
+    const path = checked.error.issues[0]?.path.map(String).join(".") || "request";
+    io.stderr(path === "site.origin" ? "origin must be an https origin (https://host[:port])\n" : `invalid rank request: ${path}\n`);
     return EXIT_FAIL;
   }
   let result: unknown;
@@ -279,34 +310,32 @@ async function rankCommand(argv: readonly string[], home: string, env: EnvLike, 
 
 // ---------- status / reload ----------
 
-async function statusCommand(home: string, io: CliIo): Promise<number> {
+/**
+ * run/server.json and the live service's context_status, when the file's pid is alive and
+ * the service on its port answers with the file's serviceInstanceId.
+ */
+async function ownedService(home: string): Promise<{ info: ServerInfo | undefined; status?: ContextStatus }> {
   const info = readServerInfo(home);
-  const alive = info !== undefined && pidAlive(info.pid);
-  if (info === undefined || !alive) {
+  if (info === undefined || !pidAlive(info.pid)) return { info };
+  const status = await probeService(info, readToken(home));
+  return status === undefined ? { info } : { info, status };
+}
+
+async function statusCommand(home: string, io: CliIo): Promise<number> {
+  const { info, status } = await ownedService(home);
+  if (info === undefined || status === undefined) {
     io.stdout(info === undefined ? "service: not running\n" : `service: not running (stale run/server.json, pid ${info.pid})\n`);
     return EXIT_FAIL;
   }
   io.stdout(`service: running\npid: ${info.pid}\nport: ${info.port}\nstarted: ${info.startedAt}\n`);
-  try {
-    const res = await withClient(home, info.port, (client) => client.callTool({ name: "context_status", arguments: {} }));
-    const parsed = ContextStatusSchema.safeParse(isRec(res) ? res.structuredContent : undefined);
-    if (!parsed.success) {
-      io.stderr("context_status: malformed response\n");
-      return EXIT_FAIL;
-    }
-    io.stdout(`${JSON.stringify(parsed.data, null, 2)}\n`);
-    return EXIT_OK;
-  } catch (e) {
-    if (e instanceof ServiceFileError) throw e;
-    io.stderr("context_status: service unreachable\n");
-    return EXIT_FAIL;
-  }
+  io.stdout(`${JSON.stringify(status, null, 2)}\n`);
+  return EXIT_OK;
 }
 
-function reloadCommand(home: string, io: CliIo): number {
-  const info = readServerInfo(home);
-  if (info === undefined || !pidAlive(info.pid)) {
-    io.stderr("service: not running\n");
+async function reloadCommand(home: string, io: CliIo): Promise<number> {
+  const { info, status } = await ownedService(home);
+  if (info === undefined || status === undefined) {
+    io.stderr(info === undefined ? "service: not running\n" : "service: not running (run/server.json does not match a live service; no signal sent)\n");
     return EXIT_FAIL;
   }
   try {
