@@ -9,10 +9,10 @@
   },
   "workspaces": [
     "packages/contracts",
+    "packages/personal-context-mcp",
     "packages/scout-core",
     "packages/native-host",
-    "packages/browser-extension",
-    "packages/personal-context-mcp"
+    "packages/browser-extension"
   ],
   "scripts": {
     "build": "npm run build --workspaces",
