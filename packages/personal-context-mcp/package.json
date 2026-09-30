@@ -2,7 +2,7 @@
   "name": "personal-context-mcp",
   "version": "0.0.0",
   "private": true,
-  "description": "Independent personal-context MCP agent (Phase 0 placeholder). Must never import @scout packages.",
+  "description": "Independent local personal-context MCP service. Must never import @scout packages.",
   "type": "module",
   "engines": {
     "node": ">=22.12.0"
@@ -13,12 +13,22 @@
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
+    },
+    "./api": {
+      "types": "./dist/api.d.ts",
+      "default": "./dist/api.js"
     }
   },
-  "files": ["dist"],
+  "files": [
+    "dist"
+  ],
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "vitest run --passWithNoTests"
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.1",
+    "zod": "^4.6.5"
   }
 }

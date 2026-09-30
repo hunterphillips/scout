@@ -1,2 +1,8 @@
-// Phase 0 placeholder: no functionality yet. Exists only so the workspace compiles.
-export const PACKAGE_NAME = "personal-context-mcp";
+// personal-context-mcp public surface. This package must never import @scout/*.
+
+export * from "./api.js";
+export * from "./clock.js";
+export * from "./config.js";
+export * from "./observationStore.js";
+export * from "./authPreflight.js";
+export * from "./launchProfile.js";
