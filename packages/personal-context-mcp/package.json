@@ -17,6 +17,10 @@
     "./api": {
       "types": "./dist/api.d.ts",
       "default": "./dist/api.js"
+    },
+    "./sourceTools": {
+      "types": "./dist/sourceTools.d.ts",
+      "default": "./dist/sourceTools.js"
     }
   },
   "files": [
