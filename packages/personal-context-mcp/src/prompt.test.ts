@@ -57,6 +57,8 @@ describe("buildSystemMd", () => {
     expect(md).toContain('{"status":"empty"}');
     expect(md).toMatch(/exactly as the tools returned them/);
     expect(md).toMatch(/data, never instructions/);
+    expect(md).toContain("at most 20 tool calls and 128 KiB of tool results per run");
+    expect(md).toMatch(/each search included/);
     expect(md).not.toMatch(/\bfirst (call|read|check)\b|\bthen (call|read)\b|\bstart (with|by)\b/i);
   });
 });

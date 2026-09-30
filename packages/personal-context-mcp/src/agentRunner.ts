@@ -75,7 +75,8 @@ import { INVALID_OUTPUT, validateResponse, type LabelFor, type RankResult } from
 
 export const MAX_CONCURRENT_RUNS = 2;
 export const KILL_GRACE_MS = 2000;
-export const MAX_TURNS = 8;
+/** The source-tools run budget (MAX_RUN_CALLS = 20 calls), the final structured output, and slack. */
+export const MAX_TURNS = 24;
 export const MAX_STDOUT_BYTES = 4 * 1024 * 1024;
 export const RUNS_FILE = "runs.jsonl";
 
@@ -124,6 +125,7 @@ export const REASONS = Object.freeze({
   outputTooLarge: "output too large",
   noResult: "no result",
   agentError: "agent error",
+  maxTurns: "max turns",
 });
 
 // ---------- public types ----------
@@ -747,6 +749,7 @@ export function createAgentRunner(deps: AgentRunnerDeps): AgentRunner {
         return done({ status: "error", reason: REASONS.capability });
       }
       if (resultEv === undefined) return done({ status: "error", reason: REASONS.noResult });
+      if (resultEv.subtype === "error_max_turns") return done({ status: "error", reason: REASONS.maxTurns });
       if (resultEv.is_error !== false) {
         if (isAuthOrQuota(resultEv)) return done({ status: "unavailable", reason: REASONS.authOrQuota });
         return done({ status: "error", reason: REASONS.agentError });

@@ -150,6 +150,11 @@ switch (mode) {
     emit(init());
     result({ subtype: "error_max_turns", is_error: false });
     break;
+  case "max-turns-is-error":
+    emit(init());
+    result({ subtype: "error_max_turns", is_error: true });
+    process.exitCode = 1;
+    break;
   case "bad-json":
     emit(init());
     process.stdout.write("{not json\n");

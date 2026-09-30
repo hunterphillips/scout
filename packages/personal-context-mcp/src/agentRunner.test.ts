@@ -309,7 +309,8 @@ describe("agent runner: outcomes", () => {
   it.each([
     ["empty", { status: "empty" }],
     ["is_error", { status: "error", reason: "agent error" }],
-    ["max-turns", { status: "error", reason: "agent error" }],
+    ["max-turns", { status: "error", reason: "max turns" }],
+    ["max-turns-is-error", { status: "error", reason: "max turns" }],
     ["bad-json", { status: "error", reason: "invalid_output" }],
     ["bad-shape", { status: "error", reason: "invalid_output" }],
     ["all-invalid", { status: "error", reason: "validation_failed", droppedCount: 2 }],
@@ -329,6 +330,7 @@ describe("agent runner: outcomes", () => {
     }
     expect(scratchEntries(e)).toEqual([]);
     expect(runLines(e).at(-1)).toMatchObject({ status: expected.status });
+    if (mode.startsWith("max-turns")) expect(runLines(e).at(-1)).toMatchObject({ status: "error", reason: "max turns" });
   });
 
   it("auth-result: an error result naming login is unavailable: auth or quota", async () => {
