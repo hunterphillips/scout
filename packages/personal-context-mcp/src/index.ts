@@ -6,3 +6,5 @@ export * from "./config.js";
 export * from "./observationStore.js";
 export * from "./authPreflight.js";
 export * from "./launchProfile.js";
+export * from "./model.js";
+export * from "./paths.js";

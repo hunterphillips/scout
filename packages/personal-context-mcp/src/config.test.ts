@@ -1,13 +1,16 @@
-import { chmodSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  checkReadable,
   ConfigError,
   DEFAULT_PORT,
   isAlwaysExcluded,
   loadConfig,
+  parseConfigFile,
   readConfigFile,
+  resolveConfig,
   resolveHome,
   sourceGrantRevision,
   writeConfig,
@@ -43,6 +46,10 @@ describe("resolveHome", () => {
   it("honors PERSONAL_CONTEXT_HOME, else ~/.personal-context-mcp", () => {
     expect(resolveHome({ PERSONAL_CONTEXT_HOME: "/x" })).toBe("/x");
     expect(resolveHome({ HOME: "/Users/tester" })).toBe("/Users/tester/.personal-context-mcp");
+  });
+
+  it("refuses a relative PERSONAL_CONTEXT_HOME with a fixed code", () => {
+    expect(codeOf(() => resolveHome({ PERSONAL_CONTEXT_HOME: "rel/pcm", HOME: "/Users/tester" }))).toBe("config-relative-home");
   });
 });
 
@@ -263,5 +270,266 @@ describe("isAlwaysExcluded", () => {
     expect(isAlwaysExcluded(`${pc}/profile.md`, "/Users/tester/workspace", opts)).toBe(true);
     expect(isAlwaysExcluded(`${pc}/profile.md`, pc, opts)).toBe(true);
     expect(isAlwaysExcluded("/Users/tester/workspace/personal-context-other/a.md", "/Users/tester/workspace", opts)).toBe(false);
+  });
+});
+
+describe("prototype keys", () => {
+  const PROTO = '{"__proto__":{"claudePath":"relative/claude"},"constructor":{"x":1},"prototype":1,"sources":[{"id":"a","kind":"markdown_dir","enabled":false,"root":"/data/a","__proto__":{"purpose":"priorities"}}]}';
+
+  it("drops __proto__, constructor and prototype at every depth", () => {
+    const file = parseConfigFile(JSON.parse(PROTO));
+    expect(file.claudePath).toBeUndefined();
+    expect(Object.getPrototypeOf(file)).toBe(Object.prototype);
+    expect(Object.hasOwn(file, "constructor")).toBe(false);
+    expect(Object.hasOwn(file, "prototype")).toBe(false);
+    expect(file.sources[0]).not.toHaveProperty("purpose");
+    expect(Object.getPrototypeOf(file.sources[0])).toBe(Object.prototype);
+    expect(resolveConfig(file, ENV).claudePath).toBeUndefined();
+  });
+
+  it("does not expose or write back the key when read from disk", () => {
+    const home = tempHome();
+    writeRaw(home, PROTO);
+    const file = readConfigFile(home);
+    expect(loadConfig(home, ENV).claudePath).toBeUndefined();
+    writeConfig(home, file, ENV);
+    const text = readFileSync(join(home, "config.json"), "utf8");
+    expect(text).not.toContain("__proto__");
+    expect(text).not.toContain("relative/claude");
+    expect(text).not.toContain('"constructor"');
+  });
+
+  it("rejects absurdly deep nesting as malformed", () => {
+    const home = tempHome();
+    writeRaw(home, `{"x":${"[".repeat(200)}${"]".repeat(200)}}`);
+    expect(codeOf(() => readConfigFile(home))).toBe("config-malformed");
+  });
+});
+
+describe("config file and home safety", () => {
+  it("refuses a config file over 1 MiB", () => {
+    const home = tempHome();
+    writeRaw(home, `{"x":"${"a".repeat(1024 * 1024)}"}`);
+    expect(codeOf(() => readConfigFile(home))).toBe("config-too-large");
+  });
+
+  it("refuses a symlinked config file", () => {
+    const home = tempHome();
+    const elsewhere = tempHome();
+    writeRaw(elsewhere, { port: 1234 });
+    symlinkSync(join(elsewhere, "config.json"), join(home, "config.json"));
+    expect(codeOf(() => readConfigFile(home))).toBe("config-unreadable");
+  });
+
+  it("refuses a symlinked home for read and write", () => {
+    const real = tempHome();
+    const link = join(tempHome(), "pcm-link");
+    symlinkSync(real, link);
+    expect(codeOf(() => readConfigFile(link))).toBe("config-home-symlink");
+    expect(codeOf(() => writeConfig(link, readConfigFile(real), ENV))).toBe("config-home-symlink");
+    expect(readdirSync(real)).toEqual([]);
+  });
+
+  it("refuses a 0755 home and leaves its mode unchanged", () => {
+    const home = tempHome();
+    chmodSync(home, 0o755);
+    expect(codeOf(() => readConfigFile(home))).toBe("config-home-not-private");
+    expect(codeOf(() => writeConfig(home, parseConfigFile({}), ENV))).toBe("config-home-not-private");
+    expect(statSync(home).mode & 0o777).toBe(0o755);
+    expect(readdirSync(home)).toEqual([]);
+  });
+
+  it("refuses a home that is a file, or not owned by us", () => {
+    const parent = tempHome();
+    const file = join(parent, "pcm");
+    writeFileSync(file, "x");
+    expect(codeOf(() => readConfigFile(file))).toBe("config-home-not-directory");
+    const home = tempHome();
+    expect(codeOf(() => readConfigFile(home, 999_999))).toBe("config-home-wrong-owner");
+    expect(codeOf(() => writeConfig(home, parseConfigFile({}), ENV, 999_999))).toBe("config-home-wrong-owner");
+  });
+
+  it("never saves a config loadConfig would reject", () => {
+    const home = tempHome();
+    const file = parseConfigFile({ sources: [{ id: "a", kind: "markdown_dir", enabled: false, root: "~" }] });
+    expect(codeOf(() => writeConfig(home, file, ENV))).toBe("config-source-root-too-broad");
+    expect(readdirSync(home)).toEqual([]);
+  });
+});
+
+describe("grant shapes", () => {
+  const md = (extra: Record<string, unknown>) => ({ sources: [{ id: "a", kind: "markdown_dir", enabled: false, root: "/data/a", ...extra }] });
+  const reg = (extra: Record<string, unknown>) => ({
+    sources: [{ id: "p", kind: "registry_projects", enabled: false, registry: "/data/reg", subpath: "thoughts/shared", ...extra }],
+  });
+  const focus = (url: string) => ({ sources: [{ id: "f", kind: "focus_http", enabled: false, url }] });
+
+  it.each([
+    ["absolute subpath", reg({ subpath: "/etc" })],
+    ["subpath with ..", reg({ subpath: "thoughts/../../.." })],
+    ["subpath that is ..", reg({ subpath: ".." })],
+    ["project with a slash", reg({ enabledProjects: ["a/b"] })],
+    ["project ..", reg({ enabledProjects: [".."] })],
+    ["project .", reg({ enabledProjects: ["."] })],
+    ["empty project", reg({ enabledProjects: [""] })],
+    ["project with a space", reg({ enabledProjects: ["my project"] })],
+    ["remote focus url", focus("http://example.com:4242/api/focus")],
+    ["https focus url", focus("https://127.0.0.1:4242/api/focus")],
+    ["focus url without port", focus("http://127.0.0.1/api/focus")],
+    ["focus url with credentials", focus("http://u:p@127.0.0.1:4242/api/focus")],
+    ["focus url with userinfo trick", focus("http://127.0.0.1:4242@evil.example/api")],
+    ["focus url on 0.0.0.0", focus("http://0.0.0.0:4242/api/focus")],
+    ["uppercase id", md({ id: "Notes" })],
+    ["id with a slash", md({ id: "a/b" })],
+    ["id starting with -", md({ id: "-a" })],
+    ["id over 64 chars", md({ id: "a".repeat(65) })],
+  ])("rejects %s at parse time", (_label, value) => {
+    expect(codeOf(() => parseConfigFile(value))).toBe("config-invalid");
+  });
+
+  it.each([
+    reg({ subpath: "thoughts/shared", enabledProjects: ["scout", "rook-workspace", "a.b_c"] }),
+    focus("http://127.0.0.1:4242/api/focus"),
+    focus("http://localhost:4242/api/focus"),
+    md({ id: "second-brain-notes" }),
+  ])("accepts a safe grant %#", (value) => {
+    expect(codeOf(() => parseConfigFile(value))).toBeUndefined();
+  });
+
+  it.each(["/", "~", "~/", "/Users", "/Users/tester", "/users/TESTER", "/Users/tester/../tester"])(
+    "rejects a root or registry at %s (/, $HOME or an ancestor of it)",
+    (root) => {
+      expect(codeOf(() => resolveConfig(parseConfigFile(md({ root })), ENV))).toBe("config-source-root-too-broad");
+      expect(codeOf(() => resolveConfig(parseConfigFile(reg({ registry: root })), ENV))).toBe("config-source-root-too-broad");
+    },
+  );
+
+  it.each(["~/workspace/second-brain/notes", "/Users/tester/x", "/data/notes", "/Users/testers"])("accepts a root at %s", (root) => {
+    expect(codeOf(() => resolveConfig(parseConfigFile(md({ root })), ENV))).toBeUndefined();
+  });
+});
+
+describe("isAlwaysExcluded hardening", () => {
+  const opts = { home: "/Users/tester" };
+
+  it.each([
+    ["INBOX", "/Users/tester/workspace/second-brain/INBOX/x.md", "/Users/tester/workspace"],
+    ["Log", "/Users/tester/workspace/second-brain/Log/y.md", "/Users/tester/workspace"],
+    ["Workspace capitalization", "/Users/tester/Workspace/personal-context/profile.md", "/Users/tester/Workspace"],
+    ["Second-Brain capitalization", "/Users/tester/workspace/Second-Brain/inbox/x.md", "/Users/tester/workspace"],
+    ["NFD spelling of a folded name", "/Users/tester/workspace/second-brain/INBOX/x.md".normalize("NFD"), "/Users/tester/workspace"],
+    ["INBOX under a second-brain root elsewhere", "/data/second-brain/INBOX/a.md", "/data/second-brain"],
+    ["service home", "/Users/tester/.personal-context-mcp/config.json", "/Users/tester/workspace/../"],
+    ["service home, other case", "/Users/tester/.Personal-Context-MCP/config.json", "/Users/tester/x/.."],
+  ])("excludes %s", (_label, p, root) => {
+    expect(isAlwaysExcluded(p, root, opts)).toBe(true);
+  });
+
+  it.each([
+    "/data/notes/.ssh/config",
+    "/data/notes/.SSH/known_hosts",
+    "/data/notes/.gnupg/pubring.kbx",
+    "/data/notes/id_ed25519",
+    "/data/notes/keys/ID_RSA.pub",
+    "/data/notes/.netrc",
+    "/data/notes/.npmrc",
+    "/data/notes/cert.p12",
+    "/data/notes/cert.PFX",
+    "/data/notes/Library/Keychains/login.keychain-db",
+    "/data/notes/.GIT/config",
+    "/data/notes/Node_Modules/x.md",
+  ])("excludes widened pattern %s", (p) => {
+    expect(isAlwaysExcluded(p, "/data/notes", opts)).toBe(true);
+  });
+
+  it("allows id_ only as a directory name and ordinary files", () => {
+    expect(isAlwaysExcluded("/data/notes/idea.md", "/data/notes", opts)).toBe(false);
+    expect(isAlwaysExcluded("/data/notes/ids/list.md", "/data/notes", opts)).toBe(false);
+  });
+
+  it("excludes a root whose own last segment matches, including the root itself", () => {
+    expect(isAlwaysExcluded("/data/secrets", "/data/secrets", opts)).toBe(true);
+    expect(isAlwaysExcluded("/data/secrets/a.md", "/data/secrets", opts)).toBe(true);
+    expect(isAlwaysExcluded("/data/.ssh", "/data/.ssh", opts)).toBe(true);
+    expect(isAlwaysExcluded("/data/notes", "/data/notes", opts)).toBe(false);
+  });
+
+  it("honors a PERSONAL_CONTEXT_HOME-style service home", () => {
+    expect(isAlwaysExcluded("/srv/pcm/config.json", "/srv", { ...opts, serviceHome: "/srv/pcm" })).toBe(true);
+  });
+
+  it("fails closed on non-absolute paths", () => {
+    expect(isAlwaysExcluded("notes/a.md", "/data/notes", opts)).toBe(true);
+    expect(isAlwaysExcluded("/data/notes/a.md", "notes", opts)).toBe(true);
+    expect(isAlwaysExcluded("/data/notes/a.md", "/data/notes", { home: "tester" })).toBe(true);
+  });
+});
+
+describe("checkReadable", () => {
+  function tree() {
+    const root = realpathSync(tempHome());
+    const home = join(root, "home");
+    const notes = join(home, "notes");
+    mkdirSync(notes, { recursive: true });
+    mkdirSync(join(home, "workspace", "personal-context"), { recursive: true });
+    writeFileSync(join(notes, "a.md"), "a");
+    writeFileSync(join(home, "workspace", "personal-context", "profile.md"), "p");
+    return { root, home, notes };
+  }
+
+  it("returns the real path for a readable file", () => {
+    const { home, notes } = tree();
+    expect(checkReadable(join(notes, "a.md"), notes, { home })).toEqual({ ok: true, realPath: join(notes, "a.md") });
+  });
+
+  it("refuses non-absolute input", () => {
+    const { home, notes } = tree();
+    expect(checkReadable("a.md", notes, { home })).toEqual({ ok: false, code: "not-absolute" });
+    expect(checkReadable(join(notes, "a.md"), "notes", { home })).toEqual({ ok: false, code: "not-absolute" });
+  });
+
+  it("fails closed on a missing file or any realpath error", () => {
+    const { home, notes } = tree();
+    expect(checkReadable(join(notes, "missing.md"), notes, { home })).toEqual({ ok: false, code: "unresolvable" });
+    const realpath = () => {
+      throw Object.assign(new Error("EACCES"), { code: "EACCES" });
+    };
+    expect(checkReadable(join(notes, "a.md"), notes, { home, realpath })).toEqual({ ok: false, code: "unresolvable" });
+  });
+
+  it("refuses a symlink that escapes the root", () => {
+    const { root, home, notes } = tree();
+    writeFileSync(join(root, "outside.md"), "o");
+    symlinkSync(join(root, "outside.md"), join(notes, "link.md"));
+    expect(checkReadable(join(notes, "link.md"), notes, { home })).toEqual({ ok: false, code: "outside-root" });
+  });
+
+  it("refuses a symlink into the profile store even when the root contains it", () => {
+    const { home } = tree();
+    const ws = join(home, "workspace");
+    symlinkSync(join(ws, "personal-context", "profile.md"), join(ws, "innocent.md"));
+    expect(checkReadable(join(ws, "innocent.md"), ws, { home })).toEqual({ ok: false, code: "excluded" });
+  });
+
+  it("refuses the profile store reached through a symlinked workspace", () => {
+    const { root, home } = tree();
+    // ~/workspace is really <root>/real-ws; the lexical exclusion under ~/workspace can't see it.
+    const realWs = join(root, "real-ws");
+    mkdirSync(join(realWs, "personal-context"), { recursive: true });
+    writeFileSync(join(realWs, "personal-context", "p.md"), "p");
+    const home2 = join(root, "home2");
+    mkdirSync(home2);
+    symlinkSync(realWs, join(home2, "workspace"));
+    expect(checkReadable(join(realWs, "personal-context", "p.md"), realWs, { home: home2 })).toEqual({ ok: false, code: "excluded" });
+  });
+
+  it("refuses a case-variant spelling of an excluded directory", () => {
+    const { home } = tree();
+    const brain = join(home, "workspace", "second-brain");
+    mkdirSync(join(brain, "inbox"), { recursive: true });
+    writeFileSync(join(brain, "inbox", "x.md"), "x");
+    // The fake realpath returns the spelling as given, as a case-insensitive disk would not.
+    const realpath = (p: string) => p;
+    expect(checkReadable(join(brain, "INBOX", "x.md"), brain, { home, realpath })).toEqual({ ok: false, code: "excluded" });
   });
 });

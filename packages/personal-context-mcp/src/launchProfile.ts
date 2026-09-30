@@ -20,7 +20,7 @@
 // classifications only.
 
 import { existsSync, mkdtempSync, realpathSync, rmSync, statSync } from "node:fs";
-import { isAbsolute, join, sep } from "node:path";
+import { isAbsolute, join } from "node:path";
 import {
   isExecutableFile,
   resolveOnPath,
@@ -30,6 +30,8 @@ import {
   type PreflightReport,
   type Verdict,
 } from "./authPreflight.js";
+import { MODEL_RE } from "./model.js";
+import { isInside } from "./paths.js";
 
 export const PROFILE_ID = "scout-direct-claude-subscription/v1";
 
@@ -49,9 +51,6 @@ export const FORWARD_KEYS: readonly string[] = Object.freeze([
   "LC_CTYPE",
   "TMPDIR",
 ]);
-
-/** Only a plain alias or model name; never anything that parses as a flag. */
-export const MODEL_RE = /^[A-Za-z0-9][A-Za-z0-9._\-[\]]{0,63}$/;
 
 export type LaunchProfileErrorCode =
   | "profile: model choice is not a plain model name"
@@ -78,10 +77,6 @@ export class LaunchProfileError extends Error {
 // case-insensitive volume can't slip past containment checks.
 function real(p: string): string {
   return realpathSync.native(p);
-}
-
-function isInside(child: string, parent: string): boolean {
-  return child === parent || child.startsWith(parent.endsWith(sep) ? parent : parent + sep);
 }
 
 /**
@@ -281,6 +276,10 @@ export type DirectPreflightOptions = LaunchProfileOptions & ProfilePreflightSeam
  * profile's cwd, and report. The verdict is `subscription` only when the profile was
  * created, the preflight found no reason, and the cwd was removed. Never throws; any
  * unexpected error becomes a fixed `internal:` reason.
+ *
+ * Blocking: the preflight runs `claude` through `spawnSync`, up to four times at up to
+ * 20 s each. The server (Task 4) must run this once at startup and again on config
+ * reload, cache the verdict, and never call it on the request path.
  */
 export function runDirectPreflight(opts: DirectPreflightOptions): DirectPreflightReport {
   try {

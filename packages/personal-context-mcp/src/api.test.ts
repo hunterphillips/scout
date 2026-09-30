@@ -32,6 +32,16 @@ describe("RankRequestSchema", () => {
     ["deadline 0", { deadlineMs: 0 }],
     ["501 candidates", { candidates: Array.from({ length: 501 }, (_, i) => ({ id: `c${i}`, title: "t", labelQuality: "slug" })) }],
     ["empty requestId", { requestId: "" }],
+    ["requestId over 128 chars", { requestId: "r".repeat(129) }],
+    ["supersedes over 128 chars", { supersedes: "r".repeat(129) }],
+    ["origin over 2048 chars", { site: { origin: `https://${"a".repeat(2050)}.dev` } }],
+    ["http origin", { site: { origin: "http://docs.stripe.com" } }],
+    ["origin with a path", { site: { origin: "https://docs.stripe.com/billing" } }],
+    ["origin with credentials", { site: { origin: "https://u:p@docs.stripe.com" } }],
+    ["not a URL", { site: { origin: "docs.stripe.com" } }],
+    ["candidate title over 160", { candidates: [{ id: "c1", title: "t".repeat(161), labelQuality: "slug" }] }],
+    ["candidate description over 400", { candidates: [{ id: "c1", title: "t", description: "d".repeat(401), labelQuality: "slug" }] }],
+    ["labelQuality over 32", { candidates: [{ id: "c1", title: "t", labelQuality: "q".repeat(33) }] }],
   ])("rejects %s", (_label, patch) => {
     expect(RankRequestSchema.safeParse({ ...request, ...patch }).success).toBe(false);
   });
@@ -70,6 +80,9 @@ describe("AGENT_OUTPUT_JSON_SCHEMA", () => {
     expect(s.additionalProperties).toBe(false);
     expect(s.properties.status.enum).toEqual(["ok", "empty"]);
     expect(s.properties.items.maxItems).toBe(3);
+    expect(s.properties.items.minItems).toBe(1);
+    expect(s.properties.items.items.properties.id.minLength).toBe(1);
+    expect(s.properties.items.items.properties.reason.minLength).toBe(1);
     expect(s.properties.items.items.additionalProperties).toBe(false);
     expect(s.properties.items.items.properties.reason.maxLength).toBe(140);
     const pattern = new RegExp(s.properties.items.items.properties.evidenceIds.items.pattern);
@@ -117,5 +130,19 @@ describe("ContextStatusSchema and ActivityObservationSchema", () => {
     expect(ActivityObservationSchema.safeParse(obs).success).toBe(true);
     expect(ActivityObservationSchema.safeParse({ ...obs, text: "x".repeat(20_000) }).success).toBe(true);
     expect(ActivityObservationSchema.safeParse({ ...obs, kind: "clicked" }).success).toBe(false);
+  });
+
+  it("bounds every observation string except text", () => {
+    const obs = { sensor: "scout", kind: "viewed_page", observedAt: "2026-09-30T12:00:00Z", url: "https://x.dev/", title: "t", truncated: false };
+    expect(ActivityObservationSchema.safeParse({ ...obs, url: `https://x.dev/${"a".repeat(8 * 1024 - 14)}` }).success).toBe(true);
+    for (const patch of [
+      { url: `https://x.dev/${"a".repeat(10 * 1024 * 1024)}` }, // 10 MB
+      { url: "u".repeat(8 * 1024 + 1) },
+      { title: "t".repeat(1025) },
+      { sensor: "s".repeat(65) },
+      { observedAt: "o".repeat(65) },
+    ]) {
+      expect(ActivityObservationSchema.safeParse({ ...obs, ...patch }).success, Object.keys(patch)[0]).toBe(false);
+    }
   });
 });

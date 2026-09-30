@@ -6,6 +6,8 @@ import type { Clock } from "./clock.js";
 export const OBSERVATION_TTL_MS = 15 * 60_000;
 export const OBSERVATION_MAX_ENTRIES = 10;
 export const OBSERVATION_MAX_TEXT_BYTES = 8 * 1024;
+/** The schema caps `title` at 1 KiB characters; the store also cuts it to 1 KiB of UTF-8 in case a caller skipped the schema. */
+export const OBSERVATION_MAX_TITLE_BYTES = 1024;
 
 /** One accepted observation, with its text already capped. */
 export interface StoredObservation extends ActivityObservation {
@@ -66,6 +68,7 @@ export function truncateUtf8(text: string, maxBytes: number): { text: string; cu
  * accepted it (the sensor's `observedAt` is informational and never trusted for expiry).
  * Adding past the cap evicts the oldest. Expired entries are dropped on every add and
  * read. Text past `maxTextBytes` is cut on a character boundary and flagged `truncated`.
+ * A title past 1 KiB is cut silently (the schema already rejects one that long).
  * Ids are `o1`, `o2`, ... per process.
  */
 export function createObservationStore(options: ObservationStoreOptions): ObservationStore {
@@ -111,7 +114,7 @@ export function createObservationStore(options: ObservationStoreOptions): Observ
         kind: obs.kind,
         observedAt: obs.observedAt,
         url: obs.url,
-        title: obs.title,
+        title: truncateUtf8(obs.title, OBSERVATION_MAX_TITLE_BYTES).text,
         truncated: obs.truncated,
       };
       if (obs.text !== undefined) {

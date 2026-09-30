@@ -1,13 +1,14 @@
 // This package is an independent service; Scout is only one of its clients. It must never
 // depend on @scout/* packages, in source or in package.json.
 
-import { readdirSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
 const SRC = dirname(fileURLToPath(import.meta.url));
 const PKG = join(SRC, "..", "package.json");
+const TEST_DIR = join(SRC, "..", "test");
 
 function sourceFiles(dir: string): string[] {
   return readdirSync(dir, { withFileTypes: true }).flatMap((e) => {
@@ -17,15 +18,15 @@ function sourceFiles(dir: string): string[] {
   });
 }
 
-// import/export ... from "@scout/..", import("@scout/.."), require("@scout/..").
-const SCOUT_SPECIFIER = /(?:from\s*|import\s*\(\s*|require\s*\(\s*|import\s+)["']@scout\//;
+// import/export ... from "@scout/..", import("@scout/.."), import(`@scout/..`), require("@scout/..").
+const SCOUT_SPECIFIER = /(?:from\s*|import\s*\(\s*|require\s*\(\s*|import\s+)["'`]@scout\//;
 
 describe("no @scout imports", () => {
-  it("no file under src/ imports @scout/*", () => {
+  it("no file under src/ (or test/, if present) imports @scout/*", () => {
     const self = fileURLToPath(import.meta.url);
-    const files = sourceFiles(SRC).filter((f) => f !== self);
+    const files = [...sourceFiles(SRC), ...(existsSync(TEST_DIR) ? sourceFiles(TEST_DIR) : [])].filter((f) => f !== self);
     expect(files.length).toBeGreaterThan(3);
-    const offenders = files.filter((f) => SCOUT_SPECIFIER.test(readFileSync(f, "utf8"))).map((f) => relative(SRC, f));
+    const offenders = files.filter((f) => SCOUT_SPECIFIER.test(readFileSync(f, "utf8"))).map((f) => relative(join(SRC, ".."), f));
     expect(offenders).toEqual([]);
   });
 
@@ -35,6 +36,7 @@ describe("no @scout imports", () => {
       "import type { Y } from '@scout/scout-core';",
       'export * from "@scout/contracts";',
       'await import("@scout/contracts")',
+      "await import(`@scout/contracts`)",
       'import "@scout/contracts";',
     ]) {
       expect(SCOUT_SPECIFIER.test(line), line).toBe(true);

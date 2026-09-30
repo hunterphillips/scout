@@ -5,20 +5,47 @@
 // `x_scout_marker` into it, so the loader keeps unknown keys and fills defaults for every
 // missing one. Sources are grants: every default source ships disabled, and the
 // always-excluded list below applies whatever the config says.
+//
+// <home> follows the private-directory house style (scout-core's ensurePrivateRunDir): a
+// real directory, owned by us, mode 0700 or tighter. It is created 0700 when missing and
+// an existing one is never chmod'ed; anything else is refused with a fixed code.
 
 import { createHash, randomBytes } from "node:crypto";
-import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeSync } from "node:fs";
+import {
+  closeSync,
+  constants as fsc,
+  fstatSync,
+  fsyncSync,
+  lstatSync,
+  mkdirSync,
+  openSync,
+  readSync,
+  realpathSync,
+  renameSync,
+  rmSync,
+  writeSync,
+} from "node:fs";
 import { homedir } from "node:os";
-import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { z } from "zod";
 import { MAX_DEADLINE_MS } from "./api.js";
-import { MODEL_RE } from "./launchProfile.js";
+import { MODEL_RE } from "./model.js";
+import { isInside } from "./paths.js";
 
 export type EnvLike = Readonly<Record<string, string | undefined>>;
 
-/** ~/.personal-context-mcp, or PERSONAL_CONTEXT_HOME when set (same convention as SCOUT_HOME). */
+/** Largest config file the loader reads. */
+export const MAX_CONFIG_BYTES = 1024 * 1024;
+
+/**
+ * ~/.personal-context-mcp, or PERSONAL_CONTEXT_HOME when set (same convention as
+ * SCOUT_HOME). A relative PERSONAL_CONTEXT_HOME (or HOME) is refused: it would depend
+ * on the cwd.
+ */
 export function resolveHome(env: EnvLike = process.env): string {
-  return env.PERSONAL_CONTEXT_HOME || join(env.HOME || homedir(), ".personal-context-mcp");
+  const home = env.PERSONAL_CONTEXT_HOME || join(env.HOME || homedir(), ".personal-context-mcp");
+  if (!isAbsolute(home)) throw new ConfigError("config-relative-home");
+  return home;
 }
 
 export function configPath(home: string): string {
@@ -26,11 +53,19 @@ export function configPath(home: string): string {
 }
 
 export type ConfigErrorCode =
+  | "config-relative-home"
+  | "config-home-symlink"
+  | "config-home-not-directory"
+  | "config-home-wrong-owner"
+  | "config-home-not-private"
+  | "config-home-unusable"
   | "config-unreadable"
+  | "config-too-large"
   | "config-malformed"
   | "config-invalid"
   | "config-duplicate-source-id"
   | "config-relative-source-path"
+  | "config-source-root-too-broad"
   | "config-write-failed";
 
 /** Carries a fixed code and, for `config-invalid`, the top-level key at fault. Never a path or value. */
@@ -48,8 +83,39 @@ export class ConfigError extends Error {
 
 const pathString = z.string().min(1);
 
+/** Source ids: lowercase, digits and `-`, starting with a letter or digit, at most 64 chars. */
+export const SOURCE_ID_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
+const sourceId = z.string().regex(SOURCE_ID_RE);
+
+/** A path inside a project: relative, no leading `/`, no `..` segment. */
+export function isSafeSubpath(p: string): boolean {
+  if (p.length === 0 || isAbsolute(p) || p.startsWith("/") || p.startsWith("\\")) return false;
+  return !p.split(/[\\/]/).some((seg) => seg === "..");
+}
+
+/** One plain directory name: letters, digits, `.`, `_`, `-`; never `.` or `..`. */
+const PROJECT_NAME_RE = /^[A-Za-z0-9._-]+$/;
+const projectName = z.string().regex(PROJECT_NAME_RE).refine((n) => n !== "." && n !== "..");
+
+/** `http://127.0.0.1:<port>/...` or `http://localhost:<port>/...`, explicit port, no credentials. */
+export function isLoopbackFocusUrl(v: string): boolean {
+  let u: URL;
+  try {
+    u = new URL(v);
+  } catch {
+    return false;
+  }
+  return (
+    u.protocol === "http:" &&
+    (u.hostname === "127.0.0.1" || u.hostname === "localhost") &&
+    u.port !== "" &&
+    u.username === "" &&
+    u.password === ""
+  );
+}
+
 const MarkdownDirSourceSchema = z.looseObject({
-  id: z.string().min(1),
+  id: sourceId,
   kind: z.literal("markdown_dir"),
   enabled: z.boolean(),
   root: pathString,
@@ -59,22 +125,23 @@ const MarkdownDirSourceSchema = z.looseObject({
 });
 
 const RegistryProjectsSourceSchema = z.looseObject({
-  id: z.string().min(1),
+  id: sourceId,
   kind: z.literal("registry_projects"),
   enabled: z.boolean(),
   /** Directory of notes whose `repo:` frontmatter maps projects. A map only: not itself readable. */
   registry: pathString,
   /** Path inside each enabled project that becomes readable. */
-  subpath: z.string().min(1),
-  /** A project is readable only once it is named here. */
-  enabledProjects: z.array(z.string().min(1)).default([]),
+  subpath: z.string().min(1).refine(isSafeSubpath),
+  /** A project is readable only once it is named here. Each entry is one plain directory name. */
+  enabledProjects: z.array(projectName).default([]),
 });
 
 const FocusHttpSourceSchema = z.looseObject({
-  id: z.string().min(1),
+  id: sourceId,
   kind: z.literal("focus_http"),
   enabled: z.boolean(),
-  url: z.url({ protocol: /^https?$/ }),
+  /** Loopback only: see isLoopbackFocusUrl. */
+  url: z.string().max(2048).refine(isLoopbackFocusUrl),
 });
 
 export const SourceConfigSchema = z.discriminatedUnion("kind", [
@@ -137,10 +204,31 @@ function defaultConfigFile(): ConfigFile {
   };
 }
 
+/** Keys that could reach an object's prototype when assigned. Dropped at every depth. */
+const UNSAFE_KEYS = new Set(["__proto__", "constructor", "prototype"]);
+const MAX_JSON_DEPTH = 64;
+
+/**
+ * A copy of a JSON-shaped value made only of own enumerable data, with `__proto__`,
+ * `constructor` and `prototype` keys dropped at every depth. Too deep: config-malformed.
+ */
+function sanitizeJson(v: unknown, depth = 0): unknown {
+  if (depth > MAX_JSON_DEPTH) throw new ConfigError("config-malformed");
+  if (Array.isArray(v)) return v.map((x) => sanitizeJson(x, depth + 1));
+  if (v !== null && typeof v === "object") {
+    const out: Record<string, unknown> = {};
+    for (const [k, x] of Object.entries(v)) {
+      if (!UNSAFE_KEYS.has(k)) out[k] = sanitizeJson(x, depth + 1);
+    }
+    return out;
+  }
+  return v;
+}
+
 /** Validate a parsed JSON value as a config file, filling defaults. Throws ConfigError. */
 export function parseConfigFile(value: unknown): ConfigFile {
   if (value === null || typeof value !== "object" || Array.isArray(value)) throw new ConfigError("config-malformed");
-  const input = value as Record<string, unknown>;
+  const input = sanitizeJson(value) as Record<string, unknown>;
   const out: ConfigFile = { ...defaultConfigFile() };
   for (const [key, v] of Object.entries(input)) {
     if (!Object.hasOwn(FIELD_SCHEMAS, key)) {
@@ -157,17 +245,83 @@ export function parseConfigFile(value: unknown): ConfigFile {
 }
 
 /**
- * Read <home>/config.json. A missing file means all defaults. A present file that is
- * unreadable, not JSON, or has a malformed known field is a ConfigError, not a fallback.
+ * Check <home> against the house style. Returns false when it does not exist; throws
+ * ConfigError when it exists but is a symlink, not a directory, not ours, or has any
+ * group/other mode bit. Never changes it.
  */
-export function readConfigFile(home: string): ConfigFile {
-  let raw: string;
+function checkPrivateHome(home: string, uid: number): boolean {
+  let st;
   try {
-    raw = readFileSync(configPath(home), "utf8");
+    st = lstatSync(home);
   } catch (e) {
-    if ((e as NodeJS.ErrnoException).code === "ENOENT") return defaultConfigFile();
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw new ConfigError("config-home-unusable");
+  }
+  if (st.isSymbolicLink()) throw new ConfigError("config-home-symlink");
+  if (!st.isDirectory()) throw new ConfigError("config-home-not-directory");
+  if (st.uid !== uid) throw new ConfigError("config-home-wrong-owner");
+  if ((st.mode & 0o077) !== 0) throw new ConfigError("config-home-not-private");
+  return true;
+}
+
+/** Create <home> 0700 when missing, then check it. An existing directory is never chmod'ed. */
+function ensurePrivateHome(home: string, uid: number): void {
+  if (checkPrivateHome(home, uid)) return;
+  try {
+    mkdirSync(home, { recursive: true, mode: 0o700 });
+  } catch {
+    throw new ConfigError("config-home-unusable");
+  }
+  if (!checkPrivateHome(home, uid)) throw new ConfigError("config-home-unusable");
+}
+
+/** Read the file without following a symlink, refusing anything over MAX_CONFIG_BYTES. `undefined`: no file. */
+function readBoundedConfig(path: string): string | undefined {
+  let fd: number;
+  try {
+    fd = openSync(path, fsc.O_RDONLY | fsc.O_NOFOLLOW);
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return undefined;
     throw new ConfigError("config-unreadable");
   }
+  try {
+    let size: number;
+    try {
+      const st = fstatSync(fd);
+      if (!st.isFile()) throw new Error();
+      size = st.size;
+    } catch {
+      throw new ConfigError("config-unreadable");
+    }
+    if (size > MAX_CONFIG_BYTES) throw new ConfigError("config-too-large");
+    // Read one byte past the cap so a file that grew after fstat is still caught.
+    const buf = Buffer.alloc(MAX_CONFIG_BYTES + 1);
+    let len = 0;
+    try {
+      for (;;) {
+        const n = readSync(fd, buf, len, buf.length - len, null);
+        if (n === 0) break;
+        len += n;
+        if (len > MAX_CONFIG_BYTES) throw new ConfigError("config-too-large");
+      }
+    } catch (e) {
+      throw e instanceof ConfigError ? e : new ConfigError("config-unreadable");
+    }
+    return buf.subarray(0, len).toString("utf8");
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/**
+ * Read <home>/config.json. A missing home or file means all defaults. A home that fails
+ * the house-style check, or a file that is a symlink, unreadable, over 1 MiB, not JSON,
+ * or has a malformed known field is a ConfigError, not a fallback.
+ */
+export function readConfigFile(home: string, uid: number = process.getuid?.() ?? -1): ConfigFile {
+  if (!checkPrivateHome(home, uid)) return defaultConfigFile();
+  const raw = readBoundedConfig(configPath(home));
+  if (raw === undefined) return defaultConfigFile();
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
@@ -179,15 +333,22 @@ export function readConfigFile(home: string): ConfigFile {
 
 /**
  * Write <home>/config.json atomically (temp file, fsync, rename) with mode 0600, creating
- * <home> as 0700 if needed. The file is validated first; unknown keys are written back.
+ * <home> as 0700 if needed. The file is validated and resolved first, so it never saves
+ * a config loadConfig would reject; unknown keys are written back.
  */
-export function writeConfig(home: string, file: ConfigFile): void {
+export function writeConfig(
+  home: string,
+  file: ConfigFile,
+  env: EnvLike = process.env,
+  uid: number = process.getuid?.() ?? -1,
+): void {
   const valid = parseConfigFile(file);
+  resolveConfig(valid, env);
   const text = JSON.stringify(valid, null, 2) + "\n";
   const target = configPath(home);
   const tmp = join(home, `.config.json.${process.pid}.${randomBytes(6).toString("hex")}.tmp`);
+  ensurePrivateHome(home, uid);
   try {
-    mkdirSync(home, { recursive: true, mode: 0o700 });
     const fd = openSync(tmp, "wx", 0o600);
     try {
       writeSync(fd, text);
@@ -226,10 +387,26 @@ export function expandHomePath(p: string, env: EnvLike = process.env): string {
   return resolve(expanded);
 }
 
+/** Case-folded, NFC-normalized form for comparisons that must hold on a case-insensitive disk. */
+function fold(p: string): string {
+  return p.normalize("NFC").toLowerCase();
+}
+
+/**
+ * A source root (or registry) must lie strictly inside $HOME or elsewhere below `/`:
+ * never `/`, never $HOME itself, never an ancestor of $HOME. Compared case-insensitively.
+ */
+function sourceLocation(p: string, env: EnvLike): string {
+  const abs = expandHomePath(p, env);
+  const home = resolve(env.HOME || homedir());
+  if (abs === resolve("/") || isInside(fold(home), fold(abs))) throw new ConfigError("config-source-root-too-broad");
+  return abs;
+}
+
 export function resolveConfig(file: ConfigFile, env: EnvLike = process.env): PcmConfig {
   const sources = file.sources.map((s): ResolvedSource => {
-    if (s.kind === "markdown_dir") return { ...s, root: expandHomePath(s.root, env) };
-    if (s.kind === "registry_projects") return { ...s, registry: expandHomePath(s.registry, env) };
+    if (s.kind === "markdown_dir") return { ...s, root: sourceLocation(s.root, env) };
+    if (s.kind === "registry_projects") return { ...s, registry: sourceLocation(s.registry, env) };
     return { ...s };
   });
   const out: PcmConfig = { port: file.port, model: file.model, maxRankMs: file.maxRankMs, sources };
@@ -239,8 +416,8 @@ export function resolveConfig(file: ConfigFile, env: EnvLike = process.env): Pcm
 }
 
 /** readConfigFile then resolveConfig. */
-export function loadConfig(home: string, env: EnvLike = process.env): PcmConfig {
-  return resolveConfig(readConfigFile(home), env);
+export function loadConfig(home: string, env: EnvLike = process.env, uid: number = process.getuid?.() ?? -1): PcmConfig {
+  return resolveConfig(readConfigFile(home, uid), env);
 }
 
 // ---------- grants ----------
@@ -279,25 +456,40 @@ function canonicalJson(v: unknown): string {
 }
 
 // ---------- always excluded ----------
+//
+// Task 2's source tools must gate every read with checkReadable, never with
+// isAlwaysExcluded alone: only checkReadable resolves symlinks and on-disk spelling.
 
-/** Path segments excluded wherever they appear. */
-const EXCLUDED_SEGMENTS = new Set([".git", "node_modules"]);
+/** Directory names excluded wherever they appear as a path segment (compared case-folded). */
+const EXCLUDED_SEGMENTS = new Set([".git", "node_modules", ".ssh", ".gnupg", "keychains", ".netrc", ".npmrc"]);
 
 /** Name patterns excluded wherever they appear (any segment, case-insensitive). */
 const EXCLUDED_NAME_PATTERNS: readonly RegExp[] = [
   /^\.env/i, // .env, .env.local, ...
   /\.pem$/i,
   /\.key$/i,
+  /\.p12$/i,
+  /\.pfx$/i,
   /secret/i,
   /token/i,
   /credential/i,
 ];
 
-/** Top-level directories excluded under a second-brain root. */
+/** Name patterns excluded on the final segment only (files such as SSH keys). */
+const EXCLUDED_FILE_PATTERNS: readonly RegExp[] = [/^id_/i];
+
+/** Top-level directories excluded under a second-brain root (compared case-folded). */
 const SECOND_BRAIN_EXCLUDED = new Set(["inbox", "log"]);
 
+function isExcludedName(seg: string, isLast: boolean): boolean {
+  const f = fold(seg);
+  if (EXCLUDED_SEGMENTS.has(f)) return true;
+  if (EXCLUDED_NAME_PATTERNS.some((re) => re.test(f))) return true;
+  return isLast && EXCLUDED_FILE_PATTERNS.some((re) => re.test(f));
+}
+
 function isSecondBrainRoot(root: string): boolean {
-  const parts = root.split(sep).filter(Boolean);
+  const parts = fold(root).split(sep).filter(Boolean);
   const last = parts.at(-1);
   const prev = parts.at(-2);
   return last === "second-brain" || (last === "notes" && prev === "second-brain");
@@ -308,43 +500,102 @@ export interface ExclusionOptions {
   home?: string;
   /** Defaults to <home>/workspace/personal-context. */
   personalContextDir?: string;
+  /** This service's own home when it is not <home>/.personal-context-mcp (e.g. PERSONAL_CONTEXT_HOME). */
+  serviceHome?: string;
+}
+
+/** Directories excluded by absolute path, whatever the source root. */
+function absoluteExcludedDirs(home: string, opts: ExclusionOptions): string[] {
+  const brain = join(home, "workspace", "second-brain");
+  const dirs = [
+    opts.personalContextDir ?? join(home, "workspace", "personal-context"),
+    ...[...SECOND_BRAIN_EXCLUDED].map((n) => join(brain, n)),
+    join(home, ".personal-context-mcp"),
+  ];
+  if (opts.serviceHome !== undefined) dirs.push(opts.serviceHome);
+  return dirs.map((d) => resolve(d));
 }
 
 /**
- * Whether a path is excluded whatever the config says. Callers pass physical paths
- * (realpath of both). Excluded:
- * - anything not inside `sourceRoot` (fails closed);
- * - everything under ~/workspace/personal-context/ (the private profile store);
- * - everything under ~/workspace/second-brain/inbox/ and ~/workspace/second-brain/log/,
- *   by absolute path, whatever the source root;
- * - any path segment named `.git` or `node_modules`;
- * - any segment matching `.env*`, `*.pem`, `*.key`, `*secret*`, `*token*`, `*credential*`
- *   (case-insensitive, so a `secrets/` directory hides its whole subtree);
+ * Whether a path is excluded whatever the config says. Lexical only: callers reading
+ * files must use checkReadable. Fails closed (excluded) when either path or HOME is not
+ * absolute. Excluded:
+ * - anything not inside `sourceRoot`;
+ * - everything under ~/workspace/personal-context/ (the private profile store), under
+ *   ~/workspace/second-brain/inbox/ and ~/workspace/second-brain/log/, and under
+ *   ~/.personal-context-mcp/ (this service's own home), by absolute path whatever the
+ *   source root, compared case-insensitively after NFC normalization;
+ * - any segment named `.git`, `node_modules`, `.ssh`, `.gnupg`, `Keychains`, `.netrc`,
+ *   `.npmrc`, or matching `.env*`, `*.pem`, `*.key`, `*.p12`, `*.pfx`, `*secret*`,
+ *   `*token*`, `*credential*`, and a final segment matching `id_*` (all case-insensitive,
+ *   so a `secrets/` directory hides its whole subtree). The source root's own last
+ *   segment counts too, so a root named `secrets` is excluded entirely;
  * - when the source root is a second-brain root (its last segments are `second-brain` or
  *   `second-brain/notes`), a first segment under it named `inbox` or `log` (covers a second
  *   brain living somewhere other than ~/workspace/second-brain).
  */
 export function isAlwaysExcluded(absPath: string, sourceRoot: string, opts: ExclusionOptions = {}): boolean {
   const home = opts.home ?? (process.env.HOME || homedir());
-  const pcDir = resolve(opts.personalContextDir ?? join(home, "workspace", "personal-context"));
+  if (!isAbsolute(absPath) || !isAbsolute(sourceRoot) || !isAbsolute(home)) return true;
   const path = resolve(absPath);
   const root = resolve(sourceRoot);
-  if (path === pcDir || path.startsWith(pcDir + sep)) return true;
-  const brainDir = join(resolve(home), "workspace", "second-brain");
-  for (const name of SECOND_BRAIN_EXCLUDED) {
-    const dir = join(brainDir, name);
-    if (path === dir || path.startsWith(dir + sep)) return true;
-  }
+  const folded = fold(path);
+  if (absoluteExcludedDirs(home, opts).some((d) => isInside(folded, fold(d)))) return true;
 
   const rel = relative(root, path);
-  if (rel === "") return false;
   if (rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel)) return true;
+  if (isExcludedName(basename(root), rel === "")) return true;
+  if (rel === "") return false;
 
   const segments = rel.split(sep);
-  for (const seg of segments) {
-    if (EXCLUDED_SEGMENTS.has(seg)) return true;
-    if (EXCLUDED_NAME_PATTERNS.some((re) => re.test(seg))) return true;
-  }
+  if (segments.some((seg, i) => isExcludedName(seg, i === segments.length - 1))) return true;
   const first = segments[0];
-  return first !== undefined && SECOND_BRAIN_EXCLUDED.has(first) && isSecondBrainRoot(root);
+  return first !== undefined && SECOND_BRAIN_EXCLUDED.has(fold(first)) && isSecondBrainRoot(root);
+}
+
+export type ReadableRefusal = "not-absolute" | "unresolvable" | "outside-root" | "excluded";
+export type ReadableResult = { ok: true; realPath: string } | { ok: false; code: ReadableRefusal };
+
+export interface CheckReadableOptions extends ExclusionOptions {
+  /** Test seam: replaces realpathSync.native. */
+  realpath?: (p: string) => string;
+}
+
+/**
+ * The gate every source read goes through. Resolves both paths with realpath (symlinks
+ * and on-disk spelling), fails closed on any fs error, requires the real path inside the
+ * real root, then applies isAlwaysExcluded to both the real and the given spelling. The
+ * absolute exclusions are matched against their real paths too, so a symlinked
+ * ~/workspace can't route around them.
+ */
+export function checkReadable(absPath: string, sourceRoot: string, opts: CheckReadableOptions = {}): ReadableResult {
+  const { realpath = realpathSync.native, ...excl } = opts;
+  if (typeof absPath !== "string" || typeof sourceRoot !== "string" || !isAbsolute(absPath) || !isAbsolute(sourceRoot)) {
+    return { ok: false, code: "not-absolute" };
+  }
+  let realPath: string;
+  let realRoot: string;
+  try {
+    realPath = realpath(absPath);
+    realRoot = realpath(sourceRoot);
+  } catch {
+    return { ok: false, code: "unresolvable" };
+  }
+  if (!isAbsolute(realPath) || !isAbsolute(realRoot)) return { ok: false, code: "unresolvable" };
+  if (!isInside(realPath, realRoot)) return { ok: false, code: "outside-root" };
+  if (isAlwaysExcluded(absPath, sourceRoot, excl) || isAlwaysExcluded(realPath, realRoot, excl)) {
+    return { ok: false, code: "excluded" };
+  }
+  const home = excl.home ?? (process.env.HOME || homedir());
+  const foldedReal = fold(realPath);
+  for (const dir of absoluteExcludedDirs(home, excl)) {
+    let realDir: string;
+    try {
+      realDir = realpath(dir);
+    } catch {
+      continue; // missing: its lexical form was already checked above
+    }
+    if (isInside(foldedReal, fold(realDir))) return { ok: false, code: "excluded" };
+  }
+  return { ok: true, realPath };
 }

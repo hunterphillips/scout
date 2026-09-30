@@ -16,19 +16,40 @@ export const MAX_EVIDENCE_PER_ITEM = 8;
 /** An evidence id as the source tools issue it: `e1`, `e2`, ... (never `e0`). */
 export const EVIDENCE_ID_PATTERN = /^e[1-9][0-9]*$/;
 
+/** Per-field caps on caller input, in characters. Bounded here so a caller can't make the service hold unbounded strings. */
+export const MAX_ID_CHARS = 128;
+export const MAX_CANDIDATE_TITLE_CHARS = 160;
+export const MAX_CANDIDATE_DESCRIPTION_CHARS = 400;
+export const MAX_LABEL_QUALITY_CHARS = 32;
+export const MAX_ORIGIN_CHARS = 2048;
+export const MAX_OBSERVATION_URL_CHARS = 8 * 1024;
+export const MAX_OBSERVATION_TITLE_CHARS = 1024;
+export const MAX_SENSOR_CHARS = 64;
+export const MAX_OBSERVED_AT_CHARS = 64;
+
+/** True when `v` is exactly an https origin (`https://host[:port]`, no path, query or credentials). */
+function isHttpsOrigin(v: string): boolean {
+  try {
+    const u = new URL(v);
+    return u.protocol === "https:" && u.origin === v;
+  } catch {
+    return false;
+  }
+}
+
 // ---------- rank_site_links input ----------
 
 export const RankCandidateSchema = z.object({
-  id: z.string().min(1),
-  title: z.string(),
-  description: z.string().optional(),
-  labelQuality: z.string(),
+  id: z.string().min(1).max(MAX_ID_CHARS),
+  title: z.string().max(MAX_CANDIDATE_TITLE_CHARS),
+  description: z.string().max(MAX_CANDIDATE_DESCRIPTION_CHARS).optional(),
+  labelQuality: z.string().max(MAX_LABEL_QUALITY_CHARS),
 });
 
 export const RankRequestSchema = z.object({
-  requestId: z.string().min(1),
+  requestId: z.string().min(1).max(MAX_ID_CHARS),
   site: z.object({
-    origin: z.string().min(1),
+    origin: z.string().min(1).max(MAX_ORIGIN_CHARS).refine(isHttpsOrigin),
     name: z.string().optional(),
   }),
   candidates: z.array(RankCandidateSchema).max(MAX_CANDIDATES),
@@ -36,7 +57,7 @@ export const RankRequestSchema = z.object({
   /** The caller's remaining budget for the model run. */
   deadlineMs: z.int().min(1).max(MAX_DEADLINE_MS),
   /** A requestId from the same MCP session to cancel first; ignored otherwise. */
-  supersedes: z.string().min(1).optional(),
+  supersedes: z.string().min(1).max(MAX_ID_CHARS).optional(),
 });
 
 export type RankCandidate = z.infer<typeof RankCandidateSchema>;
@@ -74,14 +95,15 @@ export const AGENT_OUTPUT_JSON_SCHEMA = deepFreeze({
     status: { type: "string", enum: ["ok", "empty"] },
     items: {
       type: "array",
+      minItems: 1,
       maxItems: MAX_RESULTS,
       items: {
         type: "object",
         additionalProperties: false,
         required: ["id", "reason", "evidenceIds"],
         properties: {
-          id: { type: "string" },
-          reason: { type: "string", maxLength: MAX_REASON_CHARS },
+          id: { type: "string", minLength: 1 },
+          reason: { type: "string", minLength: 1, maxLength: MAX_REASON_CHARS },
           evidenceIds: {
             type: "array",
             minItems: 1,
@@ -152,11 +174,11 @@ export type RankResponse = z.infer<typeof RankResponseSchema>;
 // ---------- observe_activity ----------
 
 export const ActivityObservationSchema = z.object({
-  sensor: z.string().min(1),
+  sensor: z.string().min(1).max(MAX_SENSOR_CHARS),
   kind: z.literal("viewed_page"),
-  observedAt: z.string().min(1),
-  url: z.string().min(1),
-  title: z.string(),
+  observedAt: z.string().min(1).max(MAX_OBSERVED_AT_CHARS),
+  url: z.string().min(1).max(MAX_OBSERVATION_URL_CHARS),
+  title: z.string().max(MAX_OBSERVATION_TITLE_CHARS),
   /** Any length is accepted here; the observation store truncates to 8 KiB. */
   text: z.string().optional(),
   truncated: z.boolean(),

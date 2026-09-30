@@ -126,6 +126,20 @@ describe("observation store", () => {
   });
 });
 
+describe("observation store bounds", () => {
+  it("cuts a title past 1 KiB even when the schema was skipped, keeping memory bounded", () => {
+    const store = createObservationStore({ clock: fakeClock() });
+    for (let i = 0; i < 20; i++) store.add(obs(i, { title: "é".repeat(5 * 1024 * 1024), text: "x".repeat(1024 * 1024) }));
+    const all = store.list();
+    expect(all).toHaveLength(10);
+    for (const o of all) {
+      expect(Buffer.byteLength(o.title, "utf8")).toBeLessThanOrEqual(1024);
+      expect(Buffer.byteLength(o.text ?? "", "utf8")).toBeLessThanOrEqual(8 * 1024);
+      expect(o.title.endsWith("\uFFFD")).toBe(false);
+    }
+  });
+});
+
 describe("truncateUtf8", () => {
   it("never splits a multi-byte character", () => {
     expect(truncateUtf8("a😀", 3)).toEqual({ text: "a", cut: true });

@@ -576,6 +576,9 @@ export interface PreflightReport {
  * Settings are resolved from the child's env and cwd, since they apply to the child even
  * though no env var names them. If env/settings already make the verdict ambiguous,
  * claude is never started (auth status could execute an apiKeyHelper).
+ *
+ * Low-level: this can throw (e.g. on a non-allowlisted invocation). Service code should
+ * call `runDirectPreflight` from launchProfile.ts, which never throws.
  */
 export function runPreflight(deps: PreflightDeps): PreflightReport {
   const {
