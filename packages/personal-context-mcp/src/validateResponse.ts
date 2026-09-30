@@ -4,8 +4,8 @@
 // `{status:"ok", items:[...]}`); anything else is a parse failure (`error`,
 // `invalid_output`). Items are then checked one by one, so one bad pick never sinks the
 // others: an item is dropped when its candidate id is unknown or repeated, when it has no
-// string reason or a reason over 140 characters, or when none of its evidence ids was
-// issued by this run's source tools
+// string reason, a reason over 140 characters or a reason that cleans to nothing (only a
+// URL, say), or when none of its evidence ids was issued by this run's source tools
 // (a path, title or URL in place of an id is simply not an issued id). At most
 // `maxResults` surviving items are kept; once that many survive, the rest are neither
 // examined nor counted as dropped. Kept reasons have URL-like strings removed and are
@@ -39,7 +39,7 @@ export interface RankOkResult {
   items: RankItem[];
   /**
    * Items the model returned that failed validation (unknown or repeated id, missing or
-   * over-long reason, no issued evidence). Items past `maxResults` are cut, not dropped, and never counted.
+   * over-long or empty-after-cleaning reason, no issued evidence). Items past `maxResults` are cut, not dropped, and never counted.
    */
   droppedCount: number;
 }
@@ -167,7 +167,9 @@ export function validateResponse({ output, req, audit, labelFor = defaultLabelFo
       if (evidence.length >= MAX_EVIDENCE_PER_ITEM) break;
     }
     if (evidence.length === 0) continue;
-    kept.push({ id, reason: cleanReason(reason), evidence });
+    const cleaned = cleanReason(reason);
+    if (cleaned === "") continue; // nothing left once URLs are removed
+    kept.push({ id, reason: cleaned, evidence });
     droppedCount--;
   }
   if (kept.length === 0) return { status: "error", reason: VALIDATION_FAILED, droppedCount };

@@ -73,7 +73,10 @@ export const AgentItemSchema = z.strictObject({
   evidenceIds: z.array(z.string().regex(EVIDENCE_ID_PATTERN)).min(1).max(MAX_EVIDENCE_PER_ITEM),
 });
 
-/** The only two shapes the model may return. The service re-validates; the CLI's own check is not trusted alone. */
+/**
+ * The only two shapes the model may return. Used to build --json-schema and in tests; the
+ * service's only check of real output is validateResponse, which does not parse with this.
+ */
 export const AgentOutputSchema = z.discriminatedUnion("status", [
   z.strictObject({ status: z.literal("ok"), items: z.array(AgentItemSchema).min(1).max(MAX_RESULTS) }),
   z.strictObject({ status: z.literal("empty") }),
@@ -84,7 +87,7 @@ export type AgentOutput = z.infer<typeof AgentOutputSchema>;
 
 /**
  * Plain JSON Schema for the CLI's `--json-schema` flag. The CLI requires a top-level object,
- * so the two shapes are folded into one; AgentOutputSchema enforces the split afterwards.
+ * so the two shapes are folded into one; validateResponse enforces the split afterwards.
  * Equivalent to the Phase 0 spike's AGENT_OUTPUT_SCHEMA, with the evidence pattern
  * tightened to the ids the tools actually issue (`e1` onward).
  */

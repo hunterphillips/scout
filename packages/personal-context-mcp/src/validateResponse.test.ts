@@ -189,4 +189,16 @@ describe("validateResponse", () => {
     const r = validateResponse({ output: ok({ id: "c1", reason: 5, evidenceIds: ["e2"] }, { id: "c2", reason: "r", evidenceIds: "e2" }, item("c3", ["e2"])), req, audit });
     expect(r).toMatchObject({ status: "ok", droppedCount: 2, items: [{ id: "c3" }] });
   });
+
+  it.each([
+    ["only a URL", "https://evil.example/x"],
+    ["only a bare host", "evil.com"],
+    ["only whitespace", "   "],
+    ["only control characters", "\u0000\u200b"],
+  ])("drops an item whose reason cleans to nothing (%s), counted as dropped", (_l, reason) => {
+    const r = validateResponse({ output: ok(item("c1", ["e2"], reason), item("c2", ["e3"])), req, audit });
+    expect(r).toMatchObject({ status: "ok", droppedCount: 1, items: [{ id: "c2" }] });
+    const only = validateResponse({ output: ok(item("c1", ["e2"], reason)), req, audit });
+    expect(only).toEqual({ status: "error", reason: "validation_failed", droppedCount: 1 });
+  });
 });

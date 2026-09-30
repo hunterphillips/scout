@@ -297,9 +297,11 @@ describe("diagnostics", () => {
       appendFile: (_p, data) => void lines.push(data),
       warn,
     });
-    const { client, ranks, bump } = makeClient({ diagnostics });
+    // One controllable clock for the client and the visits, so the deadline is exact.
+    const now = Date.UTC(2026, 8, 30, 12, 0, 0);
+    const { client, ranks, bump } = makeClient({ diagnostics, clock: { now: () => now } });
     // rank_start, rank_discarded, rank_start, rank_result
-    const result = client.rankForVisit(visit(1), CATALOG);
+    const result = client.rankForVisit(visit(1, { startedAt: now }), CATALOG);
     await flush();
     bump();
     client.notifyContextChanged();
@@ -308,7 +310,7 @@ describe("diagnostics", () => {
     ranks[1]!.reply.resolve({ ok: true, value: OK });
     await result;
     // rank_skipped, then a local rank_result with its reason
-    await client.rankForVisit(visit(2, { startedAt: Date.now() - 29_000 }), CATALOG);
+    await client.rankForVisit(visit(2, { startedAt: now - 29_000 }), CATALOG);
 
     expect(warn).not.toHaveBeenCalled();
     const events = lines.map((l) => JSON.parse(l) as Record<string, unknown>);
