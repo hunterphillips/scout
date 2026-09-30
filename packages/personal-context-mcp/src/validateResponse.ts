@@ -4,11 +4,19 @@
 // `{status:"ok", items:[...]}`); anything else is a parse failure (`error`,
 // `invalid_output`). Items are then checked one by one, so one bad pick never sinks the
 // others: an item is dropped when its candidate id is unknown or repeated, when it has no
-// string reason, or when none of its evidence ids was issued by this run's source tools
+// string reason or a reason over 140 characters, or when none of its evidence ids was
+// issued by this run's source tools
 // (a path, title or URL in place of an id is simply not an issued id). At most
 // `maxResults` surviving items are kept; once that many survive, the rest are neither
-// examined nor counted as dropped. Reasons are cut to 140 characters with URL-like
-// strings removed. Evidence labels are written here from the audit map; any label, path
+// examined nor counted as dropped. Kept reasons have URL-like strings removed and are
+// cut to 140 characters.
+//
+// The 140-character reason limit is checked in two places. The CLI's --json-schema
+// (AGENT_OUTPUT_JSON_SCHEMA, maxLength 140) fires first, when the CLI honours it; the
+// service does not parse the output with AgentOutputSchema, so the per-item check here is
+// the service's own enforcement. Both count code points, as JSON Schema's maxLength does.
+// An over-long reason drops that one item (counted in droppedCount), never the whole output,
+// and is refused before cleanReason runs, so the regex never sees more than 140 characters. Evidence labels are written here from the audit map; any label, path
 // or other extra field the model put on an item is never read.
 //
 // Outcomes: model `empty` -> `empty`; some items survived -> `ok` with `droppedCount`;
@@ -30,8 +38,8 @@ export interface RankOkResult {
   status: "ok";
   items: RankItem[];
   /**
-   * Items the model returned that failed validation (unknown or repeated id, bad reason,
-   * no issued evidence). Items past `maxResults` are cut, not dropped, and never counted.
+   * Items the model returned that failed validation (unknown or repeated id, missing or
+   * over-long reason, no issued evidence). Items past `maxResults` are cut, not dropped, and never counted.
    */
   droppedCount: number;
 }
@@ -68,20 +76,28 @@ export const defaultLabelFor: LabelFor = (loc) => {
   return loc.path === undefined ? loc.sourceId : `${loc.sourceId}: ${loc.path}`;
 };
 
-const HOST_TLDS = "com|org|net|io|dev|ai|co|md|app|edu|gov";
+const HOST_TLDS = "com|org|net|io|dev|ai|co|app|edu|gov";
 /**
  * URL-like strings: `scheme://…`, `www.…`, a `javascript:`/`data:`/`mailto:`/`file:` word
  * followed by a non-space (so "config file: X" survives), a dotted name followed by a path
- * (`evil.example/x`), and a bare host ending in a common TLD (`evil.com`). "e.g." and
- * "v1.2" are not URL-like.
+ * (`evil.example/x`), and a bare host ending in a common TLD (`evil.com`). "e.g.", "v1.2"
+ * and note names like "README.md" are not URL-like.
+ *
+ * Every repeat before a required literal is bounded (a scheme of at most 32 characters,
+ * host labels of 1-63 characters, at most 11 labels, a 63-character lookbehind), and a label never contains the
+ * `.` that separates labels, so a failed match costs a bounded number of steps per start
+ * position and a hostile reason such as "a-a-a-…" or "a.b-a.b-…" is scanned in linear time.
+ * validateResponse also refuses reasons over 140 characters before this runs.
  */
+const HOST_LABEL = String.raw`[\w-]{1,63}`;
 const URL_LIKE = new RegExp(
   [
-    String.raw`\b[a-z][a-z0-9+.-]*:\/\/\S*`,
+    String.raw`\b[a-z][a-z0-9+.-]{0,31}:\/\/\S*`,
     String.raw`\bwww\.\S*`,
     String.raw`\b(?:javascript|data|mailto|file):(?=\S)\S*`,
-    String.raw`\b[\w-]+(?:\.[\w-]+)+\/\S*`,
-    String.raw`\b[\w-]+(?:\.[\w-]+)*\.(?:${HOST_TLDS})(?![\w-])\S*`,
+    // One pass over the labels for both host forms: a common TLD, or a path whose `/`
+    // follows at least one dot (the lookbehind), so "foo/bar" survives.
+    String.raw`\b${HOST_LABEL}(?:\.${HOST_LABEL}){0,10}(?:\.(?:${HOST_TLDS})(?![\w-])|\/(?<=\.${HOST_LABEL}\/))\S*`,
   ].join("|"),
   "giu",
 );
@@ -139,6 +155,7 @@ export function validateResponse({ output, req, audit, labelFor = defaultLabelFo
     if (typeof id !== "string" || !known.has(id) || seen.has(id)) continue;
     seen.add(id); // a repeat of this id is dropped even if this one fails below
     if (typeof reason !== "string" || !Array.isArray(evidenceIds)) continue;
+    if (reason.length > 2 * MAX_REASON_CHARS || [...reason].length > MAX_REASON_CHARS) continue; // before cleanReason
     const evidence: Evidence[] = [];
     const cited = new Set<string>();
     for (const e of evidenceIds) {

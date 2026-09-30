@@ -98,16 +98,34 @@ describe("validateResponse", () => {
   });
 
   it("strips URLs from reasons and caps them at 140 characters", () => {
-    const r = validateResponse({
-      output: ok(item("c1", ["e2"], "See https://evil.example/x?y=1 and www.evil.example/p or javascript:alert(1) — " + "z".repeat(300))),
-      req,
-      audit,
-    });
-    const reason = r.status === "ok" ? r.items[0]!.reason : "";
+    const reason = cleanReason("See https://evil.example/x?y=1 and www.evil.example/p or javascript:alert(1) — " + "z".repeat(300));
     expect(reason).not.toMatch(/https?:|www\.|javascript:|evil/);
     expect([...reason].length).toBeLessThanOrEqual(140);
     expect(reason.startsWith("See and or —")).toBe(true);
     expect(cleanReason("a\u0000b‮c\n\nd")).toBe("a b c d");
+    const r = validateResponse({ output: ok(item("c1", ["e2"], "See https://evil.example/x?y=1 now")), req, audit });
+    expect(r.status === "ok" && r.items[0]!.reason).toBe("See now");
+  });
+
+  it("drops an item whose raw reason is over 140 characters, before cleaning", () => {
+    const r = validateResponse({
+      output: ok(item("c1", ["e2"], "a-".repeat(40_000)), item("c2", ["e3"], "x".repeat(141)), item("c3", ["e3"], "é".repeat(140))),
+      req,
+      audit,
+    });
+    expect(r).toMatchObject({ status: "ok", droppedCount: 2 });
+    expect(r.status === "ok" && r.items.map((i) => i.id)).toEqual(["c3"]);
+  });
+
+  it.each([
+    ["a- repeated", "a-".repeat(50_000)],
+    ["a.b- repeated", "a.b-".repeat(25_000)],
+    ["a. repeated", "a.".repeat(50_000)],
+  ])("cleanReason stays linear on 100k characters of %s", (_l, input) => {
+    expect(input.length).toBe(100_000);
+    const t0 = performance.now();
+    cleanReason(input);
+    expect(performance.now() - t0).toBeLessThan(50);
   });
 
   it.each([
@@ -120,7 +138,8 @@ describe("validateResponse", () => {
     ["bare domain with path", "see evil.example/x?y=1 now", "see now"],
     ["bare host with common TLD", "visit evil.com today", "visit today"],
     ["bare subdomain with TLD", "visit docs.evil.io:8080 today", "visit today"],
-    ["note name ending in .md", "matches README.md here", "matches here"],
+    ["note name ending in .md", "matches README.md here", "matches README.md here"],
+    ["hyphenated note name", "see billing-plan.md notes", "see billing-plan.md notes"],
     ["scheme word followed by a space", "config file: X matches", "config file: X matches"],
     ["data: in prose", "raw data: counts", "raw data: counts"],
     ["e.g. and versions", "e.g. the v1.2 billing API", "e.g. the v1.2 billing API"],

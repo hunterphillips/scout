@@ -474,6 +474,7 @@ describe("agent runner: billing preflight", () => {
     await waitFor(() => e.runner.queued === 1);
     // Passed the gate before this; the new claude path is unverified.
     e.runner.setConfig({ ...e.config, claudePath: join(e.base, "bin", "other-claude") });
+    e.runner.refreshPreflight(); // verdict is subscription again: only the config generation can stop it
     for (const ac of acs) ac.abort("supersedes");
     for (const r of running) expect((await r).result).toEqual({ status: "cancelled", reason: "supersedes" });
     expect((await queued).result).toEqual({ status: "unavailable", reason: "billing route unverified" });
