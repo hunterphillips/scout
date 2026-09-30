@@ -84,7 +84,10 @@ const DEFAULT_CONNECT_TIMEOUT_MS = 10_000;
  * Policy: the bearer token is read lazily at connect, from a regular file only, and is
  * re-read on every reconnect. After a connection failure (including a handshake that runs
  * past `connectTimeoutMs`), a 401, or a lost session, the session is dropped and the next
- * call reconnects, even when the caller aborted meanwhile; a malformed answer, a JSON-RPC
+ * call reconnects, even when the caller aborted meanwhile. A lost session (the service
+ * answers 404 to a call on an established session: it restarted or evicted us) also
+ * retries that one call once on a fresh session, since the SDK does not re-initialize by
+ * itself; a second 404 fails as today. Nothing else is retried. A malformed answer, a JSON-RPC
  * error, a call timeout, or the abort itself keeps it. After `close()` every call fails
  * `unavailable` without connecting. Aborting a
  * call's signal makes the SDK send `notifications/cancelled` for that request (the
@@ -146,18 +149,30 @@ export function createServiceTransport(options: ServiceTransportOptions = {}): S
     return connecting;
   };
 
+  type Attempt<T> = { result: TransportResult<T>; sessionLost: boolean };
+
   async function call<T>(name: string, args: Record<string, unknown>, schema: z.ZodType<T>, opts: CallOptions): Promise<TransportResult<T>> {
     if (closed) return { ok: false, status: "unavailable", reason: "service unreachable" };
+    const first = await attempt(name, args, schema, opts);
+    if (!first.sessionLost) return first.result;
+    // The session was dropped in attempt(); one retry reconnects. A second loss fails.
+    if (closed) return { ok: false, status: "unavailable", reason: "service unreachable" };
+    return (await attempt(name, args, schema, opts)).result;
+  }
+
+  async function attempt<T>(name: string, args: Record<string, unknown>, schema: z.ZodType<T>, opts: CallOptions): Promise<Attempt<T>> {
     const pending = getClient();
+    let connected = false;
     let structured: unknown;
     try {
       const client = await pending;
+      connected = true;
       opts.signal?.throwIfAborted();
       const result = await client.callTool({ name, arguments: args }, undefined, {
         ...(opts.signal ? { signal: opts.signal } : {}),
         timeout: opts.timeoutMs ?? DEFAULT_CALL_TIMEOUT_MS,
       });
-      if (result.isError === true) return { ok: false, status: "error", reason: "service error" };
+      if (result.isError === true) return { result: { ok: false, status: "error", reason: "service error" }, sessionLost: false };
       structured = result.structuredContent;
     } catch (err) {
       const aborted = opts.signal?.aborted === true;
@@ -168,12 +183,14 @@ export function createServiceTransport(options: ServiceTransportOptions = {}): S
       // aborted meanwhile, so the next call reconnects instead of failing again.
       const isAbort = aborted && err === opts.signal?.reason;
       if (!isAbort && failure.reason !== "service error" && failure.reason !== "timed out") reset(pending);
-      if (aborted) return { ok: false, status: "cancelled", reason: "aborted" };
-      return failure;
+      if (aborted) return { result: { ok: false, status: "cancelled", reason: "aborted" }, sessionLost: false };
+      // 404 on a call over an established session: the service no longer knows it.
+      const sessionLost = connected && err instanceof StreamableHTTPError && err.code === 404;
+      return { result: failure, sessionLost };
     }
     const parsed = schema.safeParse(structured);
-    if (!parsed.success) return { ok: false, status: "error", reason: "bad response" };
-    return { ok: true, value: parsed.data };
+    if (!parsed.success) return { result: { ok: false, status: "error", reason: "bad response" }, sessionLost: false };
+    return { result: { ok: true, value: parsed.data }, sessionLost: false };
   }
 
   const remember = <T extends ContextStatus>(r: TransportResult<T>): TransportResult<T> => {

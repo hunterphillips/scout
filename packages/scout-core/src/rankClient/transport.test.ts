@@ -120,9 +120,29 @@ afterEach(async () => {
   rmSync(dir, { recursive: true, force: true });
 });
 
-function connect(overrides: { baseUrl?: string; tokenPath?: string; connectTimeoutMs?: number } = {}): ServiceTransport {
+function connect(overrides: { baseUrl?: string; tokenPath?: string; connectTimeoutMs?: number; fetch?: typeof fetch } = {}): ServiceTransport {
   transport = createServiceTransport({ baseUrl: stub.url, tokenPath, ...overrides });
   return transport;
+}
+
+/**
+ * A fetch that answers the next `tools/call` POSTs with the queued HTTP statuses instead of
+ * reaching the stub; everything else goes through. `toolCalls` counts every tools/call POST.
+ */
+function scriptedFetch(): { fetch: typeof fetch; failNext: number[]; toolCalls: number } {
+  const f = {
+    failNext: [] as number[],
+    toolCalls: 0,
+    fetch: (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+      if (init?.method === "POST" && typeof init.body === "string" && init.body.includes('"method":"tools/call"')) {
+        f.toolCalls += 1;
+        const status = f.failNext.shift();
+        if (status !== undefined) return new Response(null, { status });
+      }
+      return fetch(input, init);
+    }) as typeof fetch,
+  };
+  return f;
 }
 
 async function until(check: () => boolean, ms = 2000): Promise<void> {
@@ -217,12 +237,63 @@ describe("service transport", () => {
     expect(await t.contextStatus()).toEqual({ ok: true, value: STATUS });
   });
 
-  it("reconnects on the next call after the service forgets the session", async () => {
+  it("the first call after the service forgets the session succeeds on a fresh session", async () => {
     const t = connect();
     expect((await t.contextStatus()).ok).toBe(true);
     stub.dropSessions();
-    expect(await t.contextStatus()).toMatchObject({ ok: false, status: "unavailable", reason: "service unreachable" });
+    const seen = stub.authHeaders.length;
+    expect(await t.rankSiteLinks(REQUEST)).toEqual({ ok: true, value: { status: "empty", ...STATUS } });
+    // The stale call (404), then initialize, initialized, and the retried call.
+    expect(stub.authHeaders.length).toBeGreaterThan(seen + 2);
     expect(await t.contextStatus()).toEqual({ ok: true, value: STATUS });
+  });
+
+  it("retries a lost session once: a second consecutive 404 fails `service unreachable`", async () => {
+    const f = scriptedFetch();
+    const t = connect({ fetch: f.fetch });
+    expect((await t.contextStatus()).ok).toBe(true);
+    f.failNext.push(404, 404);
+    f.toolCalls = 0;
+    expect(await t.contextStatus()).toEqual({ ok: false, status: "unavailable", reason: "service unreachable" });
+    expect(f.toolCalls).toBe(2);
+    // The next call reconnects as before.
+    expect(await t.contextStatus()).toEqual({ ok: true, value: STATUS });
+  });
+
+  it("does not retry a 401 on a call", async () => {
+    const f = scriptedFetch();
+    const t = connect({ fetch: f.fetch });
+    expect((await t.contextStatus()).ok).toBe(true);
+    f.failNext.push(401);
+    f.toolCalls = 0;
+    expect(await t.contextStatus()).toEqual({ ok: false, status: "unavailable", reason: "bad token" });
+    expect(f.toolCalls).toBe(1);
+  });
+
+  it("does not retry a call timeout", async () => {
+    const f = scriptedFetch();
+    stub.answers.rank_site_links = (_args, signal) => new Promise((resolve) => signal.addEventListener("abort", () => resolve(structured({}))));
+    const t = connect({ fetch: f.fetch });
+    expect(await t.rankSiteLinks(REQUEST, { timeoutMs: 100 })).toEqual({ ok: false, status: "unavailable", reason: "timed out" });
+    expect(f.toolCalls).toBe(1);
+  });
+
+  it("a caller abort during the lost-session retry yields `cancelled`", async () => {
+    const f = scriptedFetch();
+    stub.answers.rank_site_links = (_args, signal) =>
+      new Promise((resolve) => signal.addEventListener("abort", () => resolve(structured({ status: "empty", ...STATUS }))));
+    const t = connect({ fetch: f.fetch });
+    expect((await t.contextStatus()).ok).toBe(true);
+    f.failNext.push(404);
+    f.toolCalls = 0;
+    const controller = new AbortController();
+    const pending = t.rankSiteLinks(REQUEST, { signal: controller.signal });
+    await until(() => f.toolCalls === 2);
+    await new Promise((r) => setTimeout(r, 50));
+    controller.abort();
+    expect(await pending).toEqual({ ok: false, status: "cancelled", reason: "aborted" });
+    await until(() => stub.cancelledSeen === 1);
+    expect(f.toolCalls).toBe(2);
   });
 
   it("an abort during a failing connect still drops the session, so the next call reconnects", async () => {
