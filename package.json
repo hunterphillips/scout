@@ -2,7 +2,7 @@
   "name": "scout-workspace",
   "private": true,
   "version": "0.0.0",
-  "description": "Scout proof of concept workspace (Phase 2: plumbing + catalog discovery).",
+  "description": "Scout proof of concept workspace (Phases 1-3: plumbing, catalog discovery, personal-context service).",
   "type": "module",
   "engines": {
     "node": ">=22.12.0"

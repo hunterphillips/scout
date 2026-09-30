@@ -4,14 +4,17 @@ Scout is a proof of concept. When Hunter lands on a website, it shows a few link
 that site that fit what he is working on. Phase 1 is the plumbing: a Chrome
 extension senses the focused tab, a native host relays that to a local core process,
 and a Mac app shows the core's status. Phase 2 is catalog discovery: the core can turn
-a site into a cached list of candidate links, exposed through a dev CLI. Nothing ranks
-them yet, and the running app does not use the catalog yet.
+a site into a cached list of candidate links, exposed through a dev CLI. Phase 3 is
+the personal-context service: a local MCP server that, per request, runs a fresh
+headless `claude` on Hunter's subscription to pick a few candidates against his recent
+activity and any sources he has enabled. The running app does not use the catalog or
+the service yet; that is Phase 4.
 
 Pieces: a native Mac companion (`native/Scout`), a Chrome sensor
 (`packages/browser-extension` plus `packages/native-host`), shared code
 (`packages/contracts`, `packages/scout-core`), and an independent personal-context MCP
-agent (`packages/personal-context-mcp`, still a placeholder; it must never import
-`@scout/*`).
+service (`packages/personal-context-mcp`; it must never import `@scout/*`, and Scout is
+only one of its clients).
 
 ## Commands
 
@@ -30,9 +33,27 @@ Catalog dev CLI (after `npm run build`; opt-in, these two make network requests)
     node packages/scout-core/dist/cli.js verify https://docs.stripe.com/payments/subscriptions.md
 
 `catalog` caches under `~/.scout/cache/catalog` for 24 h; `--refresh` revalidates.
-`verify` takes up to 10 URLs from one origin. `rank` is a Phase 3 stub and exits 2.
-Both commands log to `~/.scout/logs/diagnostics.jsonl` (counts and codes only). Set
-`SCOUT_HOME` to keep a test run out of `~/.scout`.
+`verify` takes up to 10 URLs from one origin. `rank` is still a stub and exits 2 until
+Phase 4 wires the rank client in. Both commands log to `~/.scout/logs/diagnostics.jsonl`
+(counts and codes only). Set `SCOUT_HOME` to keep a test run out of `~/.scout`.
+
+Personal-context service (after `npm run build`):
+
+    node packages/personal-context-mcp/dist/server.js          # 127.0.0.1:47821, PCM_PORT overrides
+    node packages/personal-context-mcp/dist/cli.js status      # pcm status
+    node packages/personal-context-mcp/dist/cli.js sources     # what could be read, and what is enabled
+    node packages/personal-context-mcp/dist/cli.js sources enable <id> [--project <name>]
+    node packages/personal-context-mcp/dist/cli.js reload      # SIGHUP: apply a source change
+    node packages/personal-context-mcp/dist/cli.js rank --origin https://docs.stripe.com --candidates catalog.json
+
+The service keeps its files under `~/.personal-context-mcp` (`PERSONAL_CONTEXT_HOME`
+overrides): `config.json` (port, model, sources; every source ships disabled), `token`
+(bearer token every client must send), `runs.jsonl` (per-run counts, never content),
+`run/server.json`. On start it runs the billing preflight against its own launch
+profile and refuses to rank unless the verdict is `subscription`. `pcm rank` accepts a
+candidate array or the catalog CLI's `--json` output and makes one real model call.
+`SCOUT_LIVE=1 npm run test:live -w personal-context-mcp` is the opt-in smoke test (one
+model call, throwaway home); `npm test` never runs it.
 
 Native app:
 
