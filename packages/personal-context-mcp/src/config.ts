@@ -570,6 +570,10 @@ export function isAlwaysExcluded(absPath: string, sourceRoot: string, opts: Excl
  * `second-brain` segment counts too. So a root inside `~/.ssh`, a `.git` directory or a
  * `secrets/` tree is excluded whole, not only below it. Case-insensitive; `home`'s own
  * segments never count. Fails closed on a relative path.
+ *
+ * The name patterns (`token`, `secret`, `credential`, ...) apply to every folder on the
+ * way to a root, not only below it. So a project under a folder like `tokenizer/` is
+ * excluded on purpose, and list_sources shows it as `excluded`.
  */
 export function isExcludedAncestry(root: string, home: string): boolean {
   if (!isAbsolute(root) || !isAbsolute(home)) return true;

@@ -123,32 +123,100 @@ describe("activity", () => {
 
 describe("activity packing", () => {
   const ctl = "\x01".repeat(8192); // ~48 KiB once JSON-escaped
+  const english = (n: number): string => {
+    const words = `Page ${n} explains how the billing migration moves invoices to usage based pricing and what changes for customers. `;
+    return words.repeat(Math.ceil(8192 / words.length)).slice(0, 8192);
+  };
 
-  it("packs a hostile snapshot newest first into the call's room, and later tools still work", async () => {
+  it("shortens ordinary texts evenly so all ten entries fit one call", async () => {
+    const obs = Array.from({ length: 10 }, (_, i) => observation(10 - i, { text: english(10 - i) }));
+    const h = await harness({ snap: { observations: obs } });
+    const a = await h.call("read_recent_activity");
+    expect(a.isError).toBe(false);
+    expect(Buffer.byteLength(a.text)).toBeLessThanOrEqual(32 * 1024);
+    expect(a.body.observations.map((o: any) => o.title)).toEqual(obs.map((o) => o.title));
+    expect(a.body.observations.every((o: any) => o.textTruncated === true)).toBe(true);
+    const lens = a.body.observations.map((o: any) => o.text.length);
+    expect(Math.max(...lens) - Math.min(...lens)).toBeLessThanOrEqual(8);
+    expect(Math.min(...lens)).toBeGreaterThan(2000);
+    for (const [i, o] of a.body.observations.entries()) expect(obs[i]!.text!.startsWith(o.text)).toBe(true);
+    expect(a.body).toMatchObject({ truncated: true, remaining: 0 });
+    expect(h.audit().at(-1)!.evidence.map((e: any) => e.path)).toEqual(obs.map((o) => o.observationId));
+  });
+
+  it("keeps every entry of a hostile snapshot with short texts, and later tools still work", async () => {
     const obs = Array.from({ length: 10 }, (_, i) => observation(10 - i, { text: ctl }));
     const h = await harness({ snap: { observations: obs } });
     const a = await h.call("read_recent_activity");
     expect(a.isError).toBe(false);
     expect(a.body.truncated).toBe(true);
-    expect(a.body.observations).toEqual([]);
+    expect(a.body.remaining).toBe(0);
+    expect(a.body.observations).toHaveLength(10);
+    for (const o of a.body.observations) {
+      expect(o.textTruncated).toBe(true);
+      expect(o.text.length).toBeGreaterThan(0);
+      expect(o.text.length).toBeLessThan(ctl.length);
+    }
     expect(Buffer.byteLength(a.text)).toBeLessThanOrEqual(32 * 1024);
     const s = await h.call("search_source", { sourceId: "notes", query: "billing" });
     expect(s.body.status).toBe("ok");
     expect((await h.call("list_sources")).body.status).toBe("ok");
   });
 
-  it("drops the oldest entries first and keeps ids gap-free", async () => {
-    const big = "q".repeat(12 * 1024);
-    const obs = [observation(3, { text: big }), observation(2, { text: big }), observation(1, { text: big })];
+  it("leaves a short text whole and gives its slack to the heavy ones", async () => {
+    const big = "q".repeat(8 * 1024);
+    const obs = [observation(5, { text: big }), observation(4, { text: big }), observation(3), observation(2, { text: big }), observation(1, { text: big })];
     const h = await harness({ snap: { observations: obs } });
     const a = await h.call("read_recent_activity");
-    expect(a.body.observations.map((o: any) => [o.evidenceId, o.title])).toEqual([
-      ["e1", "issue 3"],
-      ["e2", "issue 2"],
+    expect(a.body.observations.map((o: any) => [o.evidenceId, o.title, o.textTruncated])).toEqual([
+      ["e1", "issue 5", true],
+      ["e2", "issue 4", true],
+      ["e3", "issue 3", undefined],
+      ["e4", "issue 2", true],
+      ["e5", "issue 1", true],
     ]);
+    expect(a.body.observations[2].text).toBe("activity text 3");
+    const heavy = a.body.observations.filter((o: any) => o.textTruncated).map((o: any) => o.text.length);
+    expect(Math.max(...heavy) - Math.min(...heavy)).toBeLessThanOrEqual(1);
+    expect(32 * 1024 - Buffer.byteLength(a.text)).toBeLessThan(400);
+    expect(a.body).toMatchObject({ truncated: true, remaining: 0 });
+  });
+
+  it("pages with offset and limit, counting remaining down without duplicates", async () => {
+    const obs = Array.from({ length: 10 }, (_, i) => observation(10 - i, { text: english(10 - i) }));
+    const h = await harness({ snap: { observations: obs } });
+    const seen: string[] = [];
+    const remaining: number[] = [];
+    for (let offset = 0; offset < 10; offset += 3) {
+      const a = await h.call("read_recent_activity", { limit: 3, offset });
+      expect(a.isError).toBe(false);
+      seen.push(...a.body.observations.map((o: any) => o.title));
+      remaining.push(a.body.remaining);
+    }
+    expect(seen).toEqual(obs.map((o) => o.title));
+    expect(remaining).toEqual([7, 4, 1, 0]);
+    const ids = h.audit().flatMap((r) => r.evidence.map((e: any) => e.path));
+    expect(ids).toEqual(obs.map((o) => o.observationId));
+  });
+
+  it("returns nothing past the end and rejects a negative offset", async () => {
+    const h = await harness({ snap: { observations: [observation(2), observation(1)] } });
+    expect((await h.call("read_recent_activity", { offset: 5 })).body).toMatchObject({ observations: [], remaining: 0, truncated: false });
+    const bad = await h.call("read_recent_activity", { offset: -1 });
+    expect(bad.body).toEqual({ status: "error", code: "invalid-args" });
+  });
+
+  it("drops the oldest entries only when the fixed fields alone overflow the room", async () => {
+    const long = "u".repeat(2000);
+    const obs = Array.from({ length: 10 }, (_, i) => observation(10 - i, { title: "t".repeat(512), url: `https://x.test/${long}${i}` }));
+    const h = await harness({ snap: { observations: obs, budgets: { maxCalls: 20, maxTotalBytes: 16 * 1024 } } });
+    const a = await h.call("read_recent_activity");
+    expect(a.isError).toBe(false);
+    expect(a.body.observations.length).toBeGreaterThan(0);
+    expect(a.body.observations.length).toBeLessThan(10);
+    expect(a.body.remaining).toBe(10 - a.body.observations.length);
     expect(a.body.truncated).toBe(true);
-    expect(h.audit().at(-1)!.evidence.map((e: any) => e.path)).toEqual(["o3", "o2"]);
-    expect((await h.call("read_recent_activity", { limit: 1 })).body).toMatchObject({ truncated: false, observations: [{ evidenceId: "e3" }] });
+    expect(Buffer.byteLength(a.text)).toBeLessThanOrEqual(16 * 1024);
   });
 });
 

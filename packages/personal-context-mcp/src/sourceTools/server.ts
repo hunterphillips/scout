@@ -26,7 +26,7 @@ import { fetchFocus, FOCUS_TIMEOUT_MS, type FetchLike, type FocusItem } from "./
 import { normalizeRelPath, READ_LIMITS, readTreeFile, rootAvailability, SEARCH_LIMITS, type FsOps, type TreeOptions } from "./markdownDir.js";
 import { newScanBudget, parseQuery, searchTree, type SearchHit } from "./search.js";
 import { discoverProjects, type RegistryView } from "./registryProjects.js";
-import { AUDIT_FILE, type RunFiles } from "./runFiles.js";
+import { AUDIT_FILE, MAX_SNAPSHOT_OBSERVATIONS, type RunFiles } from "./runFiles.js";
 
 export const SERVER_NAME = "sources";
 export const SERVER_VERSION = "0.1.0";
@@ -76,20 +76,68 @@ const hasInvalid = (args: object): boolean => Object.values(args).some((v) => v 
 /** Longer than any real evidence id, so a size estimate made with it is never short. */
 const ID_PLACEHOLDER = "e9999999999";
 
+/** Bytes `s` adds inside a JSON string literal (quotes excluded). */
+const jsonTextBytes = (s: string): number => Buffer.byteLength(JSON.stringify(s), "utf8") - 2;
+
 /**
- * Observations newest first, as many as fit `room` bytes once serialized (the oldest are
- * dropped). Returns the entries to send and whether any were dropped.
+ * The longest prefix of `text` whose JSON-escaped form fits `bytes`, cut on a code-point
+ * boundary (a lone surrogate counts as one unit, escaped the way JSON.stringify does).
  */
-export function packObservations<T extends Payload>(entries: readonly T[], room: number): { kept: T[]; dropped: boolean } {
-  let total = Buffer.byteLength(JSON.stringify({ status: "ok", observations: [], truncated: false }), "utf8");
-  const kept: T[] = [];
-  for (const e of entries) {
-    const add = Buffer.byteLength(JSON.stringify({ evidenceId: ID_PLACEHOLDER, ...e }), "utf8") + (kept.length > 0 ? 1 : 0);
-    if (total + add > room) break;
-    kept.push(e);
-    total += add;
+export function cutText(text: string, bytes: number): string {
+  if (jsonTextBytes(text) <= bytes) return text;
+  let used = 0;
+  let end = 0;
+  for (const ch of text) {
+    const c = jsonTextBytes(ch);
+    if (used + c > bytes) break;
+    used += c;
+    end += ch.length;
   }
-  return { kept, dropped: kept.length < entries.length };
+  return text.slice(0, end);
+}
+
+/**
+ * Fit observations (newest first) into `room` bytes of serialized result. Every entry's
+ * fields other than `text` are kept whole (the store caps them). When the texts don't all
+ * fit, the text room is shared evenly: an entry whose text is under its share keeps it
+ * whole and the slack goes to the rest, and each cut text is marked `textTruncated`. An
+ * entry is dropped (oldest first) only when the fixed fields alone overflow `room`.
+ */
+export function packObservations<T extends Payload & { text?: string }>(
+  entries: readonly T[],
+  room: number,
+): { kept: (T & { textTruncated?: true })[]; dropped: boolean; cut: boolean } {
+  // Worst-case envelope: `remaining` and every flag present, the id placeholder in place.
+  const envelope = Buffer.byteLength(
+    JSON.stringify({ status: "ok", observations: [], truncated: false, remaining: MAX_SNAPSHOT_OBSERVATIONS }),
+    "utf8",
+  );
+  const fixed = (e: T): number =>
+    Buffer.byteLength(JSON.stringify({ evidenceId: ID_PLACEHOLDER, ...e, text: "", textTruncated: true }), "utf8");
+  let list = entries.slice();
+  const overheadOf = (xs: readonly T[]): number =>
+    envelope + xs.reduce((sum, e) => sum + fixed(e), 0) + Math.max(0, xs.length - 1);
+  while (list.length > 0 && overheadOf(list) > room) list.pop();
+  const dropped = list.length < entries.length;
+  let textRoom = room - overheadOf(list);
+  // Water-fill: settle the shortest texts first, then split what is left evenly.
+  const need = list.map((e) => (e.text === undefined ? 0 : jsonTextBytes(e.text)));
+  const share = new Array<number>(list.length).fill(0);
+  const order = list.map((_, i) => i).sort((a, b) => need[a]! - need[b]!);
+  let left = order.length;
+  for (const i of order) {
+    const even = Math.floor(textRoom / left);
+    share[i] = Math.min(need[i]!, even);
+    textRoom -= share[i]!;
+    left--;
+  }
+  let cut = false;
+  const kept = list.map((e, i) => {
+    if (e.text === undefined || need[i]! <= share[i]!) return e;
+    cut = true;
+    return { ...e, text: cutText(e.text, share[i]!), textTruncated: true as const };
+  });
+  return { kept, dropped, cut };
 }
 
 const RO_ANNOTATIONS = { readOnlyHint: true, destructiveHint: false, idempotentHint: false, openWorldHint: false } as const;
@@ -222,27 +270,28 @@ export function createSourceToolsServer(deps: SourceToolsDeps): McpServer {
       note: "Metadata only; not citable evidence. Use the other tools for evidence ids.",
     }));
 
-  const readRecentActivity = (limit: number | undefined): Outcome => {
-    const n = limit ?? MAX_ACTIVITY_LIMIT;
-    const list = files.snapshot.observations.slice(0, n);
+  const readRecentActivity = (limit: number | undefined, offset: number | undefined): Outcome => {
+    const all = files.snapshot.observations;
+    const from = Math.min(offset ?? 0, all.length);
+    const list = all.slice(from, from + (limit ?? MAX_ACTIVITY_LIMIT));
     return ok((tx) => {
       const entries = list.map((o) => {
-        const e: Payload = { observedAt: o.observedAt, title: o.title, url: o.url, truncated: o.truncated };
+        const e: Payload & { text?: string } = { observedAt: o.observedAt, title: o.title, url: o.url, truncated: o.truncated };
         if (o.text !== undefined) e.text = o.text;
-        return { id: o.observationId, e };
+        return e;
       });
-      // Pack to the bytes this call may still use, so one heavy page can't sink the call.
-      const { kept, dropped } = packObservations(
-        entries.map((x) => x.e),
-        budget.room,
-      );
+      // Fit the bytes this call may still use: texts are shortened evenly, so one heavy
+      // page can't hide the others.
+      const { kept, cut } = packObservations(entries, budget.room);
+      const remaining = all.length - from - kept.length;
       return {
         status: "ok",
         observations: kept.map((e, i) => ({
-          evidenceId: tx.mint({ kind: "activity", sourceId: ACTIVITY_SOURCE_ID, path: entries[i]!.id }),
+          evidenceId: tx.mint({ kind: "activity", sourceId: ACTIVITY_SOURCE_ID, path: list[i]!.observationId }),
           ...e,
         })),
-        truncated: dropped,
+        truncated: remaining > 0 || cut,
+        remaining,
       };
     });
   };
@@ -370,11 +419,17 @@ export function createSourceToolsServer(deps: SourceToolsDeps): McpServer {
     {
       description:
         "Pages Hunter viewed recently, newest first, fixed when this run started. Each entry has a citable evidence id. " +
-        "When the entries don't all fit the byte budget, the oldest are left out and `truncated` is true.",
-      inputSchema: { limit: orInvalid(z.int().min(1).max(MAX_ACTIVITY_LIMIT).optional()) },
+        `Returns entries [offset, offset+limit), at most ${MAX_ACTIVITY_LIMIT} per call. To fit the byte budget, page texts ` +
+        "may be shortened (evenly across entries); a shortened entry has `textTruncated: true`. `remaining` counts older " +
+        "entries not returned: call again with offset advanced by the entries you got to see them. `truncated` is true " +
+        "when entries remain or any text was shortened.",
+      inputSchema: {
+        limit: orInvalid(z.int().min(1).max(MAX_ACTIVITY_LIMIT).optional()),
+        offset: orInvalid(z.int().min(0).max(MAX_SNAPSHOT_OBSERVATIONS).optional()),
+      },
       annotations: RO_ANNOTATIONS,
     },
-    (args) => run("read_recent_activity", args, () => readRecentActivity(args.limit)),
+    (args) => run("read_recent_activity", args, () => readRecentActivity(args.limit, args.offset)),
   );
 
   server.registerTool(
@@ -400,6 +455,8 @@ export function createSourceToolsServer(deps: SourceToolsDeps): McpServer {
         `Read a line range from one note (a relative path from search_source), at most ${READ_LIMITS.maxLines} lines or 16 KiB. ` +
         "Only a file's first 256 KiB is readable: lines past it are unreachable, and `totalLinesAtLeast` marks such a file. " +
         "`truncated` means the line or byte cap cut the range; `endClamped` means endLine was past the last line. " +
+        "A range heavy in control or escape characters can exceed the per-call result cap and return `too_large`; " +
+        "ask for a smaller range. " +
         "Returns a citable evidence id for the range.",
       inputSchema: {
         sourceId: sourceIdArg,
