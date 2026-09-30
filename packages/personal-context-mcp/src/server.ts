@@ -27,6 +27,23 @@
 //   - `deadline`: the runner's own timer.
 // Every rank outcome, including unavailable/error/cancelled, is a normal tool result.
 //
+// Sessions: at most MAX_SESSIONS. Scout opens a new session on every reconnect and may
+// never DELETE the old one, so at the cap the least recently seen session with no running
+// rank is closed to make room; only when every session has a running rank is a new one
+// refused (503). A session with no running rank and no HTTP traffic for SESSION_IDLE_MS is
+// closed by a sweep every SESSION_SWEEP_MS; a session with a running rank is kept.
+//
+// run/server.json ownership: a live pid is not enough (a SIGKILL leaves the file, and the
+// pid can be reused). Start refuses only when the file's service answers on its port with
+// its own serviceInstanceId (serviceProbe.ts); otherwise the file is stale and overwritten.
+//
+// Reload (SIGHUP) accepted limits, fine for the PoC: refreshPreflight runs the preflight's
+// `claude` invocations synchronously, so the event loop is blocked for that time even while
+// connections are live. Between setConfig and refreshPreflight a new rank sees no current
+// preflight verdict and returns `unavailable`, which fails safe. A reload during shutdown
+// is ignored. Shutdown waits at most SHUTDOWN_GRACE_MS (or until a second signal) after
+// aborting every run, then exits anyway.
+//
 // Logging: JSONL on stderr, fixed codes and scalars only. Never a token, prompt, page
 // text, title, URL, candidate or path.
 
@@ -65,6 +82,7 @@ import {
   ServiceFileError,
   writeServerInfo,
 } from "./serviceFiles.js";
+import { probeService } from "./serviceProbe.js";
 
 export const SERVER_NAME = "personal-context-mcp";
 export const SERVER_VERSION = "0.0.0";
@@ -73,7 +91,12 @@ export const MCP_PATH = "/mcp";
 export const MAX_BODY_BYTES = 4 * 1024 * 1024;
 export const MAX_SESSIONS = 64;
 /** A session with no HTTP traffic and no running rank for this long is closed. */
-export const SESSION_IDLE_MS = 30 * 60_000;
+export const SESSION_IDLE_MS = 5 * 60_000;
+export const SESSION_SWEEP_MS = 30_000;
+/** How long a response watch no handler claimed outlives its closed response. */
+export const WATCH_GRACE_MS = 2_000;
+/** Longest the process waits for a clean shutdown after a signal. */
+export const SHUTDOWN_GRACE_MS = 10_000;
 
 export type LogFields = Record<string, string | number | boolean>;
 
@@ -99,6 +122,8 @@ export interface RunningServer {
   /** Abort every run, close the HTTP server, remove server.json. Idempotent. */
   shutdown(reason: "sigterm" | "sigint"): Promise<void>;
   readonly runner: AgentRunner;
+  /** Live bookkeeping sizes, for tests: open sessions, response watches, running ranks. */
+  counts(): { sessions: number; watches: number; runs: number };
 }
 
 /** Start failures; `message` is fixed text and safe to print. */
@@ -175,23 +200,31 @@ function isInitialize(body: unknown): boolean {
   return msgs.some((m) => m !== null && typeof m === "object" && (m as { method?: unknown }).method === "initialize");
 }
 
+/** The body, or "too-large" as soon as it passes `max` (the rest is never read). */
 function readBody(req: IncomingMessage, max: number): Promise<Buffer | "too-large"> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
     let len = 0;
-    let over = false;
-    req.on("data", (c: Buffer) => {
-      if (over) return;
+    const onData = (c: Buffer): void => {
       len += c.length;
       if (len > max) {
-        over = true;
+        req.off("data", onData);
+        req.pause();
+        resolve("too-large");
         return;
       }
       chunks.push(c);
-    });
-    req.on("end", () => resolve(over ? "too-large" : Buffer.concat(chunks)));
+    };
+    req.on("data", onData);
+    req.on("end", () => resolve(Buffer.concat(chunks)));
     req.on("error", reject);
   });
+}
+
+/** 413, then drop the connection instead of draining the rest of the body. */
+function refuseTooLarge(req: IncomingMessage, res: ServerResponse): void {
+  res.once("finish", () => req.destroy());
+  sendJson(res, 413, rpcError(-32600, "request too large"), { connection: "close" });
 }
 
 function sendJson(res: ServerResponse, status: number, body: unknown, extraHeaders: Record<string, string> = {}): void {
@@ -237,8 +270,13 @@ export async function runServer(deps: ServerDeps = {}): Promise<RunningServer> {
   }
   const tokenDigest = createHash("sha256").update(token).digest();
 
+  // Refuse only when the file names a live service that answers as itself; anything else
+  // (dead pid, reused pid, no answer, another instance id) is a stale file, overwritten below.
   const prior = readServerInfo(home);
-  if (prior !== undefined && prior.pid !== process.pid && pidAlive(prior.pid)) throw new ServerStartError(MESSAGES.alreadyRunning);
+  if (prior !== undefined && prior.pid !== process.pid && pidAlive(prior.pid)) {
+    if ((await probeService(prior, token)) !== undefined) throw new ServerStartError(MESSAGES.alreadyRunning);
+    log("stale_server_json");
+  }
 
   let scratchRoot: string;
   try {
@@ -313,6 +351,7 @@ export async function runServer(deps: ServerDeps = {}): Promise<RunningServer> {
       log("rank", { status: response.status, ...(response.status === "cancelled" || response.status === "unavailable" || response.status === "error" ? { reason: response.reason } : {}) });
       return textResult(response as Record<string, unknown>);
     } finally {
+      session.lastSeen = Date.now();
       extra.signal.removeEventListener("abort", onCancel);
       if (session.runs.get(req.requestId) === controller) session.runs.delete(req.requestId);
       if (session.watches.get(extra.requestId) === watch) session.watches.delete(extra.requestId);
@@ -391,6 +430,19 @@ export async function runServer(deps: ServerDeps = {}): Promise<RunningServer> {
     return session;
   }
 
+  /** Close the least recently seen session with no running rank. False when every session has one. */
+  function evictIdleSession(): boolean {
+    let oldest: Session | undefined;
+    for (const s of sessions.values()) {
+      if (s.runs.size === 0 && (oldest === undefined || s.lastSeen < oldest.lastSeen)) oldest = s;
+    }
+    if (oldest === undefined) return false;
+    closeSession(oldest);
+    log("session_evicted", { sessions: sessions.size });
+    void oldest.transport.close().catch(() => {});
+    return true;
+  }
+
   /** Watch a POST's response stream for the JSON-RPC requests it carries. */
   function watchResponse(session: Session, res: ServerResponse, ids: Array<string | number>): void {
     if (ids.length === 0) return;
@@ -402,13 +454,19 @@ export async function runServer(deps: ServerDeps = {}): Promise<RunningServer> {
     }
     res.once("close", () => {
       const early = !res.writableFinished;
+      const drop = (id: string | number, w: ResponseWatch): void => {
+        if (w.controller === undefined && session.watches.get(id) === w) session.watches.delete(id);
+      };
       for (const [id, w] of mine) {
         if (early) {
           w.closed = true;
           if (w.controller && !w.controller.signal.aborted) w.controller.abort("response_closed" satisfies AbortReason);
         }
-        // A watch no handler claimed is dropped once its response is gone.
-        if (w.controller === undefined && session.watches.get(id) === w && !early) session.watches.delete(id);
+        // A claimed watch is removed by its rank. An unclaimed one is dropped once its
+        // response is gone; after an early close it is kept briefly, in case a rank handler
+        // has yet to claim it and must see the close.
+        if (!early) drop(id, w);
+        else if (w.controller === undefined) setTimeout(() => drop(id, w), WATCH_GRACE_MS).unref();
       }
     });
   }
@@ -436,8 +494,10 @@ export async function runServer(deps: ServerDeps = {}): Promise<RunningServer> {
     const sid = typeof sidHeader === "string" ? sidHeader : undefined;
 
     if (req.method === "POST") {
+      const declared = Number(req.headers["content-length"]);
+      if (Number.isFinite(declared) && declared > MAX_BODY_BYTES) return refuseTooLarge(req, res);
       const raw = await readBody(req, MAX_BODY_BYTES);
-      if (raw === "too-large") return sendJson(res, 413, rpcError(-32600, "request too large"));
+      if (raw === "too-large") return refuseTooLarge(req, res);
       let body: unknown;
       try {
         body = JSON.parse(raw.toString("utf8"));
@@ -447,7 +507,7 @@ export async function runServer(deps: ServerDeps = {}): Promise<RunningServer> {
       let session: Session | undefined;
       if (sid === undefined) {
         if (!isInitialize(body)) return sendJson(res, 400, rpcError(-32000, "session required"));
-        if (sessions.size >= MAX_SESSIONS) return sendJson(res, 503, rpcError(-32000, "too many sessions"));
+        if (sessions.size >= MAX_SESSIONS && !evictIdleSession()) return sendJson(res, 503, rpcError(-32000, "too many sessions"));
         session = await newSession();
       } else {
         session = sessions.get(sid);
@@ -495,9 +555,12 @@ export async function runServer(deps: ServerDeps = {}): Promise<RunningServer> {
   const sweeper = setInterval(() => {
     const now = Date.now();
     for (const s of [...sessions.values()]) {
-      if (s.runs.size === 0 && now - s.lastSeen > SESSION_IDLE_MS) void s.transport.close();
+      if (s.runs.size === 0 && now - s.lastSeen > SESSION_IDLE_MS) {
+        closeSession(s);
+        void s.transport.close().catch(() => {});
+      }
     }
-  }, 60_000);
+  }, SESSION_SWEEP_MS);
   sweeper.unref();
 
   try {
@@ -513,6 +576,10 @@ export async function runServer(deps: ServerDeps = {}): Promise<RunningServer> {
 
   let reloadChain: Promise<unknown> = Promise.resolve();
   async function doReload(): Promise<ReloadResult> {
+    if (shuttingDown) {
+      log("reload_rejected", { reason: "shutting-down" });
+      return { ok: false, sourceGrantRevision: grantRevision };
+    }
     let next: PcmConfig;
     try {
       next = loadConfig(home, env);
@@ -558,6 +625,15 @@ export async function runServer(deps: ServerDeps = {}): Promise<RunningServer> {
       return grantRevision;
     },
     runner,
+    counts() {
+      let watches = 0;
+      let runs = 0;
+      for (const s of sessions.values()) {
+        watches += s.watches.size;
+        runs += s.runs.size;
+      }
+      return { sessions: sessions.size, watches, runs };
+    },
     reload() {
       const p = reloadChain.then(doReload, doReload);
       reloadChain = p;
@@ -580,7 +656,12 @@ async function main(): Promise<void> {
     process.stderr.write(`${e instanceof ServerStartError ? e.message : "failed to start"}\n`);
     process.exit(1);
   }
+  let stopping = false;
   const stop = (reason: "sigterm" | "sigint") => () => {
+    // A second signal, or a shutdown still running after the grace period, exits at once.
+    if (stopping) process.exit(0);
+    stopping = true;
+    setTimeout(() => process.exit(0), SHUTDOWN_GRACE_MS).unref();
     void server.shutdown(reason).then(
       () => process.exit(0),
       () => process.exit(1),

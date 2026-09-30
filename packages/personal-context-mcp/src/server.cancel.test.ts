@@ -2,7 +2,7 @@
 // service, the fake CLI in `hang` mode running the real source-tools server, and a check
 // that the whole process tree is gone within 3 s and the run dir removed.
 
-import { mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { ContextStatusSchema, RankResponseSchema, type RankResponse } from "./api.js";
@@ -25,7 +25,6 @@ import {
   waitForRuns,
   type ServerFixture,
 } from "./test-support/serverFixture.js";
-import { existsSync } from "node:fs";
 
 afterEach(cleanupAll);
 
@@ -191,6 +190,7 @@ describe("server: as a process", () => {
     child.kill("SIGHUP");
     expect(parseRank(await call)).toMatchObject({ status: "cancelled", reason: "grant_changed", sourceGrantRevision: before.sourceGrantRevision });
     expect(await waitAllGone(pids, 3000)).toEqual([]);
+    await waitFor(() => scratchEntries(fx).length === 0, 3000);
     await waitFor(() => stderr().includes('"code":"reload"'), 10_000);
     const after = await status();
     expect(after.sourceGrantRevision).not.toBe(before.sourceGrantRevision);

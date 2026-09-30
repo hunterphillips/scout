@@ -8,17 +8,23 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { ContextStatusSchema, RankResponseSchema, type RankResponse } from "./api.js";
-import { portInUseMessage, runServer, ServerStartError } from "./server.js";
+import { MAX_BODY_BYTES, MAX_SESSIONS, portInUseMessage, runServer, ServerStartError, WATCH_GRACE_MS } from "./server.js";
 import { MESSAGES, readServerInfo, serverFilePath } from "./serviceFiles.js";
+import { probeService } from "./serviceProbe.js";
 import {
+  alive,
   cleanupAll,
   connect,
+  fakePids,
   makeServerFixture,
   observation,
   rankRequest,
   SERVER_JS,
+  spawnServer,
   startServer,
   token,
+  waitFor,
+  waitForRuns,
   type ServerFixture,
 } from "./test-support/serverFixture.js";
 
@@ -210,17 +216,193 @@ describe("server: server.json", () => {
     expect(readServerInfo(fx.pcmHome)).toMatchObject({ pid: process.pid, serviceInstanceId: server.serviceInstanceId });
   });
 
-  it("refuses to start when server.json names a live pid", async () => {
+  it("refuses to start when server.json names a live service that answers as itself", async () => {
+    const fx = makeServerFixture();
+    const { child } = await spawnServer(fx);
+    await expect(runServer({ env: fx.env, log: () => {} })).rejects.toThrow(MESSAGES.alreadyRunning);
+    expect(readServerInfo(fx.pcmHome)?.pid).toBe(child.pid);
+  });
+
+  it("treats a live but unrelated pid with a bogus port as stale and overwrites the file", async () => {
     const fx = makeServerFixture();
     mkdirSync(join(fx.pcmHome, "run"), { mode: 0o700 });
     const live = spawn(process.execPath, ["-e", "setTimeout(() => {}, 30000)"]);
     try {
       writeFileSync(serverFilePath(fx.pcmHome), JSON.stringify({ pid: live.pid, port: 1, serviceInstanceId: "other", startedAt: "x" }), { mode: 0o600 });
-      await expect(runServer({ env: fx.env, log: () => {} })).rejects.toThrow(MESSAGES.alreadyRunning);
-      expect(readServerInfo(fx.pcmHome)?.pid).toBe(live.pid);
+      const { server, logs } = await startServer(fx);
+      expect(readServerInfo(fx.pcmHome)).toMatchObject({ pid: process.pid, serviceInstanceId: server.serviceInstanceId });
+      expect(logs.some((l) => JSON.parse(l).code === "stale_server_json")).toBe(true);
+      expect(alive(live.pid!)).toBe(true);
     } finally {
       live.kill("SIGKILL");
     }
+  });
+
+  it("a child server starts over a file naming another live pid (this test process) and a bogus port", async () => {
+    const fx = makeServerFixture();
+    mkdirSync(join(fx.pcmHome, "run"), { mode: 0o700 });
+    writeFileSync(serverFilePath(fx.pcmHome), JSON.stringify({ pid: process.pid, port: 1, serviceInstanceId: "reused", startedAt: "x" }), { mode: 0o600 });
+    const { child } = await spawnServer(fx);
+    expect(readServerInfo(fx.pcmHome)).toMatchObject({ pid: child.pid });
+    expect(readServerInfo(fx.pcmHome)?.serviceInstanceId).not.toBe("reused");
+  });
+
+  it("the ownership probe rejects a listener with another instance id, and gives up on a silent one within its timeout", async () => {
+    const fx = makeServerFixture();
+    const { server } = await startServer(fx);
+    const info = readServerInfo(fx.pcmHome)!;
+    expect(await probeService(info, token(fx))).toMatchObject({ serviceInstanceId: server.serviceInstanceId });
+    expect(await probeService({ ...info, serviceInstanceId: "other" }, token(fx))).toBeUndefined();
+    const silent: NetServer = createNetServer(() => {}); // accepts, never answers
+    await new Promise<void>((r) => silent.listen(0, "127.0.0.1", () => r()));
+    try {
+      const t0 = Date.now();
+      expect(await probeService({ ...info, port: (silent.address() as { port: number }).port }, token(fx), 500)).toBeUndefined();
+      expect(Date.now() - t0).toBeLessThan(2000);
+    } finally {
+      silent.close();
+    }
+  });
+});
+
+// ---------- sessions, watches, body limit ----------
+
+async function initSession(port: number, tok: string): Promise<string> {
+  const res = await rawFetch(port, { headers: { ...MCP_HEADERS, authorization: `Bearer ${tok}` }, body: INIT_BODY });
+  expect(res.status).toBe(200);
+  await res.text();
+  return res.headers.get("mcp-session-id")!;
+}
+
+async function sessionAlive(port: number, tok: string, sid: string): Promise<boolean> {
+  const res = await rawFetch(port, {
+    headers: { ...MCP_HEADERS, authorization: `Bearer ${tok}`, "mcp-session-id": sid, "mcp-protocol-version": "2025-06-18" },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 9, method: "ping" }),
+  });
+  await res.text();
+  return res.status !== 404;
+}
+
+describe("server: sessions", () => {
+  it(`at ${MAX_SESSIONS} abandoned sessions, a new one evicts the least recently seen`, async () => {
+    const fx = makeServerFixture();
+    const { server } = await startServer(fx);
+    const tok = token(fx);
+    const ids: string[] = [];
+    for (let i = 0; i < MAX_SESSIONS; i++) ids.push(await initSession(server.port, tok));
+    expect(server.counts().sessions).toBe(MAX_SESSIONS);
+    const newest = await initSession(server.port, tok);
+    expect(server.counts().sessions).toBe(MAX_SESSIONS);
+    expect(await sessionAlive(server.port, tok, ids[0]!)).toBe(false);
+    expect(await sessionAlive(server.port, tok, ids[1]!)).toBe(true);
+    expect(await sessionAlive(server.port, tok, newest)).toBe(true);
+  });
+
+  it("never evicts a session whose rank is running", async () => {
+    const fx = makeServerFixture({ mode: "hang" });
+    const { server } = await startServer(fx);
+    const tok = token(fx);
+    const { client } = await connect(fx, server.port);
+    const call = client.callTool({ name: "rank_site_links", arguments: rankRequest() }, undefined, { timeout: 60_000 });
+    call.catch(() => {});
+    await waitForRuns(fx);
+    const pids = fakePids(fx);
+    // The ranking session is the oldest; filling past the cap evicts idle ones instead.
+    const ids: string[] = [];
+    for (let i = 0; i < MAX_SESSIONS + 3; i++) ids.push(await initSession(server.port, tok));
+    expect(server.counts()).toMatchObject({ sessions: MAX_SESSIONS, runs: 1 });
+    expect(pids.every(alive)).toBe(true);
+    expect(await sessionAlive(server.port, tok, ids[0]!)).toBe(false);
+    expect(ContextStatusSchema.parse((await client.callTool({ name: "context_status", arguments: {} })).structuredContent).serviceInstanceId).toBe(
+      server.serviceInstanceId,
+    );
+  });
+});
+
+describe("server: response watches", () => {
+  it("200 observe_activity calls leave no watch behind", async () => {
+    const fx = makeServerFixture();
+    const { server } = await startServer(fx);
+    const { client } = await connect(fx, server.port);
+    for (let i = 0; i < 200; i++) await client.callTool({ name: "observe_activity", arguments: { ...observation, observedAt: `2026-09-30T12:00:${String(i % 60).padStart(2, "0")}Z` } });
+    await waitFor(() => server.counts().watches === 0, 3000);
+  });
+
+  it("an observe_activity whose response closed early is dropped after the grace period", async () => {
+    const fx = makeServerFixture();
+    const { server } = await startServer(fx);
+    const tok = token(fx);
+    const sid = await initSession(server.port, tok);
+    const http = await import("node:http");
+    for (let i = 0; i < 20; i++) {
+      await new Promise<void>((resolve) => {
+        const req = http.request({
+          host: "127.0.0.1",
+          port: server.port,
+          path: "/mcp",
+          method: "POST",
+          headers: { ...MCP_HEADERS, authorization: `Bearer ${tok}`, "mcp-session-id": sid, "mcp-protocol-version": "2025-06-18" },
+        });
+        req.on("error", () => resolve());
+        req.end(JSON.stringify({ jsonrpc: "2.0", id: 100 + i, method: "tools/call", params: { name: "observe_activity", arguments: observation } }), () => {
+          req.destroy();
+          resolve();
+        });
+      });
+    }
+    await waitFor(() => server.counts().watches === 0, WATCH_GRACE_MS + 3000);
+  });
+});
+
+describe("server: body limit", () => {
+  it("answers 413 from content-length alone, without waiting for the body", async () => {
+    const fx = makeServerFixture();
+    const { server } = await startServer(fx);
+    const http = await import("node:http");
+    const status = await new Promise<number>((resolve, reject) => {
+      const req = http.request(
+        {
+          host: "127.0.0.1",
+          port: server.port,
+          path: "/mcp",
+          method: "POST",
+          headers: { ...MCP_HEADERS, authorization: `Bearer ${token(fx)}`, "content-length": String(MAX_BODY_BYTES + 1) },
+        },
+        (res) => {
+          res.resume();
+          resolve(res.statusCode ?? 0);
+        },
+      );
+      req.on("error", reject);
+      req.write("{"); // the rest never arrives
+    });
+    expect(status).toBe(413);
+  });
+
+  it("answers 413 once a chunked body passes the limit, without reading to the end", async () => {
+    const fx = makeServerFixture();
+    const { server } = await startServer(fx);
+    const http = await import("node:http");
+    const status = await new Promise<number>((resolve, reject) => {
+      const req = http.request(
+        {
+          host: "127.0.0.1",
+          port: server.port,
+          path: "/mcp",
+          method: "POST",
+          headers: { ...MCP_HEADERS, authorization: `Bearer ${token(fx)}`, "transfer-encoding": "chunked" },
+        },
+        (res) => {
+          res.resume();
+          resolve(res.statusCode ?? 0);
+        },
+      );
+      req.on("error", reject);
+      const chunk = Buffer.alloc(64 * 1024, "x");
+      for (let sent = 0; sent <= MAX_BODY_BYTES; sent += chunk.length) req.write(chunk);
+      // never ended: a server that drained to the end would never answer
+    });
+    expect(status).toBe(413);
   });
 });
 

@@ -103,7 +103,9 @@ export function ensureToken(home: string): string {
     let fd: number;
     try {
       fd = openSync(path, fsc.O_WRONLY | fsc.O_CREAT | fsc.O_EXCL | fsc.O_NOFOLLOW, 0o600);
-    } catch {
+    } catch (e) {
+      // A concurrent first start created it between our read and our open: use theirs.
+      if ((e as NodeJS.ErrnoException).code === "EEXIST") return readConcurrentToken(home);
       throw new ServiceFileError(MESSAGES.tokenUnreadable);
     }
     try {
@@ -114,6 +116,18 @@ export function ensureToken(home: string): string {
     return readToken(home);
   }
   return checkToken(existing);
+}
+
+/** readToken, retried for up to ~0.5 s while another process finishes writing the file. */
+function readConcurrentToken(home: string): string {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return readToken(home);
+    } catch (e) {
+      if (attempt >= 25 || !(e instanceof ServiceFileError) || e.message !== MESSAGES.tokenUnreadable) throw e;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
+    }
+  }
 }
 
 function checkToken(f: { text: string; mode: number; uid: number; isFile: boolean }): string {
