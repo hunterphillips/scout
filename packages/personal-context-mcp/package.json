@@ -9,6 +9,9 @@
   },
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
+  "bin": {
+    "pcm": "dist/cli.js"
+  },
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
@@ -29,7 +32,8 @@
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "test:live": "SCOUT_LIVE=1 vitest run --config vitest.live.config.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.1",
