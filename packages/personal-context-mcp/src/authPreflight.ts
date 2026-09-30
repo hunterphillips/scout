@@ -13,10 +13,13 @@
 // first-party claude.ai login of a subscription type. Anything else, including any
 // read/parse/shape uncertainty, is "ambiguous".
 //
-// The report holds presence flags, key names and fixed reason codes only. It never
-// contains env values, file contents, URLs, commands, credentials or account identity.
-// (Settings entries carry the settings file path the preflight itself chose to inspect,
-// as in the spike; no path from the environment's values is ever reported.)
+// The report holds presence flags, key names, fixed reason codes and a few local paths.
+// It never contains env values, file contents, URLs, commands, credentials or account
+// identity. The paths it does contain (the resolved claude binary, `configDir`, and the
+// settings files inspected) derive from HOME / CLAUDE_CONFIG_DIR and can reveal the
+// username and directory layout.
+// Callers must not forward the raw report to MCP clients or logs; surface the verdict
+// and reason codes only.
 
 import { spawnSync as nodeSpawnSync } from "node:child_process";
 import * as realFs from "node:fs";

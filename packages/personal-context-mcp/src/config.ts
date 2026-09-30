@@ -315,11 +315,14 @@ export interface ExclusionOptions {
  * (realpath of both). Excluded:
  * - anything not inside `sourceRoot` (fails closed);
  * - everything under ~/workspace/personal-context/ (the private profile store);
+ * - everything under ~/workspace/second-brain/inbox/ and ~/workspace/second-brain/log/,
+ *   by absolute path, whatever the source root;
  * - any path segment named `.git` or `node_modules`;
  * - any segment matching `.env*`, `*.pem`, `*.key`, `*secret*`, `*token*`, `*credential*`
  *   (case-insensitive, so a `secrets/` directory hides its whole subtree);
  * - when the source root is a second-brain root (its last segments are `second-brain` or
- *   `second-brain/notes`), a first segment under it named `inbox` or `log`.
+ *   `second-brain/notes`), a first segment under it named `inbox` or `log` (covers a second
+ *   brain living somewhere other than ~/workspace/second-brain).
  */
 export function isAlwaysExcluded(absPath: string, sourceRoot: string, opts: ExclusionOptions = {}): boolean {
   const home = opts.home ?? (process.env.HOME || homedir());
@@ -327,6 +330,11 @@ export function isAlwaysExcluded(absPath: string, sourceRoot: string, opts: Excl
   const path = resolve(absPath);
   const root = resolve(sourceRoot);
   if (path === pcDir || path.startsWith(pcDir + sep)) return true;
+  const brainDir = join(resolve(home), "workspace", "second-brain");
+  for (const name of SECOND_BRAIN_EXCLUDED) {
+    const dir = join(brainDir, name);
+    if (path === dir || path.startsWith(dir + sep)) return true;
+  }
 
   const rel = relative(root, path);
   if (rel === "") return false;

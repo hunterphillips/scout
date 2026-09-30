@@ -240,6 +240,24 @@ describe("isAlwaysExcluded", () => {
     }
   });
 
+  it("excludes ~/workspace/second-brain/inbox and log by absolute path whatever the root", () => {
+    const sb = "/Users/tester/workspace/second-brain";
+    for (const r of ["/Users/tester/workspace", "/Users/tester"]) {
+      expect(isAlwaysExcluded(`${sb}/inbox/x.md`, r, opts)).toBe(true);
+      expect(isAlwaysExcluded(`${sb}/log/y.md`, r, opts)).toBe(true);
+      expect(isAlwaysExcluded(`${sb}/inbox`, r, opts)).toBe(true);
+      expect(isAlwaysExcluded(`${sb}/log`, r, opts)).toBe(true);
+      expect(isAlwaysExcluded(`${sb}/notes/idea.md`, r, opts)).toBe(false);
+      expect(isAlwaysExcluded(`${sb}/inbox-archive/x.md`, r, opts)).toBe(false);
+    }
+  });
+
+  it("allows notes/inbox-ideas.md under a second-brain root (a file named like inbox is not the inbox folder)", () => {
+    const sb = "/Users/tester/workspace/second-brain";
+    expect(isAlwaysExcluded(`${sb}/notes/inbox-ideas.md`, sb, opts)).toBe(false);
+    expect(isAlwaysExcluded(`${sb}/notes/inbox-ideas.md`, "/Users/tester/workspace", opts)).toBe(false);
+  });
+
   it("excludes everything under ~/workspace/personal-context", () => {
     const pc = "/Users/tester/workspace/personal-context";
     expect(isAlwaysExcluded(`${pc}/profile.md`, "/Users/tester/workspace", opts)).toBe(true);
