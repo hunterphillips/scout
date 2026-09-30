@@ -5,6 +5,8 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   checkReadable,
   ConfigError,
+  isExcludedAncestry,
+  prepareRoot,
   DEFAULT_PORT,
   isAlwaysExcluded,
   loadConfig,
@@ -552,5 +554,57 @@ describe("checkReadable", () => {
     // The fake realpath returns the spelling as given, as a case-insensitive disk would not.
     const realpath = (p: string) => p;
     expect(checkReadable(join(brain, "INBOX", "x.md"), brain, { home, realpath })).toEqual({ ok: false, code: "excluded" });
+  });
+});
+
+describe("roots inside an excluded area", () => {
+  function tree() {
+    const root = realpathSync(tempHome());
+    const home = join(root, "home");
+    mkdirSync(home);
+    return { root, home };
+  }
+
+  it.each([".ssh/thoughts", "code/repo/.git/thoughts", "work/secrets/notes", "work/tokens/notes", "a/My-Credentials/b", "x/second-brain/log/y"])(
+    "refuses every path under a root at ~/%s",
+    (sub) => {
+      const { home } = tree();
+      const r = join(home, ...sub.split("/"));
+      mkdirSync(r, { recursive: true });
+      writeFileSync(join(r, "x.md"), "x");
+      expect(checkReadable(join(r, "x.md"), r, { home })).toEqual({ ok: false, code: "excluded" });
+      expect(checkReadable(r, r, { home })).toEqual({ ok: false, code: "excluded" });
+      expect(prepareRoot(r, { home })).toEqual({ ok: false, code: "excluded" });
+    },
+  );
+
+  it("checks the real root too, so a symlink to ~/.ssh/x is refused", () => {
+    const { home } = tree();
+    mkdirSync(join(home, ".ssh", "x"), { recursive: true });
+    writeFileSync(join(home, ".ssh", "x", "a.md"), "a");
+    symlinkSync(join(home, ".ssh", "x"), join(home, "plain"));
+    expect(checkReadable(join(home, "plain", "a.md"), join(home, "plain"), { home })).toEqual({ ok: false, code: "excluded" });
+  });
+
+  it("measures from $HOME, or from / outside it; $HOME's own segments never count", () => {
+    expect(isExcludedAncestry("/Users/tester/notes", "/Users/tester")).toBe(false);
+    expect(isExcludedAncestry("/Users/tester/.ssh/notes", "/Users/tester")).toBe(true);
+    expect(isExcludedAncestry("/home/tokens-user/notes", "/home/tokens-user")).toBe(false);
+    expect(isExcludedAncestry("/srv/secrets/notes", "/Users/tester")).toBe(true);
+    expect(isExcludedAncestry("/srv/data/notes", "/Users/tester")).toBe(false);
+    expect(isExcludedAncestry("relative/notes", "/Users/tester")).toBe(true);
+  });
+
+  it("reuses a prepared root without resolving it again", () => {
+    const { home } = tree();
+    const notes = join(home, "notes");
+    mkdirSync(notes);
+    writeFileSync(join(notes, "a.md"), "a");
+    const p = prepareRoot(notes, { home });
+    expect(p.ok).toBe(true);
+    const seen: string[] = [];
+    const realpath = (x: string) => (seen.push(x), realpathSync.native(x));
+    if (p.ok) expect(checkReadable(join(notes, "a.md"), notes, { home, realpath, prepared: p.root })).toEqual({ ok: true, realPath: join(notes, "a.md") });
+    expect(seen).toEqual([join(notes, "a.md")]);
   });
 });

@@ -121,6 +121,37 @@ describe("activity", () => {
   });
 });
 
+describe("activity packing", () => {
+  const ctl = "\x01".repeat(8192); // ~48 KiB once JSON-escaped
+
+  it("packs a hostile snapshot newest first into the call's room, and later tools still work", async () => {
+    const obs = Array.from({ length: 10 }, (_, i) => observation(10 - i, { text: ctl }));
+    const h = await harness({ snap: { observations: obs } });
+    const a = await h.call("read_recent_activity");
+    expect(a.isError).toBe(false);
+    expect(a.body.truncated).toBe(true);
+    expect(a.body.observations).toEqual([]);
+    expect(Buffer.byteLength(a.text)).toBeLessThanOrEqual(32 * 1024);
+    const s = await h.call("search_source", { sourceId: "notes", query: "billing" });
+    expect(s.body.status).toBe("ok");
+    expect((await h.call("list_sources")).body.status).toBe("ok");
+  });
+
+  it("drops the oldest entries first and keeps ids gap-free", async () => {
+    const big = "q".repeat(12 * 1024);
+    const obs = [observation(3, { text: big }), observation(2, { text: big }), observation(1, { text: big })];
+    const h = await harness({ snap: { observations: obs } });
+    const a = await h.call("read_recent_activity");
+    expect(a.body.observations.map((o: any) => [o.evidenceId, o.title])).toEqual([
+      ["e1", "issue 3"],
+      ["e2", "issue 2"],
+    ]);
+    expect(a.body.truncated).toBe(true);
+    expect(h.audit().at(-1)!.evidence.map((e: any) => e.path)).toEqual(["o3", "o2"]);
+    expect((await h.call("read_recent_activity", { limit: 1 })).body).toMatchObject({ truncated: false, observations: [{ evidenceId: "e3" }] });
+  });
+});
+
 describe("search and read", () => {
   it("returns hits with paths, line ranges, snippets and fresh evidence ids", async () => {
     const h = await harness();
@@ -206,10 +237,11 @@ describe("registry projects", () => {
     const h = await harness({ sources: registrySources });
     const { body } = await h.call("list_sources");
     expect(body.sources[0].projects).toEqual([
-      { name: "alpha", enabled: true, availability: "ok" },
-      { name: "beta", enabled: false, availability: "unavailable: disabled" },
-      { name: "home", enabled: true, availability: "unavailable: too-broad" },
+      { name: "alpha", availability: "ok" },
+      { name: "home", availability: "unavailable: too-broad" },
     ]);
+    expect(body.sources[0].disabledProjectCount).toBe(1);
+    expect(JSON.stringify(body)).not.toContain("beta");
   });
 
   it("searches and reads only enabled projects, under <repo>/thoughts/shared only", async () => {
@@ -249,6 +281,16 @@ describe("focus", () => {
     expect(r.isError).toBe(false);
     expect(h.fetch).toHaveBeenCalledTimes(1);
     expect(h.fetch.mock.calls.every((c) => c[0] === FOCUS_URL)).toBe(true);
+  });
+
+  it.each([
+    ["too-large", () => new Response("x".repeat(300 * 1024))],
+    ["http-status", () => new Response("", { status: 302, headers: { location: "http://example.com/" } })],
+  ])("reports %s as unavailable and fetches with redirect: error", async (reason, respond) => {
+    const h = await harness({ fetch: respond });
+    expect((await h.call("get_focus")).body).toEqual({ status: "unavailable", sourceId: "focus", reason });
+    expect(h.fetch.mock.calls[0]![1]).toMatchObject({ method: "GET", redirect: "error" });
+    expect(h.audit().at(-1)).toMatchObject({ tool: "get_focus", status: "unavailable", code: reason });
   });
 
   it("is unavailable when no Focus source is granted, without fetching", async () => {
@@ -295,6 +337,17 @@ describe("budgets", () => {
     expect(issued).toEqual(issued.map((_, i) => `e${i + 1}`));
   });
 
+  it("refuses one oversized result as too_large, alone, and the run goes on", async () => {
+    const h = await harness();
+    write(join(h.f.notes, "ctl.md"), "\x01".repeat(16 * 1024)); // 16 KiB of text, ~96 KiB of JSON
+    const big = await h.call("read_source", { sourceId: "notes", path: "ctl.md" });
+    expect(big).toMatchObject({ isError: true, body: { status: "too_large" } });
+    expect(h.audit().at(-1)).toMatchObject({ tool: "read_source", status: "too-large", evidence: [] });
+    expect(h.ledger().all()).toEqual([]);
+    const next = await h.call("read_source", { sourceId: "notes", path: "todo.txt" });
+    expect(next.body).toMatchObject({ status: "ok", evidenceId: "e1" });
+  });
+
   it("marks per-call scan caps as truncated", async () => {
     const h = await harness();
     write(join(h.f.notes, "big.md"), "x\n".repeat(200 * 1024));
@@ -303,7 +356,42 @@ describe("budgets", () => {
   });
 });
 
+describe("invalid arguments", () => {
+  it.each([
+    ["read_source", { sourceId: "notes", path: 12345 }],
+    ["read_source", { sourceId: "notes", path: `${QUERY_SENTINEL}/`.repeat(100) }],
+    ["read_source", { sourceId: "notes" }],
+    ["read_source", { sourceId: "notes", path: "todo.txt", startLine: 0 }],
+    ["search_source", { sourceId: "notes", query: "billing", limit: 99 }],
+    ["read_recent_activity", { limit: "ten" }],
+  ])("%s with bad arguments is counted, audited without values, and answered with a fixed code", async (tool, args) => {
+    const h = await harness({ snap: { budgets: { maxCalls: 2, maxTotalBytes: 128 * 1024 } } });
+    const r = await h.call(tool, args as Record<string, unknown>);
+    expect(r).toMatchObject({ isError: true, body: { status: "error", code: "invalid-args" } });
+    const line = h.audit().at(-1)!;
+    expect(line).toMatchObject({ tool, status: "invalid-args", code: "invalid-args", evidence: [] });
+    expect(JSON.stringify(h.audit())).not.toContain(QUERY_SENTINEL);
+    await h.call("list_sources");
+    expect((await h.call("list_sources")).body).toEqual({ status: "budget_exhausted" });
+  });
+
+  it("still advertises typed input schemas", async () => {
+    const h = await harness();
+    const { tools } = await h.client.listTools();
+    const read = tools.find((t) => t.name === "read_source")!;
+    expect(read.inputSchema.properties).toMatchObject({ path: { type: "string", maxLength: 1024 }, startLine: { type: "integer", minimum: 1 } });
+    expect(read.inputSchema.required).toEqual(["sourceId", "path"]);
+  });
+});
+
 describe("evidence and audit", () => {
+  it("audits the reason behind a denied read, without telling the model", async () => {
+    const h = await harness();
+    const r = await h.call("read_source", { sourceId: "notes", path: "secrets/billing.md" });
+    expect(r.body).toEqual({ status: "error", code: "denied" });
+    expect(h.audit().at(-1)).toMatchObject({ status: "error", code: "denied", detail: "excluded" });
+  });
+
   it("issues sequential, unique ids across tools and keeps the map out of every result", async () => {
     const h = await harness();
     const results = [

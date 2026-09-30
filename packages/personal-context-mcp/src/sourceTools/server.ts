@@ -5,7 +5,13 @@
 // commits no ids.
 //
 // Results carry `structuredContent` and the same object as compact JSON text; the byte
-// budget counts the text. Errors are fixed codes only: never a path, query or content.
+// budget counts the text (see budget.ts). A result over the per-call cap is refused alone
+// as `too_large`. Errors are fixed codes only: never a path, query or content.
+//
+// Arguments: every field's schema ends in `.catch(INVALID)`, so the SDK never rejects a
+// call before the handler runs (it has no hook for that). The advertised JSON schema is
+// unchanged; a field that fails it arrives as INVALID and the call is counted, audited as
+// `invalid-args` (without argument values) and answered with that fixed code.
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
@@ -14,21 +20,11 @@ import { z } from "zod";
 import type { Clock } from "../clock.js";
 import type { ExclusionOptions, FocusHttpSource, RegistryProjectsSource, SourceConfig } from "../config.js";
 import { createAuditLog, type AuditLog, type CallAuditRecord, type CallStatus } from "./audit.js";
-import { createRunBudget } from "./budget.js";
+import { createRunBudget, type RunBudget } from "./budget.js";
 import { createEvidenceLedger, type EvidenceLedger, type EvidenceTransaction } from "./evidence.js";
 import { fetchFocus, FOCUS_TIMEOUT_MS, type FetchLike, type FocusItem } from "./focus.js";
-import {
-  newScanBudget,
-  normalizeRelPath,
-  parseQuery,
-  readTreeFile,
-  rootAvailability,
-  searchTree,
-  SEARCH_LIMITS,
-  type FsOps,
-  type SearchHit,
-  type TreeOptions,
-} from "./markdownDir.js";
+import { normalizeRelPath, READ_LIMITS, readTreeFile, rootAvailability, SEARCH_LIMITS, type FsOps, type TreeOptions } from "./markdownDir.js";
+import { newScanBudget, parseQuery, searchTree, type SearchHit } from "./search.js";
 import { discoverProjects, type RegistryView } from "./registryProjects.js";
 import { AUDIT_FILE, type RunFiles } from "./runFiles.js";
 
@@ -57,21 +53,51 @@ export interface SourceToolsDeps {
 type Payload = Record<string, unknown>;
 
 interface Outcome {
-  status: Exclude<CallStatus, "budget_exhausted">;
+  status: Exclude<CallStatus, "budget_exhausted" | "too-large">;
   code?: string;
+  /** Audit only: the underlying reason for a `denied`. */
+  detail?: string;
   /** Builds the payload; mints evidence through `tx`. Must be synchronous. */
   build(tx: EvidenceTransaction): Payload;
 }
 
 const ok = (build: (tx: EvidenceTransaction) => Payload): Outcome => ({ status: "ok", build });
-const fail = (code: string): Outcome => ({ status: "error", code, build: () => ({ status: "error", code }) });
+const fail = (code: string, detail?: string): Outcome => {
+  const o: Outcome = { status: "error", code, build: () => ({ status: "error", code }) };
+  if (detail !== undefined) o.detail = detail;
+  return o;
+};
+
+/** What a field that failed its schema turns into (see the header). */
+const INVALID: unique symbol = Symbol("invalid-arg");
+const orInvalid = <T extends z.ZodType>(schema: T) => schema.catch(() => INVALID as never);
+const hasInvalid = (args: object): boolean => Object.values(args).some((v) => v === INVALID);
+
+/** Longer than any real evidence id, so a size estimate made with it is never short. */
+const ID_PLACEHOLDER = "e9999999999";
+
+/**
+ * Observations newest first, as many as fit `room` bytes once serialized (the oldest are
+ * dropped). Returns the entries to send and whether any were dropped.
+ */
+export function packObservations<T extends Payload>(entries: readonly T[], room: number): { kept: T[]; dropped: boolean } {
+  let total = Buffer.byteLength(JSON.stringify({ status: "ok", observations: [], truncated: false }), "utf8");
+  const kept: T[] = [];
+  for (const e of entries) {
+    const add = Buffer.byteLength(JSON.stringify({ evidenceId: ID_PLACEHOLDER, ...e }), "utf8") + (kept.length > 0 ? 1 : 0);
+    if (total + add > room) break;
+    kept.push(e);
+    total += add;
+  }
+  return { kept, dropped: kept.length < entries.length };
+}
 
 const RO_ANNOTATIONS = { readOnlyHint: true, destructiveHint: false, idempotentHint: false, openWorldHint: false } as const;
 
 export function createSourceToolsServer(deps: SourceToolsDeps): McpServer {
   const { files, clock } = deps;
   const audit = deps.audit ?? createAuditLog(join(deps.runDir, AUDIT_FILE), clock);
-  const budget = createRunBudget(files.snapshot.budgets);
+  const budget: RunBudget = createRunBudget(files.snapshot.budgets);
   const ledger = createEvidenceLedger();
   deps.onLedger?.(ledger);
   const fetchImpl: FetchLike = deps.fetch ?? ((url, init) => fetch(url, init));
@@ -118,10 +144,15 @@ export function createSourceToolsServer(deps: SourceToolsDeps): McpServer {
     try {
       if (!budget.admitCall()) return exhausted();
       let outcome: Outcome;
-      try {
-        outcome = await work();
-      } catch {
-        outcome = fail("internal");
+      if (args !== null && typeof args === "object" && hasInvalid(args)) {
+        args = {}; // no argument values reach the audit, not even hashed
+        outcome = { status: "invalid-args", code: "invalid-args", build: () => ({ status: "error", code: "invalid-args" }) };
+      } else {
+        try {
+          outcome = await work();
+        } catch {
+          outcome = fail("internal");
+        }
       }
       // From here to commit is synchronous, so two calls' transactions never interleave.
       let tx = ledger.begin();
@@ -135,20 +166,27 @@ export function createSourceToolsServer(deps: SourceToolsDeps): McpServer {
         payload = outcome.build(tx);
       }
       const bytes = Buffer.byteLength(JSON.stringify(payload), "utf8");
-      if (!budget.admitBytes(bytes)) {
+      const admission = budget.admitBytes(bytes);
+      if (admission === "exhausted") {
         tx.rollback();
         return exhausted();
+      }
+      if (admission === "too-large") {
+        tx.rollback();
+        audit.call({ tool, args, status: "too-large", evidence: [], bytes, ms: ms() });
+        return respond({ status: "too_large" }, true);
       }
       try {
         const rec: CallAuditRecord = { tool, args, status: outcome.status, evidence: tx.records, bytes, ms: ms() };
         if (outcome.code !== undefined) rec.code = outcome.code;
+        if (outcome.detail !== undefined) rec.detail = outcome.detail;
         audit.call(rec);
       } catch {
         tx.rollback();
         return respond({ status: "error", code: "audit-failed" }, true);
       }
       tx.commit();
-      return respond(payload, outcome.status === "error");
+      return respond(payload, outcome.status === "error" || outcome.status === "invalid-args");
     } catch {
       return respond({ status: "error", code: "internal" }, true);
     }
@@ -169,11 +207,11 @@ export function createSourceToolsServer(deps: SourceToolsDeps): McpServer {
         } else if (s.kind === "registry_projects") {
           const v = registry(s);
           entry.availability = v.availability === "ok" ? "ok" : `unavailable: ${v.availability}`;
-          entry.projects = v.projects.map((p) => ({
-            name: p.name,
-            enabled: p.enabled,
-            availability: p.availability === "ok" ? "ok" : `unavailable: ${p.availability}`,
-          }));
+          // Disabled projects are counted, never named: their names are not granted.
+          entry.projects = v.projects
+            .filter((p) => p.enabled)
+            .map((p) => ({ name: p.name, availability: p.availability === "ok" ? "ok" : `unavailable: ${p.availability}` }));
+          entry.disabledProjectCount = v.projects.filter((p) => !p.enabled).length;
           entry.pathFormat = "<project>/<path inside the project>";
         } else {
           entry.availability = "ok"; // probed only by get_focus
@@ -187,20 +225,26 @@ export function createSourceToolsServer(deps: SourceToolsDeps): McpServer {
   const readRecentActivity = (limit: number | undefined): Outcome => {
     const n = limit ?? MAX_ACTIVITY_LIMIT;
     const list = files.snapshot.observations.slice(0, n);
-    return ok((tx) => ({
-      status: "ok",
-      observations: list.map((o) => {
-        const e: Payload = {
-          evidenceId: tx.mint({ kind: "activity", sourceId: ACTIVITY_SOURCE_ID, path: o.observationId }),
-          observedAt: o.observedAt,
-          title: o.title,
-          url: o.url,
-          truncated: o.truncated,
-        };
+    return ok((tx) => {
+      const entries = list.map((o) => {
+        const e: Payload = { observedAt: o.observedAt, title: o.title, url: o.url, truncated: o.truncated };
         if (o.text !== undefined) e.text = o.text;
-        return e;
-      }),
-    }));
+        return { id: o.observationId, e };
+      });
+      // Pack to the bytes this call may still use, so one heavy page can't sink the call.
+      const { kept, dropped } = packObservations(
+        entries.map((x) => x.e),
+        budget.room,
+      );
+      return {
+        status: "ok",
+        observations: kept.map((e, i) => ({
+          evidenceId: tx.mint({ kind: "activity", sourceId: ACTIVITY_SOURCE_ID, path: entries[i]!.id }),
+          ...e,
+        })),
+        truncated: dropped,
+      };
+    });
   };
 
   const hitsPayload = (s: SourceConfig, hits: SearchHit[], truncated: boolean) => (tx: EvidenceTransaction): Payload => ({
@@ -222,12 +266,12 @@ export function createSourceToolsServer(deps: SourceToolsDeps): McpServer {
     const terms = parseQuery(query);
     if (!terms) return fail("invalid-query");
     const max = Math.min(limit ?? SEARCH_LIMITS.maxHits, SEARCH_LIMITS.maxHits);
+    const scan = newScanBudget(() => clock.now());
     if (s.kind === "markdown_dir") {
-      const r = searchTree(treeFor(s.root, s.exclude), terms, max);
+      const r = searchTree(treeFor(s.root, s.exclude), terms, max, scan);
       return ok(hitsPayload(s, r.hits, r.truncated));
     }
     if (s.kind === "registry_projects") {
-      const scan = newScanBudget();
       const hits: SearchHit[] = [];
       for (const p of registry(s).projects) {
         if (hits.length >= max) break;
@@ -252,10 +296,10 @@ export function createSourceToolsServer(deps: SourceToolsDeps): McpServer {
       const norm = normalizeRelPath(path);
       if (norm === undefined) return fail("invalid-path");
       const slash = norm.indexOf("/");
-      if (slash < 0) return fail("denied");
+      if (slash < 0) return fail("denied", "no-project");
       const name = norm.slice(0, slash);
       const p = registry(s).projects.find((x) => x.name === name);
-      if (!p || !p.enabled || p.availability !== "ok" || p.root === undefined) return fail("denied");
+      if (!p || !p.enabled || p.availability !== "ok" || p.root === undefined) return fail("denied", "project-unavailable");
       tree = treeFor(p.root);
       rel = norm.slice(slash + 1);
       prefix = `${name}/`;
@@ -263,19 +307,24 @@ export function createSourceToolsServer(deps: SourceToolsDeps): McpServer {
       return fail("unsupported-source");
     }
     const r = readTreeFile(tree, rel, startLine, endLine);
-    if (!r.ok) return fail(r.code);
+    if (!r.ok) return fail(r.code, r.detail);
     const shown = prefix + r.path;
-    return ok((tx) => ({
-      status: "ok",
-      sourceId: s.id,
-      ...recallFields(s),
-      evidenceId: tx.mint({ kind: "note", sourceId: s.id, path: shown, lines: r.lines }),
-      path: shown,
-      lines: r.lines,
-      totalLines: r.totalLines,
-      text: r.text,
-      truncated: r.truncated,
-    }));
+    return ok((tx) => {
+      const out: Payload = {
+        status: "ok",
+        sourceId: s.id,
+        ...recallFields(s),
+        evidenceId: tx.mint({ kind: "note", sourceId: s.id, path: shown, lines: r.lines }),
+        path: shown,
+        lines: r.lines,
+        totalLines: r.totalLines,
+      };
+      if (r.totalLinesAtLeast) out.totalLinesAtLeast = true;
+      out.text = r.text;
+      out.truncated = r.truncated;
+      if (r.endClamped) out.endClamped = true;
+      return out;
+    });
   };
 
   const getFocus = async (): Promise<Outcome> => {
@@ -302,12 +351,14 @@ export function createSourceToolsServer(deps: SourceToolsDeps): McpServer {
   // ---------- registration ----------
 
   const server = new McpServer({ name: SERVER_NAME, version: SERVER_VERSION });
-  const sourceIdArg = z.string().max(64).describe("A source id from list_sources.");
+  const sourceIdArg = orInvalid(z.string().max(64).describe("A source id from list_sources."));
 
   server.registerTool(
     "list_sources",
     {
-      description: "List the granted sources: id, kind, purpose and availability. Metadata only; not citable evidence.",
+      description:
+        "List the granted sources: id, kind, purpose and availability (for a project registry, the enabled projects " +
+        "and a count of disabled ones). Metadata only; not citable evidence.",
       inputSchema: {},
       annotations: RO_ANNOTATIONS,
     },
@@ -317,8 +368,10 @@ export function createSourceToolsServer(deps: SourceToolsDeps): McpServer {
   server.registerTool(
     "read_recent_activity",
     {
-      description: "Pages Hunter viewed recently, newest first, fixed when this run started. Each entry has a citable evidence id.",
-      inputSchema: { limit: z.int().min(1).max(MAX_ACTIVITY_LIMIT).optional() },
+      description:
+        "Pages Hunter viewed recently, newest first, fixed when this run started. Each entry has a citable evidence id. " +
+        "When the entries don't all fit the byte budget, the oldest are left out and `truncated` is true.",
+      inputSchema: { limit: orInvalid(z.int().min(1).max(MAX_ACTIVITY_LIMIT).optional()) },
       annotations: RO_ANNOTATIONS,
     },
     (args) => run("read_recent_activity", args, () => readRecentActivity(args.limit)),
@@ -332,8 +385,8 @@ export function createSourceToolsServer(deps: SourceToolsDeps): McpServer {
         "Returns up to `limit` hits (path, line range, 300-character snippet), each with a citable evidence id.",
       inputSchema: {
         sourceId: sourceIdArg,
-        query: z.string().max(SEARCH_LIMITS.maxQueryChars),
-        limit: z.int().min(1).max(SEARCH_LIMITS.maxHits).default(SEARCH_LIMITS.maxHits),
+        query: orInvalid(z.string().max(SEARCH_LIMITS.maxQueryChars)),
+        limit: orInvalid(z.int().min(1).max(SEARCH_LIMITS.maxHits).default(SEARCH_LIMITS.maxHits)),
       },
       annotations: RO_ANNOTATIONS,
     },
@@ -344,13 +397,15 @@ export function createSourceToolsServer(deps: SourceToolsDeps): McpServer {
     "read_source",
     {
       description:
-        "Read a line range from one note (a relative path from search_source), at most 200 lines or 16 KiB. " +
+        `Read a line range from one note (a relative path from search_source), at most ${READ_LIMITS.maxLines} lines or 16 KiB. ` +
+        "Only a file's first 256 KiB is readable: lines past it are unreachable, and `totalLinesAtLeast` marks such a file. " +
+        "`truncated` means the line or byte cap cut the range; `endClamped` means endLine was past the last line. " +
         "Returns a citable evidence id for the range.",
       inputSchema: {
         sourceId: sourceIdArg,
-        path: z.string().max(1024),
-        startLine: z.int().min(1).max(10_000_000).optional(),
-        endLine: z.int().min(1).max(10_000_000).optional(),
+        path: orInvalid(z.string().max(1024)),
+        startLine: orInvalid(z.int().min(1).max(10_000_000).optional()),
+        endLine: orInvalid(z.int().min(1).max(10_000_000).optional()),
       },
       annotations: RO_ANNOTATIONS,
     },

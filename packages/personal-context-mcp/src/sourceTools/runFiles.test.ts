@@ -1,11 +1,11 @@
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { snapshot } from "../test-support/sourceFixture.js";
 import { createRunBudget } from "./budget.js";
 import { createEvidenceLedger } from "./evidence.js";
-import { readRunFiles, RunFileError } from "./runFiles.js";
+import { checkRunDir, readRunFiles, RunFileError } from "./runFiles.js";
 
 const dirs: string[] = [];
 function runDir(snap: unknown, sources: unknown): string {
@@ -65,15 +65,50 @@ describe("run files", () => {
 });
 
 describe("budget", () => {
-  it("counts every call and stays exhausted once a limit is passed", () => {
+  it("counts every call and stays exhausted once the cumulative limit is passed", () => {
     const b = createRunBudget({ maxCalls: 3, maxTotalBytes: 100 });
-    expect(b.admitCall() && b.admitBytes(60)).toBe(true);
     expect(b.admitCall()).toBe(true);
-    expect(b.admitBytes(50)).toBe(false);
+    expect(b.admitBytes(60)).toBe("ok");
+    expect(b.room).toBe(40);
+    expect(b.admitCall()).toBe(true);
+    expect(b.admitBytes(50)).toBe("exhausted");
     expect(b.admitCall()).toBe(false);
-    expect(b.admitBytes(1)).toBe(false);
+    expect(b.admitBytes(1)).toBe("exhausted");
     expect(b.exhausted).toBe(true);
+    expect(b.room).toBe(0);
     expect(b.bytes).toBe(60);
+  });
+
+  it("refuses one result over the per-call cap without exhausting the run", () => {
+    const b = createRunBudget({ maxCalls: 5, maxTotalBytes: 1000, maxCallBytes: 100 });
+    expect(b.room).toBe(100);
+    expect(b.admitBytes(101)).toBe("too-large");
+    expect(b.exhausted).toBe(false);
+    expect(b.bytes).toBe(0);
+    expect(b.admitBytes(100)).toBe("ok");
+    expect(createRunBudget({ maxCalls: 1, maxTotalBytes: 128 * 1024 }).room).toBe(32 * 1024);
+  });
+});
+
+describe("checkRunDir", () => {
+  it("accepts a 0700 directory we own", () => {
+    expect(checkRunDir(runDir(undefined, undefined))).toBeUndefined();
+  });
+
+  it("refuses anything else with a fixed code", () => {
+    const d = runDir(undefined, undefined);
+    const real = join(d, "real");
+    mkdirSync(real, { mode: 0o700 });
+    symlinkSync(real, join(d, "link"));
+    writeFileSync(join(d, "file"), "");
+    mkdirSync(join(d, "open"));
+    chmodSync(join(d, "open"), 0o755);
+    expect(checkRunDir("relative/run")).toBe("run-dir-relative");
+    expect(checkRunDir(join(d, "missing"))).toBe("run-dir-unusable");
+    expect(checkRunDir(join(d, "link"))).toBe("run-dir-symlink");
+    expect(checkRunDir(join(d, "file"))).toBe("run-dir-not-directory");
+    expect(checkRunDir(join(d, "open"))).toBe("run-dir-not-private");
+    expect(checkRunDir(real, (process.getuid?.() ?? 0) + 1)).toBe("run-dir-wrong-owner");
   });
 });
 

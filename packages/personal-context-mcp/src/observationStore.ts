@@ -66,11 +66,22 @@ export function truncateUtf8(text: string, maxBytes: number): { text: string; cu
 }
 
 /**
+ * `s` without C0 control characters other than `\n` and `\t`, and without format
+ * characters (`\p{Cf}`: zero-width and bidi controls, soft hyphens). Control characters
+ * cost six bytes each once JSON-escaped, and format characters can hide text from a
+ * reader; neither carries meaning a ranker needs.
+ */
+export function stripControlChars(s: string): string {
+  return s.replace(/[\u0000-\u0008\u000B-\u001F]|\p{Cf}/gu, "");
+}
+
+/**
  * Policy: at most `maxEntries` observations, each kept for `ttlMs` from when the service
  * accepted it (the sensor's `observedAt` is informational and never trusted for expiry).
  * Adding past the cap evicts the oldest. Expired entries are dropped on every add and
  * read. Text past `maxTextBytes` is cut on a character boundary and flagged `truncated`.
  * A title past 1 KiB or a url past 8 KiB is cut silently (the schema already rejects one that long).
+ * `text` and `title` pass through stripControlChars before the cut.
  * Ids are `o1`, `o2`, ... per process.
  */
 export function createObservationStore(options: ObservationStoreOptions): ObservationStore {
@@ -116,11 +127,11 @@ export function createObservationStore(options: ObservationStoreOptions): Observ
         kind: obs.kind,
         observedAt: obs.observedAt,
         url: truncateUtf8(obs.url, OBSERVATION_MAX_URL_BYTES).text,
-        title: truncateUtf8(obs.title, OBSERVATION_MAX_TITLE_BYTES).text,
+        title: truncateUtf8(stripControlChars(obs.title), OBSERVATION_MAX_TITLE_BYTES).text,
         truncated: obs.truncated,
       };
       if (obs.text !== undefined) {
-        const t = truncateUtf8(obs.text, maxTextBytes);
+        const t = truncateUtf8(stripControlChars(obs.text), maxTextBytes);
         stored.text = t.text;
         stored.truncated = obs.truncated || t.cut;
       }

@@ -3,7 +3,7 @@
 
 import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -199,6 +199,25 @@ console.log(c.pid+" "+h.pid);h.unref();c.unref();setTimeout(()=>process.exit(0),
     expect(out).toBe("");
     expect(err).toContain(code);
     expect(err).not.toContain(f.runDir);
+    expect(existsSync(join(f.runDir, "audit.jsonl"))).toBe(false);
+  });
+
+  it.each([
+    ["a symlinked run dir", (f: Fixture) => (symlinkSync(f.runDir, join(f.base, "run-link")), join(f.base, "run-link")), "run-dir-symlink"],
+    ["a group-readable run dir", (f: Fixture) => (chmodSync(f.runDir, 0o750), f.runDir), "run-dir-not-private"],
+  ])("exits 2 without serving on %s", async (_l, prepare, code) => {
+    const f = runDirFixture();
+    const dir = prepare(f);
+    const child = spawn(process.execPath, [entry, "--run-dir", dir], { stdio: ["pipe", "pipe", "pipe"], env: env(f) });
+    children.push(child);
+    let out = "";
+    let err = "";
+    child.stdout!.on("data", (d: Buffer) => (out += d.toString("utf8")));
+    child.stderr!.on("data", (d: Buffer) => (err += d.toString("utf8")));
+    child.stdin!.write(JSON.stringify(INIT) + "\n");
+    expect(await waitExit(child, 5000)).toEqual({ code: 2 });
+    expect(out).toBe("");
+    expect(err.trim()).toBe(`source-tools: ${code}`);
     expect(existsSync(join(f.runDir, "audit.jsonl"))).toBe(false);
   });
 

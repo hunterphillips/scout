@@ -17,6 +17,13 @@ describe("parseRepoFrontmatter", () => {
     ["block list, first entry wins", "---\ncreated: x\nrepo:\n  - ~/work/a\n  - ~/work/b\nrefreshed: y\n---\n", "~/work/a"],
     ["flow list", "---\nrepo: [~/work/a, ~/work/b]\n---\n", "~/work/a"],
     ["BOM and CRLF", "﻿---\r\nrepo: /abs/a\r\n---\r\n", "/abs/a"],
+    ["quoted scalar with a comment", '---\nrepo: "~/x" # c\n---\n', "~/x"],
+    ["quoted scalar holding a #", '---\nrepo: "~/a #b" # c\n---\n', "~/a #b"],
+    ["tab after the key", "---\nrepo:\t~/x\n---\n", "~/x"],
+    ["block list after a blank line", "---\nrepo:\n\n  - ~/x\n---\n", "~/x"],
+    ["block list item with a comment", "---\nrepo:\n  - '~/x' # main\n---\n", "~/x"],
+    ["flow list with a quoted comma", '---\nrepo: [ "~/a,b", ~/c ]\n---\n', "~/a,b"],
+    ["flow list with a comment", "---\nrepo: [~/a, ~/b] # both\n---\n", "~/a"],
   ])("reads a %s", (_l, text, want) => {
     expect(parseRepoFrontmatter(text)).toBe(want);
   });
@@ -27,6 +34,9 @@ describe("parseRepoFrontmatter", () => {
     ["unclosed frontmatter", "---\nrepo: /abs/a\n"],
     ["empty block list", "---\nrepo:\nnext: 1\n---\n"],
     ["nested key", "---\nmeta:\n  repo: /abs/a\n---\n"],
+    ["unbalanced quote", '---\nrepo: "~/a\n---\n'],
+    ["flow list with an unbalanced quote", '---\nrepo: [ "~/a, ~/b ]\n---\n'],
+    ["only a comment", "---\nrepo: # none\n---\n"],
   ])("ignores %s", (_l, text) => {
     expect(parseRepoFrontmatter(text)).toBeUndefined();
   });
@@ -85,6 +95,20 @@ describe("discoverProjects", () => {
     write(join(f.home, "workspace", "second-brain", "notes", "projects", "gamma.md"), "---\nrepo: ~/work/gamma\n---\n");
     const v = discoverProjects(src(["gamma"]), { exclusion: { home: f.home } });
     expect(v.projects.find((p) => p.name === "gamma")).toEqual({ name: "gamma", enabled: true, availability: "unresolvable" });
+  });
+
+  it.each([
+    ["~/.ssh", ".ssh"],
+    ["~/notes/../.ssh", ".ssh"],
+    ["~/code/repo/.git", "code/repo/.git"],
+    ["~/work/secrets", "work/secrets"],
+    ["~/work/tokens", "work/tokens"],
+  ])("refuses a project whose repo is %s", (repo, dir) => {
+    const { f, src } = setup();
+    write(join(f.home, ...dir.split("/"), "thoughts", "shared", "p.md"), "hidden");
+    write(join(f.home, "workspace", "second-brain", "notes", "projects", "evil.md"), `---\nrepo: ${repo}\n---\n`);
+    const v = discoverProjects(src(["evil"]), { exclusion: { home: f.home } });
+    expect(v.projects.find((p) => p.name === "evil")).toEqual({ name: "evil", enabled: true, availability: "excluded" });
   });
 
   it("refuses a project inside the private profile store", () => {

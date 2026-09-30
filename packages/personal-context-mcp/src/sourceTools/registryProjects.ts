@@ -10,13 +10,14 @@
 // notes give the same name, the first in path order wins.
 //
 // A project is readable only when its name is in `enabledProjects`, neither its repo nor
-// `<repo>/<subpath>` is too broad (`/`, $HOME or an ancestor of it), and
-// `<repo>/<subpath>` passes checkReadable. It is then read as a markdown directory rooted
+// `<repo>/<subpath>` is too broad (`/`, $HOME or an ancestor of it), no directory on the
+// way to `<repo>/<subpath>` has an always-excluded name (`~/.ssh`, `.git`, `secrets`, ...),
+// and `<repo>/<subpath>` passes checkReadable (which repeats that check on the real path). It is then read as a markdown directory rooted
 // at `<repo>/<subpath>`.
 
 import { basename, extname, isAbsolute, join, resolve } from "node:path";
 import { homedir } from "node:os";
-import { checkReadable, isTooBroadRoot, type ExclusionOptions, type RegistryProjectsSource } from "../config.js";
+import { checkReadable, isExcludedAncestry, isTooBroadRoot, type ExclusionOptions, type RegistryProjectsSource } from "../config.js";
 import { nodeFs, readVerified, walkFiles, type FsOps, type TreeOptions } from "./markdownDir.js";
 
 /** Bytes read from the top of each registry note when looking for frontmatter. */
@@ -42,16 +43,61 @@ export interface RegistryView {
   truncated: boolean;
 }
 
-function unquote(v: string): string {
-  const t = v.trim();
-  if (t.length >= 2 && ((t.startsWith('"') && t.endsWith('"')) || (t.startsWith("'") && t.endsWith("'")))) return t.slice(1, -1);
-  const hash = t.search(/\s#/);
-  return (hash >= 0 ? t.slice(0, hash) : t).trim();
+/** `v` up to a `#` that starts a comment (at the start or after whitespace, outside quotes), trimmed. */
+function stripComment(v: string): string {
+  let quote: string | undefined;
+  for (let i = 0; i < v.length; i++) {
+    const c = v[i];
+    if (quote !== undefined) {
+      if (c === quote) quote = undefined;
+    } else if (c === '"' || c === "'") {
+      quote = c;
+    } else if (c === "#" && (i === 0 || /\s/.test(v[i - 1] ?? ""))) {
+      return v.slice(0, i).trim();
+    }
+  }
+  return v.trim();
 }
 
-/** The first `repo:` entry of the note's first frontmatter block, unexpanded, or undefined. */
+/** A scalar with matching outer quotes removed. Undefined for an unbalanced quote. */
+function unquote(v: string): string | undefined {
+  const t = v.trim();
+  const q = t[0];
+  if (q === '"' || q === "'") return t.length >= 2 && t.endsWith(q) && !t.slice(1, -1).includes(q) ? t.slice(1, -1) : undefined;
+  return t;
+}
+
+/** Split a flow list's inside on commas outside quotes. Undefined for an unbalanced quote. */
+function splitFlow(inner: string): string[] | undefined {
+  const items: string[] = [];
+  let quote: string | undefined;
+  let cur = "";
+  for (const c of inner) {
+    if (quote !== undefined) {
+      if (c === quote) quote = undefined;
+    } else if (c === '"' || c === "'") {
+      quote = c;
+    } else if (c === ",") {
+      items.push(cur);
+      cur = "";
+      continue;
+    }
+    cur += c;
+  }
+  if (quote !== undefined) return undefined;
+  items.push(cur);
+  return items;
+}
+
+const nonEmpty = (v: string | undefined): string | undefined => (v === undefined || v === "" ? undefined : v);
+
+/**
+ * The first `repo:` entry of the note's first frontmatter block, unexpanded, or undefined.
+ * Trailing `# comments` are dropped, quotes are honored (a quoted item may hold commas or
+ * `#`), and blank lines inside a block list are skipped. Anything malformed is undefined.
+ */
 export function parseRepoFrontmatter(text: string): string | undefined {
-  const lines = text.replace(/^﻿/, "").split(/\r?\n/);
+  const lines = text.replace(/^\uFEFF/, "").split(/\r?\n/);
   if (lines[0]?.trim() !== "---") return undefined;
   let close = -1;
   for (let i = 1; i < lines.length; i++) {
@@ -66,21 +112,18 @@ export function parseRepoFrontmatter(text: string): string | undefined {
   for (let i = 0; i < fm.length; i++) {
     const m = /^repo:(.*)$/.exec(fm[i] ?? "");
     if (!m) continue;
-    const value = (m[1] ?? "").trim();
+    const value = stripComment(m[1] ?? "");
     if (value.startsWith("[")) {
       if (!value.endsWith("]")) return undefined;
-      const first = value.slice(1, -1).split(",")[0];
-      const v = first === undefined ? "" : unquote(first);
-      return v === "" ? undefined : v;
+      const first = splitFlow(value.slice(1, -1))?.[0];
+      return first === undefined ? undefined : nonEmpty(unquote(first));
     }
-    if (value !== "") {
-      const v = unquote(value);
-      return v === "" ? undefined : v;
-    }
-    const item = /^\s+-\s+(.+)$/.exec(fm[i + 1] ?? "");
+    if (value !== "") return nonEmpty(unquote(value));
+    let j = i + 1;
+    while (j < fm.length && (fm[j] ?? "").trim() === "") j++;
+    const item = /^\s+-\s+(.+)$/.exec(fm[j] ?? "");
     if (!item) return undefined;
-    const v = unquote(item[1] ?? "");
-    return v === "" ? undefined : v;
+    return nonEmpty(unquote(stripComment(item[1] ?? "")));
   }
   return undefined;
 }
@@ -140,6 +183,10 @@ export function discoverProjects(source: RegistryProjectsSource, opts: RegistryO
     const root = join(repo, ...source.subpath.split("/"));
     if (isTooBroadRoot(repo, home) || isTooBroadRoot(root, home)) {
       projects.push({ name, enabled: true, availability: "too-broad" });
+      continue;
+    }
+    if (isExcludedAncestry(root, home)) {
+      projects.push({ name, enabled: true, availability: "excluded" });
       continue;
     }
     const c = checkReadable(root, root, copts);

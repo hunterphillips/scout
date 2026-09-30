@@ -3,7 +3,7 @@
 // the run's budgets) and `sources.json` (the enabled sources). Both are parsed strictly;
 // any problem is a RunFileError with a fixed code and the server never starts serving.
 
-import { closeSync, constants as fsc, fstatSync, openSync, readSync } from "node:fs";
+import { closeSync, constants as fsc, fstatSync, lstatSync, openSync, readSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import { z } from "zod";
 import {
@@ -73,6 +73,34 @@ export class RunFileError extends Error {
     super(code);
     this.name = "RunFileError";
   }
+}
+
+export type RunDirErrorCode =
+  | "run-dir-relative"
+  | "run-dir-unusable"
+  | "run-dir-symlink"
+  | "run-dir-not-directory"
+  | "run-dir-wrong-owner"
+  | "run-dir-not-private";
+
+/**
+ * The run dir must be an absolute path to a real directory (not a symlink), owned by us,
+ * with mode exactly 0700: the runner creates it that way, and anything else means someone
+ * else could plant or read run files. Returns a fixed code, or undefined when it is fine.
+ */
+export function checkRunDir(dir: string, uid: number = process.getuid?.() ?? -1): RunDirErrorCode | undefined {
+  if (!isAbsolute(dir) || dir.includes("\0")) return "run-dir-relative";
+  let st;
+  try {
+    st = lstatSync(dir);
+  } catch {
+    return "run-dir-unusable";
+  }
+  if (st.isSymbolicLink()) return "run-dir-symlink";
+  if (!st.isDirectory()) return "run-dir-not-directory";
+  if (st.uid !== uid) return "run-dir-wrong-owner";
+  if ((st.mode & 0o777) !== 0o700) return "run-dir-not-private";
+  return undefined;
 }
 
 /** Read a regular file without following a symlink, at most MAX_RUN_FILE_BYTES. */

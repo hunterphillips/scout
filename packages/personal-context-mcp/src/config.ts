@@ -563,38 +563,63 @@ export function isAlwaysExcluded(absPath: string, sourceRoot: string, opts: Excl
   return first !== undefined && SECOND_BRAIN_EXCLUDED.has(fold(first)) && isSecondBrainRoot(root);
 }
 
+/**
+ * Whether any directory on the way to `root` carries an always-excluded name: every
+ * segment of `root` measured from `home` (or from `/` when `root` is outside it) is
+ * checked against the segment and name rules, and an `inbox` or `log` right after a
+ * `second-brain` segment counts too. So a root inside `~/.ssh`, a `.git` directory or a
+ * `secrets/` tree is excluded whole, not only below it. Case-insensitive; `home`'s own
+ * segments never count. Fails closed on a relative path.
+ */
+export function isExcludedAncestry(root: string, home: string): boolean {
+  if (!isAbsolute(root) || !isAbsolute(home)) return true;
+  const r = fold(resolve(root));
+  const h = fold(resolve(home));
+  const rel = isInside(r, h) ? relative(h, r) : r;
+  const segs = rel.split(sep).filter(Boolean);
+  return segs.some((s, i) => isExcludedName(s, false) || (SECOND_BRAIN_EXCLUDED.has(s) && segs[i - 1] === "second-brain"));
+}
+
 export type ReadableRefusal = "not-absolute" | "unresolvable" | "outside-root" | "excluded" | "too-broad";
 export type ReadableResult = { ok: true; realPath: string } | { ok: false; code: ReadableRefusal };
+
+/** A source root resolved once, so a walk does not re-resolve it for every entry. */
+export interface PreparedRoot {
+  /** The root as given; checkReadable uses this only for the same spelling. */
+  sourceRoot: string;
+  realRoot: string;
+  home: string;
+  realHome: string;
+  /** The absolute exclusions that exist, by real path. */
+  realExcludedDirs: readonly string[];
+}
 
 export interface CheckReadableOptions extends ExclusionOptions {
   /** Test seam: replaces realpathSync.native. */
   realpath?: (p: string) => string;
+  /** From prepareRoot for the same `sourceRoot`: skips resolving the root, home and exclusions again. */
+  prepared?: PreparedRoot;
 }
 
 /**
- * The gate every source read goes through. Resolves both paths with realpath (symlinks
- * and on-disk spelling), fails closed on any fs error, requires the real path inside the
- * real root, then applies isAlwaysExcluded to both the real and the given spelling. The
- * absolute exclusions are matched against their real paths too, so a symlinked
- * ~/workspace can't route around them. The too-broad rule (never `/`, $HOME or an
- * ancestor of it) applies to the given root and to its real path, so a `~/notes-link`
- * symlink to `~` is refused. Open the returned `realPath` with `O_NOFOLLOW`, so a
- * symlink swapped in after this check fails the open instead of being followed.
+ * The root half of checkReadable: resolve the root, $HOME and the absolute exclusions,
+ * and refuse a root that is too broad (never `/`, $HOME or an ancestor of it, lexically
+ * or through a symlink) or that lies inside an always-excluded area (isExcludedAncestry,
+ * on both the given and the real spelling). Fails closed on any fs error.
  */
-export function checkReadable(absPath: string, sourceRoot: string, opts: CheckReadableOptions = {}): ReadableResult {
+export function prepareRoot(
+  sourceRoot: string,
+  opts: CheckReadableOptions = {},
+): { ok: true; root: PreparedRoot } | { ok: false; code: ReadableRefusal } {
   const { realpath = realpathSync.native, ...excl } = opts;
-  if (typeof absPath !== "string" || typeof sourceRoot !== "string" || !isAbsolute(absPath) || !isAbsolute(sourceRoot)) {
-    return { ok: false, code: "not-absolute" };
-  }
-  let realPath: string;
+  if (typeof sourceRoot !== "string" || !isAbsolute(sourceRoot)) return { ok: false, code: "not-absolute" };
   let realRoot: string;
   try {
-    realPath = realpath(absPath);
     realRoot = realpath(sourceRoot);
   } catch {
     return { ok: false, code: "unresolvable" };
   }
-  if (!isAbsolute(realPath) || !isAbsolute(realRoot)) return { ok: false, code: "unresolvable" };
+  if (!isAbsolute(realRoot)) return { ok: false, code: "unresolvable" };
   const home = excl.home ?? (process.env.HOME || homedir());
   let realHome = home;
   try {
@@ -605,19 +630,53 @@ export function checkReadable(absPath: string, sourceRoot: string, opts: CheckRe
   if (isTooBroadRoot(sourceRoot, home) || isTooBroadRoot(realRoot, home) || isTooBroadRoot(realRoot, realHome)) {
     return { ok: false, code: "too-broad" };
   }
-  if (!isInside(realPath, realRoot)) return { ok: false, code: "outside-root" };
-  if (isAlwaysExcluded(absPath, sourceRoot, excl) || isAlwaysExcluded(realPath, realRoot, excl)) {
+  if (isExcludedAncestry(sourceRoot, home) || isExcludedAncestry(realRoot, realHome)) return { ok: false, code: "excluded" };
+  const realExcludedDirs: string[] = [];
+  for (const dir of absoluteExcludedDirs(home, excl)) {
+    try {
+      realExcludedDirs.push(fold(realpath(dir)));
+    } catch {
+      // missing: its lexical form is checked by isAlwaysExcluded
+    }
+  }
+  return { ok: true, root: { sourceRoot, realRoot, home, realHome, realExcludedDirs } };
+}
+
+/**
+ * The gate every source read goes through. Resolves both paths with realpath (symlinks
+ * and on-disk spelling), fails closed on any fs error, requires the real path inside the
+ * real root, then applies isAlwaysExcluded to both the real and the given spelling. The
+ * absolute exclusions are matched against their real paths too, so a symlinked
+ * ~/workspace can't route around them. The root itself must pass prepareRoot: not too
+ * broad, and not inside an excluded area (`~/.ssh/thoughts`, `repo/.git/notes`,
+ * `work/secrets/notes` are refused whole). Open the returned `realPath` with `O_NOFOLLOW`,
+ * so a symlink swapped in after this check fails the open instead of being followed.
+ */
+export function checkReadable(absPath: string, sourceRoot: string, opts: CheckReadableOptions = {}): ReadableResult {
+  const { realpath = realpathSync.native, prepared, ...excl } = opts;
+  if (typeof absPath !== "string" || typeof sourceRoot !== "string" || !isAbsolute(absPath) || !isAbsolute(sourceRoot)) {
+    return { ok: false, code: "not-absolute" };
+  }
+  let realPath: string;
+  try {
+    realPath = realpath(absPath);
+  } catch {
+    return { ok: false, code: "unresolvable" };
+  }
+  if (!isAbsolute(realPath)) return { ok: false, code: "unresolvable" };
+  let root: PreparedRoot;
+  if (prepared !== undefined && prepared.sourceRoot === sourceRoot) {
+    root = prepared;
+  } else {
+    const p = prepareRoot(sourceRoot, { ...excl, realpath });
+    if (!p.ok) return p;
+    root = p.root;
+  }
+  if (!isInside(realPath, root.realRoot)) return { ok: false, code: "outside-root" };
+  if (isAlwaysExcluded(absPath, sourceRoot, excl) || isAlwaysExcluded(realPath, root.realRoot, excl)) {
     return { ok: false, code: "excluded" };
   }
   const foldedReal = fold(realPath);
-  for (const dir of absoluteExcludedDirs(home, excl)) {
-    let realDir: string;
-    try {
-      realDir = realpath(dir);
-    } catch {
-      continue; // missing: its lexical form was already checked above
-    }
-    if (isInside(foldedReal, fold(realDir))) return { ok: false, code: "excluded" };
-  }
+  if (root.realExcludedDirs.some((d) => isInside(foldedReal, d))) return { ok: false, code: "excluded" };
   return { ok: true, realPath };
 }

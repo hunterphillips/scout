@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ActivityObservation } from "./api.js";
-import { createObservationStore, OBSERVATION_TTL_MS, truncateUtf8 } from "./observationStore.js";
+import { createObservationStore, OBSERVATION_TTL_MS, stripControlChars, truncateUtf8 } from "./observationStore.js";
 
 function fakeClock(start = 1_000_000) {
   let t = start;
@@ -156,5 +156,24 @@ describe("truncateUtf8", () => {
     expect(truncateUtf8("a😀", 3)).toEqual({ text: "a", cut: true });
     expect(truncateUtf8("a😀", 5)).toEqual({ text: "a😀", cut: false });
     expect(truncateUtf8("abc", 2)).toEqual({ text: "ab", cut: true });
+  });
+});
+
+describe("control and format characters", () => {
+  it("strips C0 controls (keeping newline and tab) and \\p{Cf} from text and title before the cut", () => {
+    const store = createObservationStore({ clock: fakeClock() });
+    const hidden = "a\u0001b\u0000c\r\n\td\u200Be\u202Ef\uFEFFg\u00ADh";
+    store.add(obs(1, { title: `t\u0007i\u200Dtle`, text: hidden }));
+    const stored = store.list()[0]!;
+    expect(stored.title).toBe("title");
+    expect(stored.text).toBe("abc\n\tdefgh");
+    // 8 KiB of \x01 would cost ~48 KiB once JSON-escaped; it is dropped before the cut.
+    store.add(obs(2, { text: "\u0001".repeat(8192) + "real" }));
+    expect(store.list()[0]!.text).toBe("real");
+    expect(store.list()[0]!.truncated).toBe(false);
+  });
+
+  it("leaves ordinary text alone", () => {
+    expect(stripControlChars("héllo — wörld\n\tok 👍")).toBe("héllo — wörld\n\tok 👍");
   });
 });

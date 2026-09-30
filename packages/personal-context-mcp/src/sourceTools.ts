@@ -2,7 +2,8 @@
 // The source-tools entrypoint: `node dist/sourceTools.js --run-dir <absolute dir>`.
 // The agent runner starts it through `--mcp-config` as the stdio MCP server `sources`.
 //
-// It reads <runDir>/snapshot.json and <runDir>/sources.json before serving (a bad file
+// The run dir must be a real 0700 directory owned by us (checkRunDir; else exit 2 with a
+// fixed code). It reads <runDir>/snapshot.json and <runDir>/sources.json before serving (a bad file
 // exits 2 with a fixed code on stderr), appends to <runDir>/audit.jsonl, and writes
 // nothing else. stdout carries MCP protocol only. It exits 0 on stdin EOF, on
 // SIGTERM/SIGINT/SIGHUP, and when orphaned. Importing this module does nothing.
@@ -15,7 +16,7 @@ import { systemClock } from "./clock.js";
 import type { ExclusionOptions } from "./config.js";
 import { createAuditLog } from "./sourceTools/audit.js";
 import { watchLifecycle } from "./sourceTools/lifecycle.js";
-import { AUDIT_FILE, readRunFiles, RunFileError } from "./sourceTools/runFiles.js";
+import { AUDIT_FILE, checkRunDir, readRunFiles, RunFileError } from "./sourceTools/runFiles.js";
 import { createSourceToolsServer } from "./sourceTools/server.js";
 
 export { createSourceToolsServer } from "./sourceTools/server.js";
@@ -51,6 +52,11 @@ async function main(): Promise<void> {
   const args = parseSourceToolsArgs(process.argv.slice(2));
   if (!args) {
     diag("usage");
+    process.exit(2);
+  }
+  const dirCode = checkRunDir(args.runDir);
+  if (dirCode !== undefined) {
+    diag(dirCode);
     process.exit(2);
   }
   let files;

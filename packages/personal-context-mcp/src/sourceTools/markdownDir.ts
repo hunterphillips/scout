@@ -5,31 +5,27 @@
 // entered. A symlinked file is kept only when checkReadable puts its real path inside the
 // real root and it is a regular file. Every directory and file goes through checkReadable,
 // which also applies the always-excluded list, so an excluded directory is pruned whole.
-// Only `.md`, `.markdown` and `.txt` files count.
+// The root is resolved once per walk (prepareRoot). Only `.md`, `.markdown` and `.txt`
+// files count. Search lives in search.ts.
 //
 // Opening: the real path from checkReadable is opened with O_NOFOLLOW | O_NONBLOCK, the
-// descriptor must be a regular file, and the real path must still resolve to itself after
-// the open. A file swapped for a symlink after the check fails the open; a FIFO can't
-// block the server.
-//
-// Search: the query is split on whitespace into terms (case-insensitive, at most 8, each
-// at most 64 characters). A hit is a window of at most three lines holding every term: it
-// ends on the first line by which every term has appeared, counting from a line with any
-// term, and starts on the latest line that still keeps every term in the window. Hits are in
-// path order, then line order, and never overlap. Each call is capped at 2,000 files,
-// 256 KiB read per file, and 5 MiB read in all; hitting a cap sets `truncated`.
+// descriptor must be a regular file with one link, and the real path must still resolve to
+// itself after the open. A file swapped for a symlink after the check fails the open; a
+// FIFO can't block the server.
 //
 // Read: a relative path (no absolute, `~`, `..`, `.`, empty segment, backslash or NUL),
-// at most 200 lines and 16 KiB of text.
+// at most 200 lines and 16 KiB of text, from the first 256 KiB of the file. No directory
+// on the way may be a symlink, the same rule the walker follows.
 //
 // User `exclude` entries are matched case-insensitively: an entry with a `/` excludes that
 // relative path and everything under it; an entry without one excludes any path segment of
-// that name.
+// that name. They apply to the path as asked and to the file's real path under the real
+// root, so a symlink can't route around them.
 
-import { type Dirent, constants as fsc, closeSync, fstatSync, openSync, readdirSync, readSync, realpathSync, statSync } from "node:fs";
-import { extname, isAbsolute, join } from "node:path";
+import { type Dirent, constants as fsc, closeSync, fstatSync, lstatSync, openSync, readdirSync, readSync, realpathSync, statSync } from "node:fs";
+import { extname, isAbsolute, join, relative, sep } from "node:path";
 import { StringDecoder } from "node:string_decoder";
-import { checkReadable, type ExclusionOptions } from "../config.js";
+import { checkReadable, prepareRoot, type CheckReadableOptions, type ExclusionOptions, type ReadableRefusal } from "../config.js";
 
 export const SEARCH_LIMITS = Object.freeze({
   maxFiles: 2_000,
@@ -47,6 +43,19 @@ export const SEARCH_LIMITS = Object.freeze({
   maxDepth: 32,
 });
 
+/** Wall-clock time one search call may spend walking and reading before it stops as `truncated`. */
+export const SEARCH_DEADLINE_MS = 2_000;
+
+/** A point in time past which a walk or search stops. `now` is injectable for tests. */
+export interface Deadline {
+  now(): number;
+  at: number;
+}
+
+export function deadlineIn(ms: number = SEARCH_DEADLINE_MS, now: () => number = Date.now): Deadline {
+  return { now, at: now() + ms };
+}
+
 export const READ_LIMITS = Object.freeze({
   maxLines: 200,
   maxBytes: 16 * 1024,
@@ -59,10 +68,11 @@ const TEXT_EXTENSIONS = new Set([".md", ".markdown", ".txt"]);
 export interface FsOps {
   readdir(dir: string): Dirent[];
   open(path: string, flags: number): number;
-  fstat(fd: number): { isFile(): boolean; size: number; dev: number; ino: number };
+  fstat(fd: number): { isFile(): boolean; size: number; dev: number; ino: number; nlink: number };
   read(fd: number, buf: Buffer, offset: number, length: number, position: number): number;
   close(fd: number): void;
   stat(path: string): { isFile(): boolean; dev: number; ino: number };
+  lstat(path: string): { isSymbolicLink(): boolean };
   realpath(path: string): string;
 }
 
@@ -73,6 +83,7 @@ export const nodeFs: FsOps = {
   read: (fd, buf, off, len, pos) => readSync(fd, buf, off, len, pos),
   close: (fd) => closeSync(fd),
   stat: (p) => statSync(p),
+  lstat: (p) => lstatSync(p),
   realpath: (p) => realpathSync.native(p),
 };
 
@@ -87,6 +98,9 @@ export interface TreeOptions {
 
 export type TreeCode = "denied" | "invalid-path" | "invalid-range" | "invalid-query";
 
+/** Why a read was denied. Audit only: the model sees `denied`. */
+export type DenyDetail = ReadableRefusal | "user-excluded" | "not-text" | "symlinked-dir" | VerifyFailure;
+
 export interface FileEntry {
   /** Relative path with `/` separators. */
   rel: string;
@@ -98,37 +112,33 @@ export interface WalkResult {
   truncated: boolean;
 }
 
-export interface SearchHit {
+export interface ReadOk {
+  ok: true;
   path: string;
   lines: [number, number];
-  snippet: string;
-}
-
-export interface SearchResult {
-  hits: SearchHit[];
+  /** Lines in the part of the file that was read (its first 256 KiB). */
+  totalLines: number;
+  /** Set when the file is longer than 256 KiB: totalLines is a lower bound, later lines are unreachable. */
+  totalLinesAtLeast?: true;
+  text: string;
+  /** The 200-line or 16 KiB cap cut the range asked for. */
   truncated: boolean;
+  /** `endLine` was past the last readable line and was clamped to it. */
+  endClamped?: true;
 }
 
-/** Shared per-call search budget, so a registry search over several projects stays within one call's caps. */
-export interface ScanBudget {
-  files: number;
-  bytes: number;
-  truncated: boolean;
-}
-
-export function newScanBudget(): ScanBudget {
-  return { files: 0, bytes: 0, truncated: false };
-}
-
-export type ReadResult =
-  | { ok: true; path: string; lines: [number, number]; totalLines: number; text: string; truncated: boolean }
-  | { ok: false; code: TreeCode };
+export type ReadResult = ReadOk | { ok: false; code: TreeCode; detail?: DenyDetail };
 
 const fold = (s: string): string => s.normalize("NFC").toLowerCase();
 
-function checkOpts(opts: TreeOptions) {
+function checkOpts(opts: TreeOptions): CheckReadableOptions {
   const { realpath } = opts.fs ?? nodeFs;
   return { ...opts.exclusion, realpath };
+}
+
+/** `realPath` relative to `realRoot`, with `/` separators. */
+function realRel(realRoot: string, realPath: string): string {
+  return relative(realRoot, realPath).split(sep).join("/");
 }
 
 /** Whether the root itself is usable. Returns checkReadable's refusal code otherwise. */
@@ -165,20 +175,22 @@ function isTextFile(name: string): boolean {
 }
 
 /**
- * Regular text files under the root, sorted by relative path. Stops at `maxFiles` (from
- * the shared scan budget when given) and marks `truncated`.
+ * Regular text files under the root, sorted by relative path. Stops at `maxFiles`, at
+ * SEARCH_LIMITS.maxEntries or maxDepth, or at `deadline`, and marks `truncated`.
  */
-export function walkFiles(opts: TreeOptions, maxFiles: number = SEARCH_LIMITS.maxFiles): WalkResult {
+export function walkFiles(opts: TreeOptions, maxFiles: number = SEARCH_LIMITS.maxFiles, deadline?: Deadline): WalkResult {
   const fs = opts.fs ?? nodeFs;
-  const copts = checkOpts(opts);
   const files: FileEntry[] = [];
   let entries = 0;
   let truncated = false;
-  if (!checkReadable(opts.root, opts.root, copts).ok) return { files, truncated };
+  const prep = prepareRoot(opts.root, checkOpts(opts));
+  if (!prep.ok) return { files, truncated };
+  const copts: CheckReadableOptions = { ...checkOpts(opts), prepared: prep.root };
+  const { realRoot } = prep.root;
 
   const walk = (segs: string[], depth: number): void => {
     if (truncated) return;
-    if (depth > SEARCH_LIMITS.maxDepth) {
+    if (depth > SEARCH_LIMITS.maxDepth || (deadline !== undefined && deadline.now() >= deadline.at)) {
       truncated = true;
       return;
     }
@@ -207,6 +219,7 @@ export function walkFiles(opts: TreeOptions, maxFiles: number = SEARCH_LIMITS.ma
       const c = checkReadable(abs, opts.root, copts);
       if (!c.ok) continue;
       if (ent.isSymbolicLink()) {
+        if (userExcluded(realRel(realRoot, c.realPath), opts.exclude)) continue;
         try {
           if (!fs.stat(c.realPath).isFile()) continue;
         } catch {
@@ -225,25 +238,37 @@ export function walkFiles(opts: TreeOptions, maxFiles: number = SEARCH_LIMITS.ma
   return { files, truncated };
 }
 
+export type VerifyFailure = "open-failed" | "not-regular" | "hard-link" | "moved" | "read-failed";
+
 /**
- * Open a checked real path and read at most `maxBytes`. Fails (undefined) when the path is
- * now a symlink, is not a regular file, or no longer resolves to itself.
+ * Open a checked real path and read at most `maxBytes`. Fails when the path is now a
+ * symlink, is not a regular file, has more than one hard link (a hard link can pull in a
+ * file from anywhere on the volume, including excluded ones), or no longer resolves to
+ * itself. One race is accepted: a parent directory swapped for a symlink and back between
+ * the realpath recheck and the open. Node on macOS can't map a descriptor back to its path
+ * to close that window, and pulling it off takes a concurrent process running as the same
+ * user.
  */
-export function readVerified(fs: FsOps, realPath: string, maxBytes: number): { text: string; cut: boolean } | undefined {
+export function readVerifiedDetailed(
+  fs: FsOps,
+  realPath: string,
+  maxBytes: number,
+): { ok: true; text: string; cut: boolean } | { ok: false; reason: VerifyFailure } {
   let fd: number;
   try {
     fd = fs.open(realPath, fsc.O_RDONLY | fsc.O_NOFOLLOW | fsc.O_NONBLOCK);
   } catch {
-    return undefined;
+    return { ok: false, reason: "open-failed" };
   }
   try {
     const st = fs.fstat(fd);
-    if (!st.isFile()) return undefined;
+    if (!st.isFile()) return { ok: false, reason: "not-regular" };
+    if (st.nlink > 1) return { ok: false, reason: "hard-link" };
     // Parent directories were symlink-free at check time; make sure they still are and
     // that the name still names the file we opened.
-    if (fs.realpath(realPath) !== realPath) return undefined;
+    if (fs.realpath(realPath) !== realPath) return { ok: false, reason: "moved" };
     const now = fs.stat(realPath);
-    if (now.dev !== st.dev || now.ino !== st.ino) return undefined;
+    if (now.dev !== st.dev || now.ino !== st.ino) return { ok: false, reason: "moved" };
     const want = Math.min(st.size, maxBytes);
     const buf = Buffer.alloc(want);
     let len = 0;
@@ -253,9 +278,9 @@ export function readVerified(fs: FsOps, realPath: string, maxBytes: number): { t
       len += n;
     }
     // StringDecoder holds back a character split at the cut instead of emitting U+FFFD.
-    return { text: new StringDecoder("utf8").write(buf.subarray(0, len)), cut: st.size > maxBytes };
+    return { ok: true, text: new StringDecoder("utf8").write(buf.subarray(0, len)), cut: st.size > maxBytes };
   } catch {
-    return undefined;
+    return { ok: false, reason: "read-failed" };
   } finally {
     try {
       fs.close(fd);
@@ -265,87 +290,10 @@ export function readVerified(fs: FsOps, realPath: string, maxBytes: number): { t
   }
 }
 
-/** Split a query into lower-cased terms, or undefined when it is not a usable query. */
-export function parseQuery(query: unknown): string[] | undefined {
-  if (typeof query !== "string" || query.length === 0 || query.length > SEARCH_LIMITS.maxQueryChars || query.includes("\0")) {
-    return undefined;
-  }
-  const terms = [...new Set(query.toLowerCase().split(/\s+/).filter(Boolean))];
-  if (terms.length === 0 || terms.length > SEARCH_LIMITS.maxTerms) return undefined;
-  if (terms.some((t) => t.length > SEARCH_LIMITS.maxTermChars)) return undefined;
-  return terms;
-}
-
-function cutChars(s: string, max: number): string {
-  const chars = Array.from(s);
-  return chars.length <= max ? s : chars.slice(0, max).join("");
-}
-
-function matchLines(lines: string[], terms: string[], limit: number, path: string, out: SearchHit[]): void {
-  const lower = lines.map((l) => l.toLowerCase());
-  for (let i = 0; i < lower.length && out.length < limit; i++) {
-    const first = lower[i] ?? "";
-    if (!terms.some((t) => first.includes(t))) continue;
-    const seen = new Set<string>();
-    let end = -1;
-    for (let j = i; j < Math.min(i + SEARCH_LIMITS.windowLines, lower.length); j++) {
-      const l = lower[j] ?? "";
-      for (const t of terms) if (l.includes(t)) seen.add(t);
-      if (seen.size === terms.length) {
-        end = j;
-        break;
-      }
-    }
-    if (end < 0) continue;
-    // Tighten the start: the latest line from which the window still holds every term.
-    let start = i;
-    for (let k = end; k > i; k--) {
-      const win = lower.slice(k, end + 1);
-      if (terms.every((t) => win.some((l) => l.includes(t)))) {
-        start = k;
-        break;
-      }
-    }
-    const text = lines
-      .slice(start, end + 1)
-      .map((l) => l.trim())
-      .join(" ")
-      .replace(/\s+/g, " ");
-    out.push({ path, lines: [start + 1, end + 1], snippet: cutChars(text, SEARCH_LIMITS.maxSnippetChars) });
-    i = end;
-  }
-}
-
-/**
- * Search the tree. `prefix` is prepended to returned paths (registry projects use
- * `<project>/`). `budget` is shared across trees searched in one call.
- */
-export function searchTree(
-  opts: TreeOptions,
-  terms: string[],
-  limit: number,
-  budget: ScanBudget = newScanBudget(),
-  prefix = "",
-  out: SearchHit[] = [],
-): SearchResult {
-  const fs = opts.fs ?? nodeFs;
-  const walked = walkFiles(opts, Math.max(0, SEARCH_LIMITS.maxFiles - budget.files));
-  if (walked.truncated) budget.truncated = true;
-  for (const f of walked.files) {
-    if (out.length >= limit) break;
-    if (budget.files >= SEARCH_LIMITS.maxFiles || budget.bytes >= SEARCH_LIMITS.maxScanBytes) {
-      budget.truncated = true;
-      break;
-    }
-    budget.files++;
-    const room = Math.min(SEARCH_LIMITS.maxFileBytes, SEARCH_LIMITS.maxScanBytes - budget.bytes);
-    const r = readVerified(fs, f.realPath, room);
-    if (!r) continue;
-    budget.bytes += Buffer.byteLength(r.text, "utf8");
-    if (r.cut) budget.truncated = true;
-    matchLines(r.text.split(/\r?\n/), terms, limit, prefix + f.rel, out);
-  }
-  return { hits: out, truncated: budget.truncated };
+/** readVerifiedDetailed without the reason: undefined on any failure. */
+export function readVerified(fs: FsOps, realPath: string, maxBytes: number): { text: string; cut: boolean } | undefined {
+  const r = readVerifiedDetailed(fs, realPath, maxBytes);
+  return r.ok ? { text: r.text, cut: r.cut } : undefined;
 }
 
 /** Normalize a model-supplied relative path, or undefined when it is not one. */
@@ -365,15 +313,32 @@ export function readTreeFile(opts: TreeOptions, relPath: string, startLine?: num
   const start = startLine ?? 1;
   if (!Number.isInteger(start) || start < 1) return { ok: false, code: "invalid-range" };
   if (endLine !== undefined && (!Number.isInteger(endLine) || endLine < start)) return { ok: false, code: "invalid-range" };
-  if (userExcluded(rel, opts.exclude) || !isTextFile(rel)) return { ok: false, code: "denied" };
-  const c = checkReadable(join(opts.root, ...rel.split("/")), opts.root, checkOpts(opts));
-  if (!c.ok) return { ok: false, code: "denied" };
-  const r = readVerified(fs, c.realPath, SEARCH_LIMITS.maxFileBytes);
-  if (!r) return { ok: false, code: "denied" };
+  const denied = (detail: DenyDetail): ReadResult => ({ ok: false, code: "denied", detail });
+  if (userExcluded(rel, opts.exclude)) return denied("user-excluded");
+  if (!isTextFile(rel)) return denied("not-text");
+  const segs = rel.split("/");
+  // The walker never enters a symlinked directory; a read must not either.
+  for (let i = 1; i < segs.length; i++) {
+    try {
+      if (fs.lstat(join(opts.root, ...segs.slice(0, i))).isSymbolicLink()) return denied("symlinked-dir");
+    } catch {
+      return denied("unresolvable");
+    }
+  }
+  const prep = prepareRoot(opts.root, checkOpts(opts));
+  if (!prep.ok) return denied(prep.code);
+  const c = checkReadable(join(opts.root, ...segs), opts.root, { ...checkOpts(opts), prepared: prep.root });
+  if (!c.ok) return denied(c.code);
+  if (userExcluded(realRel(prep.root.realRoot, c.realPath), opts.exclude)) return denied("user-excluded");
+  const r = readVerifiedDetailed(fs, c.realPath, SEARCH_LIMITS.maxFileBytes);
+  if (!r.ok) return denied(r.reason);
   const lines = r.text.split(/\r?\n/);
   if (start > lines.length) return { ok: false, code: "invalid-range" };
-  const wantEnd = Math.min(endLine ?? start + READ_LIMITS.maxLines - 1, start + READ_LIMITS.maxLines - 1, lines.length);
-  let truncated = r.cut || (endLine !== undefined && endLine > wantEnd);
+  const capEnd = start + READ_LIMITS.maxLines - 1;
+  const askedEnd = endLine ?? capEnd;
+  const endClamped = endLine !== undefined && endLine > lines.length;
+  const wantEnd = Math.min(askedEnd, capEnd, lines.length);
+  let truncated = Math.min(askedEnd, lines.length) > capEnd;
   const kept: string[] = [];
   let bytes = 0;
   for (let n = start; n <= wantEnd; n++) {
@@ -394,5 +359,11 @@ export function readTreeFile(opts: TreeOptions, relPath: string, startLine?: num
     bytes += add;
   }
   if (kept.length < wantEnd - start + 1) truncated = true;
-  return { ok: true, path: rel, lines: [start, start + kept.length - 1], totalLines: lines.length, text: kept.join("\n"), truncated };
+  const last = start + kept.length - 1;
+  // The last line of a file cut at 256 KiB may itself be cut.
+  if (r.cut && last === lines.length) truncated = true;
+  const out: ReadOk = { ok: true, path: rel, lines: [start, last], totalLines: lines.length, text: kept.join("\n"), truncated };
+  if (r.cut) out.totalLinesAtLeast = true;
+  if (endClamped) out.endClamped = true;
+  return out;
 }

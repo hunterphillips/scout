@@ -1,19 +1,20 @@
-import { renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { linkSync, mkdirSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { link, makeFixture, SENTINEL, write, type Fixture } from "../test-support/sourceFixture.js";
 import {
+  deadlineIn,
   nodeFs,
   normalizeRelPath,
-  parseQuery,
   readTreeFile,
   rootAvailability,
-  searchTree,
+  SEARCH_DEADLINE_MS,
   SEARCH_LIMITS,
   walkFiles,
   type FsOps,
   type TreeOptions,
 } from "./markdownDir.js";
+import { newScanBudget, parseQuery, searchTree } from "./search.js";
 
 const fixtures: Fixture[] = [];
 function fx(): Fixture {
@@ -62,14 +63,14 @@ describe("walk", () => {
     expect(rels).toEqual(["notes/billing.md"]);
     const hits = searchTree({ root: brain, exclusion: { home: f.home } }, ["billing"], 10).hits;
     expect(JSON.stringify(hits)).not.toContain(SENTINEL);
-    expect(readTreeFile({ root: brain, exclusion: { home: f.home } }, "inbox/billing.md")).toEqual({ ok: false, code: "denied" });
+    expect(readTreeFile({ root: brain, exclusion: { home: f.home } }, "inbox/billing.md")).toMatchObject({ ok: false, code: "denied" });
   });
 
   it("honors user excludes by segment name and by relative path", () => {
     const f = fx();
     expect(walkFiles(tree(f, { exclude: ["projects"] })).files.map((x) => x.rel)).toEqual(["billing-migration.md", "todo.txt"]);
     expect(walkFiles(tree(f, { exclude: ["Projects/Scout.md"] })).files.map((x) => x.rel)).toEqual(["billing-migration.md", "todo.txt"]);
-    expect(readTreeFile(tree(f, { exclude: ["projects"] }), "projects/scout.md")).toEqual({ ok: false, code: "denied" });
+    expect(readTreeFile(tree(f, { exclude: ["projects"] }), "projects/scout.md")).toMatchObject({ ok: false, code: "denied" });
   });
 
   it("stops at the file cap and marks the walk truncated", () => {
@@ -203,7 +204,7 @@ describe("read", () => {
     const f = fx();
     link(join(f.outside, "plain.md"), join(f.notes, "escape.md"));
     for (const p of [".env", "x.pem", "secrets/billing.md", ".git/billing.md", "data.json", "escape.md", "missing.md", "projects"]) {
-      expect(readTreeFile(tree(f), p)).toEqual({ ok: false, code: "denied" });
+      expect(readTreeFile(tree(f), p)).toMatchObject({ ok: false, code: "denied" });
     }
   });
 
@@ -260,7 +261,7 @@ describe("read", () => {
     };
     const r = readTreeFile(tree(f, { fs: racingFs }), "billing-migration.md");
     expect(swapped).toBe(true);
-    expect(r).toEqual({ ok: false, code: "denied" });
+    expect(r).toEqual({ ok: false, code: "denied", detail: "open-failed" });
   });
 
   it("fails when a parent directory is swapped for a symlink after the check", () => {
@@ -282,7 +283,112 @@ describe("read", () => {
     };
     const r = readTreeFile(tree(f, { fs: racingFs }), "projects/scout.md");
     expect(swapped).toBe(true);
-    expect(r).toEqual({ ok: false, code: "denied" });
+    expect(r).toEqual({ ok: false, code: "denied", detail: "moved" });
+  });
+});
+
+describe("roots inside an excluded area", () => {
+  it.each([".ssh/thoughts", "code/repo/.git/thoughts", "work/secrets/notes", "work/tokens/notes", "elsewhere/second-brain/inbox/sub"])(
+    "refuses a root under %s whole",
+    (sub) => {
+      const f = fx();
+      const root = join(f.home, ...sub.split("/"));
+      write(join(root, "x.md"), `zebra ${SENTINEL}`);
+      const t = { root, exclusion: { home: f.home } };
+      expect(readTreeFile(t, "x.md")).toEqual({ ok: false, code: "denied", detail: "excluded" });
+      expect(walkFiles(t).files).toEqual([]);
+      expect(searchTree(t, ["zebra"], 10).hits).toEqual([]);
+      expect(rootAvailability(t)).toEqual({ ok: false, code: "excluded" });
+    },
+  );
+
+  it("refuses a root reached through a symlink into ~/.ssh", () => {
+    const f = fx();
+    write(join(f.home, ".ssh", "thoughts", "x.md"), `zebra ${SENTINEL}`);
+    link(join(f.home, ".ssh", "thoughts"), join(f.home, "innocent"));
+    expect(readTreeFile({ root: join(f.home, "innocent"), exclusion: { home: f.home } }, "x.md")).toMatchObject({ ok: false, code: "denied" });
+  });
+});
+
+describe("user excludes through symlinks", () => {
+  function setup() {
+    const f = fx();
+    write(join(f.notes, "private", "plan.md"), `zebra ${SENTINEL}`);
+    link(join(f.notes, "private", "plan.md"), join(f.notes, "link.md"));
+    link(join(f.notes, "private"), join(f.notes, "alias"));
+    return { f, t: tree(f, { exclude: ["private"] }) };
+  }
+
+  it("denies a symlinked file whose target is user-excluded", () => {
+    const { t } = setup();
+    expect(readTreeFile(t, "link.md")).toEqual({ ok: false, code: "denied", detail: "user-excluded" });
+  });
+
+  it("denies any read through a symlinked directory", () => {
+    const { f, t } = setup();
+    expect(readTreeFile(t, "alias/plan.md")).toEqual({ ok: false, code: "denied", detail: "symlinked-dir" });
+    // Even when nothing is excluded, as the walker never enters one either.
+    link(join(f.notes, "projects"), join(f.notes, "projects-link"));
+    expect(readTreeFile(tree(f), "projects-link/scout.md")).toEqual({ ok: false, code: "denied", detail: "symlinked-dir" });
+  });
+
+  it("never lists or searches the symlinked file", () => {
+    const { t } = setup();
+    expect(walkFiles(t).files.map((x) => x.rel)).not.toContain("link.md");
+    const r = searchTree(t, ["zebra"], 10);
+    expect(r.hits).toEqual([]);
+    expect(JSON.stringify(r)).not.toContain(SENTINEL);
+  });
+});
+
+describe("hard links", () => {
+  it("denies a hard link to a file outside the root, and never searches it", () => {
+    const f = fx();
+    linkSync(join(f.outside, "plain.md"), join(f.notes, "hard.md"));
+    expect(readTreeFile(tree(f), "hard.md")).toEqual({ ok: false, code: "denied", detail: "hard-link" });
+    expect(JSON.stringify(searchTree(tree(f), ["billing"], 10))).not.toContain(SENTINEL);
+  });
+});
+
+describe("read range flags", () => {
+  it("marks endClamped when endLine is past the file, separately from truncated", () => {
+    const f = fx();
+    const r = readTreeFile(tree(f), "billing-migration.md", 5, 50);
+    expect(r).toMatchObject({ ok: true, lines: [5, 6], totalLines: 6, truncated: false, endClamped: true });
+    expect(readTreeFile(tree(f), "billing-migration.md", 1, 6)).not.toHaveProperty("endClamped");
+  });
+
+  it("flags totalLinesAtLeast for a file past 256 KiB", () => {
+    const f = fx();
+    write(join(f.notes, "huge.md"), "line\n".repeat(80 * 1024));
+    const r = readTreeFile(tree(f), "huge.md", 1, 2);
+    expect(r).toMatchObject({ ok: true, lines: [1, 2], totalLinesAtLeast: true, truncated: false });
+    expect(readTreeFile(tree(f), "billing-migration.md")).not.toHaveProperty("totalLinesAtLeast");
+  });
+});
+
+describe("walk cost", () => {
+  it("stops at the search deadline and marks the result truncated", () => {
+    const f = fx();
+    for (let i = 0; i < 50; i++) mkdirSync(join(f.notes, `d${i}`));
+    let t = 0;
+    const now = () => (t += 100); // every look at the clock costs 100 ms
+    const r = searchTree(tree(f), ["billing"], 10, newScanBudget(now));
+    expect(r.truncated).toBe(true);
+    expect(t).toBeLessThan(SEARCH_DEADLINE_MS + 1000);
+    expect(walkFiles(tree(f), SEARCH_LIMITS.maxFiles, deadlineIn(0, () => 0)).truncated).toBe(true);
+  });
+
+  it("walks 5,000 empty directories quickly (root, home and exclusions resolved once)", () => {
+    const f = fx();
+    for (let i = 0; i < 5000; i++) mkdirSync(join(f.notes, `d${i}`));
+    const t0 = performance.now();
+    const r = searchTree(tree(f), ["billing"], 10);
+    const ms = performance.now() - t0;
+    expect(r.truncated).toBe(false);
+    expect(r.hits.length).toBeGreaterThan(0);
+    // ~175 ms on the dev machine; ~490 ms before the per-walk cache. Loose bound: tests run in parallel.
+    expect(ms).toBeLessThan(1000);
   });
 });
 

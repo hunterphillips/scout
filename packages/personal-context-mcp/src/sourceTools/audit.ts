@@ -8,7 +8,11 @@ import { closeSync, constants as fsc, openSync, writeSync } from "node:fs";
 import type { Clock } from "../clock.js";
 import type { EvidenceRecord } from "./evidence.js";
 
-export type CallStatus = "ok" | "error" | "unavailable" | "budget_exhausted";
+/**
+ * `too-large`: this one result was over the per-call byte cap and was not sent.
+ * `invalid-args`: the arguments failed the tool's schema; no work was done.
+ */
+export type CallStatus = "ok" | "error" | "unavailable" | "budget_exhausted" | "too-large" | "invalid-args";
 
 export interface CallAuditRecord {
   tool: string;
@@ -16,6 +20,8 @@ export interface CallAuditRecord {
   status: CallStatus;
   /** A fixed code for `error` / `unavailable`. */
   code?: string;
+  /** The underlying fixed code behind a `denied` (e.g. `excluded`, `hard-link`). Audit only; never sent to the model. */
+  detail?: string;
   evidence: readonly EvidenceRecord[];
   bytes: number;
   ms: number;
@@ -82,6 +88,7 @@ export function createAuditLog(path: string, clock: Clock, pid: number = process
         ms: rec.ms,
       };
       if (rec.code !== undefined) line.code = rec.code;
+      if (rec.detail !== undefined) line.detail = rec.detail;
       append(line);
     },
     lifecycle(event, reason) {
