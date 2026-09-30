@@ -30,8 +30,10 @@
 // Sessions: at most MAX_SESSIONS. Scout opens a new session on every reconnect and may
 // never DELETE the old one, so at the cap the least recently seen session with no running
 // rank is closed to make room; only when every session has a running rank is a new one
-// refused (503). A session with no running rank and no HTTP traffic for SESSION_IDLE_MS is
-// closed by a sweep every SESSION_SWEEP_MS; a session with a running rank is kept.
+// refused (503). A session with no running rank, no open GET stream, and no HTTP traffic
+// for SESSION_IDLE_MS is closed by a sweep every SESSION_SWEEP_MS. Scout keeps one session
+// for the life of its process, so the timeout is long (30 min); eviction at the cap is what
+// clears abandoned sessions. A session with an open GET stream counts as seen on every sweep.
 //
 // run/server.json ownership: a live pid is not enough (a SIGKILL leaves the file, and the
 // pid can be reused). Start refuses only when the file's service answers on its port with
@@ -90,8 +92,8 @@ export const MCP_PATH = "/mcp";
 /** Largest POST body read. */
 export const MAX_BODY_BYTES = 4 * 1024 * 1024;
 export const MAX_SESSIONS = 64;
-/** A session with no HTTP traffic and no running rank for this long is closed. */
-export const SESSION_IDLE_MS = 5 * 60_000;
+/** A session with no HTTP traffic, no open GET stream and no running rank for this long is closed. */
+export const SESSION_IDLE_MS = 30 * 60_000;
 export const SESSION_SWEEP_MS = 30_000;
 /** How long a response watch no handler claimed outlives its closed response. */
 export const WATCH_GRACE_MS = 2_000;
@@ -105,6 +107,9 @@ export interface ServerDeps {
   env?: EnvLike;
   /** One JSONL line per call. Defaults to stderr. */
   log?: (line: string) => void;
+  /** Tests only: override SESSION_IDLE_MS and SESSION_SWEEP_MS. */
+  sessionIdleMs?: number;
+  sessionSweepMs?: number;
 }
 
 export interface ReloadResult {
@@ -168,6 +173,8 @@ interface Session {
   transport: StreamableHTTPServerTransport;
   closed: boolean;
   lastSeen: number;
+  /** GET (SSE) responses currently open for this session. */
+  openStreams: number;
   /** Running ranks by the caller's requestId, for supersedes. */
   runs: Map<string, AbortController>;
   /** JSON-RPC request id -> response watch, for response_closed. */
@@ -410,6 +417,7 @@ export async function runServer(deps: ServerDeps = {}): Promise<RunningServer> {
       transport: undefined as unknown as StreamableHTTPServerTransport,
       closed: false,
       lastSeen: Date.now(),
+      openStreams: 0,
       runs: new Map(),
       watches: new Map(),
     };
@@ -522,6 +530,13 @@ export async function runServer(deps: ServerDeps = {}): Promise<RunningServer> {
       const session = sid === undefined ? undefined : sessions.get(sid);
       if (session === undefined) return sendJson(res, sid === undefined ? 400 : 404, rpcError(-32001, "session not found"));
       session.lastSeen = Date.now();
+      if (req.method === "GET") {
+        session.openStreams++;
+        res.once("close", () => {
+          session.openStreams--;
+          session.lastSeen = Date.now();
+        });
+      }
       await session.transport.handleRequest(req, res);
       return;
     }
@@ -552,15 +567,18 @@ export async function runServer(deps: ServerDeps = {}): Promise<RunningServer> {
   port = (http.address() as AddressInfo).port;
   http.on("error", () => log("http_error"));
 
+  const idleMs = deps.sessionIdleMs ?? SESSION_IDLE_MS;
   const sweeper = setInterval(() => {
     const now = Date.now();
     for (const s of [...sessions.values()]) {
-      if (s.runs.size === 0 && now - s.lastSeen > SESSION_IDLE_MS) {
+      // An open GET stream is activity; refreshing lastSeen also keeps eviction order honest.
+      if (s.openStreams > 0) s.lastSeen = now;
+      else if (s.runs.size === 0 && now - s.lastSeen > idleMs) {
         closeSession(s);
         void s.transport.close().catch(() => {});
       }
     }
-  }, SESSION_SWEEP_MS);
+  }, deps.sessionSweepMs ?? SESSION_SWEEP_MS);
   sweeper.unref();
 
   try {

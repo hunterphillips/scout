@@ -5,6 +5,8 @@
 // token and getting back a context_status whose serviceInstanceId equals the file's. The
 // server uses this before refusing to start, and `pcm status` / `pcm reload` before
 // reporting a live service or sending it a signal.
+// The probe (and `pcm rank`) sends the bearer token to whatever listens on the recorded
+// port; acceptable, since the token guards only this service.
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";

@@ -8,7 +8,7 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { ContextStatusSchema, RankResponseSchema, type RankResponse } from "./api.js";
-import { MAX_BODY_BYTES, MAX_SESSIONS, portInUseMessage, runServer, ServerStartError, WATCH_GRACE_MS } from "./server.js";
+import { MAX_BODY_BYTES, MAX_SESSIONS, portInUseMessage, runServer, SESSION_IDLE_MS, ServerStartError, WATCH_GRACE_MS } from "./server.js";
 import { MESSAGES, readServerInfo, serverFilePath } from "./serviceFiles.js";
 import { probeService } from "./serviceProbe.js";
 import {
@@ -284,6 +284,39 @@ async function sessionAlive(port: number, tok: string, sid: string): Promise<boo
 }
 
 describe("server: sessions", () => {
+  it("the default idle timeout is 30 minutes", () => {
+    expect(SESSION_IDLE_MS).toBe(30 * 60_000);
+  });
+
+  it("the sweep closes an idle session but keeps one with an open GET stream", async () => {
+    const fx = makeServerFixture();
+    const server = await runServer({ env: fx.env, log: () => {}, sessionIdleMs: 300, sessionSweepMs: 50 });
+    const stream = new AbortController();
+    try {
+      const tok = token(fx);
+      const idle = await initSession(server.port, tok);
+      const streaming = await initSession(server.port, tok);
+      const get = await fetch(`http://127.0.0.1:${server.port}/mcp`, {
+        method: "GET",
+        headers: { accept: "text/event-stream", authorization: `Bearer ${tok}`, "mcp-session-id": streaming, "mcp-protocol-version": "2025-06-18" },
+        signal: stream.signal,
+      });
+      expect(get.status).toBe(200);
+      await waitFor(() => server.counts().sessions === 1, 5_000);
+      // Well past the idle limit, the streaming session is still there.
+      await new Promise((r) => setTimeout(r, 600));
+      expect(server.counts().sessions).toBe(1);
+      expect(await sessionAlive(server.port, tok, idle)).toBe(false);
+      expect(await sessionAlive(server.port, tok, streaming)).toBe(true);
+      // Once the stream closes, the session idles out like any other.
+      stream.abort();
+      await waitFor(() => server.counts().sessions === 0, 5_000);
+    } finally {
+      stream.abort();
+      await server.shutdown("sigterm");
+    }
+  });
+
   it(`at ${MAX_SESSIONS} abandoned sessions, a new one evicts the least recently seen`, async () => {
     const fx = makeServerFixture();
     const { server } = await startServer(fx);
