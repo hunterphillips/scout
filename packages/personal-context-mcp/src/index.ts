@@ -8,3 +8,8 @@ export * from "./authPreflight.js";
 export * from "./launchProfile.js";
 export * from "./model.js";
 export * from "./paths.js";
+export * from "./agentRunner.js";
+export * from "./auditIndex.js";
+export * from "./processTree.js";
+export * from "./prompt.js";
+export * from "./validateResponse.js";

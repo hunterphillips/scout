@@ -1,13 +1,12 @@
 // Lifecycle: the orphan timer in-process on fake time, then the built entrypoint as a real
 // child process (stdin EOF, orphaned, bad run files, protocol-only stdout).
 
-import { execFileSync, spawn, type ChildProcess } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { chmodSync, existsSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
-import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { makeFixture, mdSource, snapshot, type Fixture } from "../test-support/sourceFixture.js";
 import { watchLifecycle } from "./lifecycle.js";
 
@@ -72,12 +71,7 @@ afterEach(() => {
   for (const f of fixtures.splice(0)) f.cleanup();
 });
 
-beforeAll(() => {
-  // Build so the test always exercises the current source.
-  const tsPkg = createRequire(import.meta.url).resolve("typescript/package.json");
-  const tsc = join(dirname(tsPkg), "bin", "tsc");
-  execFileSync(process.execPath, [tsc, "-p", join(pkgDir, "tsconfig.build.json")], { stdio: "inherit" });
-}, 60_000);
+// dist/ is built once by the vitest global setup (test/global-setup.mjs).
 
 function runDirFixture(snap: unknown = snapshot()): Fixture {
   const f = makeFixture();
