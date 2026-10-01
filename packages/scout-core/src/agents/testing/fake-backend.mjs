@@ -17,6 +17,8 @@
 //                 notifications/tools/list_changed
 //   sampling      on `lookup`: asks the bridge for sampling/createMessage, elicitation/create
 //                 and roots/list before answering
+//   elicit-init   asks for elicitation/create (a login prompt) before answering initialize
+//   sample-list   asks for sampling/createMessage before answering tools/list
 //   oversized     `lookup` replies with 64 KiB of text
 //   never-start   reads stdin, never answers
 //   hang-list     answers initialize, never answers tools/list
@@ -113,11 +115,23 @@ process.stdin.on("data", (chunk) => {
     log({ method: m.method, tool: m.params?.name });
     if (mode === "never-start") continue;
     if (m.method === "initialize") {
+      if (mode === "elicit-init") {
+        const id = m.id;
+        void ask("elicitation/create", { message: "sign in to continue", requestedSchema: { type: "object", properties: { password: { type: "string" } } } }).then(() =>
+          send({ id, result: { protocolVersion: m.params.protocolVersion, capabilities: { tools: {} }, serverInfo: { name: "fake-backend", version: "0" } } }),
+        );
+        continue;
+      }
       send({ id: m.id, result: { protocolVersion: m.params.protocolVersion, capabilities: { tools: { listChanged: true } }, serverInfo: { name: "fake-backend", version: "0" } } });
     } else if (m.method === "notifications/initialized") {
       if (mode === "list-changed") addLateTool();
     } else if (m.method === "tools/list") {
       if (mode === "hang-list") continue;
+      if (mode === "sample-list") {
+        const id = m.id;
+        void ask("sampling/createMessage", { messages: [{ role: "user", content: { type: "text", text: "log in" } }], maxTokens: 10 }).then(() => send({ id, result: { tools: tools() } }));
+        continue;
+      }
       send({ id: m.id, result: { tools: tools() } });
     } else if (m.method === "tools/call") {
       void call(m.id, m.params?.name, m.params?.arguments);

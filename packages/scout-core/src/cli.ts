@@ -1,6 +1,7 @@
 import { realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import type { Candidate } from "@scout/contracts";
+import { agentCommand, AGENT_USAGE, type AgentCliDeps } from "./agents/profileCli.js";
 import { capabilityCommand, CAPABILITY_USAGE } from "./capabilities/capabilityCli.js";
 import { createSiteResourceDiscoverer, type DiscoveryResult } from "./capabilities/discovery.js";
 import type { CatalogCacheResult } from "./catalog/cache.js";
@@ -29,6 +30,9 @@ import { createOriginFetchSession } from "./fetch/originSession.js";
  * - `rank <origin>` is not available until Phase 3.
  * - `capability ...` reads and changes the capability store under `SCOUT_HOME`
  *   (`capabilities/capabilityCli.ts`); only `capability ingest` touches the network.
+ * - `agent ...` configures the existing MCP tools Scout's jobs may call, in
+ *   `agent-profile.json` under `SCOUT_HOME` (`agents/profileCli.ts`); only
+ *   `agent inspect|refresh --allow-start` starts a process (the user's reviewed backend).
  *
  * Only `catalog`, `discover`, `verify`, and `capability ingest` touch the network, and only when invoked. Importing this
  * module does nothing; the process entry runs `runCli` only when this file is `argv[1]`.
@@ -43,7 +47,7 @@ export const USAGE = `usage:
                                     (exits 1 if robots.txt errored and nothing was found)
   cli.js verify <url>...            (at most ${VERIFY_CLI_MAX_URLS} URLs, all on one origin)
   cli.js rank <https-origin>        (Phase 3)
-${CAPABILITY_USAGE}`;
+${CAPABILITY_USAGE}${AGENT_USAGE}`;
 
 /** How many candidates `catalog` lists after the summary. */
 export const CATALOG_PREVIEW = 20;
@@ -57,6 +61,8 @@ export interface CliDeps {
   sleep?: Sleep;
   /** Defaults to the JSONL sink at `defaultDiagnosticsPath(env)`. */
   diagnostics?: Diagnostics;
+  /** Seams for `agent ...`. */
+  agent?: AgentCliDeps;
 }
 
 export interface CliIo {
@@ -152,6 +158,13 @@ export async function runCli(argv: readonly string[], io: CliIo): Promise<number
           ...io,
           discover: (origin: string) => runDiscovery(origin, false, io),
           diagnostics: io.deps?.diagnostics ?? createDiagnostics({ path: defaultDiagnosticsPath(io.env ?? process.env), clock: io.deps?.clock ?? systemClock }),
+        });
+      case "agent":
+        return await agentCommand(rest, {
+          stdout: io.stdout,
+          stderr: io.stderr,
+          ...(io.env ? { env: io.env } : {}),
+          ...(io.deps?.agent || io.deps?.clock ? { deps: { ...(io.deps?.clock ? { now: () => io.deps!.clock!.now() } : {}), ...io.deps?.agent } } : {}),
         });
       case "rank":
         io.stderr("rank: not available until Phase 3\n");

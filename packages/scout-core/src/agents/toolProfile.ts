@@ -24,6 +24,11 @@
 //   (`unattendedReadDeclared: true`, required; Scout does not sandbox a server's internals),
 //   and when it was selected. Tool names are unique across selections: the bridge
 //   advertises each under its own name on one server.
+// - Setup bookkeeping (optional, written by the setup CLI, never part of a launch): the
+//   connection's definition file, its revision, the command's resolved path/size/mtime at
+//   inspection (drift), the tools the last inspection listed (inspected, not selected), and
+//   `unavailable` when the last inspection attempt hit an auth prompt.
+//   `tools.revision` is bumped on every change that alters what a job may call.
 //
 // Errors carry fixed codes only: never a path, pointer or value.
 
@@ -136,7 +141,20 @@ export const LiteralEnvSchema = z
   )
   .refine((env) => envNamesOk(env, MAX_LITERAL_ENV), { message: "literal env name refused" });
 
-/** The connection fields, without the cross-field check (zod refuses omit/pick on a refined object). */
+const canonicalBytes = (v: unknown): number => {
+  try {
+    return Buffer.byteLength(canonicalJson(v), "utf8");
+  } catch {
+    return Number.POSITIVE_INFINITY;
+  }
+};
+
+/** A tool input schema a selection may freeze: a JSON object schema of at most MAX_SCHEMA_BYTES canonical bytes. */
+export const InputSchemaSchema = z
+  .looseObject({ type: z.literal("object") })
+  .refine((s) => canonicalBytes(s) <= MAX_SCHEMA_BYTES, { message: "input schema too large" });
+
+/** The connection's launch fields, without the cross-field check (zod refuses omit/pick on a refined object). */
 export const ConnectionFields = z.strictObject({
   id: z.string().regex(CONNECTION_ID_RE),
   transport: z.literal("stdio"),
@@ -151,13 +169,72 @@ export const ConnectionFields = z.strictObject({
     .max(MAX_ARGS),
   env: EnvBindingsSchema,
   literalEnv: LiteralEnvSchema.optional(),
+  /** The backend's working directory; `/` when absent. */
+  cwd: absolutePath.optional(),
 });
 
 /** A name may not be both bound and literal. */
 export const envNamesDisjoint = (c: { env: Record<string, unknown>; literalEnv?: Record<string, string> | undefined }): boolean =>
   Object.keys(c.literalEnv ?? {}).every((n) => !Object.hasOwn(c.env, n));
 
-export const ConnectionSchema = ConnectionFields.refine(envNamesDisjoint, { message: "env name both bound and literal" });
+/** Most tools one inspection stores per connection. */
+export const MAX_INSPECTED_TOOLS = 64;
+/** Longest backend tool name an inspection stores. */
+export const MAX_INSPECTED_NAME_CHARS = 128;
+
+/**
+ * One tool a setup inspection listed (agents/profileCli.ts). Inspected, not selected: it
+ * grants nothing. `inputSchema` is present only when the tool can be selected (its name and
+ * schema fit the selection rules); `unselectable` says why not otherwise.
+ */
+export const InspectedToolSchema = z
+  .strictObject({
+    name: z
+      .string()
+      .min(1)
+      .max(MAX_INSPECTED_NAME_CHARS)
+      .refine((n) => !/\p{Cc}/u.test(n)),
+    description: z.string().max(MAX_DESCRIPTION_CHARS),
+    inputSchema: InputSchemaSchema.optional(),
+    schemaHash: z
+      .string()
+      .regex(/^[0-9a-f]{64}$/)
+      .optional(),
+    unselectable: z.enum(["name_not_supported", "schema_not_supported"]).optional(),
+  })
+  .refine((t) => (t.inputSchema === undefined) === (t.unselectable !== undefined))
+  .refine((t) => t.inputSchema === undefined || schemaHash(t.inputSchema) === t.schemaHash, { message: "schemaHash does not match inputSchema" });
+export type InspectedTool = z.infer<typeof InspectedToolSchema>;
+
+/** The command's real path and identity when it was inspected, so `status` can show drift. */
+export const ResolvedCommandSchema = z.strictObject({
+  path: absolutePath,
+  size: z.int().min(0),
+  mtimeMs: z.number().min(0),
+});
+export type ResolvedCommand = z.infer<typeof ResolvedCommandSchema>;
+
+/**
+ * Setup bookkeeping (agents/profileCli.ts), all optional so a hand-written connection stays
+ * valid. Not part of the launch: the bridge's job file never carries these.
+ */
+const ConnectionSetupFields = {
+  /** The user-owned definition file the connection was reviewed from (`refresh` re-reads it). */
+  definitionFile: absolutePath.optional(),
+  /** Bumped on every change to this connection's definition or selections. */
+  revision: z.int().min(0).optional(),
+  resolvedCommand: ResolvedCommandSchema.optional(),
+  inspectedAt: z.iso.datetime().optional(),
+  inspectedTools: z.array(InspectedToolSchema).max(MAX_INSPECTED_TOOLS).optional(),
+  /**
+   * Set when the last inspection attempt failed because the backend asked Scout for input
+   * (an auth prompt); cleared by the next successful inspection. While set, nothing on the
+   * connection can be selected.
+   */
+  unavailable: z.strictObject({ reason: z.literal("auth_prompt"), at: z.iso.datetime() }).optional(),
+};
+
+export const ConnectionSchema = ConnectionFields.extend(ConnectionSetupFields).refine(envNamesDisjoint, { message: "env name both bound and literal" });
 export type Connection = z.infer<typeof ConnectionSchema>;
 
 /**
@@ -200,18 +277,6 @@ export function schemaHash(inputSchema: unknown): string {
   return createHash("sha256").update(canonicalJson(inputSchema), "utf8").digest("hex");
 }
 
-const canonicalBytes = (v: unknown): number => {
-  try {
-    return Buffer.byteLength(canonicalJson(v), "utf8");
-  } catch {
-    return Number.POSITIVE_INFINITY;
-  }
-};
-
-const InputSchemaSchema = z
-  .looseObject({ type: z.literal("object") })
-  .refine((s) => canonicalBytes(s) <= MAX_SCHEMA_BYTES, { message: "input schema too large" });
-
 /** The selection fields, without the hash check (zod refuses omit/pick on a refined object). */
 export const ToolSelectionFields = z.strictObject({
   connectionId: z.string().regex(CONNECTION_ID_RE),
@@ -230,6 +295,8 @@ export type ToolSelection = z.infer<typeof ToolSelectionSchema>;
 
 export const ToolsProfileSchema = z
   .strictObject({
+    /** The tool configuration's revision: bumped on every change that alters what a job may call. */
+    revision: z.int().min(0).optional(),
     connections: z.array(ConnectionSchema).max(MAX_CONNECTIONS),
     selections: z.array(ToolSelectionSchema).max(MAX_SELECTIONS),
   })

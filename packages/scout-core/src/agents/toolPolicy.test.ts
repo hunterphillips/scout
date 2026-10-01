@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { buildJobSurface, SCOUT_TOOL_NAMES } from "./jobSurface.js";
 import { fakeBackend, selection } from "./testing/fakeBackend.js";
 import { defaultManagedPaths } from "./claudeJob.js";
-import { BRIDGE_JOB_MAX_BYTES } from "./contextToolBridge.js";
+import { BRIDGE_JOB_MAX_BYTES, BridgeJobSchema } from "./contextToolBridge.js";
 import { BRIDGE_SERVER_NAME, checkManagedPolicy, managedSettingsConflict, planJobTools, type JobManagedPaths, type ToolPlanOptions } from "./toolPolicy.js";
 import { MAX_ARG_CHARS, MAX_ARGS, MAX_CONNECTIONS, MAX_DESCRIPTION_CHARS, MAX_SELECTIONS, ToolsProfileSchema, type ToolsProfile } from "./toolProfile.js";
 
@@ -91,6 +91,31 @@ describe("planJobTools", () => {
     const plan = planJobTools(opts({ connections: [a.connection], selections: [selection("notes", "lookup", true)] }));
     expect(plan.ok && plan.bridgeJob!.connections[0]!.literalEnv).toEqual({ PATH: "/usr/bin:/bin" });
     expect(JSON.stringify(plan.ok && plan.bridgeJob)).not.toContain(SECRET);
+  });
+
+  it("never carries setup bookkeeping into the bridge job", () => {
+    const a = fakeBackend(dir(), "notes", "honest");
+    const withSetup = { ...a.connection, definitionFile: a.definitionFile, revision: 3, inspectedAt: "2026-10-01T12:00:00.000Z" };
+    const plan = planJobTools(opts({ connections: [withSetup], selections: [selection("notes", "lookup", false)] }));
+    expect(plan.ok).toBe(true);
+    if (!plan.ok) return;
+    const jobText = JSON.stringify(plan.bridgeJob);
+    for (const field of ["definitionFile", "inspectedAt", "revision"]) expect(jobText).not.toContain(field);
+    // The job schema has no field for the auth-prompt mark either.
+    const conn0 = plan.bridgeJob!.connections[0]!;
+    expect(BridgeJobSchema.safeParse({ ...plan.bridgeJob, connections: [{ ...conn0, unavailable: { reason: "auth_prompt", at: "2026-10-01T12:00:00.000Z" } }] }).success).toBe(false);
+  });
+
+  it("a connection marked unavailable (auth_prompt) is never offered: optional tools are listed unavailable, a required one blocks the job", () => {
+    const a = fakeBackend(dir(), "notes", "honest");
+    const marked = { ...a.connection, unavailable: { reason: "auth_prompt" as const, at: "2026-10-01T12:00:00.000Z" } };
+    const optional = planJobTools(opts({ connections: [marked], selections: [selection("notes", "lookup", false)] }));
+    expect(optional).toMatchObject({ ok: true, unavailable: [{ server: BRIDGE_SERVER_NAME, tool: "mcp__scout_bridge__lookup" }] });
+    if (optional.ok) {
+      expect(optional.bridgeJob).toBeUndefined();
+      expect(optional.spec.servers.map((s) => s.name)).toEqual(["scout"]);
+    }
+    expect(planJobTools(opts({ connections: [marked], selections: [selection("notes", "lookup", true)] }))).toEqual({ ok: false, reason: "tool_unavailable", detail: "required_connection_unavailable" });
   });
 
   it("an optional tool whose command is gone is reported unavailable and left out; Scout alone still runs", () => {

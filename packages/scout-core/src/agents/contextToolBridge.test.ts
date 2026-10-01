@@ -75,6 +75,7 @@ function jobFor(defs: FakeBackendDef[], selections: ToolSelection[], limits: Par
       args: def.connection.args,
       env: def.connection.env,
       ...(def.connection.literalEnv ? { literalEnv: def.connection.literalEnv } : {}),
+      ...(def.connection.cwd !== undefined ? { cwd: def.connection.cwd } : {}),
     })),
     tools: selections.map((s) => ({ name: s.toolName, connectionId: s.connectionId, description: s.description, inputSchema: s.inputSchema, schemaHash: s.schemaHash })),
   };
@@ -208,6 +209,16 @@ describe("context tool bridge (B13)", () => {
     const jobText = readFileSync(join(s.dir, "bridge.json"), "utf8");
     expect(jobText).not.toContain(env.NOTES_TOKEN);
     expect(JSON.parse(jobText).connections[0].env.NOTES_TOKEN).toEqual({ file: s.backend.definitionFile, pointer: "/env/NOTES_TOKEN" });
+  });
+
+  it("starts the backend in the connection's cwd when one is set", async () => {
+    const dir = tempDir();
+    const backend = fakeBackend(dir, "notes", "honest");
+    backend.connection.cwd = dir;
+    backends.push(backend);
+    const { client } = await connect(dir, jobFor([backend], [selection("notes", "lookup", true)]));
+    expect(await names(client)).toEqual(["lookup"]);
+    expect(backend.lines().find((l) => l.cwd)!.cwd).toBe(dir);
   });
 
   it("bindings that no longer resolve at spawn: the backend is never started and its tools are not advertised", async () => {

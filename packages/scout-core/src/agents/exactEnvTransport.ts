@@ -11,7 +11,8 @@ export const BACKEND_MAX_LINE_BYTES = 1024 * 1024;
 
 /**
  * Like the SDK's StdioClientTransport, except the child gets exactly `env` (the SDK's merges
- * in HOME, PATH, USER, ... from this process), its stderr is discarded, its cwd is `/`, and
+ * in HOME, PATH, USER, ... from this process), its stderr is discarded, its cwd is `/` unless
+ * the reviewed definition names one, and
  * one oversized line closes it.
  */
 export class ExactEnvStdioTransport implements Transport {
@@ -25,6 +26,7 @@ export class ExactEnvStdioTransport implements Transport {
     private readonly command: string,
     private readonly args: readonly string[],
     private readonly env: Readonly<Record<string, string>>,
+    private readonly cwd: string = "/",
   ) {}
 
   get pid(): number | undefined {
@@ -33,7 +35,7 @@ export class ExactEnvStdioTransport implements Transport {
 
   start(): Promise<void> {
     return new Promise((resolve, reject) => {
-      const proc = spawn(this.command, [...this.args], { env: { ...this.env }, cwd: "/", stdio: ["pipe", "pipe", "ignore"], shell: false });
+      const proc = spawn(this.command, [...this.args], { env: { ...this.env }, cwd: this.cwd, stdio: ["pipe", "pipe", "ignore"], shell: false });
       this.proc = proc;
       proc.on("error", (e) => {
         reject(e);
