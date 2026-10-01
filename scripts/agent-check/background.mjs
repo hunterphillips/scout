@@ -86,6 +86,14 @@ export async function runBackground(caseName, o, deps) {
   let cancelAt;
   const cleanup = { ok: false };
   const ac = new AbortController();
+  // run.mjs's abort (SIGINT/SIGTERM/uncaught error): cancel the job; cleanup below still runs.
+  let externalAbort;
+  const onExternalAbort = () => {
+    externalAbort = typeof deps.abortSignal?.reason === "string" ? deps.abortSignal.reason : "signal";
+    ac.abort("aborted");
+  };
+  if (deps.abortSignal?.aborted) onExternalAbort();
+  else deps.abortSignal?.addEventListener("abort", onExternalAbort, { once: true });
 
   // The adapter's spawn, observed: argv, child pid, and the init event (for the report and the cancel timer).
   const spawn = (command, args, options) => {
@@ -149,10 +157,10 @@ export async function runBackground(caseName, o, deps) {
     if (pf.verdict !== "subscription") {
       outcome = "preflight_failed";
       failures.push("preflight");
-    } else {
+    } else if (!ac.signal.aborted) {
       inference.push({ n: 1, purpose: caseName, at: new Date().toISOString() });
       const request = jobRequest({ requestId, coreInstanceId: fixture.coreInstanceId, profileFingerprint: adapter.profileFingerprint });
-      job = await adapter.run(request, { toolSurface: { scout: { socketPath: fixture.socketPath, token: fixture.token } }, ...(caseName === "cancel" ? { signal: ac.signal } : {}) });
+      job = await adapter.run(request, { toolSurface: { scout: { socketPath: fixture.socketPath, token: fixture.token } }, signal: ac.signal });
       const r = job.result;
       const d = job.details;
       if (caseName === "cancel") {
@@ -198,6 +206,11 @@ export async function runBackground(caseName, o, deps) {
     cleanup.throwawayRemoved = !existsSync(throwaway.root);
     cleanup.ok = cleanup.jobDirRemoved && cleanup.processesRemaining === 0 && (cleanup.fixtureConnectionsAtEnd ?? 0) === 0 && cleanup.throwawayRemoved;
     if (!cleanup.ok) failures.push("cleanup_incomplete");
+    deps.abortSignal?.removeEventListener("abort", onExternalAbort);
+  }
+  if (externalAbort) {
+    outcome = "aborted";
+    failures.push(`aborted_${/^[A-Za-z]{1,32}$/.test(externalAbort) ? externalAbort : "signal"}`);
   }
 
   const pass = failures.length === 0 && (caseName === "cancel" ? outcome === "cancelled" : outcome === "ok");

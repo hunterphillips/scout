@@ -22,12 +22,21 @@ Two commands for Phase 1 of the website-agent plan.
 | `--authorize-real-root` | hotload: the acceptance run. Adds one `scout-proof-<nonce>` MCP registration at user scope and one `scout-proof-<nonce>` skill directory in the real user skills root (`$CLAUDE_CONFIG_DIR/skills`, else `~/.claude/skills`), and removes both afterwards. |
 | `--preliminary` | hotload: put the skill in the throwaway cwd's `.claude/skills` and load the server with `--mcp-config`. Nothing installed changes; the result does not count for the gate. |
 | `--with-revocation` | hotload: after the skill works, revoke the resource, remove the skill, and ask for one more read. Needs one more request. |
-| `--two-session` | hotload: if turn 2 does not use the skill, try again in a fresh session, to tell "needs a restart" from "never works". Needs one more request. |
+| `--two-session` | hotload: if turn 1 does not show the proof server connected, or turn 2 does not invoke the skill, try again in a fresh session, to tell "needs a restart" from "never works". Needs one more request. |
 
 A hotload run without `--authorize-real-root` or `--preliminary` exits 2 and changes
-nothing. The hot-load gate then stays unverified.
+nothing. The hot-load gate then stays unverified. A missing user skills root is refused,
+never created.
 
 Exit codes: 0 the check passed (or a dry run), 1 the check failed or stopped, 2 refused.
+
+SIGINT or SIGTERM during a run stops the session, runs the same cleanup as a normal end
+(once; a second signal is ignored), writes the report with outcome `aborted`, and exits 1.
+An uncaught exception or unhandled rejection is treated the same way.
+
+One inference request is one turn: one message sent to the hotload session, or one
+background job. A turn can make several API calls when the model uses tools; the report
+counts them per turn in `turns[].usage.turns`.
 
 ## Invocations and inference requests
 
@@ -48,18 +57,46 @@ binary it will launch, and launches nothing for inference unless the verdict is
 
 **hotload.** Starts a fixture Scout core holding one approved synthetic skill resource
 whose text has a fresh proof phrase. It registers the MCP server (`claude mcp add --scope
-user`), then opens one headless session that stays open across turns
-(`--input-format stream-json`). Turn 1 asks which `scout-proof-*` skills the session sees.
-The proof skill is written after turn 1. Turn 2 asks the session to use it. The check
-passes only if the session called the Skill tool with that name, read the resource
-through the proof server, and quoted the proof phrase. Outcomes: `hotload_pass`,
-`hotload_requires_reload` (turn 2 did not use the new skill), `mcp_requires_restart` (the
-registration did not load in turn 1), `preflight_failed`, `aborted`.
+user`), then opens one headless `claude -p` process that stays open across turns
+(`--input-format stream-json --output-format stream-json`). This process stands in for an
+interactive session; it is not one, and the report says so. Turn 1 asks which
+`scout-proof-*` skills the session sees. The proof skill is written after turn 1. Turn 2
+asks the session to list the `scout-proof-*` skills it sees and, if it lists one, to use it
+and quote the proof phrase. Turn 2's prompt does not name the skill.
+
+The session loads every user-scope MCP server and plugin, because the user-scope proof
+registration is only visible with user settings loaded. The report counts them and never
+names them. These flags limit what the model can do: `--tools Skill,ToolSearch`,
+`--settings {"disableAllHooks":true}`, `--setting-sources user`, `--permission-mode
+dontAsk` with `--allowedTools` set to `Skill`, `ToolSearch` and the proof server's two
+tools, and `--max-turns 8`. Other servers' tools are loaded but not allowed, so `dontAsk`
+denies them.
+
+`ToolSearch` is offered because, from the 2.1.286 binary, the CLI defers MCP tools behind
+tool search whenever `ToolSearch` is available. The init event may still list a deferred
+tool, so the report records `mcpToolsDeferred` (the proof server connected but its tools
+were not listed in init) and `toolSearch.uses`.
+
+Outcomes, each from the session's own events:
+
+| Outcome | Evidence |
+| --- | --- |
+| `hotload_pass` | Turn 2 listed the proof skill, invoked it with the Skill tool, read the resource through the proof server, and quoted the proof phrase. |
+| `skill_used_not_listed` | All of the above, but the skill was missing from the model's own list. |
+| `read_ok_phrase_missing` | The read succeeded; the final reply has no proof phrase. |
+| `skill_invoked_read_failed` | The Skill tool was called; `read_resource` was not called or returned an error (`readError` holds the code). |
+| `skill_not_invoked` | No Skill call names the proof skill. |
+| `hotload_requires_reload` | `--two-session`: turn 2 did not invoke it; a fresh session did, and read it. |
+| `skill_never_loads` | `--two-session`: neither session invoked and read it. |
+| `mcp_not_loaded` | Turn 1's init did not show the proof server connected with usable tools. `mcpStatusSeen` is the status seen: `pending`, `failed`, `absent`, or `connected_without_tools`. MCP startup is non-blocking in 2.1.286, so a slow server shows `pending`. |
+| `mcp_requires_restart` | `--two-session`: `mcp_not_loaded` in the first session, connected in a fresh one. |
+| `preflight_failed`, `aborted` | The billing preflight did not return `subscription`; the run stopped (signal, timeout, or error). |
 
 Cleanup always runs. The skill directory is removed only if it still holds exactly the
 `SKILL.md` that was written, by hash. The registration is removed only if `claude mcp
-get` still shows the same command and args at user scope. Anything changed is left in
-place and reported.
+get` still shows the same command and args at user scope. That check runs even when `mcp
+add` failed or timed out, since it may have written the entry first. Anything changed is
+left in place and reported.
 
 **baseline.** One background job through the real job adapter, with Scout context only.
 Passes on `ok` with at least one pick and at least one Scout tool call.

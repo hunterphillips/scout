@@ -17,8 +17,31 @@ export const RESOURCE_ID_PATTERN = /^res_[0-9a-f]{64}$/;
 /** A full SHA-256, lowercase hex. */
 export const SHA256_HEX_PATTERN = /^[0-9a-f]{64}$/;
 
-/** True when `v` is exactly an https origin (`https://host[:port]`, no path, query or credentials). */
+/** RFC 1123 hostname, lowercase: labels of letters, digits and inner hyphens, dot-separated. */
+const HOSTNAME_RE = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*$/;
+export const HOSTNAME_MAX_CHARS = 253;
+const LABEL_MAX_CHARS = 63;
+
+/**
+ * True when `v` is exactly an https origin `https://host[:port]`: the host an RFC 1123
+ * hostname (lowercase, at most 253 characters, labels at most 63), the port 1-65535 if
+ * present, no userinfo, path, query or fragment, and `v` is its own WHATWG origin (so the
+ * default port, leading zeros and anything the URL parser would rewrite are refused). IP
+ * literals are refused: an all-digit last label is what WHATWG reads as IPv4, and `[...]`
+ * never matches. Scout only targets hostnames.
+ */
 export function isHttpsOrigin(v: string): boolean {
+  if (typeof v !== "string") return false;
+  const m = /^https:\/\/([^:/?#@\[\]]+)(?::(\d{1,5}))?$/.exec(v);
+  if (!m) return false;
+  const host = m[1]!;
+  if (host.length > HOSTNAME_MAX_CHARS || !HOSTNAME_RE.test(host)) return false;
+  const labels = host.split(".");
+  if (labels.some((l) => l.length > LABEL_MAX_CHARS) || /^\d+$/.test(labels.at(-1)!)) return false;
+  if (m[2] !== undefined) {
+    const port = Number(m[2]);
+    if (port < 1 || port > 65535) return false;
+  }
   try {
     const u = new URL(v);
     return u.protocol === "https:" && u.origin === v;

@@ -79,6 +79,11 @@ export function startSession(o) {
         child.stdin?.write(userMessage(text));
       });
     },
+    /** Stop the session now (abort path): terminate its process group; close() still reaps. */
+    terminate() {
+      tree?.poll(psSnapshot());
+      if (!exited) sup.terminate();
+    },
     /** End stdin, wait for exit, then terminate and reap whatever remains. Returns tree evidence. */
     async close() {
       tree?.poll(psSnapshot());

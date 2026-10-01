@@ -5,9 +5,11 @@
 // validated skill name (identity.ts). `description` is one double-quoted line that states the
 // publisher origin first and may end with a bounded, website-provided description labeled as
 // website-authored. Website text is reduced to plain characters before it is placed there:
-// control, format and separator characters, quotes, backslashes, backticks and `${` are
-// removed or replaced and whitespace is collapsed, so it cannot end the line, the quoted
-// string or the frontmatter, add a key, or form an interpolation. No other key (allowed-tools,
+// control, format and separator characters, quotes, backslashes and backticks are removed or
+// replaced, `$ARGUMENTS` is removed, a `$` before a digit, letter, `_` or `{` is removed (so
+// no `$0`-`$9`, `$name` or `${...}` substitution survives), and whitespace is collapsed, so it
+// cannot end the line, the quoted string or the frontmatter, add a key, or form an
+// interpolation. No other key (allowed-tools,
 // hooks, model, ...) is ever written.
 //
 // The body is fixed Scout text plus validated identifiers only (resource ID, kind, origin,
@@ -29,8 +31,9 @@ export const SITE_DESCRIPTION_MAX = 300;
 export const SERVER_NAME_RE = /^[A-Za-z0-9_-]{1,64}$/;
 export const DEFAULT_SERVER_NAME = "scout";
 /**
- * Origins as the wrapper writes them: ASCII (punycode) host, optional port. Stricter than the
- * contract's isHttpsOrigin, which follows WHATWG and so accepts hosts such as `a"b`.
+ * Origins as the wrapper writes them: ASCII (punycode) host, optional port. A second check
+ * beside the contract's isHttpsOrigin (RFC 1123 hostname plus WHATWG round trip), kept so the
+ * wrapper's own guarantee does not depend on another module.
  */
 export const WRAPPER_ORIGIN_RE = /^https:\/\/[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?(?::\d{1,5})?$/;
 
@@ -68,14 +71,29 @@ export interface WrapperInput {
   siteDescription?: string;
 }
 
-/** Website text as one plain line: no control/format/separator chars, quotes, backslashes, backticks or `${`. */
+/** Removes `$ARGUMENTS` and any `$` that could start a substitution, until none is left. */
+function stripSubstitutions(text: string): string {
+  let prev: string;
+  let cur = text;
+  do {
+    prev = cur;
+    cur = cur.replace(/\$ARGUMENTS/g, "").replace(/\$(?=[0-9A-Za-z_{])/g, "");
+  } while (cur !== prev);
+  return cur;
+}
+
+/**
+ * Website text as one plain line: no control/format/separator chars, quotes, backslashes,
+ * backticks, `$ARGUMENTS`, or `$` before a digit, letter, `_` or `{`.
+ */
 export function plainSiteText(text: string, max = SITE_DESCRIPTION_MAX): string {
-  const flat = text
-    .normalize("NFC")
-    .replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}\p{Cs}\p{Co}\p{Cn}]/gu, " ")
-    .replace(/["`]/g, "'")
-    .replace(/\\/g, "")
-    .replace(/\$\{/g, "{")
+  const flat = stripSubstitutions(
+    text
+      .normalize("NFC")
+      .replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}\p{Cs}\p{Co}\p{Cn}]/gu, " ")
+      .replace(/["`]/g, "'")
+      .replace(/\\/g, ""),
+  )
     .replace(/\s+/g, " ")
     .trim();
   const chars = [...flat];

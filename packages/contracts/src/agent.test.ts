@@ -7,6 +7,8 @@ import {
   agentResponseSchema,
   deriveResourceId,
   HostJobResultSchema,
+  HttpsOriginSchema,
+  isHttpsOrigin,
   JOB_AGENT_OUTPUT_JSON_SCHEMA,
   JobAgentOutputSchema,
   JobRequestSchema,
@@ -16,6 +18,60 @@ import {
 const HASH_A = "a".repeat(64);
 const HASH_B = "b".repeat(64);
 const req = (method: string, params: unknown) => ({ protocol: AGENT_PROTOCOL_VERSION, requestId: "r1", method, params });
+
+describe("isHttpsOrigin", () => {
+  it.each([
+    "https://example.com",
+    "https://docs.example.com",
+    "https://a-b.example.co.uk",
+    "https://xn--bcher-kva.example",
+    "https://localhost",
+    "https://example.com:8443",
+    "https://example.com:1",
+    "https://example.com:65535",
+    "https://a1.b2",
+    `https://${"a".repeat(63)}.com`,
+  ])("accepts %s", (v) => {
+    expect(isHttpsOrigin(v)).toBe(true);
+    expect(HttpsOriginSchema.safeParse(v).success).toBe(true);
+  });
+
+  it.each([
+    ["http scheme", "http://example.com"],
+    ["uppercase host", "https://Example.com"],
+    ["trailing dot", "https://example.com."],
+    ["empty label", "https://a..example.com"],
+    ["leading hyphen", "https://-a.example.com"],
+    ["trailing hyphen in label", "https://a-.example.com"],
+    ["underscore", "https://a_b.example.com"],
+    ["quote", 'https://a"b.example.com'],
+    ["backtick", "https://a`b.example.com"],
+    ["brace", "https://a${b}.example.com"],
+    ["percent", "https://a%41.example.com"],
+    ["unicode", "https://b\u00fccher.example"],
+    ["userinfo", "https://user@example.com"],
+    ["empty userinfo", "https://@example.com"],
+    ["path", "https://example.com/"],
+    ["query", "https://example.com?x"],
+    ["fragment", "https://example.com#x"],
+    ["default port", "https://example.com:443"],
+    ["port 0", "https://example.com:0"],
+    ["port too large", "https://example.com:65536"],
+    ["port leading zero", "https://example.com:08443"],
+    ["empty port", "https://example.com:"],
+    ["ipv4", "https://127.0.0.1"],
+    ["numeric last label", "https://example.123"],
+    ["hex ipv4", "https://0x7f.1"],
+    ["ipv6", "https://[::1]"],
+    ["label too long", `https://${"a".repeat(64)}.com`],
+    ["host too long", `https://${Array(64).fill("abc").join(".")}`],
+    ["whitespace", "https://exa mple.com"],
+    ["newline", "https://example.com\nx"],
+  ])("refuses %s", (_label, v) => {
+    expect(isHttpsOrigin(v)).toBe(false);
+    expect(HttpsOriginSchema.safeParse(v).success).toBe(false);
+  });
+});
 
 describe("capability contracts", () => {
   it("derives the resource id from full SHA-256 of kind and canonical URL", async () => {

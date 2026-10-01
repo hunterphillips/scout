@@ -16,6 +16,8 @@
 // Removal is conditional: the registration only when `get` still shows exactly the command
 // and args we added at user scope; the skill directory only when it holds exactly our
 // SKILL.md with the content hash we recorded. Anything else is left in place and reported.
+// Removal is attempted whenever `add` was attempted, whatever `add` reported: an `add` that
+// wrote the entry and then failed or timed out must not leak it.
 
 import { spawnSync } from "node:child_process";
 import { lstatSync, mkdirSync, readdirSync, readFileSync, rmdirSync, unlinkSync, writeFileSync } from "node:fs";
@@ -23,12 +25,15 @@ import { join } from "node:path";
 import { ownershipHash } from "../../packages/scout-core/dist/capabilities/identity.js";
 import { WRAPPER_FILE } from "../../packages/scout-core/dist/capabilities/wrapper.js";
 
-const TIMEOUT_MS = 60_000;
+export const MCP_TIMEOUT_MS = 60_000;
 
-/** Run `claude <args>` argv-only with the session's exact env and cwd. stdout only; stderr is dropped. */
-export function claudeRun(claudePath, args, { env, cwd }) {
-  const r = spawnSync(claudePath, args, { env: { ...env }, cwd, encoding: "utf8", timeout: TIMEOUT_MS, killSignal: "SIGKILL", stdio: ["ignore", "pipe", "pipe"] });
-  return { status: r.error ? null : r.status, stdout: r.stdout ?? "" };
+/**
+ * Run `claude <args>` argv-only with the session's exact env and cwd. stdout only; stderr is
+ * dropped. `status` is null when it timed out (killed) or could not run.
+ */
+export function claudeRun(claudePath, args, { env, cwd, timeoutMs = MCP_TIMEOUT_MS }) {
+  const r = spawnSync(claudePath, args, { env: { ...env }, cwd, encoding: "utf8", timeout: timeoutMs, killSignal: "SIGKILL", stdio: ["ignore", "pipe", "pipe"] });
+  return { status: r.error ? null : r.status, timedOut: r.error?.code === "ETIMEDOUT", stdout: r.stdout ?? "" };
 }
 
 /** `claude mcp get <name>`, parsed. `lines` holds only the descriptive fields, for the report. */
@@ -51,8 +56,10 @@ export function ownsRegistration(get, expected) {
   return get.exists === true && typeof get.scope === "string" && get.scope.startsWith("User config") && get.type === "stdio" && get.command === expected.command && get.args === expected.args.join(" ");
 }
 
+/** `claude mcp add --scope user`. Returns `{ ok, status, timedOut }`; the caller cleans up either way. */
 export function mcpAddUser(claudePath, name, command, args, opts) {
-  return claudeRun(claudePath, ["mcp", "add", "--scope", "user", name, "--", command, ...args], opts).status === 0;
+  const r = claudeRun(claudePath, ["mcp", "add", "--scope", "user", name, "--", command, ...args], opts);
+  return { ok: r.status === 0, status: r.status, timedOut: r.timedOut };
 }
 
 /**

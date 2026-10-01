@@ -176,4 +176,25 @@ describe("plainSiteText", () => {
     expect(plainSiteText("  Stripe   billing\tdocs ")).toBe("Stripe billing docs");
     expect([...plainSiteText("\u00e9".repeat(500))].length).toBe(SITE_DESCRIPTION_MAX);
   });
+
+  it("removes $ARGUMENTS and every $ that could start a substitution", () => {
+    expect(plainSiteText("Run with $ARGUMENTS and $ARGUMENTS[0] now")).toBe("Run with and [0] now");
+    expect(plainSiteText("first $0 then $9 and $1x")).toBe("first 0 then 9 and 1x");
+    expect(plainSiteText("$name ${CLAUDE_SKILL_DIR} $_x $HOME")).toBe("name {CLAUDE_SKILL_DIR} _x HOME");
+    // Removal never leaves a new substitution behind.
+    for (const t of ["$$ARGUMENTS", "$$ARGUMENTSx", "$$$1", "$$$$x", "$\\{x}", "$\\ARGUMENTS", "$$ARGUMENTSARGUMENTS0"]) {
+      const out = plainSiteText(t);
+      expect(out, t).not.toMatch(/\$[0-9A-Za-z_{]/);
+      expect(out, t).not.toContain("$ARGUMENTS");
+    }
+    // A $ before anything else is plain text.
+    expect(plainSiteText("costs $ 5, or 5$ total, $.")).toBe("costs $ 5, or 5$ total, $.");
+  });
+
+  it("keeps substitution syntax out of a rendered description", () => {
+    const text = renderSkillWrapper(input({ siteDescription: "Use $ARGUMENTS, $1, $USER and ${CLAUDE_SESSION_ID}" }));
+    const fm = parseWrapperFrontmatter(text);
+    expect(fm.description).not.toMatch(/\$[0-9A-Za-z_{]/);
+    expect(fm.description).not.toContain("$ARGUMENTS");
+  });
 });

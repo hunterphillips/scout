@@ -51,8 +51,36 @@ export function parseArgs(argv) {
   return { opts: o };
 }
 
+export const ABORT_EVENTS = Object.freeze(["SIGINT", "SIGTERM", "uncaughtException", "unhandledRejection"]);
+
 /**
- * Run one check. `io`: { env, out, err, deps } where deps are test seams passed to the case.
+ * While a check runs, SIGINT/SIGTERM (and, as a last resort, an uncaught exception or
+ * unhandled rejection) abort it: the case stops its session, runs its one cleanup, and the
+ * report is still written with outcome `aborted`. A second signal during cleanup is ignored.
+ * Returns the AbortSignal and an uninstall function.
+ */
+export function installAbortHandlers(signals, err) {
+  const ac = new AbortController();
+  if (!signals) return { signal: ac.signal, uninstall: () => {} };
+  const handlers = ABORT_EVENTS.map((ev) => {
+    const h = () => {
+      if (ac.signal.aborted) {
+        err(`verify:agent: ${ev} again; cleanup is already running`);
+        return;
+      }
+      err(`verify:agent: ${ev}; stopping the check and cleaning up`);
+      ac.abort(ev);
+    };
+    signals.on(ev, h);
+    return [ev, h];
+  });
+  return { signal: ac.signal, uninstall: () => handlers.forEach(([ev, h]) => signals.off(ev, h)) };
+}
+
+/**
+ * Run one check. `io`: { env, out, err, deps, signals } where deps are test seams passed to
+ * the case and `signals` is the emitter to watch for ABORT_EVENTS (the entrypoint passes
+ * `process`).
  * Exit codes: 0 pass (or dry run), 1 failed/aborted check, 2 refused (usage or authorization).
  */
 export async function runAgentCheck(argv, io = {}) {
@@ -100,24 +128,30 @@ export async function runAgentCheck(argv, io = {}) {
     return 2;
   }
 
-  const deps = { out, err, ...(io.deps ?? {}) };
-  const res =
-    o.case === "hotload"
-      ? await (await import("./hotload.mjs")).runHotload(o, deps)
-      : await (await import("./background.mjs")).runBackground(o.case, o, deps);
-  if (!res.report) return res.code;
+  const abort = installAbortHandlers(io.signals, err);
   try {
-    const { path, report } = mods.report.writeReport(o.home, o.case, res.report, { env, secrets: res.secrets ?? [] });
-    for (const l of mods.report.summaryLines(report, path)) out(l);
-  } catch (e) {
-    err(`verify:agent: report not written: ${e.message}`);
-    return 1;
+    const deps = { out, err, abortSignal: abort.signal, ...(io.deps ?? {}) };
+    const res =
+      o.case === "hotload"
+        ? await (await import("./hotload.mjs")).runHotload(o, deps)
+        : await (await import("./background.mjs")).runBackground(o.case, o, deps);
+    if (!res.report) return res.code;
+    try {
+      const { path, report } = mods.report.writeReport(o.home, o.case, res.report, { env, secrets: res.secrets ?? [] });
+      for (const l of mods.report.summaryLines(report, path)) out(l);
+    } catch (e) {
+      err(`verify:agent: report not written: ${e.message}`);
+      return 1;
+    }
+    return res.code;
+  } finally {
+    // Kept until the report is written, so a signal then cannot cut it short.
+    abort.uninstall();
   }
-  return res.code;
 }
 
 if (isMain(import.meta.url)) {
-  runAgentCheck(process.argv.slice(2)).then(
+  runAgentCheck(process.argv.slice(2), { signals: process }).then(
     (code) => process.exit(code),
     () => {
       process.stderr.write("verify:agent: internal error\n");

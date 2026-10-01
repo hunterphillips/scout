@@ -21,12 +21,25 @@
 // Modes:
 //   hotload-watch (default)   the skills list is rescanned before every turn (hot-load works)
 //   hotload-static            the skills list is fixed at startup (needs a restart)
-//   mcp-ignore                user-scope registrations are not loaded
-// Turns are recognized by their text: "Use the skill named <name>" invokes the Skill tool,
-// then follows the SKILL.md it read (calls the read tool it names with the resource ID it
-// names) and answers with the "Proof phrase:" line it got back, or a refusal; a message
-// naming an `mcp__...__read_resource` tool and a resource ID calls it directly; anything else
-// is answered with the visible `scout-proof-*` skill names.
+//   hotload-never             no scout-proof-* skill is ever visible, in any session
+//   mcp-ignore                user-scope registrations are not loaded (absent from init)
+//   mcp-pending | mcp-failed  user-scope registrations show that status in init, no tools
+//   mcp-late                  like mcp-pending in the first session only (counted in FAKE_LOG)
+//   deferred                  with ToolSearch in --tools, MCP tools are left out of init and
+//                             loaded with a ToolSearch call before first use (as 2.1.286
+//                             defers MCP tools when tool search is on)
+//   read-fail                 the skill's read uses an unknown resource ID (Scout not_found)
+//   skill-no-read             the Skill tool is called, but no read follows
+//   phrase-missing            the read succeeds, the answer omits the phrase
+//   not-listed                the listing says none, but the skill is used anyway
+//   hang-turn2                the second turn never answers
+//   mcp-add-fail | mcp-add-hang   `mcp add` writes the entry, then exits 1 | never exits
+// Turns are recognized by their text: "use it with the Skill tool" first writes a
+// "Skills seen:" line, then (if a proof skill is visible) invokes the Skill tool, follows
+// the SKILL.md it read (calls the read tool it names with the resource ID it names) and
+// answers with the "Proof phrase:" line it got back, or a refusal; a message naming an
+// `mcp__...__read_resource` tool and a resource ID calls it directly; anything else is
+// answered with a "Skills seen:" line of the visible `scout-proof-*` skill names.
 //
 // FAKE_LOG lines: {subcommand}, {session: argv}, {turn, prompt}, {scoutPid}.
 
@@ -49,7 +62,7 @@ export async function runExtended({ argv, mode, version }) {
   };
   if (argv[0] === "--version") return out(`${version} (Claude Code)\n`);
   if (argv[0] === "auth") return auth(argv, mode);
-  if (argv[0] === "mcp") return mcp(argv.slice(1));
+  if (argv[0] === "mcp") return mcp(argv.slice(1), mode);
   return session({ argv, has, flag, mode, version });
 }
 
@@ -83,7 +96,7 @@ function writeRegistry(cfg) {
   writeFileSync(configFile(), JSON.stringify(cfg, null, 2), { mode: 0o600 });
 }
 
-function mcp(args) {
+function mcp(args, mode) {
   logLine({ subcommand: ["mcp", ...args] });
   const [cmd, ...rest] = args;
   const scopeAt = rest.findIndex((a) => a === "--scope" || a === "-s");
@@ -103,6 +116,8 @@ function mcp(args) {
     const [command, ...cargs] = plain.slice(dd + 1);
     servers[name] = { type: "stdio", command, args: cargs, env: {} };
     writeRegistry(cfg);
+    if (mode === "mcp-add-fail") return fail("fake: failed after writing the entry");
+    if (mode === "mcp-add-hang") return new Promise(() => setInterval(() => {}, 1000));
     return out(`Added stdio MCP server ${name} with command: ${[command, ...cargs].join(" ")} to user config\nFile modified: ${configFile()}\n`);
   }
   if (cmd === "get") {
@@ -163,28 +178,57 @@ async function connect(name, cfg) {
   }
 }
 
+function priorSessions() {
+  try {
+    return readFileSync(process.env.FAKE_LOG, "utf8").split("\n").filter((l) => l.startsWith('{"session":')).length;
+  } catch {
+    return 0;
+  }
+}
+
 async function session({ argv, has, flag, mode, version }) {
+  const earlier = priorSessions();
   logLine({ session: argv, pid: process.pid });
   const cwd = process.cwd();
   const roots = skillRoots(flag, cwd);
-  const startupSkills = scanSkills(roots);
+  const hideProof = (m) => (mode === "hotload-never" ? new Map([...m].filter(([n]) => !n.startsWith("scout-proof-"))) : m);
+  const startupSkills = hideProof(scanSkills(roots));
   const sources = (flag("--setting-sources") ?? "user,project,local").split(",");
 
+  const userStatus = mode === "mcp-pending" || (mode === "mcp-late" && earlier === 0) ? "pending" : mode === "mcp-failed" ? "failed" : undefined;
   const configs = [];
+  const servers = [];
   if (!has("--strict-mcp-config") && sources.includes("user") && mode !== "mcp-ignore") {
-    for (const [name, cfg] of Object.entries(readRegistry().mcpServers ?? {})) configs.push([name, cfg]);
+    for (const [name, cfg] of Object.entries(readRegistry().mcpServers ?? {})) {
+      if (userStatus) servers.push({ name, status: userStatus, tools: [] });
+      else configs.push([name, cfg]);
+    }
   }
   const mcpConfig = flag("--mcp-config");
   if (mcpConfig) for (const [name, cfg] of Object.entries(JSON.parse(readFileSync(mcpConfig, "utf8")).mcpServers ?? {})) configs.push([name, cfg]);
-  const servers = [];
   for (const [name, cfg] of configs) servers.push(await connect(name, cfg));
 
   const builtins = flag("--tools") === undefined ? ["Bash", "Read", "Edit", "Skill"] : flag("--tools").split(",").filter(Boolean);
-  const visible = () => (mode === "hotload-static" ? startupSkills : scanSkills(roots));
+  // Tool search is on only when ToolSearch is offered; then MCP tools start deferred.
+  const deferred = mode === "deferred" && builtins.includes("ToolSearch");
+  const loaded = new Set();
+  const visible = () => (mode === "hotload-static" ? startupSkills : hideProof(scanSkills(roots)));
   let toolSeq = 0;
   let turn = 0;
 
+  const toolUse = (name, input, result, isError = false) => {
+    const id = `toolu_${++toolSeq}`;
+    emit({ type: "assistant", message: { content: [{ type: "tool_use", id, name, input }] } });
+    if (result !== undefined) emit({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: id, is_error: isError, content: result }] } });
+    return id;
+  };
+  const say = (text) => emit({ type: "assistant", message: { content: [{ type: "text", text }] } });
+
   async function callRead(toolName, resourceId) {
+    if (deferred && !loaded.has(toolName)) {
+      toolUse("ToolSearch", { query: `select:${toolName}` }, "Loaded 1 tool");
+      loaded.add(toolName);
+    }
     const id = `toolu_${++toolSeq}`;
     emit({ type: "assistant", message: { content: [{ type: "tool_use", id, name: toolName, input: { resourceId } }] } });
     const m = /^mcp__(.+)__read_resource$/.exec(toolName);
@@ -202,14 +246,31 @@ async function session({ argv, has, flag, mode, version }) {
 
   const answerFromRead = ({ text, isError }) => {
     if (isError) return "Scout no longer provides this resource.";
+    if (mode === "phrase-missing") return "I read the resource.";
     return /Proof phrase: (SCOUT-PROOF-[0-9a-f]+)/.exec(text)?.[0] ?? "The resource had no proof phrase.";
   };
+  const proofNames = () => [...visible().keys()].filter((n) => n.startsWith("scout-proof-"));
+  const listing = (names) => `Skills seen: ${names.length ? names.join(", ") : "none"}`;
+
+  async function useSkill(name) {
+    const file = builtins.includes("Skill") ? visible().get(name) : undefined;
+    if (!file) {
+      toolUse("Skill", { skill: name }, `Unknown skill: ${name}`, true);
+      return `I can't find a skill named ${name}.`;
+    }
+    toolUse("Skill", { skill: name }, "Launching skill");
+    if (mode === "skill-no-read") return "I opened the skill.";
+    const body = readFileSync(file, "utf8");
+    const tool = /(mcp__\S+__read_resource)/.exec(body)?.[1];
+    const rid = mode === "read-fail" ? `res_${"0".repeat(64)}` : /res_[0-9a-f]{64}/.exec(body)?.[0];
+    return tool && rid ? answerFromRead(await callRead(tool, rid)) : "The skill named no resource.";
+  }
 
   async function handle(prompt) {
     turn++;
     if (turn === 1) {
       const tools = [...builtins];
-      for (const s of servers) tools.push(...s.tools.map((t) => `mcp__${s.name}__${t}`));
+      if (!deferred) for (const s of servers) tools.push(...s.tools.map((t) => `mcp__${s.name}__${t}`));
       emit({
         type: "system",
         subtype: "init",
@@ -220,35 +281,24 @@ async function session({ argv, has, flag, mode, version }) {
         model: flag("--model") ?? "gateway-default-model",
         permissionMode: flag("--permission-mode") ?? "default",
         skills: [...startupSkills.keys()],
+        plugins: [{ name: "someone-elses-plugin", path: "/nonexistent" }],
         apiKeySource: "none",
         claude_code_version: version,
       });
     }
+    if (mode === "hang-turn2" && turn === 2) return new Promise(() => {});
     let text;
-    const useSkill = /Use the skill named (scout-proof-[a-z0-9]+)/.exec(prompt);
     const direct = /(mcp__\S+__read_resource)\b[\s\S]*?(res_[0-9a-f]{64})/.exec(prompt);
-    if (useSkill) {
-      const name = useSkill[1];
-      const id = `toolu_${++toolSeq}`;
-      emit({ type: "assistant", message: { content: [{ type: "tool_use", id, name: "Skill", input: { skill: name } }] } });
-      const file = builtins.includes("Skill") ? visible().get(name) : undefined;
-      if (!file) {
-        emit({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: id, is_error: true, content: `Unknown skill: ${name}` }] } });
-        text = `I can't find a skill named ${name}.`;
-      } else {
-        const body = readFileSync(file, "utf8");
-        emit({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: id, content: "Launching skill" }] } });
-        const tool = /(mcp__\S+__read_resource)/.exec(body)?.[1];
-        const rid = /res_[0-9a-f]{64}/.exec(body)?.[0];
-        text = tool && rid ? answerFromRead(await callRead(tool, rid)) : "The skill named no resource.";
-      }
+    if (/use it with the Skill tool/.test(prompt)) {
+      const names = proofNames();
+      say(listing(mode === "not-listed" ? [] : names));
+      text = names.length ? await useSkill(names[0]) : "I see no scout-proof skill.";
     } else if (direct) {
       text = answerFromRead(await callRead(direct[1], direct[2]));
     } else {
-      const names = [...visible().keys()].filter((n) => n.startsWith("scout-proof-"));
-      text = names.length ? `Skills: ${names.join(", ")}` : "Skills: none";
+      text = listing(proofNames());
     }
-    emit({ type: "assistant", message: { content: [{ type: "text", text }] } });
+    say(text);
     emit({
       type: "result",
       subtype: "success",
@@ -277,6 +327,6 @@ async function session({ argv, has, flag, mode, version }) {
     chain = chain.then(() => handle(prompt));
   });
   await new Promise((resolve) => rl.on("close", resolve));
-  await chain;
+  if (mode !== "hang-turn2") await chain;
   for (const s of servers) await s.client?.close();
 }
