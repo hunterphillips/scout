@@ -26,7 +26,7 @@ branch ceremony for the PoC; merge and move on).
 `../thoughts/shared/plans/2026-10-01-scout-website-agent-design.md`). Its "Implementation
 progress" section is the new phase log. **Pivot Phase 1 (prove the agent connection)
 passed its gate the same day**; Phase 2 (website capabilities) is in progress: P2.2, P2.3,
-P2.4, P2.7, P2.1 done; P2.6 in review, P2.5 in progress. The old
+P2.4, P2.7, P2.1, P2.6 done; P2.5 in progress. The old
 build above is still intact and still not wired into the app; the legacy
 `personal-context-mcp` package stays untouched until pivot Phase 4.
 
@@ -240,7 +240,16 @@ the plan's phase log):
 - `scripts/setup.mjs`, `uninstall.mjs`, `doctor.mjs` with `scripts/lib/`: the install.
   Setup refuses to run against a non-default Scout home without `--scout-root`;
   uninstall touches only recorded paths inside setup's own locations; the
-  personal-context config is merged, not owned.
+  personal-context config is merged, not owned. Pivot P2.6: `setup --agent-integration`
+  registers the stdio MCP adapter at user scope through `claude mcp add` (never by
+  editing JSON) and installs the static `scout-integration` skill into the skills root,
+  both recorded in `installed.json` (`skillsRoot`, kinds `skill` and `mcp-registration`);
+  `uninstall --agent-integration` removes only what matches the record (exact `get`
+  match, skill by hash), counts runtime wrappers and never touches them. Logic in
+  `lib/{claude-mcp,agent-integration,integration-skill}.mjs`; a foreign `scout`
+  registration refuses and is reported without its command line. Test overrides
+  `SCOUT_CLAUDE_BIN`/`SCOUT_SKILLS_ROOT` are required on a non-real home and refused on
+  the real one. Not yet gated against a real `claude` (Phase 2 live check).
 - `scripts/spikes/`: Phase 0 spikes, each with tests (billing preflights, launch
   profile, subscription smoke test, GitHub-capture and bridge spikes). Reference only;
   Phase 3 lifted the launch profile, preflight, and process-tree code into
