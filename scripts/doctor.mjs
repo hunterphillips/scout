@@ -1,9 +1,12 @@
 #!/usr/bin/env node
 // Scout doctor: read-only checks of what setup.mjs installed. Prints one
-// OK / WARN / FAIL line per check; exits 1 if any check fails.
+// OK / WARN / FAIL line per check; exits 1 if any check fails. When the agent integration
+// is recorded, it also checks the `scout` MCP registration (via `claude mcp get`, which the
+// CLI uses to health-check the server), the integration skill, and the recorded skillsRoot.
+// SCOUT_SKILLS_ROOT or SCOUT_CLAUDE_BIN with the real ~/.scout is a failed check.
 //
 // Usage: node scripts/doctor.mjs
-// Env overrides: SCOUT_HOME, PERSONAL_CONTEXT_HOME, CHROME_NMH_DIR (see lib/paths.mjs).
+// Env overrides: SCOUT_HOME, PERSONAL_CONTEXT_HOME, CHROME_NMH_DIR, SCOUT_CLAUDE_BIN (see lib/paths.mjs).
 
 import { lstatSync, readFileSync } from "node:fs";
 import { HOST_NAME, REPO_ROOT, layout } from "./lib/paths.mjs";
@@ -12,11 +15,12 @@ import { isExecutableFile } from "./lib/executables.mjs";
 import { allowedPath, readInstalled } from "./lib/installed.mjs";
 import { exists, readJsonObject, wrapperScript } from "./lib/files.mjs";
 import { isMain } from "./lib/is-main.mjs";
+import { checkIntegration } from "./lib/agent-integration.mjs";
 
 const oct = (m) => (m & 0o777).toString(8).padStart(4, "0");
 
 /** Run every check; returns [{ status: "OK"|"WARN"|"FAIL", label, detail }]. Writes nothing. */
-export function runChecks(env = process.env) {
+export function runChecks(env = process.env, { claudeFallbacks, mcpTimeoutMs, realHome } = {}) {
   const results = [];
   const add = (status, label, detail = "") => results.push({ status, label, detail });
   const check = (ok, label, detail) => add(ok ? "OK" : "FAIL", label, detail);
@@ -44,7 +48,7 @@ export function runChecks(env = process.env) {
   const extensionId = scout?.extensionId;
 
   if (installed.value) {
-    const outside = installed.value.files.filter((f) => !allowedPath(f.kind, f.path, L));
+    const outside = installed.value.files.filter((f) => !allowedPath(f.kind, f.path, L, installed.value));
     check(outside.length === 0, "install record lists only paths setup writes", outside.length ? outside.map((f) => `${f.kind} ${f.path}`).join("; ") : base.installed);
   }
   const markerCheck = (value, label) => check(marker != null && value === marker, label, `${String(value)} (recorded ${String(marker)})`);
@@ -115,11 +119,14 @@ export function runChecks(env = process.env) {
     const id = tryRead(() => extensionIdFromPem(k.value.pem));
     check(id.value === extensionId, "extension key derives extensionId", id.error ?? String(id.value));
   }
+
+  // Agent integration (optional)
+  if (installed.value) results.push(...checkIntegration(installed.value, { env, L, claudeFallbacks, mcpTimeoutMs, realHome }));
   return results;
 }
 
-export function runDoctor(env = process.env, out = console.log) {
-  const results = runChecks(env);
+export function runDoctor(env = process.env, out = console.log, opts = {}) {
+  const results = runChecks(env, opts);
   for (const r of results) out(`${r.status.padEnd(4)} ${r.label}${r.detail ? `: ${r.detail}` : ""}`);
   const failed = results.filter((r) => r.status === "FAIL").length;
   out(failed ? `${failed} check(s) failed.` : "All checks passed.");

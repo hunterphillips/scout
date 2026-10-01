@@ -2,30 +2,36 @@
 // Scout setup: install the extension key, configs, native host wrapper, and
 // Chrome native-messaging manifest. Every file written is recorded in
 // <SCOUT_HOME>/installed.json so uninstall.mjs can remove exactly those.
+// --agent-integration also registers the user-scope `scout` MCP server through `claude mcp add`
+// and installs the static scout-integration skill (lib/agent-integration.mjs); without it,
+// setup never touches Claude Code's configuration.
 // ~/.personal-context-mcp/config.json belongs to the personal-context service;
 // setup only merges nodePath, claudePath, and x_scout_marker into it.
 //
-// Usage: node scripts/setup.mjs [--dry-run] [--scout-root <dir>]
-// Env overrides: SCOUT_HOME, PERSONAL_CONTEXT_HOME, CHROME_NMH_DIR (see lib/paths.mjs).
+// Usage: node scripts/setup.mjs [--dry-run] [--scout-root <dir>] [--agent-integration]
+// Env overrides: SCOUT_HOME, PERSONAL_CONTEXT_HOME, CHROME_NMH_DIR, SCOUT_SKILLS_ROOT,
+// SCOUT_CLAUDE_BIN (see lib/paths.mjs). The last two are for test installs; with the real
+// ~/.scout, --agent-integration refuses them.
 // When the Scout home is not the real ~/.scout (SCOUT_HOME or HOME overridden),
 // --scout-root is required so a test install cannot re-key the real built extension.
 // Never touches ~/.rook or any process.
 
 import { chmodSync, lstatSync, mkdirSync, readFileSync, statSync } from "node:fs";
-import { userInfo } from "node:os";
-import { join, resolve } from "node:path";
-import { DEFAULT_DESTINATIONS, HOST_NAME, REPO_ROOT, layout, scoutHome } from "./lib/paths.mjs";
+import { resolve } from "node:path";
+import { DEFAULT_DESTINATIONS, HOST_NAME, REPO_ROOT, isRealScoutHome, layout, scoutHome } from "./lib/paths.mjs";
 import { extensionIdFromPem, generateKeyPem, manifestKey } from "./lib/extension-key.mjs";
 import { defaultClaudeFallbacks, isExecutableFile, resolveClaude, resolveNode } from "./lib/executables.mjs";
 import { PC_MERGED_KEYS, newMarker, readInstalled, upsertEntry } from "./lib/installed.mjs";
 import { checkPrivateDir, ensurePrivateDir, exists, fileMarker, readJsonObject, shDoubleQuote, wrapperScript, writeFileMode, writeJson } from "./lib/files.mjs";
 import { isMain } from "./lib/is-main.mjs";
+import { INTEGRATION_EXPLANATION, applyIntegration, describeIntegration, planIntegration, recordedIntegration } from "./lib/agent-integration.mjs";
 
 export function parseArgs(argv) {
-  const opts = { dryRun: false, scoutRoot: REPO_ROOT, scoutRootGiven: false };
+  const opts = { dryRun: false, scoutRoot: REPO_ROOT, scoutRootGiven: false, agentIntegration: false };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--dry-run") opts.dryRun = true;
+    else if (a === "--agent-integration") opts.agentIntegration = true;
     else if (a === "--scout-root") {
       if (!argv[i + 1]) throw new Error("--scout-root needs a directory");
       opts.scoutRoot = argv[++i];
@@ -180,25 +186,26 @@ export function planSetup({ env = process.env, scoutRoot = REPO_ROOT, dryRun = f
   return { L, marker, record, extensionId, nodePath, claudePath, warnings, dirs, steps };
 }
 
-export function runSetup(argv, { env = process.env, out = console.log, err = console.error, claudeFallbacks } = {}) {
-  let opts, plan;
+export function runSetup(argv, { env = process.env, out = console.log, err = console.error, claudeFallbacks, mcpTimeoutMs, realHome } = {}) {
+  let opts, plan, integration;
   try {
     opts = parseArgs(argv);
     const home = resolve(scoutHome(env));
-    // userInfo() reads the account record, so an overridden HOME cannot make a temp dir look real.
-    if (home !== join(userInfo().homedir, ".scout") && !opts.scoutRootGiven) {
+    if (!isRealScoutHome(env, realHome) && !opts.scoutRootGiven) {
       throw new Error(
         `Scout home ${home} is not the real ~/.scout and --scout-root is not given; a test install would re-key the real built extension in ${REPO_ROOT}.\n` +
           `Pass --scout-root <dir> pointing at a separate built copy.`,
       );
     }
     plan = planSetup({ env, scoutRoot: opts.scoutRoot, dryRun: opts.dryRun, claudeFallbacks });
+    // Every refusal happens here, before anything is written.
+    if (opts.agentIntegration) integration = planIntegration({ env, L: plan.L, nodePath: plan.nodePath, record: plan.record, claudeFallbacks, mcpTimeoutMs, realHome });
   } catch (e) {
     err(`setup: ${e.message}`);
     return 1;
   }
   const { L, dirs, steps, warnings } = plan;
-  for (const w of warnings) err(`warning: ${w}`);
+  for (const w of [...warnings, ...(integration?.warnings ?? [])]) err(`warning: ${w}`);
   const mode = (m) => m.toString(8).padStart(4, "0");
 
   if (opts.dryRun) {
@@ -210,6 +217,11 @@ export function runSetup(argv, { env = process.env, out = console.log, err = con
     }
     for (const s of steps) out(`${s.keep ? "would keep" : "would write"} ${s.path} (${mode(s.mode)}): ${s.summary}`);
     out(`would record ${steps.length} files in ${L.installed} (0600)`);
+    if (integration) {
+      out("Agent integration:");
+      for (const line of describeIntegration(integration)) out(line);
+      for (const line of INTEGRATION_EXPLANATION) out(line);
+    } else integrationHint(plan.record, out);
     return 0;
   }
 
@@ -237,10 +249,28 @@ export function runSetup(argv, { env = process.env, out = console.log, err = con
     err(`setup: files written so far are recorded in ${L.installed}; fix the cause and re-run (re-running is safe).`);
     return 1;
   }
-  out(`recorded ${record.files.length} files in ${L.installed}`);
+  if (integration) {
+    try {
+      record = applyIntegration(integration, record, { env, mcpTimeoutMs, out, save: (r) => writeJson(L.installed, r, 0o600) });
+    } catch (e) {
+      err(`setup: agent integration failed: ${e.message}`);
+      err(`setup: what was done is recorded in ${L.installed}; re-run, or remove it with \`npm run uninstall -- --agent-integration\`.`);
+      return 1;
+    }
+  }
+  out(`recorded ${record.files.length} entries in ${L.installed}`);
   out(`extension ID: ${plan.extensionId}`);
   out(`Load the unpacked extension from ${L.extensionManifest.replace(/\/manifest\.json$/, "")}, then run \`npm run doctor\`.`);
+  if (integration) {
+    out("Agent integration installed.");
+    for (const line of INTEGRATION_EXPLANATION) out(line);
+  } else integrationHint(record, out);
   return 0;
+}
+
+function integrationHint(record, out) {
+  const { registration, skill } = recordedIntegration(record);
+  if (!registration && !skill) out("Optional: `npm run setup -- --agent-integration` adds the `scout` MCP connection and skill to all of your Claude Code sessions.");
 }
 
 if (isMain(import.meta.url)) process.exitCode = runSetup(process.argv.slice(2));
