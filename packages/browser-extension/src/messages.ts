@@ -62,8 +62,10 @@ export interface StatusSnapshot {
   paused: boolean;
   /** Exact-origin patterns Chrome has granted. */
   granted: string[];
-  /** The popup's "Capture GitHub issue text" toggle. */
+  /** The popup's "Capture GitHub issue text" toggle, as it takes effect (off without the exact GitHub grant). */
   githubCapture: boolean;
+  /** Chrome also holds a broad grant (e.g. all sites), which Scout ignores. */
+  broadGrantIgnored: boolean;
   /** Null until the core sends a policy on the current port. */
   policy: PolicyState | null;
   counters: { focus: number; forwarded: number; dropped: number; acked: number; denied: number };
