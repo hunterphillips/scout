@@ -26,7 +26,8 @@ branch ceremony for the PoC; merge and move on).
 `../thoughts/shared/plans/2026-10-01-scout-website-agent-design.md`). Its "Implementation
 progress" section is the new phase log. **Pivot Phase 1 (prove the agent connection)
 passed its gate the same day**; Phase 2 (website capabilities) is in progress: P2.2, P2.3,
-P2.4, P2.7, P2.1, P2.6 done; P2.5 in progress. The old
+all seven tasks (P2.1–P2.7) are built, reviewed, and merged; the Phase 2 live checks
+and gate are pending. The old
 build above is still intact and still not wired into the app; the legacy
 `personal-context-mcp` package stays untouched until pivot Phase 4.
 
@@ -151,7 +152,10 @@ the plan's phase log):
   `permissionState.ts` (the live connection's revisioned grants; nothing permitted before
   the first snapshot), `dwell.ts` (3 s on injected `Timers`), `visitTracker.ts` (visits
   only for permitted https origins; `config.destinations` is the Phase 3 recommendations
-  list and feeds nothing yet), `resumeCache.ts`
+  list and feeds nothing yet), `panelCapabilities.ts` / `nativeCommands.ts` /
+  `previewStream.ts` / `panelChannel.ts` (pivot P2.5: the window's capability view,
+  acknowledged idempotent mutation commands, 16 KiB preview chunks, and the wiring; one
+  `coreInstanceId` per start shared with the agent API), `resumeCache.ts`
   (keyed map, 30 s TTL; constructed but not read until Phase 4 wires visit → resume
   cache → catalog → rank), `activityForwarder.ts` (Phase 1: counts only),
   `diagnostics.ts` (JSONL, scalar fields, forbidden-name filter), `config.ts`,
@@ -235,8 +239,21 @@ the plan's phase log):
     `test/global-setup.mjs` builds `dist/` before the suite.
 - `native/Scout`: `SidecarProcess` launches `<nodePath> <scoutRoot>/packages/scout-core/dist/main.js --stdio`
   from `~/.scout/config.json` (no PATH fallback; `SCOUT_HOME` stripped from the child
-  env), restart cap 3 per 60 s, non-blocking stdin writes; `FrontmostMonitor`; a text
-  panel (`PanelModel`) showing status plus the visited hostname.
+  env), restart cap 3 per 60 s, non-blocking stdin writes (`send` → written / retryLater /
+  oversize; a command line incl. newline must be under 512 bytes, macOS `PIPE_BUF`);
+  `FrontmostMonitor`. Pivot P2.5: ScoutKit (no AppKit) holds the whole decision layer —
+  `Protocol.swift` (strict frame decoding, the seven window commands), `JSONLParser`
+  (single pass, 1 MiB lines), `CommandTracker` (command ids; same-id resend for refused
+  writes; on a core restart only approve/decline/revoke are re-sent, toggles settle
+  `unknown`), `PreviewAssembler` (seq/offset/total/descriptor + SHA-256 before a preview is
+  approvable), `CapabilityModel` (per-`coreInstanceId` revision high-water mark),
+  `PanelModel` (composite state; the shown preview and expansion change only by user
+  action; Approve only for the shown, complete preview). ScoutApp: `ScoutWindow`
+  (non-activating NSPanel on all Spaces; Escape collapses), `ScoutPanel.swift` (compact
+  line + disclosure; Offers / Library / Preview / Settings / Activity / Problems; Approve
+  lives only in the Preview pane). Fixtures in `native/Scout/Tests/Fixtures/` are parsed by
+  the contracts package's `panelFixtures.test.ts`, which also pins the Swift limits to the
+  contract's.
 - `scripts/setup.mjs`, `uninstall.mjs`, `doctor.mjs` with `scripts/lib/`: the install.
   Setup refuses to run against a non-default Scout home without `--scout-root`;
   uninstall touches only recorded paths inside setup's own locations; the
