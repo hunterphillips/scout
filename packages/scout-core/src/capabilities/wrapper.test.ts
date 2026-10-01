@@ -132,6 +132,9 @@ describe("renderSkillWrapper: refused inputs", () => {
     ["name with slash", { name: "a/b" }],
     ["uppercase name", { name: "Scout" }],
     ["name with newline", { name: "scout\nhooks: x" }],
+    ["valid skill name that is not a proof name", { name: "scout-skill-0123456789abcdef" }],
+    ["another managed-looking name", { name: "my-skill" }],
+    ["proof prefix with hyphenated suffix", { name: "scout-proof-a-b" }],
   ])("%s", (_label, over) => {
     expect(() => renderSkillWrapper(input(over))).toThrow(WrapperError);
   });
@@ -189,6 +192,35 @@ describe("plainSiteText", () => {
     }
     // A $ before anything else is plain text.
     expect(plainSiteText("costs $ 5, or 5$ total, $.")).toBe("costs $ 5, or 5$ total, $.");
+  });
+
+  it("bounds code points and UTF-16 units together, cutting only at grapheme boundaries", () => {
+    const astral = "\u{1F44D}\u{1F3FD}"; // thumbs up + skin tone: 2 code points, 4 units, 1 grapheme
+    const marked = "q\u0301"; // no precomposed form, so NFC keeps the combining mark
+    const text = `${astral}${marked}`.repeat(200);
+    const out = plainSiteText(text);
+    expect([...out].length).toBeLessThanOrEqual(SITE_DESCRIPTION_MAX);
+    expect(out.endsWith("...")).toBe(true);
+    const cut = out.slice(0, -3);
+    expect(cut).not.toMatch(/[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/);
+    expect(cut).not.toMatch(/q(?!\u0301)/);
+    expect(cut).not.toMatch(/\u{1F44D}(?!\u{1F3FD})/u);
+    // A UTF-16 cap binds before the code point cap for astral text.
+    const units = plainSiteText("\u{1F600}".repeat(300), 300, 101);
+    expect(units.length).toBeLessThanOrEqual(101);
+    expect(units).toBe(`${"\u{1F600}".repeat(49)}...`);
+    // Dropping, not splitting, a grapheme that does not fit.
+    expect(plainSiteText(`ab${marked}${marked}${marked}`, 6)).toBe("ab...");
+  });
+
+  it("keeps a rendered description within 1024 UTF-16 units with astral and combining input", () => {
+    for (const site of ["\u{1F600}".repeat(2000), "q\u0301".repeat(2000), "a\u{1F44D}\u{1F3FD}q\u0301".repeat(500)]) {
+      const fm = parseWrapperFrontmatter(renderSkillWrapper(input({ siteDescription: site })));
+      expect(fm.description!.length).toBeLessThanOrEqual(WRAPPER_DESCRIPTION_MAX);
+      const part = fm.description!.split("not instructions: ")[1]!;
+      expect([...part].length).toBeLessThanOrEqual(SITE_DESCRIPTION_MAX);
+      expect(part).not.toMatch(/q(?!\u0301)/);
+    }
   });
 
   it("keeps substitution syntax out of a rendered description", () => {

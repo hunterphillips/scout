@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { deriveResourceId } from "@scout/contracts";
-import { assignWrapperNames, isScoutOwnedName, isValidSkillName, ownershipHash, SKILL_NAME_MAX, wrapperName, WrapperIdentityError } from "./identity.js";
+import { createHash } from "node:crypto";
+import { assignWrapperNames, isScoutOwnedName, isValidSkillName, OWNERSHIP_HASH_TAG, ownershipHash, SKILL_NAME_MAX, wrapperName, WrapperIdentityError } from "./identity.js";
 
 const id = (hex: string) => `res_${hex.padEnd(64, "0")}`;
 
@@ -99,5 +100,13 @@ describe("ownershipHash", () => {
     expect(ownershipHash({ a: "1", b: "2" })).toBe(ownershipHash({ b: "2", a: "1" }));
     // Length prefixes: moving bytes between path and content changes the hash.
     expect(ownershipHash({ ab: "c" })).not.toBe(ownershipHash({ a: "bc" }));
+  });
+
+  it("starts with the domain tag (layout pinned)", () => {
+    expect(OWNERSHIP_HASH_TAG).toBe("scout-own-v1\0");
+    const want = createHash("sha256").update("scout-own-v1\0").update("8:SKILL.md3:abc").digest("hex");
+    expect(ownershipHash({ "SKILL.md": "abc" })).toBe(want);
+    const untagged = createHash("sha256").update("8:SKILL.md3:abc").digest("hex");
+    expect(ownershipHash({ "SKILL.md": "abc" })).not.toBe(untagged);
   });
 });

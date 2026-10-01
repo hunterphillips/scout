@@ -68,12 +68,25 @@ export function isScoutOwnedName(name: string, manifestNames: ReadonlySet<string
   return names.has(name);
 }
 
+/** Domain tag that starts every ownership hash input, so the hash cannot be confused with another SHA-256 use. */
+export const OWNERSHIP_HASH_TAG = "scout-own-v1\0";
+
 /**
- * SHA-256 (hex) over an export's files: each relative path and its exact UTF-8 content,
- * length-prefixed, in path order. Any edit, added file or rename changes it.
+ * SHA-256 (hex) over an export's files: the tag `scout-own-v1\0`, then each relative path and
+ * its exact UTF-8 content, length-prefixed (`<byte length>:` before each), in path order. Any
+ * edit, added file or rename changes it.
+ *
+ * Format commitments (an export manifest stores these hashes, so changing any of them makes
+ * every recorded wrapper look edited by someone else, and Scout then leaves it alone):
+ *   - naming scheme: `scout-<kind abbrev>-<first 16 hex of the resource ID>` (wrapperName);
+ *   - hash layout: the tag, then `<len>:<path><len>:<content>` per file in sorted path order;
+ *   - the wrapper body includes the approved version hash, so re-exporting a newer version
+ *     changes the ownership hash even when nothing else in the text changed.
+ * A layout change needs a new tag (`scout-own-v2\0`) and a manifest migration.
  */
 export function ownershipHash(files: Readonly<Record<string, string>>): string {
   const h = createHash("sha256");
+  h.update(OWNERSHIP_HASH_TAG);
   for (const path of Object.keys(files).sort()) {
     const p = Buffer.from(path, "utf8");
     const c = Buffer.from(files[path]!, "utf8");
