@@ -6,6 +6,9 @@
 //
 // The process is spawned argv-only and detached (scout-core's childSupervisor), so close()
 // can end stdin, then terminate and reap the whole tree if it does not exit.
+//
+// A turn that times out poisons the session: its answer may still arrive and would be read
+// as the next turn's, so every later send() is refused (rejects with SessionPoisoned).
 
 import { spawn as nodeSpawn } from "node:child_process";
 import { startChild } from "../../packages/scout-core/dist/agents/childSupervisor.js";
@@ -13,6 +16,14 @@ import { createJsonLineStream } from "../../packages/scout-core/dist/agents/json
 import { OwnedTree, psSnapshot } from "../../packages/scout-core/dist/agents/processTree.js";
 
 const MAX_STDOUT_BYTES = 8 * 1024 * 1024;
+
+export class SessionPoisoned extends Error {
+  constructor() {
+    super("session poisoned by an earlier turn timeout");
+    this.name = "SessionPoisoned";
+    this.code = "session_poisoned";
+  }
+}
 const EXIT_WAIT_MS = 10_000;
 
 export function userMessage(text) {
@@ -30,6 +41,7 @@ export function startSession(o) {
   let waiter;
   let exited = false;
   let tooLarge = false;
+  let poisoned = false;
   const stream = createJsonLineStream({
     maxBytes: MAX_STDOUT_BYTES,
     onEvent: (ev) => {
@@ -59,17 +71,22 @@ export function startSession(o) {
     get exited() {
       return exited;
     },
+    get poisoned() {
+      return poisoned;
+    },
     /** Record the process tree now (for the cleanup evidence). */
     pollTree() {
       tree?.poll(psSnapshot());
     },
     /** Send one message; resolves `{ events, result, timedOut, exited, ms }` for this turn. */
     send(text, { timeoutMs }) {
+      if (poisoned) return Promise.reject(new SessionPoisoned());
       const from = events.length;
       const t0 = Date.now();
       return new Promise((resolve) => {
         const finish = (timedOut) => {
           clearTimeout(timer);
+          if (timedOut) poisoned = true;
           waiter = undefined;
           const turn = events.slice(from);
           resolve({ events: turn, result: turn.findLast((e) => e.type === "result"), timedOut, exited, tooLarge, ms: Date.now() - t0 });
