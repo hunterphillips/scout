@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PanelStateSchema, type PanelPreviewChunk, type PreviewCommand } from "@scout/contracts";
@@ -120,6 +120,7 @@ describe("preview stream", () => {
       expect(c.sha256).toBe(sha(text));
       expect(c.totalBytes).toBe(Buffer.byteLength(text));
       expect(c.descriptor).toEqual({ kind: "llms_txt", siteOrigin: ORIGIN, sourceUrl: `${ORIGIN}/llms.txt`, contentType: "text/plain; charset=utf-8" });
+      expect(c.descriptor).toEqual(chunks[0]!.descriptor);
       expect(PanelStateSchema.safeParse(c).success).toBe(true);
     }
     expect(chunks.map((c) => c.text).join("")).toBe(text);
@@ -176,18 +177,32 @@ describe("preview stream", () => {
     expect(stream.serve(cmd({ resourceId: `res_${"0".repeat(64)}`, version: target.version }))).toEqual({ ok: false, code: "not_found" });
   });
 
-  it("a revoked resource is unavailable, mid-read included", async () => {
-    const target = await ingest("w".repeat(40));
+  it("a revoked resource's versions stay previewable, mid-read included, until collection drops them", async () => {
+    const text = "w".repeat(40);
+    const target = await ingest(text);
     await store.approve({ ...target, expectedRevision: store.getResource(target.resourceId)!.revision });
     const w = watched();
     const stream = createPreviewStream({ store: w.store, clock, chunkBytes: 16 });
     const first = stream.serve(cmd(target));
     const cursor = first.ok ? first.chunk.nextCursor! : "";
     await store.revoke(target.resourceId);
-    expect(stream.serve(cmd(target, cursor))).toMatchObject({ ok: false, code: "unavailable" });
+    expect(store.getResource(target.resourceId)!.resource.blocked).toBe(true);
+    // The revocation dropped the pin; the next chunk takes it again.
+    const second = stream.serve(cmd(target, cursor));
+    expect(second).toMatchObject({ ok: true, chunk: { seq: 1, offset: 16 } });
+    expect(w.pinned.size).toBe(1);
+    expect(readAll(stream, target).map((c) => c.text).join("")).toBe(text);
+  });
+
+  it("a version whose blob is gone is not_found; an unreadable blob is unavailable", async () => {
+    const target = await ingest("u".repeat(40));
+    const v = store.getVersion(target.resourceId, target.version)!;
+    const blob = join(home, "capabilities", "blobs", `${v.blobRef}.txt`);
+    const stream = createPreviewStream({ store: watched().store, clock, chunkBytes: 16 });
+    writeFileSync(blob, "tampered", { mode: 0o600 });
     expect(stream.serve(cmd(target))).toMatchObject({ ok: false, code: "unavailable" });
-    expect(stream.openChains).toBe(0);
-    expect(w.pinned.size).toBe(0);
+    unlinkSync(blob);
+    expect(stream.serve(cmd(target))).toMatchObject({ ok: false, code: "not_found" });
   });
 
   it("close releases every open read", async () => {

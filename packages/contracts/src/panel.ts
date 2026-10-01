@@ -32,8 +32,14 @@ export const CAPABILITY_OFFERS_MAX = 50;
 export const CAPABILITY_LIBRARY_MAX = 200;
 export const CAPABILITY_ORIGINS_MAX = 200;
 export const CAPABILITY_CONFLICTS_MAX = 50;
-/** Versions listed per library entry, newest first. */
+/** Versions listed per library entry, newest first; the default version is always among them. */
 export const LIBRARY_VERSIONS_MAX = 6;
+/**
+ * Serialized `capabilities` frame (JSON, newline excluded) stays under this, well inside the
+ * app's 1 MiB line limit: the core drops the least recent library entries, then the oldest
+ * offers, until it fits, and sets `truncated`.
+ */
+export const CAPABILITIES_FRAME_MAX_BYTES = 512 * 1024;
 export const PANEL_AUDIT_MAX = 200;
 
 const COMMAND_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
@@ -76,7 +82,10 @@ export const PanelResultsFailureSchema = z.object({
 
 export const SkillDescriptorSchema = z.object({ name: z.string(), description: z.string().optional() });
 
-/** A pending version of an unblocked resource whose site origin Chrome currently permits. */
+/**
+ * The newest recorded version of an unblocked resource whose site origin Chrome currently
+ * permits, while that version is pending. One offer per resource at most.
+ */
 export const CapabilityOfferSchema = z.object({
   resourceId: ResourceIdSchema,
   /** The version's content hash; approve/decline name it. */
@@ -104,9 +113,9 @@ export const LibraryEntrySchema = z.object({
   siteOrigin: HttpsOriginSchema,
   sourceUrl: SourceUrlSchema,
   defaultVersion: ContentHashSchema.optional(),
-  /** `blocked`: revoked; `approved`: has a default version; `pending_only`: neither (only pending or declined versions). */
-  state: z.enum(["approved", "blocked", "pending_only"]),
-  /** Newest first, at most LIBRARY_VERSIONS_MAX. */
+  /** `blocked`: revoked; `approved`: has a default version; `no_default`: neither (only pending or declined versions). */
+  state: z.enum(["approved", "blocked", "no_default"]),
+  /** Newest first, at most LIBRARY_VERSIONS_MAX; includes `defaultVersion` even when older than the rest. */
   versions: z.array(LibraryVersionSchema).max(LIBRARY_VERSIONS_MAX),
   resourceRevision: Revision,
 });
@@ -138,7 +147,7 @@ export const PanelCapabilitiesSchema = z.object({
   library: z.array(LibraryEntrySchema).max(CAPABILITY_LIBRARY_MAX),
   conflicts: z.array(CapabilityConflictSchema).max(CAPABILITY_CONFLICTS_MAX),
   origins: z.array(OriginSettingSchema).max(CAPABILITY_ORIGINS_MAX),
-  /** Some list was cut to its bound. */
+  /** Some list was cut to its bound, or to CAPABILITIES_FRAME_MAX_BYTES. */
   truncated: z.boolean(),
 });
 

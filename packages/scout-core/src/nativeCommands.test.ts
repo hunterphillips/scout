@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { MutationCommand, PanelAck } from "@scout/contracts";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { writeBrowserContextGrant } from "./agentApi/grants.js";
+import { readBrowserContextGrant, writeBrowserContextGrant } from "./agentApi/grants.js";
 import type { DiscoveryResult } from "./capabilities/discovery.js";
 import { type CapabilityStore, createCapabilityStore } from "./capabilities/store.js";
 import { readConfig } from "./config.js";
@@ -80,6 +80,7 @@ function setup(extra: Partial<NativeCommandsOptions> & { permitted?: boolean; st
     store: counted,
     isPermitted: () => extra.permitted ?? true,
     writeBrowserContextGrant: (enabled) => writeBrowserContextGrant(home, enabled),
+    readBrowserContextGrant: () => readBrowserContextGrant(home),
     emitAck: (a) => void acks.push(a),
     onStoreChanged: () => void counts.changed++,
     onGrantChanged: (enabled) => void grants.push(enabled),
@@ -169,7 +170,7 @@ describe("native commands", () => {
     expect(body.offers).toEqual([]);
   });
 
-  it("revoke blocks after commit, acks, and later previews are unavailable", async () => {
+  it("revoke blocks after commit, acks, and later previews stay readable", async () => {
     const t = await ingest("guide v1");
     await store.approve({ ...t, expectedRevision: rev(t.resourceId) });
     let blockedAtAck: boolean | undefined;
@@ -178,7 +179,7 @@ describe("native commands", () => {
     expect(blockedAtAck).toBe(true);
     expect(store.resolveRead(t.resourceId)).toEqual({ ok: false, code: "revoked" });
     const previews = createPreviewStream({ store, clock });
-    expect(previews.serve({ type: "preview", commandId: "p1", ...t })).toMatchObject({ ok: false, code: "unavailable" });
+    expect(previews.serve({ type: "preview", commandId: "p1", ...t })).toMatchObject({ ok: true, chunk: { text: "guide v1" } });
     // Revoking an already-blocked resource acks ok whatever revision the app had.
     const again = setup();
     await again.commands.handle({ type: "revoke", commandId: "r2", resourceId: t.resourceId, expectedRevision: 0 });
@@ -228,6 +229,17 @@ describe("native commands", () => {
     await s.commands.handle({ type: "set_agent_browser_context", commandId: "g2", enabled: false });
     expect(readConfig(home).agentBrowserContext).toBe(false);
     expect(s.grants).toEqual([true, false]);
+  });
+
+  it("the announced grant is what the agent API reads back, not what was asked", async () => {
+    // Another invalid key makes the agent API treat the whole file as not granted.
+    writeFileSync(join(home, "config.json"), JSON.stringify({ chromeBundleId: 7 }));
+    const s = setup();
+    await s.commands.handle({ type: "set_agent_browser_context", commandId: "g1", enabled: true });
+    expect(s.acks[0]).toMatchObject({ ok: true });
+    expect(JSON.parse(readFileSync(join(home, "config.json"), "utf8"))).toEqual({ chromeBundleId: 7, agentBrowserContext: true });
+    expect(readBrowserContextGrant(home)).toBe(false);
+    expect(s.grants).toEqual([false]);
   });
 
   it("a malformed config.json is left alone and the grant command fails", async () => {

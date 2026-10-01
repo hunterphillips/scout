@@ -9,6 +9,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
 import { encodeFrame, FrameDecoder, MAX_FRAME_FROM_CHROME } from "@scout/contracts/frame";
+import { NATIVE_COMMAND_MAX_BYTES } from "@scout/contracts";
 import { createSocketBackend } from "@scout/scout-mcp/client";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { createCapabilityStore } from "./capabilities/store.js";
@@ -231,18 +232,33 @@ describe("main --stdio", () => {
     expect(chunks.map((ch) => ch.text).join("")).toBe(text);
     expect(chunks.at(-1)!.nextCursor).toBeUndefined();
 
-    // An over-long line is refused like any invalid one and never answered.
-    c.child.stdin.write(`${JSON.stringify({ type: "refresh_capabilities", commandId: "big", pad: "x".repeat(5000) })}\n`);
-    c.child.stdin.write(`${JSON.stringify({ type: "refresh_capabilities", commandId: "small" })}\n`);
-    await until(() => c.lines.some((l) => (l as { commandId?: string }).commandId === "small"));
-    expect(c.lines.some((l) => (l as { commandId?: string }).commandId === "big")).toBe(false);
     c.child.stdin.end();
     expect((await c.exited).code).toBe(0);
     const log = readFileSync(join(home, "logs", "diagnostics.jsonl"), "utf8");
-    expect(log).toContain('"event":"native_command_invalid"');
     expect(log).toContain('"event":"preview_chunk"');
     expect(log).not.toContain("s.example/llms.txt");
     expect(log).not.toContain("😀");
+  });
+
+  it("refuses a stdin line whose bytes with the newline reach the command size limit: counted, never answered", async () => {
+    // A valid command padded with JSON whitespace to exactly `bytes` before the newline.
+    const padded = (commandId: string, bytes: number): string => {
+      const head = `{"type":"refresh_capabilities","commandId":"${commandId}"`;
+      return `${head}${" ".repeat(bytes - head.length - 1)}}`;
+    };
+    const c = await startReady();
+    const atLimit = padded("atlimit", NATIVE_COMMAND_MAX_BYTES - 1); // + newline = NATIVE_COMMAND_MAX_BYTES
+    const under = padded("under", NATIVE_COMMAND_MAX_BYTES - 2); // + newline = one byte under
+    expect(Buffer.byteLength(atLimit)).toBe(NATIVE_COMMAND_MAX_BYTES - 1);
+    c.child.stdin.write(`${atLimit}\n`);
+    c.child.stdin.write(`${under}\n`);
+    await until(() => c.lines.some((l) => (l as { commandId?: string }).commandId === "under"));
+    expect(c.lines.some((l) => (l as { commandId?: string }).commandId === "atlimit")).toBe(false);
+    c.child.stdin.end();
+    expect((await c.exited).code).toBe(0);
+    const log = readFileSync(join(home, "logs", "diagnostics.jsonl"), "utf8");
+    const invalid = log.trim().split("\n").map((l) => JSON.parse(l) as { event: string; count?: number }).filter((e) => e.event === "native_command_invalid");
+    expect(invalid.map((e) => e.count)).toEqual([1]);
   });
 
   it("relays host frames into panel states, answers hello with a policy, and acks page_text back to the host", async () => {

@@ -2,10 +2,16 @@
 // for the user, the library, export conflicts, per-origin auto-acquire settings), rebuilt from
 // the store and re-sent on every change rather than patched.
 //
-// Offers are the pending versions of unblocked resources whose site origin Chrome permits
-// right now, so losing a grant drops that origin's offers on the next frame. A declined or
-// revoked version is never an offer, and a blocked resource offers nothing however often it is
-// rediscovered. Each list is bounded (contracts panel.ts); `truncated` says one was cut.
+// An offer is a resource's newest recorded version while it is pending (the same rule ingest's
+// auto-acquire uses), on an unblocked resource whose site origin Chrome permits right now, so
+// losing a grant drops that origin's offers on the next frame. An older pending version is never
+// offered, nor one behind a declined newer one; a declined or revoked version is never an offer,
+// and a blocked resource offers nothing however often it is rediscovered.
+//
+// A library entry lists its newest LIBRARY_VERSIONS_MAX versions, always including the default
+// (an older default displaces the oldest other version). Each list is bounded (contracts
+// panel.ts), and the serialized frame is kept under CAPABILITIES_FRAME_MAX_BYTES by dropping the
+// least recent library entries, then the oldest offers; `truncated` says something was cut.
 //
 // The emitter coalesces change notifications (debounced) and skips a frame identical to the
 // last one sent; `refresh()` sends at once, even when unchanged. `revision` increases with
@@ -16,6 +22,7 @@ import {
   CAPABILITY_LIBRARY_MAX,
   CAPABILITY_OFFERS_MAX,
   CAPABILITY_ORIGINS_MAX,
+  CAPABILITIES_FRAME_MAX_BYTES,
   LIBRARY_VERSIONS_MAX,
   type CapabilityOffer,
   type LibraryEntry,
@@ -52,32 +59,34 @@ export function buildCapabilities(input: CapabilitiesInput): CapabilitiesBody {
   const library: (LibraryEntry & { newest: number })[] = [];
   for (const r of state.resources) {
     const res = r.resource;
-    if (!res.blocked && isPermitted(res.siteOrigin)) {
-      for (const v of res.versions) {
-        if (v.state !== "pending") continue;
-        const skill = r.meta[v.hash]?.skill;
-        offers.push({
-          resourceId: res.id,
-          version: v.hash,
-          kind: res.kind,
-          siteOrigin: res.siteOrigin,
-          sourceUrl: res.sourceUrl,
-          byteLength: v.byteLength,
-          fetchedAt: v.fetchedAt,
-          resourceRevision: r.revision,
-          ...(skill ? { skill: { name: skill.name, ...(skill.description !== undefined ? { description: skill.description } : {}) } } : {}),
-        });
-      }
+    const v = res.versions.at(-1);
+    if (!res.blocked && v?.state === "pending" && isPermitted(res.siteOrigin)) {
+      const skill = r.meta[v.hash]?.skill;
+      offers.push({
+        resourceId: res.id,
+        version: v.hash,
+        kind: res.kind,
+        siteOrigin: res.siteOrigin,
+        sourceUrl: res.sourceUrl,
+        byteLength: v.byteLength,
+        fetchedAt: v.fetchedAt,
+        resourceRevision: r.revision,
+        ...(skill ? { skill: { name: skill.name, ...(skill.description !== undefined ? { description: skill.description } : {}) } } : {}),
+      });
     }
     const versions = [...res.versions].reverse().sort((a, b) => b.fetchedAt - a.fetchedAt);
+    let listed = versions.slice(0, LIBRARY_VERSIONS_MAX);
+    const defaultV = versions.find((v) => v.hash === res.defaultVersion);
+    // An unlisted default is older than every listed version: it replaces the oldest one.
+    if (defaultV && !listed.includes(defaultV)) listed = [...listed.slice(0, -1), defaultV];
     library.push({
       resourceId: res.id,
       kind: res.kind,
       siteOrigin: res.siteOrigin,
       sourceUrl: res.sourceUrl,
       ...(res.defaultVersion !== undefined ? { defaultVersion: res.defaultVersion } : {}),
-      state: res.blocked ? "blocked" : res.defaultVersion !== undefined ? "approved" : "pending_only",
-      versions: versions.slice(0, LIBRARY_VERSIONS_MAX).map((v) => ({ hash: v.hash, state: v.state, byteLength: v.byteLength, fetchedAt: v.fetchedAt })),
+      state: res.blocked ? "blocked" : res.defaultVersion !== undefined ? "approved" : "no_default",
+      versions: listed.map((v) => ({ hash: v.hash, state: v.state, byteLength: v.byteLength, fetchedAt: v.fetchedAt })),
       resourceRevision: r.revision,
       newest: versions[0]?.fetchedAt ?? 0,
     });
@@ -99,7 +108,7 @@ export function buildCapabilities(input: CapabilitiesInput): CapabilitiesBody {
   const l = cut(library, CAPABILITY_LIBRARY_MAX);
   const c = cut(input.conflicts, CAPABILITY_CONFLICTS_MAX);
   const g = cut(origins, CAPABILITY_ORIGINS_MAX);
-  return {
+  const body: CapabilitiesBody = {
     approvalRevision: state.approvalRevision,
     offers: o.items,
     library: l.items.map(({ newest: _newest, ...entry }) => entry),
@@ -107,6 +116,32 @@ export function buildCapabilities(input: CapabilitiesInput): CapabilitiesBody {
     origins: g.items,
     truncated: o.cut || l.cut || c.cut || g.cut,
   };
+  return fitFrame(body);
+}
+
+const bytes = (value: unknown): number => Buffer.byteLength(JSON.stringify(value), "utf8");
+/** The frame's size as sent, with the largest revision the emitter could stamp on it. */
+const frameBytes = (body: CapabilitiesBody): number => bytes({ type: "capabilities", revision: Number.MAX_SAFE_INTEGER, ...body });
+
+/**
+ * Drop the least recent library entries, then the oldest offers (both lists are newest first),
+ * until the serialized frame is under CAPABILITIES_FRAME_MAX_BYTES. Each drop subtracts the
+ * element's own bytes (not its comma), so the running total never underestimates; the loop then
+ * confirms against the exact size.
+ */
+function fitFrame(body: CapabilitiesBody): CapabilitiesBody {
+  let total = frameBytes(body);
+  if (total < CAPABILITIES_FRAME_MAX_BYTES) return body;
+  const library = [...body.library];
+  const offers = [...body.offers];
+  for (;;) {
+    while (total >= CAPABILITIES_FRAME_MAX_BYTES && (library.length > 0 || offers.length > 0)) {
+      total -= bytes(library.length > 0 ? library.pop() : offers.pop());
+    }
+    const fitted: CapabilitiesBody = { ...body, library, offers, truncated: true };
+    total = frameBytes(fitted);
+    if (total < CAPABILITIES_FRAME_MAX_BYTES || (library.length === 0 && offers.length === 0)) return fitted;
+  }
 }
 
 const rank = (s: OriginSetting, current: string | null): number => (s.autoAcquire ? 2 : 0) + (s.origin === current ? 1 : 0);

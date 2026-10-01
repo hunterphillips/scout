@@ -69,6 +69,13 @@ describe("panel frames (core -> app)", () => {
     for (const f of frames) expect(PanelStateSchema.parse(f)).toEqual(f);
   });
 
+  it("names a library entry without a default `no_default`", () => {
+    const entry = { ...library, state: "no_default", versions: [{ ...library.versions[0], state: "pending" }] };
+    delete (entry as { defaultVersion?: string }).defaultVersion;
+    expect(PanelStateSchema.safeParse({ ...capabilities, library: [entry] }).success).toBe(true);
+    expect(PanelStateSchema.safeParse({ ...capabilities, library: [{ ...entry, state: "pending_only" }] }).success).toBe(false);
+  });
+
   it("still parses the old frames", () => {
     expect(PanelStateSchema.safeParse({ type: "state", status: "disconnected" }).success).toBe(true);
     expect(PanelStateSchema.safeParse({ type: "results", visitEpoch: 1, status: "empty", items: [] }).success).toBe(true);

@@ -44,10 +44,12 @@ export interface NativeCommandsOptions {
   isPermitted: (origin: string) => boolean;
   /** Persist the browser-context grant; throws when it could not. */
   writeBrowserContextGrant: (enabled: boolean) => void;
+  /** The grant as the agent API reads it from disk (readBrowserContextGrant). */
+  readBrowserContextGrant: () => boolean;
   emitAck: (ack: PanelAck) => void;
   /** Stored state changed: the capabilities view may differ. */
   onStoreChanged: () => void;
-  /** The browser-context grant was written. */
+  /** The browser-context grant was written; `enabled` is what the agent API now reads. */
   onGrantChanged: (enabled: boolean) => void;
   /** `refresh_capabilities`: send the capabilities view now. */
   refreshCapabilities: () => void;
@@ -137,7 +139,9 @@ export function createNativeCommands(options: NativeCommandsOptions): NativeComm
         } catch {
           return { ack: failed(id, "store_error") };
         }
-        options.onGrantChanged(cmd.enabled);
+        // Announce what the agent API will read, not what was asked: another invalid key in
+        // config.json makes the whole file count as not granted.
+        options.onGrantChanged(options.readBrowserContextGrant());
         return { ack: ok(id, 0) };
       case "refresh_capabilities":
         options.refreshCapabilities();

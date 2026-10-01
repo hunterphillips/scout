@@ -213,8 +213,9 @@ export async function runStdio(deps: StdioDeps): Promise<StdioCore> {
     })());
 
   // The only writer is the native app that launched us over a private pipe. Its commands fit
-  // one atomic pipe write (at most NATIVE_COMMAND_MAX_BYTES with the newline, the app's own
+  // one atomic pipe write (shorter than NATIVE_COMMAND_MAX_BYTES with the newline, the app's own
   // limit); a longer line is refused like any invalid one. readline itself does not cap a line.
+  // readline strips the newline, so it is added back to the count.
   const rl = createInterface({ input: deps.stdin, crlfDelay: Infinity });
   let shuttingDown: Promise<void> | null = null;
   // Settles (never rejects) once start has finished either way, so a shutdown that
@@ -245,7 +246,7 @@ export async function runStdio(deps: StdioDeps): Promise<StdioCore> {
     if (line.trim() === "") return;
     let value: unknown;
     try {
-      value = Buffer.byteLength(line, "utf8") < NATIVE_COMMAND_MAX_BYTES ? JSON.parse(line) : undefined;
+      value = Buffer.byteLength(line, "utf8") + 1 < NATIVE_COMMAND_MAX_BYTES ? JSON.parse(line) : undefined;
     } catch {
       value = undefined;
     }

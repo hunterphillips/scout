@@ -222,9 +222,9 @@ export interface CapabilityStore {
   /** Keep a readable version from collection while a request uses it. Returns the read check. */
   pinVersion(requestId: string, resourceId: string, version: string): ReadResolution;
   /**
-   * Keep any recorded, non-revoked version of an unblocked resource (pending included) from
-   * collection while Scout's window previews it. False (nothing pinned) otherwise. Released by
-   * `releasePins`, and by a revocation like every pin.
+   * Keep any recorded version (pending, declined, or a blocked resource's revoked one) from
+   * collection while Scout's window previews it, read-only. False (nothing pinned) when the
+   * version is not recorded. Released by `releasePins`, and by a revocation like every pin.
    */
   pinForPreview(requestId: string, resourceId: string, version: string): boolean;
   releasePins(requestId: string): void;
@@ -563,7 +563,7 @@ export async function createCapabilityStore(options: CapabilityStoreOptions): Pr
     pinForPreview(requestId, resourceId, version) {
       const r = findResource(state, resourceId);
       const v = r?.resource.versions.find((x) => x.hash === version);
-      if (!r || r.resource.blocked || !v || v.state === "revoked") return false;
+      if (!r || !v) return false;
       if (!pins.has(requestId)) pins.set(requestId, new Set());
       pins.get(requestId)!.add(pinKey(resourceId, version));
       return true;

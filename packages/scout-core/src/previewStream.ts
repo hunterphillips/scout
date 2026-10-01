@@ -4,17 +4,20 @@
 // the last) an opaque cursor for the next chunk. The app assembles and checks the chunks; it
 // never sends text back.
 //
-// Any recorded version may be previewed, pending ones included (that is how the user decides),
-// except while the resource is blocked or the version is revoked (`unavailable`). An unknown
-// resource or version is `not_found`, and so is an unknown or expired cursor; a cursor presented
-// for another resource or version is `invalid`.
+// Any recorded version may be previewed, read-only: pending ones (that is how the user decides),
+// and a blocked resource's revoked versions too, so re-approving one from the library also
+// follows a complete preview. An unknown resource or version is `not_found`, and so is a
+// version whose blob is gone, and an unknown or expired cursor; a cursor presented for another
+// resource or version is `invalid`. `unavailable` means the blob is there but unreadable or
+// fails its hash check.
 //
 // A multi-chunk read is one chain: its first chunk draws a pin ID and pins the version in the
 // store (store.pinForPreview) so collection cannot drop it mid-read. The pin is released on the
 // last chunk, when the chain expires (PREVIEW_CURSOR_TTL_MS after its latest chunk; swept on
 // every command and by `sweepExpired`), when MAX_PREVIEW_CHAINS is exceeded (least recently used first), and
-// on `close`. A revocation drops the store's pins itself and stops the next chunk. Cursors are
-// not consumed, so a command the app retries gets the same chunk again.
+// on `close`. A revocation drops the store's pins; the next chunk pins the version again, or is
+// `not_found` if collection dropped it meanwhile. Cursors are not consumed, so a command the app
+// retries gets the same chunk again.
 
 import { randomBytes } from "node:crypto";
 import {
@@ -26,7 +29,7 @@ import {
   type PreviewDescriptor,
 } from "@scout/contracts";
 import { utf8Cut } from "./agentApi/handlers.js";
-import type { CapabilityStore } from "./capabilities/store.js";
+import { type CapabilityStore, StoreCorruptError } from "./capabilities/store.js";
 import type { Clock } from "./clock.js";
 
 /** Open multi-chunk reads at once; the oldest is dropped beyond this. */
@@ -112,13 +115,12 @@ export function createPreviewStream(options: PreviewStreamOptions): PreviewStrea
     const r = store.getResource(cmd.resourceId);
     if (!r) return fail("not_found");
     const v = r.resource.versions.find((x) => x.hash === cmd.version);
-    if (r.resource.blocked || v?.state === "revoked") return fail("unavailable", r.revision);
     if (!v) return fail("not_found", r.revision);
     let bytes: Buffer;
     try {
       bytes = store.readBlob(v.blobRef);
-    } catch {
-      return fail("unavailable", r.revision);
+    } catch (error) {
+      return fail(error instanceof StoreCorruptError && error.code === "blob_missing" ? "not_found" : "unavailable", r.revision);
     }
     if (offset > bytes.length) return fail("invalid", r.revision);
 
@@ -156,7 +158,7 @@ export function createPreviewStream(options: PreviewStreamOptions): PreviewStrea
     chains.delete(chain.pinId);
     chains.set(chain.pinId, chain);
     // Re-pinned on every chunk: a no-op unless something released the pin meanwhile.
-    if (!store.pinForPreview(chain.pinId, r.resource.id, v.hash)) return fail("unavailable", r.revision);
+    if (!store.pinForPreview(chain.pinId, r.resource.id, v.hash)) return fail("not_found", r.revision);
     chain.expiresAt = clock.now() + ttlMs;
     const next = newId();
     chain.cursors.add(next);

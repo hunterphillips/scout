@@ -94,6 +94,7 @@ export function createPanelChannel(options: PanelChannelOptions): PanelChannel {
     store,
     isPermitted: options.isPermitted,
     writeBrowserContextGrant: options.writeBrowserContextGrant,
+    readBrowserContextGrant: options.readBrowserContextGrant,
     emitAck: emit,
     onStoreChanged: () => capabilities.changed(),
     onGrantChanged: (enabled) => emit({ type: "grant", agentBrowserContext: enabled }),
