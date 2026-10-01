@@ -52,10 +52,10 @@ export const BINARY_CONTROL_RATIO = 0.01;
 
 /**
  * Frontmatter keys that would make a skill do more than give instructions. Matched after
- * lowercasing and turning `_` into `-`. Scout's wrapper never passes these through, so a
+ * `normalizeKey` (camelCase and `_` become kebab-case). Scout's wrapper never passes these through, so a
  * skill carrying one is refused rather than silently stripped.
  */
-export const EXECUTABLE_FRONTMATTER_KEYS: ReadonlySet<string> = new Set(["hooks", "allowed-tools", "tools", "model", "mcp-servers", "mcpservers"]);
+export const EXECUTABLE_FRONTMATTER_KEYS: ReadonlySet<string> = new Set(["hooks", "allowed-tools", "tools", "model", "mcp-servers", "mcpservers", "allowedtools"]);
 
 /** Most frontmatter lines examined before the block counts as unterminated. */
 const FRONTMATTER_MAX_LINES = 64;
@@ -67,6 +67,11 @@ const FRONTMATTER_KEY = /^[A-Za-z][A-Za-z0-9_-]{0,63}$/;
 
 export function sha256Hex(bytes: Uint8Array): string {
   return createHash("sha256").update(bytes).digest("hex");
+}
+
+/** `allowedTools`, `allowed_tools`, and `Allowed-Tools` all become `allowed-tools`. */
+function normalizeKey(key: string): string {
+  return key.replace(/([a-z0-9])([A-Z])/g, "$1-$2").replace(/_/g, "-").toLowerCase();
 }
 
 function isHtmlContentType(contentType: string | undefined): boolean {
@@ -113,7 +118,7 @@ function checkSkill(body: string): TextRejectReason | null {
     const key = line.slice(0, colon).trim();
     const value = line.slice(colon + 1).trim();
     if (!FRONTMATTER_KEY.test(key)) return "frontmatter_invalid";
-    if (EXECUTABLE_FRONTMATTER_KEYS.has(key.toLowerCase().replace(/_/g, "-"))) return "frontmatter_executable";
+    if (EXECUTABLE_FRONTMATTER_KEYS.has(normalizeKey(key))) return "frontmatter_executable";
     if (/^[|>]/.test(value)) return "frontmatter_invalid";
   }
   return lines.slice(end + 1).join("\n").trim() ? null : "empty";

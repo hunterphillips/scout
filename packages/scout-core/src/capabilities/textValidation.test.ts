@@ -47,7 +47,7 @@ describe("validateText", () => {
     });
 
     it("refuses executable frontmatter keys rather than stripping them", () => {
-      for (const key of ["hooks", "allowed-tools", "allowed_tools", "tools", "model", "Model"]) {
+      for (const key of ["hooks", "allowed-tools", "allowed_tools", "allowedTools", "tools", "model", "Model", "mcp-servers", "mcp_servers", "mcpServers", "mcpservers", "allowedtools"]) {
         expect(validateText(enc(`---\nname: x\n${key}: Bash\n---\nbody\n`), undefined, "skill")).toEqual({ ok: false, reason: "frontmatter_executable" });
       }
     });

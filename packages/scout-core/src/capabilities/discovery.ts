@@ -9,7 +9,6 @@
 import { join } from "node:path";
 import type { ResourceKind } from "@scout/contracts";
 import type { CatalogFetch, CatalogFetchOptions } from "../catalog/catalogFetch.js";
-import { TEXT_SOURCE_MAX_BYTES } from "../catalog/catalogFetch.js";
 import { isRefusal } from "../catalog/pacing.js";
 import { createOriginFetchSession, type OriginFetchSession } from "../catalog/resolveCatalog.js";
 import { type CompiledRobots, compileRobots, fetchRobots, isAllowed, type RobotsSource } from "../catalog/robots.js";
@@ -309,7 +308,7 @@ export async function discoverSiteResources(originInput: string, options: Discov
       return item(request, "failed", "none", "robots_disallowed");
     }
 
-    const opts: CatalogFetchOptions = { accept: request.accept, maxBytes: request.kind === "llms_txt" ? TEXT_SOURCE_MAX_BYTES : TEXT_MAX_BYTES[request.kind] };
+    const opts: CatalogFetchOptions = { accept: request.accept, maxBytes: TEXT_MAX_BYTES[request.kind] };
     if (lastGood?.etag) opts.ifNoneMatch = lastGood.etag;
     if (lastGood?.lastModified) opts.ifModifiedSince = lastGood.lastModified;
     const result = await fetch(request.url, opts);

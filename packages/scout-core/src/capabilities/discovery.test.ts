@@ -109,6 +109,13 @@ describe("discoverSiteResources", () => {
     expect(skillNamed(result, "big")).toMatchObject({ status: "limited", code: "too_large" });
   });
 
+  it("never downloads more than its own 128 KiB cap for llms.txt", async () => {
+    const site = fakeSite({ "/llms.txt": `# Big\n${"x".repeat(300 * 1024)}` });
+    const result = await discoverer(site.guardedFetch).discover(ORIGIN);
+    expect(one(result, "llms_txt")).toMatchObject({ status: "limited", code: "too_large" });
+    expect(site.requests.find((r) => r.path === "/llms.txt")?.options.maxBytes).toBe(128 * 1024);
+  });
+
   it("rejects an HTML fallback page served as text/markdown and invalid encodings", async () => {
     const site = fakeSite({
       "/llms.txt": { body: "<!doctype html><html><div id=root></div></html>", contentType: "text/markdown" },
