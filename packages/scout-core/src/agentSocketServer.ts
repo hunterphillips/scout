@@ -60,8 +60,14 @@ export function createAgentSocketServer(options: AgentSocketServerOptions): Agen
   let server: Server | null = null;
   let published: PublishedSocket | null = null;
   let nextId = 0;
+  /** Set by `close()`: a connection accepted from then on is destroyed before it can authenticate. */
+  let closing = false;
 
   const handleConnection = (sock: Socket): void => {
+    if (closing) {
+      sock.destroy();
+      return;
+    }
     sockets.add(sock);
     const n = ++nextId;
     const conn: AgentConnection = { id: `agent-conn-${n}`, principal: null };
@@ -124,6 +130,7 @@ export function createAgentSocketServer(options: AgentSocketServerOptions): Agen
     coreInstanceId: handlers.coreInstanceId,
     async start() {
       if (server !== null) throw new Error("scout: agent socket server already started");
+      closing = false;
       const srv = createServer(handleConnection);
       published = await publishPrivateSocket({
         runDir: options.runDir,
@@ -142,7 +149,11 @@ export function createAgentSocketServer(options: AgentSocketServerOptions): Agen
       const pub = published;
       server = null;
       published = null;
-      // Wait for each close event, so every connection's cursors and pins are gone on return.
+      closing = true;
+      // Stop accepting first, so a client reconnecting now cannot authenticate and hold the
+      // listener open; then wait for each close event, so every connection's cursors and pins
+      // are gone on return.
+      const listenerClosed = pub?.close();
       await Promise.all(
         [...sockets].map(
           (s) =>
@@ -152,7 +163,7 @@ export function createAgentSocketServer(options: AgentSocketServerOptions): Agen
             }),
         ),
       );
-      await pub?.close();
+      await listenerClosed;
     },
     issueJobToken: (grant) => auth.issueJobToken(grant),
     revokeJobToken: (jobId) => auth.revokeJobToken(jobId),

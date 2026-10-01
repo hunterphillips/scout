@@ -23,9 +23,10 @@
 //
 // A multi-chunk read is one read session: its first chunk draws a random pin ID, every
 // cursor of the chain carries it, and every chunk with a next cursor pins the version in the
-// store under it. The pin is released when the session ends: on the last chunk, on
-// revocation, on the connection closing, or once no live cursor of the chain is left
-// (expired or evicted). A single-chunk read pins nothing. Expired cursors are swept whenever
+// store under it. The pin is released on the last chunk (even while earlier cursors of the
+// chain are still live: replaying one re-pins under the same ID), on revocation, on the
+// connection closing, or once no live cursor of the chain is left (expired or evicted),
+// which also ends a re-pin from a replay. A single-chunk read pins nothing. Expired cursors are swept whenever
 // a cursor is issued or presented, and by `sweepExpired`, which main runs before each
 // collection so an abandoned read on a quiet connection does not hold its pin.
 
@@ -269,16 +270,17 @@ export function createAgentHandlers(options: AgentHandlerOptions): AgentHandlers
       const refused = gate(conn);
       if (refused) return fail(refused);
       const site = currentSite();
+      const c = p.cursor !== undefined ? takeCursor(p.cursor, "site_links", conn) : undefined;
+      if (p.cursor !== undefined && (!c || site?.origin !== c.origin)) return fail("expired_snapshot");
+      if (!site) return fail("not_found");
+      // Loaded once: the version checked is the one paged.
+      const cached = cachedLinks(site.origin);
       let start = 0;
-      if (p.cursor !== undefined) {
-        const c = takeCursor(p.cursor, "site_links", conn);
-        if (!c || site?.origin !== c.origin) return fail("expired_snapshot");
+      if (c) {
         // The catalog changed since the first page: the listing is stale.
-        if (cachedLinks(c.origin)?.catalogVersion !== c.catalogVersion) return fail("expired_snapshot");
+        if (cached?.catalogVersion !== c.catalogVersion) return fail("expired_snapshot");
         start = c.offset;
       }
-      if (!site) return fail("not_found");
-      const cached = cachedLinks(site.origin);
       if (!cached) return fail("not_found");
       const { catalogVersion, links } = cached;
       return page<SiteLink, "site_links">(

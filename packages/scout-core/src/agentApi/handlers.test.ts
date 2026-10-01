@@ -260,6 +260,17 @@ describe("read_resource", () => {
     expect(code(conn, "read_resource", { resourceId: r.id, cursor: first.nextCursor! })).toBe("revoked");
   });
 
+  it("answers unavailable when the version's blob on disk no longer matches its hash", async () => {
+    const r = await ingest("llms_txt", "/llms.txt", "guide v1\n");
+    await approve(r.id, r.version);
+    const conn = connect();
+    expect(ok(conn, "read_resource", { resourceId: r.id }).text).toBe("guide v1\n");
+    const resolved = store.resolveRead(r.id, r.version);
+    if (!resolved.ok) throw new Error("expected a readable version");
+    writeFileSync(join(store.dir, "blobs", `${resolved.version.blobRef}.txt`), "tampered\n");
+    expect(code(conn, "read_resource", { resourceId: r.id })).toBe("unavailable");
+  });
+
   it("keeps reading the pinned version after a newer one is approved", async () => {
     const v1 = await ingest("llms_txt", "/llms.txt", LONG_TEXT);
     await approve(v1.id, v1.version);

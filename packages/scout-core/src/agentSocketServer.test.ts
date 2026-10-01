@@ -1,8 +1,9 @@
+import { createHash } from "node:crypto";
 import { chmodSync, existsSync, lstatSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { connect, createServer, type Server, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { AGENT_PROTOCOL_VERSION, AGENT_REQUEST_MAX_BYTES, AGENT_RESPONSE_MAX_BYTES } from "@scout/contracts";
+import { AGENT_CURSOR_TTL_MS, AGENT_PROTOCOL_VERSION, AGENT_REQUEST_MAX_BYTES, AGENT_RESPONSE_MAX_BYTES } from "@scout/contracts";
 import { encodeFrame, FrameDecoder, frameHeader, MAX_FRAME_FROM_CHROME } from "@scout/contracts/frame";
 import { BackendError, createSocketBackend } from "@scout/scout-mcp/client";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -10,6 +11,7 @@ import { createAgentAuth, type InteractiveTokenFile, writeInteractiveTokenFile }
 import { createAgentHandlers } from "./agentApi/handlers.js";
 import { createReadAudit } from "./agentApi/readAudit.js";
 import { AGENT_SOCKET_NAME, type AgentSocketServer, createAgentSocketServer } from "./agentSocketServer.js";
+import type { DiscoveryResult } from "./capabilities/discovery.js";
 import { type CapabilityStore, createCapabilityStore } from "./capabilities/store.js";
 import { createCatalogCache } from "./catalog/cache.js";
 import type { Diagnostics } from "./diagnostics.js";
@@ -47,7 +49,10 @@ afterEach(async () => {
 });
 
 /** The production stack main.ts builds: token file, auth, handlers, server. */
-async function startAgent(coreInstanceId = "core-a", opts: { helloTimeoutMs?: number; chmod?: (p: string, m: number) => void } = {}) {
+async function startAgent(
+  coreInstanceId = "core-a",
+  { clock: handlerClock = clock, ...opts }: { helloTimeoutMs?: number; chmod?: (p: string, m: number) => void; clock?: { now: () => number } } = {},
+) {
   const token = writeInteractiveTokenFile(runDir);
   const auth = createAgentAuth({ interactiveToken: token.token });
   const audit = createReadAudit();
@@ -56,10 +61,10 @@ async function startAgent(coreInstanceId = "core-a", opts: { helloTimeoutMs?: nu
     auth,
     store,
     view: () => ({ currentSite: null, paused: false }),
-    catalog: createCatalogCache({ clock, dir: join(root, "cache", "catalog") }),
+    catalog: createCatalogCache({ clock: handlerClock, dir: join(root, "cache", "catalog") }),
     browserContextGranted: () => false,
     audit,
-    clock,
+    clock: handlerClock,
   });
   const server = createAgentSocketServer({ runDir, handlers, auth, audit, diagnostics, ...opts });
   await server.start();
@@ -95,6 +100,12 @@ async function rawClient(path: string) {
 let seq = 0;
 const hello = (token: string) => ({ protocol: AGENT_PROTOCOL_VERSION, requestId: `h${++seq}`, method: "hello", params: { token } });
 const list = () => ({ protocol: AGENT_PROTOCOL_VERSION, requestId: `l${++seq}`, method: "list_resources", params: {} });
+const read = (resourceId: string, cursor?: string) => ({
+  protocol: AGENT_PROTOCOL_VERSION,
+  requestId: `r${++seq}`,
+  method: "read_resource",
+  params: { resourceId, ...(cursor !== undefined ? { cursor } : {}) },
+});
 
 describe("agent socket files", () => {
   it("publishes agent.sock already 0600, only after the chmod, with no temp name left", async () => {
@@ -131,6 +142,35 @@ describe("agent socket files", () => {
     await new Promise<void>((r) => other.listen(again.server.socketPath, () => r()));
     await again.server.close();
     expect(lstatSync(again.server.socketPath).isSocket()).toBe(true);
+  });
+});
+
+describe("agent socket close", () => {
+  it("resolves promptly when a client connects and says hello while it is closing, and closes that client", async () => {
+    const { server, token } = await startAgent();
+    const before = await rawClient(server.socketPath);
+    before.send(hello(token.token));
+    await until(() => before.frames.length === 1);
+
+    // A reconnect in flight as close starts: it is accepted (or refused) only after close began.
+    const late = connect({ path: server.socketPath });
+    let lateClosed = false;
+    late.on("close", () => void (lateClosed = true));
+    late.on("error", () => {});
+    late.on("connect", () => void late.write(encodeFrame(hello(token.token), AGENT_REQUEST_MAX_BYTES)));
+    const lateFrames: unknown[] = [];
+    const decoder = new FrameDecoder({ maxBytes: AGENT_RESPONSE_MAX_BYTES });
+    late.on("data", (c: Buffer) => void lateFrames.push(...decoder.push(c)));
+
+    running.splice(0);
+    const started = Date.now();
+    await Promise.race([server.close(), new Promise((_, reject) => setTimeout(() => reject(new Error("close() hung")), 1_000))]);
+    expect(Date.now() - started).toBeLessThan(1_000);
+    token.remove();
+    await until(() => before.closed && lateClosed);
+    expect(lateFrames).toEqual([]);
+    expect(server.openConnections).toBe(0);
+    expect(existsSync(server.socketPath)).toBe(false);
   });
 });
 
@@ -192,6 +232,80 @@ describe("agent socket connections", () => {
     } finally {
       await core.close();
     }
+  });
+});
+
+describe("read sessions over the socket", () => {
+  const SITE = "https://docs.example.com";
+  const LONG_TEXT = Array.from({ length: 2500 }, (_, i) => `line ${i}: café\n`).join("");
+  let now: number;
+  let agent: AgentSocketServer | null;
+
+  beforeEach(async () => {
+    // A store on a fake clock whose revocations reach the socket server, as main wires it.
+    await store.close();
+    now = 1_800_000_000_000;
+    agent = null;
+    store = await createCapabilityStore({ scoutHome: root, clock: { now: () => now }, onRevoked: (id) => agent?.resourceRevoked(id) });
+  });
+
+  async function ingestApproved(text: string, resourceId?: string): Promise<{ id: string; version: string }> {
+    const sha256 = createHash("sha256").update(text, "utf8").digest("hex");
+    const sourceUrl = `${SITE}/llms.txt`;
+    const found = {
+      kind: "llms_txt" as const, siteOrigin: SITE, publisherOrigin: SITE, sourceUrl, finalUrl: sourceUrl,
+      text, sha256, byteLength: Buffer.byteLength(text), fetchedAt: now,
+    };
+    const discovery: DiscoveryResult = {
+      origin: SITE, checkedAt: now, robots: "not_fetched",
+      items: [{ kind: "llms_txt", sourceUrl, status: "found", source: "network", resource: found }],
+      externalReferences: [], skillsOverCap: 0, acceptedBytes: 0, stats: { requests: 0, refused: 0, ms: 0 },
+    };
+    const r = (await store.ingest(discovery, { chromePermitted: false })).results[0]!;
+    const id = resourceId ?? r.resourceId;
+    await store.approve({ resourceId: id, version: r.version, expectedRevision: store.getResource(id)!.revision });
+    return { id, version: r.version };
+  }
+
+  async function openRead() {
+    const { server, token } = await startAgent("core-a", { clock: { now: () => now } });
+    agent = server;
+    const v1 = await ingestApproved(LONG_TEXT);
+    const c = await rawClient(server.socketPath);
+    c.send(hello(token.token));
+    c.send(read(v1.id));
+    await until(() => c.frames.length === 2);
+    const first = c.frames[1] as { status: string; result: { nextCursor?: string } };
+    expect(first.status).toBe("ok");
+    expect(first.result.nextCursor).toBeDefined();
+    return { server, c, v1, cursor: first.result.nextCursor! };
+  }
+
+  it("a revocation answers revoked to the next chunk on an open connection", async () => {
+    const { c, v1, cursor } = await openRead();
+    await store.revoke(v1.id);
+    c.send(read(v1.id, cursor));
+    await until(() => c.frames.length === 3);
+    expect(c.frames[2]).toMatchObject({ status: "error", error: { code: "revoked" } });
+    expect(c.closed).toBe(false);
+  });
+
+  it("sweepExpired releases an abandoned read's pin on a quiet open connection, so collection takes the version", async () => {
+    const { server, c, v1 } = await openRead();
+    // More newer versions than collection retains.
+    for (let i = 2; i <= 8; i++) {
+      now += 1000;
+      await ingestApproved(`guide v${i}\n`, v1.id);
+    }
+    await store.collectGarbage();
+    expect(store.resolveRead(v1.id, v1.version).ok).toBe(true);
+
+    now += AGENT_CURSOR_TTL_MS;
+    server.sweepExpired();
+    await store.collectGarbage();
+    expect(store.resolveRead(v1.id, v1.version)).toEqual({ ok: false, code: "not_found" });
+    expect(c.closed).toBe(false);
+    expect(server.openConnections).toBe(1);
   });
 });
 
