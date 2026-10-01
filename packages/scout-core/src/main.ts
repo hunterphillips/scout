@@ -17,6 +17,10 @@
 // revocation hook to the agent socket. Skill wrappers are exported only when the
 // installer's record (installed.json) names a skills root.
 //
+// Scout's window gets its capability view, previews, command acks, the context-read audit,
+// and the browser-context grant from the panel channel (panelChannel.ts), which starts right
+// after the coordinator and stops right after it, before the sockets and the store close.
+//
 // The process exits 0 when stdin closes (the app quit or crashed), on SIGTERM/SIGINT/
 // SIGHUP, or on a `shutdown` command, after closing both sockets (which releases the agent
 // connections' pins), then the store, then removing the token file. It never outlives the
@@ -28,11 +32,11 @@ import { join } from "node:path";
 import { createInterface } from "node:readline";
 import type { Readable, Writable } from "node:stream";
 import { fileURLToPath } from "node:url";
-import { NativeCommandSchema, type PanelState } from "@scout/contracts";
+import { NATIVE_COMMAND_MAX_BYTES, NativeCommandSchema, type PanelState } from "@scout/contracts";
 import { createAgentAuth, type InteractiveTokenFile, writeInteractiveTokenFile } from "./agentApi/auth.js";
-import { readBrowserContextGrant } from "./agentApi/grants.js";
+import { readBrowserContextGrant, writeBrowserContextGrant } from "./agentApi/grants.js";
 import { createAgentHandlers } from "./agentApi/handlers.js";
-import { createReadAudit } from "./agentApi/readAudit.js";
+import { createReadAudit, type ReadAudit } from "./agentApi/readAudit.js";
 import { type AgentSocketServer, createAgentSocketServer } from "./agentSocketServer.js";
 import { createSkillExporter, ExportError, type SkillExporter } from "./capabilities/exports.js";
 import { type CapabilityStore, createCapabilityStore, StoreCorruptError } from "./capabilities/store.js";
@@ -47,6 +51,7 @@ import { createDiagnostics, defaultDiagnosticsPath, type Diagnostics, scoutHome 
 import { DWELL_MS } from "./dwell.js";
 import { createOriginFetchSession } from "./fetch/originSession.js";
 import { InstalledRecordError, readInstalledRecord } from "./installedRecord.js";
+import { createPanelChannel, type PanelChannel } from "./panelChannel.js";
 import { createSocketServer, SocketServerError } from "./socketServer.js";
 
 /** Hard cap on shutdown: exit anyway if closing takes longer. */
@@ -124,9 +129,12 @@ export async function runStdio(deps: StdioDeps): Promise<StdioCore> {
     deps.exit(EXIT_START_FAILED);
     return { shutdown: async () => {} };
   }
+  // Built below, after the store; GC runs before then only at start, with nothing to sweep.
+  let panel: PanelChannel | null = null;
   const collectGarbage = (): void => {
     // Expired read cursors would otherwise keep their pins until the next agent call.
     agentServer?.sweepExpired();
+    panel?.sweepExpired();
     void store.collectGarbage().catch(() => diagnostics.event("capability_gc_failed", {}));
   };
   collectGarbage();
@@ -138,6 +146,31 @@ export async function runStdio(deps: StdioDeps): Promise<StdioCore> {
     if (!stdoutOpen) return;
     deps.stdout.write(`${JSON.stringify(state)}\n`);
   };
+
+  // Context reads over agent.sock; each one re-sends Scout's window its (debounced) audit view.
+  const readAudit = createReadAudit();
+  const audit: ReadAudit = {
+    record(entry) {
+      readAudit.record(entry);
+      panel?.auditChanged();
+    },
+    entries: () => readAudit.entries(),
+  };
+
+  // The channel reads the coordinator's grants and visit lazily: it is first used after both exist.
+  panel = createPanelChannel({
+    store,
+    exportConflicts: () => exporter?.manifest().conflicts ?? [],
+    readBrowserContextGrant: () => readBrowserContextGrant(home),
+    writeBrowserContextGrant: (enabled) => writeBrowserContextGrant(home, enabled),
+    getAudit: () => audit.entries(),
+    isPermitted: (origin) => coordinator.permissions.isPermitted(origin),
+    currentOrigin: () => coordinator.agentView().currentSite?.origin ?? null,
+    emit: emitPanel,
+    clock,
+    diagnostics,
+  });
+  const panelChannel = panel;
 
   // Settled visits run the same catalog and discovery pipelines as the dev CLI, with their
   // caches under SCOUT_HOME; the coordinator owns each pass's fetch session and window.
@@ -156,7 +189,11 @@ export async function runStdio(deps: StdioDeps): Promise<StdioCore> {
       resolveCatalog: (origin, session) => catalogResolver.resolve(origin, { session }),
       discover: (origin, session) => discoverer.discover(origin, { session }),
     },
+    panel: panelChannel,
   });
+  panelChannel.start();
+  // The startup export sync may record conflicts the first frame could not show.
+  void store.startupExportSync.then(() => panelChannel.capabilitiesChanged());
 
   const server = createSocketServer({
     runDir,
@@ -175,8 +212,9 @@ export async function runStdio(deps: StdioDeps): Promise<StdioCore> {
       tokenFile?.remove();
     })());
 
-  // stdin lines are not length-capped: the only writer is the native app that launched
-  // us over a private pipe, and its commands are a few dozen bytes. Deliberate.
+  // The only writer is the native app that launched us over a private pipe. Its commands fit
+  // one atomic pipe write (at most NATIVE_COMMAND_MAX_BYTES with the newline, the app's own
+  // limit); a longer line is refused like any invalid one. readline itself does not cap a line.
   const rl = createInterface({ input: deps.stdin, crlfDelay: Infinity });
   let shuttingDown: Promise<void> | null = null;
   // Settles (never rejects) once start has finished either way, so a shutdown that
@@ -191,6 +229,7 @@ export async function runStdio(deps: StdioDeps): Promise<StdioCore> {
     diagnostics.event("shutdown", { reason });
     deps.log(`scout-core: shutdown (${reason})`);
     coordinator.stop();
+    panelChannel.stop();
     rl.close();
     const deadline = new Promise<void>((resolve) => setTimeout(resolve, SHUTDOWN_DEADLINE_MS).unref());
     const closed = startSettled.then(closeAll);
@@ -206,7 +245,7 @@ export async function runStdio(deps: StdioDeps): Promise<StdioCore> {
     if (line.trim() === "") return;
     let value: unknown;
     try {
-      value = JSON.parse(line);
+      value = Buffer.byteLength(line, "utf8") < NATIVE_COMMAND_MAX_BYTES ? JSON.parse(line) : undefined;
     } catch {
       value = undefined;
     }
@@ -237,7 +276,6 @@ export async function runStdio(deps: StdioDeps): Promise<StdioCore> {
       throw new StartError("agent-token-write-failed");
     }
     const auth = createAgentAuth({ interactiveToken: tokenFile.token });
-    const audit = createReadAudit();
     const handlers = createAgentHandlers({
       coreInstanceId: randomBytes(16).toString("hex"),
       auth,
@@ -273,6 +311,7 @@ export async function runStdio(deps: StdioDeps): Promise<StdioCore> {
     // start a second, stdin-closed shutdown with its own exit.
     shuttingDown = Promise.resolve();
     coordinator.stop();
+    panelChannel.stop();
     rl.close();
     await closeAll();
     deps.exit(EXIT_START_FAILED);

@@ -7,9 +7,11 @@ import { tmpdir } from "node:os";
 import { PassThrough } from "node:stream";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { createHash } from "node:crypto";
 import { encodeFrame, FrameDecoder, MAX_FRAME_FROM_CHROME } from "@scout/contracts/frame";
 import { createSocketBackend } from "@scout/scout-mcp/client";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { createCapabilityStore } from "./capabilities/store.js";
 import { DEFAULT_DESTINATIONS, readConfig, readDestinations } from "./config.js";
 import type { Diagnostics } from "./diagnostics.js";
 import { DWELL_MS } from "./dwell.js";
@@ -169,9 +171,85 @@ describe("main --stdio", () => {
     expect(existsSync(socketPath())).toBe(false);
   });
 
+  it("sends Scout's window the browser-context grant, the capability view, and the audit on start", async () => {
+    writeFileSync(join(home, "config.json"), JSON.stringify({ agentBrowserContext: true }));
+    const c = await startReady();
+    await until(() => ["grant", "capabilities", "audit"].every((t) => c.lines.some((l) => (l as { type?: string }).type === t)));
+    expect(c.lines.find((l) => (l as { type?: string }).type === "grant")).toEqual({ type: "grant", agentBrowserContext: true });
+    expect(c.lines.find((l) => (l as { type?: string }).type === "capabilities")).toMatchObject({ offers: [], library: [], truncated: false });
+    c.child.stdin.end();
+    expect((await c.exited).code).toBe(0);
+  });
+
+  it("streams a stored version's preview chunk by chunk through the real core", async () => {
+    // A pending llms.txt (40 000 bytes of multi-byte text) in a store seeded before start.
+    const text = "aé😀".repeat(5000);
+    const origin = "https://s.example";
+    const sourceUrl = `${origin}/llms.txt`;
+    const sha = createHash("sha256").update(text, "utf8").digest("hex");
+    // Seen just now, so the core's startup collection keeps the pending version.
+    const seed = await createCapabilityStore({ scoutHome: home, clock: { now: () => Date.now() } });
+    const report = await seed.ingest(
+      {
+        origin,
+        checkedAt: 1,
+        robots: "not_fetched",
+        items: [
+          {
+            kind: "llms_txt",
+            sourceUrl,
+            status: "found",
+            source: "network",
+            resource: { kind: "llms_txt", siteOrigin: origin, publisherOrigin: origin, sourceUrl, finalUrl: sourceUrl, text, sha256: sha, byteLength: Buffer.byteLength(text), fetchedAt: 1 },
+          },
+        ],
+        externalReferences: [],
+        skillsOverCap: 0,
+        acceptedBytes: 0,
+        stats: { requests: 0, refused: 0, ms: 0 },
+      },
+      { chromePermitted: false },
+    );
+    await seed.close();
+    const { resourceId, version } = report.results[0]!;
+
+    const c = await startReady();
+    const chunks: Array<{ seq: number; text: string; sha256: string; nextCursor?: string }> = [];
+    let cursor: string | undefined;
+    for (let i = 0; ; i++) {
+      const commandId = `p${i}`;
+      c.child.stdin.write(`${JSON.stringify({ type: "preview", commandId, resourceId, version, ...(cursor ? { cursor } : {}) })}\n`);
+      await until(() => c.lines.some((l) => (l as { commandId?: string }).commandId === commandId));
+      const chunk = c.lines.find((l) => (l as { commandId?: string }).commandId === commandId) as (typeof chunks)[number] & { type: string };
+      expect(chunk.type).toBe("preview");
+      chunks.push(chunk);
+      cursor = chunk.nextCursor;
+      if (cursor === undefined) break;
+    }
+    expect(chunks.map((ch) => ch.seq)).toEqual([0, 1, 2]);
+    expect(chunks.every((ch) => ch.sha256 === sha)).toBe(true);
+    expect(chunks.map((ch) => ch.text).join("")).toBe(text);
+    expect(chunks.at(-1)!.nextCursor).toBeUndefined();
+
+    // An over-long line is refused like any invalid one and never answered.
+    c.child.stdin.write(`${JSON.stringify({ type: "refresh_capabilities", commandId: "big", pad: "x".repeat(5000) })}\n`);
+    c.child.stdin.write(`${JSON.stringify({ type: "refresh_capabilities", commandId: "small" })}\n`);
+    await until(() => c.lines.some((l) => (l as { commandId?: string }).commandId === "small"));
+    expect(c.lines.some((l) => (l as { commandId?: string }).commandId === "big")).toBe(false);
+    c.child.stdin.end();
+    expect((await c.exited).code).toBe(0);
+    const log = readFileSync(join(home, "logs", "diagnostics.jsonl"), "utf8");
+    expect(log).toContain('"event":"native_command_invalid"');
+    expect(log).toContain('"event":"preview_chunk"');
+    expect(log).not.toContain("s.example/llms.txt");
+    expect(log).not.toContain("😀");
+  });
+
   it("relays host frames into panel states, answers hello with a policy, and acks page_text back to the host", async () => {
     const c = await startReady();
-    expect(c.lines[0]).toEqual({ type: "state", status: "disconnected" });
+    // Scout's window frames (grant, capabilities, audit) interleave; this test follows the states.
+    const states = () => c.lines.filter((l) => (l as { type?: string }).type === "state");
+    expect(states()[0]).toEqual({ type: "state", status: "disconnected" });
     c.child.stdin.write("not json\n");
 
     const sock = connect({ path: socketPath() });
@@ -185,8 +263,8 @@ describe("main --stdio", () => {
     const acks = () => received.filter((f) => f.type === "ack");
     const send = (o: object) => sock.write(encodeFrame(o, MAX_FRAME_FROM_CHROME));
     send({ type: "hello", protocol: 2 });
-    await until(() => c.lines.length >= 2 && received.length >= 1);
-    expect(c.lines[1]).toEqual({ type: "state", status: "idle", visitEpoch: 0 });
+    await until(() => states().length >= 2 && received.length >= 1);
+    expect(states()[1]).toEqual({ type: "state", status: "idle", visitEpoch: 0, permitted: false });
     expect(received).toEqual([{ type: "capture_policy", revision: 0, paused: false, captureEnabled: false }]);
     send({
       type: "observation",
@@ -201,8 +279,8 @@ describe("main --stdio", () => {
       type: "observation",
       observation: { kind: "focus", seq: 1, at: 1, browserFocused: true, windowId: 1, tabId: 7, url: "https://docs.stripe.com/x" },
     });
-    await until(() => c.lines.length >= 3);
-    expect(c.lines[2]).toEqual({ type: "state", status: "idle", visitEpoch: 2, detail: "docs.stripe.com" });
+    await until(() => states().length >= 3);
+    expect(states()[2]).toEqual({ type: "state", status: "idle", visitEpoch: 2, detail: "docs.stripe.com", permitted: true });
 
     send({
       type: "observation",
@@ -226,10 +304,10 @@ describe("main --stdio", () => {
     await until(() => acks().length === 1);
     expect(acks()).toEqual([{ type: "ack", seq: 3 }]);
     // GitHub is granted, so the issue tab is a visit too.
-    expect(c.lines.slice(3)).toEqual([{ type: "state", status: "idle", visitEpoch: 3, detail: "github.com" }]);
+    expect(states().slice(3)).toEqual([{ type: "state", status: "idle", visitEpoch: 3, detail: "github.com", permitted: true }]);
 
     sock.destroy();
-    await until(() => (c.lines.at(-1) as { status?: string }).status === "disconnected");
+    await until(() => (states().at(-1) as { status?: string }).status === "disconnected");
     c.child.stdin.end();
     expect((await c.exited).code).toBe(0);
 
