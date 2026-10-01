@@ -46,6 +46,8 @@ export interface AgentSocketServer {
   revokeJobToken(jobId: string): void;
   /** For the store's `onRevoked`: drop the resource's cursors and the job tokens that pinned it. Synchronous. */
   resourceRevoked(resourceId: string): void;
+  /** Drop expired cursors and release their read pins; main runs it before each capability GC. */
+  sweepExpired(): void;
   /** The recent browser-context reads, oldest first. */
   readAudit(): ReadAuditEntry[];
   readonly openConnections: number;
@@ -158,6 +160,7 @@ export function createAgentSocketServer(options: AgentSocketServerOptions): Agen
       handlers.dropResource(resourceId);
       auth.revokeJobTokensPinning(resourceId);
     },
+    sweepExpired: () => handlers.sweepExpired(),
     readAudit: () => options.audit.entries(),
     get openConnections() {
       return sockets.size;

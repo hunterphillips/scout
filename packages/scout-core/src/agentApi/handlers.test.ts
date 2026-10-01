@@ -21,7 +21,7 @@ import { type CapabilityStore, createCapabilityStore } from "../capabilities/sto
 import { CATALOG_CACHE_SCHEMA_VERSION, createCatalogCache } from "../catalog/cache.js";
 import { cacheFileName } from "../privateCacheFile.js";
 import { type AgentAuth, createAgentAuth } from "./auth.js";
-import { type AgentConnection, type AgentHandlers, type AgentView, createAgentHandlers } from "./handlers.js";
+import { type AgentConnection, type AgentHandlers, type AgentView, createAgentHandlers, MAX_CURSORS } from "./handlers.js";
 import { createReadAudit, type ReadAudit } from "./readAudit.js";
 
 const SITE = "https://docs.example.com";
@@ -460,6 +460,53 @@ describe("read pins", () => {
     expect(text).toBe(LONG_TEXT);
 
     // The connection is still open; the read is over.
+    await store.collectGarbage();
+    expect(store.resolveRead(v1.id, v1.version)).toEqual({ ok: false, code: "not_found" });
+  });
+
+  /** Approve more newer versions of `id` than collection retains, so its first version is collectable unless pinned. */
+  async function supersede(id: string) {
+    for (let i = 2; i <= 8; i++) {
+      now += 1000;
+      const v = await ingest("llms_txt", "/llms.txt", `guide v${i}\n`);
+      await approve(id, v.version);
+    }
+  }
+
+  it("keeps the pin when continuing from the oldest cursor at the cursor cap evicts it", async () => {
+    const v1 = await ingest("llms_txt", "/llms.txt", LONG_TEXT);
+    await approve(v1.id, v1.version);
+    const conn = connect();
+    const first = ok(conn, "read_resource", { resourceId: v1.id });
+    await supersede(v1.id);
+    // Fill the table so the read's cursor is the oldest of MAX_CURSORS.
+    for (let i = 1; i < MAX_CURSORS; i++) expect(ok(conn, "list_resources", { limit: 1 }).nextCursor).toBeDefined();
+    const second = ok(conn, "read_resource", { resourceId: v1.id, cursor: first.nextCursor! });
+    expect(second.nextCursor).toBeDefined();
+    // The consumed cursor was evicted to make room; the new one still carries the pin.
+    expect(code(conn, "read_resource", { resourceId: v1.id, cursor: first.nextCursor! })).toBe("expired_snapshot");
+    await store.collectGarbage();
+    expect(store.resolveRead(v1.id, v1.version).ok).toBe(true);
+    expect(ok(conn, "read_resource", { resourceId: v1.id, cursor: second.nextCursor! }).version).toBe(v1.version);
+  });
+
+  it("sweepExpired releases an abandoned read's pin without another call, so collection takes the version", async () => {
+    const v1 = await ingest("llms_txt", "/llms.txt", LONG_TEXT);
+    await approve(v1.id, v1.version);
+    const pins = trackPins();
+    const conn = connect();
+    ok(conn, "read_resource", { resourceId: v1.id });
+    await supersede(v1.id);
+    expect(pins.size).toBe(1);
+    // Not yet expired: the sweep keeps it.
+    handlers.sweepExpired();
+    expect(pins.size).toBe(1);
+    await store.collectGarbage();
+    expect(store.resolveRead(v1.id, v1.version).ok).toBe(true);
+
+    now += AGENT_CURSOR_TTL_MS;
+    handlers.sweepExpired();
+    expect(pins.size).toBe(0);
     await store.collectGarbage();
     expect(store.resolveRead(v1.id, v1.version)).toEqual({ ok: false, code: "not_found" });
   });

@@ -105,8 +105,11 @@ export async function runStdio(deps: StdioDeps): Promise<StdioCore> {
     deps.exit(EXIT_START_FAILED);
     return { shutdown: async () => {} };
   }
-  const collectGarbage = (): void =>
+  const collectGarbage = (): void => {
+    // Expired read cursors would otherwise keep their pins until the next agent call.
+    agentServer?.sweepExpired();
     void store.collectGarbage().catch(() => diagnostics.event("capability_gc_failed", {}));
+  };
   collectGarbage();
   const gcTimer = setInterval(collectGarbage, GC_INTERVAL_MS);
   gcTimer.unref();

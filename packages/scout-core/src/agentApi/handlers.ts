@@ -25,7 +25,9 @@
 // cursor of the chain carries it, and every chunk with a next cursor pins the version in the
 // store under it. The pin is released when the session ends: on the last chunk, on
 // revocation, on the connection closing, or once no live cursor of the chain is left
-// (expired or evicted). A single-chunk read pins nothing.
+// (expired or evicted). A single-chunk read pins nothing. Expired cursors are swept whenever
+// a cursor is issued or presented, and by `sweepExpired`, which main runs before each
+// collection so an abandoned read on a quiet connection does not hold its pin.
 
 import { randomBytes } from "node:crypto";
 import {
@@ -102,6 +104,8 @@ export interface AgentHandlers {
   endConnection(connection: AgentConnection): void;
   /** The resource was revoked: its read cursors answer `revoked` from now on. Synchronous and idempotent. */
   dropResource(resourceId: string): void;
+  /** Drop every expired cursor and release the pins of the read sessions that left. */
+  sweepExpired(): void;
 }
 
 interface CursorScope {
@@ -171,16 +175,18 @@ export function createAgentHandlers(options: AgentHandlerOptions): AgentHandlers
     for (const pinId of ended) store.releasePins(pinId);
   }
 
+  /** Store the new cursor first, so a read session continuing from a cursor swept or evicted here keeps its pin. */
   function issueCursor(conn: AgentConnection, body: CursorBody): string {
     const now = clock.now();
-    dropCursors((c) => c.expiresAt <= now);
-    if (cursors.size >= MAX_CURSORS) {
-      const evicted = new Set([...cursors.keys()].slice(0, cursors.size - MAX_CURSORS + 1));
-      dropCursors((_c, k) => evicted.has(k));
-    }
     const id = randomBytes(16).toString("base64url");
     const scope: CursorScope = { coreInstanceId, connectionId: conn.id, tokenId: conn.principal!.tokenId, expiresAt: now + AGENT_CURSOR_TTL_MS };
     cursors.set(id, { ...body, ...scope } as CursorState);
+    dropCursors((c) => c.expiresAt <= now);
+    if (cursors.size > MAX_CURSORS) {
+      // Oldest first; the new cursor is last in insertion order.
+      const evicted = new Set([...cursors.keys()].slice(0, cursors.size - MAX_CURSORS));
+      dropCursors((_c, k) => evicted.has(k));
+    }
     return id;
   }
 
@@ -416,6 +422,10 @@ export function createAgentHandlers(options: AgentHandlerOptions): AgentHandlers
         c.revoked = true;
         store.releasePins(c.pinId);
       }
+    },
+    sweepExpired() {
+      const now = clock.now();
+      dropCursors((c) => c.expiresAt <= now);
     },
   };
 }
