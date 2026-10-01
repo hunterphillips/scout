@@ -303,19 +303,165 @@ describe("read_resource", () => {
     expect(code(job, "read_resource", { resourceId: r.id, cursor: interactiveCursor })).toBe("expired_snapshot");
   });
 
-  it("releases the connection's pins when it ends", async () => {
+  it("serves an explicit superseded version as superseded, and answers not_found for a pending or declined version", async () => {
+    const v1 = await ingest("llms_txt", "/llms.txt", "guide v1\n");
+    await approve(v1.id, v1.version);
+    const v2 = await ingest("llms_txt", "/llms.txt", "guide v2\n");
+    await approve(v1.id, v2.version);
+    const pending = await ingest("llms_txt", "/llms.txt", "guide v3\n");
+    const declined = await ingest("llms_txt", "/llms.txt", "guide v4\n");
+    await store.decline({ resourceId: v1.id, version: declined.version, expectedRevision: rev(v1.id) });
+    const conn = connect();
+    const old = ok(conn, "read_resource", { resourceId: v1.id, version: v1.version });
+    expect([old.version, old.approval, old.text]).toEqual([v1.version, "superseded", "guide v1\n"]);
+    expect(ok(conn, "read_resource", { resourceId: v1.id }).approval).toBe("approved");
+    expect(code(conn, "read_resource", { resourceId: v1.id, version: pending.version })).toBe("not_found");
+    expect(code(conn, "read_resource", { resourceId: v1.id, version: declined.version })).toBe("not_found");
+  });
+});
+
+describe("read pins", () => {
+  /** Live store pins by pin ID, as the handlers set and release them. */
+  function trackPins(): Map<string, number> {
+    const live = new Map<string, number>();
+    const pin = store.pinVersion;
+    const release = store.releasePins;
+    store.pinVersion = (id, resourceId, version) => {
+      const r = pin(id, resourceId, version);
+      if (r.ok) live.set(id, (live.get(id) ?? 0) + 1);
+      return r;
+    };
+    store.releasePins = (id) => {
+      live.delete(id);
+      release(id);
+    };
+    return live;
+  }
+
+  it("pins a multi-chunk read between chunks under one ID and releases it with the last chunk", async () => {
     const r = await ingest("llms_txt", "/llms.txt", LONG_TEXT);
     await approve(r.id, r.version);
+    const pins = trackPins();
     const conn = connect();
-    ok(conn, "read_resource", { resourceId: r.id });
+    let cursor: string | undefined;
+    let chunks = 0;
+    do {
+      const c = ok(conn, "read_resource", { resourceId: r.id, ...(cursor ? { cursor } : {}) });
+      cursor = c.nextCursor;
+      chunks++;
+      if (cursor) {
+        expect(pins.size).toBe(1);
+        expect([...pins.keys()][0]).not.toBe(conn.id);
+      }
+    } while (cursor);
+    expect(chunks).toBeGreaterThan(2);
+    expect(pins.size).toBe(0);
+  });
+
+  it("pins nothing for a single-chunk read", async () => {
+    const r = await ingest("llms_txt", "/llms.txt", "short\n");
+    await approve(r.id, r.version);
+    const pins = trackPins();
     const released: string[] = [];
     const release = store.releasePins;
     store.releasePins = (id) => {
       released.push(id);
       release(id);
     };
-    handlers.endConnection(conn);
-    expect(released).toEqual([conn.id]);
+    expect(ok(connect(), "read_resource", { resourceId: r.id }).nextCursor).toBeUndefined();
+    expect(pins.size).toBe(0);
+    expect(released).toEqual([]);
+  });
+
+  it("gives each read on one connection its own pin", async () => {
+    const r = await ingest("llms_txt", "/llms.txt", LONG_TEXT);
+    await approve(r.id, r.version);
+    const pins = trackPins();
+    const conn = connect();
+    ok(conn, "read_resource", { resourceId: r.id });
+    expect(pins.size).toBe(1);
+    readAll(conn, r.id);
+    // The finished read released its own pin; the abandoned one is still open.
+    expect(pins.size).toBe(1);
+  });
+
+  it("releases an abandoned read's pin once its cursor expires", async () => {
+    const r = await ingest("llms_txt", "/llms.txt", LONG_TEXT);
+    await approve(r.id, r.version);
+    const other = await ingest("agents_md", "/AGENTS.md", LONG_TEXT);
+    await approve(other.id, other.version);
+    const pins = trackPins();
+    const conn = connect();
+    const first = ok(conn, "read_resource", { resourceId: r.id });
+    expect(pins.size).toBe(1);
+    now += AGENT_CURSOR_TTL_MS;
+    // Found expired when presented.
+    expect(code(conn, "read_resource", { resourceId: r.id, cursor: first.nextCursor! })).toBe("expired_snapshot");
+    expect(pins.size).toBe(0);
+
+    // Swept when a later cursor is issued, without being presented again.
+    ok(conn, "read_resource", { resourceId: r.id });
+    const [abandoned] = pins.keys();
+    now += AGENT_CURSOR_TTL_MS;
+    ok(conn, "read_resource", { resourceId: other.id });
+    expect(pins.has(abandoned!)).toBe(false);
+    expect(pins.size).toBe(1);
+  });
+
+  it("releases an open read's pin when the resource is revoked", async () => {
+    const r = await ingest("llms_txt", "/llms.txt", LONG_TEXT);
+    await approve(r.id, r.version);
+    const pins = trackPins();
+    const conn = connect();
+    ok(conn, "read_resource", { resourceId: r.id });
+    expect(pins.size).toBe(1);
+    await store.revoke(r.id);
+    expect(pins.size).toBe(0);
+  });
+
+  it("releases every open read's pin when the connection ends, and no other connection's", async () => {
+    const r = await ingest("llms_txt", "/llms.txt", LONG_TEXT);
+    await approve(r.id, r.version);
+    const pins = trackPins();
+    const a = connect();
+    const b = connect();
+    ok(a, "read_resource", { resourceId: r.id });
+    ok(a, "read_resource", { resourceId: r.id });
+    ok(b, "read_resource", { resourceId: r.id });
+    expect(pins.size).toBe(3);
+    handlers.endConnection(a);
+    expect(pins.size).toBe(1);
+    handlers.endConnection(b);
+    expect(pins.size).toBe(0);
+  });
+
+  it("keeps a superseded version from collection during a read, and lets it go after the read ends", async () => {
+    const v1 = await ingest("llms_txt", "/llms.txt", LONG_TEXT);
+    await approve(v1.id, v1.version);
+    const conn = connect();
+    const first = ok(conn, "read_resource", { resourceId: v1.id });
+    // More newer versions than collection retains.
+    for (let i = 2; i <= 8; i++) {
+      now += 1000;
+      const v = await ingest("llms_txt", "/llms.txt", `guide v${i}\n`);
+      await approve(v1.id, v.version);
+    }
+    await store.collectGarbage();
+    expect(store.resolveRead(v1.id, v1.version).ok).toBe(true);
+
+    let text = first.text;
+    let cursor = first.nextCursor;
+    while (cursor) {
+      const c = ok(conn, "read_resource", { resourceId: v1.id, cursor });
+      expect(c.version).toBe(v1.version);
+      text += c.text;
+      cursor = c.nextCursor;
+    }
+    expect(text).toBe(LONG_TEXT);
+
+    // The connection is still open; the read is over.
+    await store.collectGarbage();
+    expect(store.resolveRead(v1.id, v1.version)).toEqual({ ok: false, code: "not_found" });
   });
 });
 

@@ -17,9 +17,15 @@
 // AGENT_CURSOR_TTL_MS, and at most MAX_CURSORS live (oldest evicted first). Each pins what it
 // pages over: `site_links` the origin and catalog version, `list_resources` the version list
 // of the first page (later pages re-check each item, so a page may be short, or empty, and
-// still carry `nextCursor`), `read_resource` the resource and version, which is also pinned
-// in the store against collection until the connection ends. A revocation invalidates the
-// resource's read cursors for good: they keep answering `revoked` until they expire.
+// still carry `nextCursor`), `read_resource` the resource and version. A revocation
+// invalidates the resource's read cursors for good: they keep answering `revoked` until they
+// expire.
+//
+// A multi-chunk read is one read session: its first chunk draws a random pin ID, every
+// cursor of the chain carries it, and every chunk with a next cursor pins the version in the
+// store under it. The pin is released when the session ends: on the last chunk, on
+// revocation, on the connection closing, or once no live cursor of the chain is left
+// (expired or evicted). A single-chunk read pins nothing.
 
 import { randomBytes } from "node:crypto";
 import {
@@ -92,7 +98,7 @@ export interface AgentHandlers {
   call(frame: unknown, connection: AgentConnection): AgentResponse;
   /** An error response for a frame that could not be decoded at all. */
   refuse(code: AgentStatusCode): AgentResponse;
-  /** The connection closed: drop its cursors and release its store pins. */
+  /** The connection closed: drop its cursors and release the pins of its open read sessions. */
   endConnection(connection: AgentConnection): void;
   /** The resource was revoked: its read cursors answer `revoked` from now on. Synchronous and idempotent. */
   dropResource(resourceId: string): void;
@@ -115,7 +121,7 @@ type CursorState = CursorScope &
     | { method: "site_links"; offset: number; origin: string; catalogVersion: string }
     | { method: "list_resources"; offset: number; entries: readonly VersionRef[] }
     /** `revoked` is set when the resource is revoked; such a cursor only ever answers `revoked`, even after a re-approval. */
-    | { method: "read_resource"; resourceId: string; version: string; offset: number; revoked?: true }
+    | { method: "read_resource"; resourceId: string; version: string; offset: number; pinId: string; revoked?: true }
   );
 type CursorBody = CursorState extends infer S ? (S extends CursorState ? Omit<S, keyof CursorScope> : never) : never;
 
@@ -152,10 +158,26 @@ export function createAgentHandlers(options: AgentHandlerOptions): AgentHandlers
   const fitsResponse = (result: unknown): boolean =>
     byteLength({ ...envelope(PROBE_REQUEST_ID), status: "ok", result }) <= AGENT_RESPONSE_MAX_BYTES;
 
+  /** Delete the cursors `drop` selects, then release each read session's pin that no remaining cursor carries. */
+  function dropCursors(drop: (c: CursorState, id: string) => boolean): void {
+    const ended = new Set<string>();
+    for (const [k, c] of cursors) {
+      if (!drop(c, k)) continue;
+      cursors.delete(k);
+      if (c.method === "read_resource") ended.add(c.pinId);
+    }
+    if (ended.size === 0) return;
+    for (const c of cursors.values()) if (c.method === "read_resource") ended.delete(c.pinId);
+    for (const pinId of ended) store.releasePins(pinId);
+  }
+
   function issueCursor(conn: AgentConnection, body: CursorBody): string {
     const now = clock.now();
-    for (const [k, c] of cursors) if (c.expiresAt <= now) cursors.delete(k);
-    while (cursors.size >= MAX_CURSORS) cursors.delete(cursors.keys().next().value!);
+    dropCursors((c) => c.expiresAt <= now);
+    if (cursors.size >= MAX_CURSORS) {
+      const evicted = new Set([...cursors.keys()].slice(0, cursors.size - MAX_CURSORS + 1));
+      dropCursors((_c, k) => evicted.has(k));
+    }
     const id = randomBytes(16).toString("base64url");
     const scope: CursorScope = { coreInstanceId, connectionId: conn.id, tokenId: conn.principal!.tokenId, expiresAt: now + AGENT_CURSOR_TTL_MS };
     cursors.set(id, { ...body, ...scope } as CursorState);
@@ -165,7 +187,11 @@ export function createAgentHandlers(options: AgentHandlerOptions): AgentHandlers
   /** The cursor if it was issued by this core to this connection and token for `method` and is unexpired. */
   function takeCursor<K extends CursorState["method"]>(id: string, method: K, conn: AgentConnection): Extract<CursorState, { method: K }> | undefined {
     const c = cursors.get(id);
-    if (!c || c.method !== method || c.expiresAt <= clock.now()) return undefined;
+    if (c && c.expiresAt <= clock.now()) {
+      dropCursors((_c, k) => k === id);
+      return undefined;
+    }
+    if (!c || c.method !== method) return undefined;
     if (c.coreInstanceId !== coreInstanceId || c.connectionId !== conn.id || c.tokenId !== conn.principal?.tokenId) return undefined;
     return c as Extract<CursorState, { method: K }>;
   }
@@ -295,6 +321,7 @@ export function createAgentHandlers(options: AgentHandlerOptions): AgentHandlers
     read_resource: (p, conn) => {
       let version = p.version;
       let offset = 0;
+      let pinId: string | undefined;
       if (p.cursor !== undefined) {
         const c = takeCursor(p.cursor, "read_resource", conn);
         if (!c) return fail("expired_snapshot");
@@ -302,6 +329,7 @@ export function createAgentHandlers(options: AgentHandlerOptions): AgentHandlers
         if (c.revoked) return fail("revoked");
         version = c.version;
         offset = c.offset;
+        pinId = c.pinId;
       }
       // Checked on every chunk, so a revocation mid-read stops the next chunk.
       const resolved = store.resolveRead(p.resourceId, version);
@@ -321,11 +349,16 @@ export function createAgentHandlers(options: AgentHandlerOptions): AgentHandlers
         const more = end < bytes.length;
         const result = { ...identity(r, v, approval), offset, totalBytes: bytes.length, text: bytes.subarray(offset, end).toString("utf8") };
         if (fitsResponse(more ? { ...result, nextCursor: PROBE_CURSOR } : result)) {
-          if (!more) return { ok: result };
-          // Keep the version from collection while this connection may still read it.
-          const pinned = store.pinVersion(conn.id, r.id, v.hash);
+          if (!more) {
+            // The read session is over: its bytes are all served.
+            if (pinId !== undefined) store.releasePins(pinId);
+            return { ok: result };
+          }
+          // Keep the version from collection while the read session may still need it.
+          pinId ??= randomBytes(16).toString("base64url");
+          const pinned = store.pinVersion(pinId, r.id, v.hash);
           if (!pinned.ok) return fail(pinned.code);
-          return { ok: { ...result, nextCursor: issueCursor(conn, { method: "read_resource", resourceId: r.id, version: v.hash, offset: end }) } };
+          return { ok: { ...result, nextCursor: issueCursor(conn, { method: "read_resource", resourceId: r.id, version: v.hash, offset: end, pinId }) } };
         }
         if (end === offset) return fail("limit_exceeded");
         max = Math.floor((end - offset) / 2);
@@ -375,11 +408,14 @@ export function createAgentHandlers(options: AgentHandlerOptions): AgentHandlers
       return result;
     },
     endConnection(conn) {
-      for (const [k, c] of cursors) if (c.connectionId === conn.id) cursors.delete(k);
-      store.releasePins(conn.id);
+      dropCursors((c) => c.connectionId === conn.id);
     },
     dropResource(resourceId) {
-      for (const c of cursors.values()) if (c.method === "read_resource" && c.resourceId === resourceId) c.revoked = true;
+      for (const c of cursors.values()) {
+        if (c.method !== "read_resource" || c.resourceId !== resourceId) continue;
+        c.revoked = true;
+        store.releasePins(c.pinId);
+      }
     },
   };
 }
