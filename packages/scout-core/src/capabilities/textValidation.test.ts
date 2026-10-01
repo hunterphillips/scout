@@ -33,11 +33,23 @@ describe("validateText", () => {
   });
 
   it("refuses an HTML app-fallback page even when served as text/markdown", () => {
-    for (const page of ["<!DOCTYPE html><html><body>app</body></html>", "\n  <html lang=en>", "<div id=root></div><script src=/app.js></script>", "# Title\n<script>boot()</script>"]) {
+    const shell = '<!doctype html>\n<html lang="en">\n<head><meta charset="utf-8"><script type="module" src="/assets/index.js"></script></head>\n<body><div id="root"></div></body>\n</html>\n';
+    for (const page of [shell, "<!DOCTYPE html><html><body>app</body></html>", "\n  <html lang=en>", "﻿<head><title>x</title></head>", "<!-- app -->\n<div id=root></div>\n<body></body>"]) {
       expect(validateText(enc(page), "text/markdown", "llms_txt")).toEqual({ ok: false, reason: "html" });
     }
-    expect(validateText(enc("# Plain\n"), "text/html; charset=utf-8", "agents_md")).toEqual({ ok: false, reason: "html" });
+    expect(validateText(enc("<div id=root></div>"), "text/html; charset=utf-8", "agents_md")).toEqual({ ok: false, reason: "html" });
     expect(validateText(enc("<!doctype html><p>x"), "application/json", "skills_index")).toEqual({ ok: false, reason: "html" });
+  });
+
+  it("accepts Markdown that contains markup", () => {
+    const agents = "<!-- markdownlint-disable -->\n# Agents\n\nRun `npm test` before every commit.\n";
+    const skill = '<div align="center">\n  <img src="logo.png" alt="logo">\n</div>\n\n# Checkout\n\nSteps.\n';
+    const llms = "# Site\n\n> Widgets that never use a `<script>` tag.\n\n- [Embed](/embed): add <script src=\"/w.js\"></script> to your page\n";
+    expect(validateText(enc(agents), "text/markdown", "agents_md").ok).toBe(true);
+    expect(validateText(enc(skill), undefined, "skill").ok).toBe(true);
+    expect(validateText(enc(llms), "text/plain", "llms_txt").ok).toBe(true);
+    // A text/html label on a body that is plainly Markdown does not refuse it.
+    expect(validateText(enc("# Plain\n"), "text/html; charset=utf-8", "agents_md").ok).toBe(true);
   });
 
   describe("skills", () => {
@@ -47,7 +59,29 @@ describe("validateText", () => {
     });
 
     it("refuses executable frontmatter keys rather than stripping them", () => {
-      for (const key of ["hooks", "allowed-tools", "allowed_tools", "allowedTools", "tools", "model", "Model", "mcp-servers", "mcp_servers", "mcpServers", "mcpservers", "allowedtools"]) {
+      for (const key of [
+        "hooks",
+        "allowed-tools",
+        "allowed_tools",
+        "allowedTools",
+        "tools",
+        "model",
+        "Model",
+        "mcp-servers",
+        "mcp_servers",
+        "mcpServers",
+        "mcpservers",
+        "allowedtools",
+        "context",
+        "agent",
+        "agents",
+        "subagent",
+        "subAgent",
+        "permissions",
+        "permission-mode",
+        "permissionMode",
+        "settings",
+      ]) {
         expect(validateText(enc(`---\nname: x\n${key}: Bash\n---\nbody\n`), undefined, "skill")).toEqual({ ok: false, reason: "frontmatter_executable" });
       }
     });

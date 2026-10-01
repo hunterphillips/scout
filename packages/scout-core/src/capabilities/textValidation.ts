@@ -4,8 +4,9 @@ import { createHash } from "node:crypto";
  * Acceptance rules for fetched website text (P2.2). Pure: bytes in, verdict out.
  *
  * The body decides, not the publisher's Content-Type: static hosts mislabel files, and a
- * single-page app answers every path with its `index.html`. A declared `text/html` is
- * still enough to refuse, but a declared `text/markdown` never rescues an HTML page.
+ * single-page app answers every path with its `index.html`. A declared `text/markdown`
+ * never rescues an HTML page, and a declared `text/html` on a body that is plainly
+ * Markdown does not condemn it (the declared type is still recorded with the text).
  */
 
 /** What is being validated. `skills_index` is JSON; this checks its encoding only and `skillsIndex.ts` its shape. */
@@ -55,12 +56,32 @@ export const BINARY_CONTROL_RATIO = 0.01;
  * `normalizeKey` (camelCase and `_` become kebab-case). Scout's wrapper never passes these through, so a
  * skill carrying one is refused rather than silently stripped.
  */
-export const EXECUTABLE_FRONTMATTER_KEYS: ReadonlySet<string> = new Set(["hooks", "allowed-tools", "tools", "model", "mcp-servers", "mcpservers", "allowedtools"]);
+export const EXECUTABLE_FRONTMATTER_KEYS: ReadonlySet<string> = new Set([
+  "hooks",
+  "allowed-tools",
+  "allowedtools",
+  "tools",
+  "model",
+  "mcp-servers",
+  "mcpservers",
+  "context",
+  "agent",
+  "agents",
+  "subagent",
+  "sub-agent",
+  "permissions",
+  "permission-mode",
+  "permissionmode",
+  "settings",
+]);
 
 /** Most frontmatter lines examined before the block counts as unterminated. */
 const FRONTMATTER_MAX_LINES = 64;
 
-const HTML_MARKERS = /<!doctype\s+html|<html[\s>]|<head[\s>]|<body[\s>]|<script[\s>]/i;
+/** A document that opens as HTML: a doctype, or an `html`, `head`, or `body` tag. */
+const HTML_OPENING = /^<(?:!doctype\s+html|html[\s>]|head[\s>]|body[\s>])/i;
+/** Document-level HTML anywhere in the scanned prefix. `<script>` alone is not one: Markdown mentions it in prose. */
+const HTML_MARKERS = /<!doctype\s+html|<html[\s>]|<head[\s>]|<body[\s>]/i;
 /** A tag, comment, doctype, or processing instruction as the very first thing in the body. */
 const LEADING_TAG = /^<(?:[a-z][a-z0-9-]*[\s/>]|!|\?)/i;
 const FRONTMATTER_KEY = /^[A-Za-z][A-Za-z0-9_-]{0,63}$/;
@@ -89,9 +110,19 @@ function looksBinary(text: string): boolean {
   return control > 0 && control / text.length > BINARY_CONTROL_RATIO;
 }
 
-function looksLikeHtml(body: string): boolean {
+/**
+ * Whether `body` (BOM and leading whitespace removed) is an HTML page rather than text that
+ * happens to contain markup. Markdown often opens with a comment
+ * (`<!-- markdownlint-disable -->`) or a centered `<div>`, so a leading tag alone is not
+ * enough: the body must open as an HTML document, or open with a tag and carry an `html`,
+ * `head`, or `body` marker in its first `HTML_SCAN_CHARS`, or open with a tag while
+ * declared `text/html`.
+ */
+function looksLikeHtml(body: string, declaredHtml: boolean): boolean {
   const head = body.slice(0, HTML_SCAN_CHARS);
-  return LEADING_TAG.test(head) || HTML_MARKERS.test(head);
+  if (HTML_OPENING.test(head)) return true;
+  if (!LEADING_TAG.test(head)) return false;
+  return declaredHtml || HTML_MARKERS.test(head);
 }
 
 /**
@@ -126,8 +157,8 @@ function checkSkill(body: string): TextRejectReason | null {
 
 /**
  * Accept `bytes` as text of `kind`, or say why not. Order: size cap, NUL bytes, strict
- * UTF-8, emptiness, binary control-character ratio, HTML (declared `text/html`, a leading
- * tag, or an HTML marker in the first `HTML_SCAN_CHARS`), then the `SKILL.md` shape for skills.
+ * UTF-8, emptiness, binary control-character ratio, HTML (`looksLikeHtml`), then the
+ * `SKILL.md` shape for skills.
  */
 export function validateText(bytes: Uint8Array, declaredContentType: string | undefined, kind: TextKind, maxBytes: number = TEXT_MAX_BYTES[kind]): TextValidation {
   if (bytes.byteLength > maxBytes) return { ok: false, reason: "too_large" };
@@ -141,7 +172,7 @@ export function validateText(bytes: Uint8Array, declaredContentType: string | un
   const body = text.replace(/^﻿/, "").trimStart();
   if (!body) return { ok: false, reason: "empty" };
   if (looksBinary(text)) return { ok: false, reason: "binary" };
-  if (isHtmlContentType(declaredContentType) || looksLikeHtml(body)) return { ok: false, reason: "html" };
+  if (looksLikeHtml(body, isHtmlContentType(declaredContentType))) return { ok: false, reason: "html" };
   if (kind === "skill") {
     const reason = checkSkill(body);
     if (reason) return { ok: false, reason };
