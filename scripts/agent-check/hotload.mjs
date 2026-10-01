@@ -29,7 +29,7 @@
 
 import { randomBytes } from "node:crypto";
 import { mkdirSync, writeFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { REPO_ROOT } from "../lib/paths.mjs";
 import { createLaunchProfile, filterChildEnv, runProfilePreflight } from "../../packages/scout-core/dist/agents/launchProfile.js";
 import { renderSkillWrapper } from "../../packages/scout-core/dist/capabilities/wrapper.js";
