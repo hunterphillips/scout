@@ -1,6 +1,7 @@
 import { realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import type { Candidate } from "@scout/contracts";
+import { capabilityCommand, CAPABILITY_USAGE } from "./capabilities/capabilityCli.js";
 import { createSiteResourceDiscoverer, type DiscoveryResult } from "./capabilities/discovery.js";
 import type { CatalogCacheResult } from "./catalog/cache.js";
 import type { Sleep } from "./catalog/pacing.js";
@@ -26,8 +27,10 @@ import { createOriginFetchSession } from "./fetch/originSession.js";
  *   runs on one origin fetch session and opens that session's single pacing window. Exits
  *   1 when robots.txt could not be fetched (an error, not a 404) and nothing was found.
  * - `rank <origin>` is not available until Phase 3.
+ * - `capability ...` reads and changes the capability store under `SCOUT_HOME`
+ *   (`capabilities/capabilityCli.ts`); only `capability ingest` touches the network.
  *
- * Only `catalog`, `discover`, and `verify` touch the network, and only when invoked. Importing this
+ * Only `catalog`, `discover`, `verify`, and `capability ingest` touch the network, and only when invoked. Importing this
  * module does nothing; the process entry runs `runCli` only when this file is `argv[1]`.
  */
 
@@ -40,7 +43,7 @@ export const USAGE = `usage:
                                     (exits 1 if robots.txt errored and nothing was found)
   cli.js verify <url>...            (at most ${VERIFY_CLI_MAX_URLS} URLs, all on one origin)
   cli.js rank <https-origin>        (Phase 3)
-`;
+${CAPABILITY_USAGE}`;
 
 /** How many candidates `catalog` lists after the summary. */
 export const CATALOG_PREVIEW = 20;
@@ -144,6 +147,12 @@ export async function runCli(argv: readonly string[], io: CliIo): Promise<number
         if (!origin.ok) return usage(`verify: ${origin.reason}`);
         return await verifyCommand(origin.origin, positional, io);
       }
+      case "capability":
+        return await capabilityCommand(rest, {
+          ...io,
+          discover: (origin: string) => runDiscovery(origin, false, io),
+          diagnostics: io.deps?.diagnostics ?? createDiagnostics({ path: defaultDiagnosticsPath(io.env ?? process.env), clock: io.deps?.clock ?? systemClock }),
+        });
       case "rank":
         io.stderr("rank: not available until Phase 3\n");
         return EXIT_UNAVAILABLE;
@@ -214,6 +223,14 @@ export function formatCatalog(
 }
 
 async function discoverCommand(origin: string, opts: { refresh: boolean; json: boolean }, io: CliIo): Promise<number> {
+  const result = await runDiscovery(origin, opts.refresh, io);
+  io.stdout(opts.json ? `${JSON.stringify(withoutText(result), null, 2)}\n` : formatDiscovery(result));
+  const nothingFound = !result.items.some((item) => item.status === "found") && result.externalReferences.length === 0;
+  return result.robots === "error" && nothingFound ? EXIT_FAIL : EXIT_OK;
+}
+
+/** One discovery pass on its own origin session (shared by `discover` and `capability ingest`). */
+async function runDiscovery(origin: string, refresh: boolean, io: CliIo): Promise<DiscoveryResult> {
   const deps = io.deps ?? {};
   const env = io.env ?? process.env;
   const clock = deps.clock ?? systemClock;
@@ -233,10 +250,7 @@ async function discoverCommand(origin: string, opts: { refresh: boolean; json: b
     ...(deps.sleep ? { sleep: deps.sleep } : {}),
   });
   session.startWindow();
-  const result = await discoverer.discover(origin, { refresh: opts.refresh, session });
-  io.stdout(opts.json ? `${JSON.stringify(withoutText(result), null, 2)}\n` : formatDiscovery(result));
-  const nothingFound = !result.items.some((item) => item.status === "found") && result.externalReferences.length === 0;
-  return result.robots === "error" && nothingFound ? EXIT_FAIL : EXIT_OK;
+  return discoverer.discover(origin, { refresh, session });
 }
 
 /** The result with each resource's text replaced by its length, for printing. */

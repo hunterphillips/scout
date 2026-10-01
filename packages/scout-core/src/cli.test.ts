@@ -344,4 +344,28 @@ describe("runCli", () => {
     expect(await runCli(["discover", `${ORIGIN}/path`], run.io)).toBe(1);
     expect(site.requests).toEqual([]);
   });
+
+  it("capability ingest, list, approve with the shown revision, and revoke work against SCOUT_HOME without printing text", async () => {
+    const { runCli } = await import("./cli.js");
+    const site = fakeSite({ "/llms.txt": "# Site\n\nSECRET-BODY\n" });
+    const ingest = io({ guardedFetch: site.guardedFetch });
+    expect(await runCli(["capability", "ingest", ORIGIN], ingest.io)).toBe(0);
+    const [resourceId, version, outcome] = ingest.out().trim().split(/\s+/);
+    expect(outcome).toBe("new_pending");
+
+    const list = io();
+    expect(await runCli(["capability", "list"], list.io)).toBe(0);
+    expect(list.out()).toContain(`${resourceId}  llms_txt  rev 1`);
+    expect(list.out()).not.toContain("SECRET-BODY");
+
+    const stale = io();
+    expect(await runCli(["capability", "approve", resourceId!, version!, "--rev", "0"], stale.io)).toBe(1);
+    expect(stale.err()).toContain("StaleApprovalError");
+    expect(await runCli(["capability", "approve", resourceId!, version!, "--rev", "1"], io().io)).toBe(0);
+    const revoke = io();
+    expect(await runCli(["capability", "revoke", resourceId!], revoke.io)).toBe(0);
+    expect(revoke.out()).toMatch(/revoked 1 readable version/);
+    expect(await runCli(["capability", "policy", ORIGIN, "--auto-acquire", "on"], io().io)).toBe(1);
+    expect(await runCli(["capability", "policy", ORIGIN, "--auto-acquire", "on", "--ack"], io().io)).toBe(0);
+  });
 });
