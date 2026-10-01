@@ -1,23 +1,27 @@
 import { randomBytes } from "node:crypto";
-import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { closeSync, fstatSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { z } from "zod";
-import { cacheFileName, checkPrivateDir, type DirRefusal, fsErrorCode } from "../catalog/cache.js";
 import type { Clock } from "../clock.js";
 import { type Diagnostics, scoutHome } from "../diagnostics.js";
-import { sha256Hex, TEXT_MAX_BYTES } from "./textValidation.js";
+import { CACHE_STALE_MAX_MS, cacheFileName, checkPrivateDir, type DirRefusal, fsErrorCode } from "../privateCacheFile.js";
+import type { IndexEntryUnsupportedReason } from "./skillsIndex.js";
+import { sha256Hex, TEXT_MAX_BYTES, type TextRejectReason } from "./textValidation.js";
 
 /**
- * The on-disk record of what resource discovery last learned about one origin:
- * `<scoutHome>/cache/discovery/<host>-<hash>.json` (dir 0700, file 0600, written
- * atomically; the same name and directory rules as the catalog cache).
+ * The discovery cache is a preview store. It holds what resource discovery last learned
+ * about one origin so Scout can show it and revalidate it cheaply. Approved text never
+ * lives here: the capability store (P2.3) copies an approved version into its own
+ * content-addressed blobs and never reads it back from this cache.
+ *
+ * Layout: `<scoutHome>/cache/discovery/<host>-<hash>.json` (dir 0700, file 0600, written
+ * atomically; the same name and directory rules as the catalog cache, `privateCacheFile.ts`).
  *
  * Text persistence: the accepted text of every public resource (and the skills index) is
  * stored inline in the record, bounded by the per-kind caps (at most ~1.6 MiB per origin
  * with today's limits). Inline keeps each origin's state in one atomic write with no blob
- * files to collect; P2.3 reads it from here for preview and copies approved versions into
- * its own content-addressed blob store. Every load re-hashes the text against its stored
- * SHA-256, so a hand-edited or truncated file is refused, never served.
+ * files to collect. Every load re-hashes the text against its stored SHA-256, so a
+ * hand-edited or truncated file is refused, never served.
  */
 
 /** Bump when the file shape changes meaning; every older file is then ignored. */
@@ -32,11 +36,75 @@ export const DISCOVERY_BACKOFF_MS: readonly number[] = [15 * 60 * 1000, 60 * 60 
 /** A `checkedAt` further than this in the future marks the file invalid (clock skew or tampering). */
 export const DISCOVERY_FUTURE_TOLERANCE_MS = 5 * 60 * 1000;
 
+/**
+ * A failed probe keeps its last good text only while the text was downloaded less than
+ * this long ago (the catalog cache's stale limit). Older text is dropped and the probe
+ * reports a plain failure.
+ */
+export const DISCOVERY_STALE_TEXT_MAX_MS = CACHE_STALE_MAX_MS;
+
+/** A cache file larger than this is refused unread (`file_too_large`). Today's caps keep a file under ~2 MiB. */
+export const DISCOVERY_CACHE_FILE_MAX_BYTES = 4 * 1024 * 1024;
+
 export const PROBE_KINDS = ["llms_txt", "agents_md", "skills_index", "skill"] as const;
 export type ProbeKind = (typeof PROBE_KINDS)[number];
 
 export const PROBE_STATUSES = ["found", "absent", "failed", "unsupported", "limited"] as const;
 export type ProbeStatus = (typeof PROBE_STATUSES)[number];
+
+/** Why a probe failed: the site's transport answer, a Scout protection, or a refused skill body. */
+export type ProbeFailureCode =
+  | "network"
+  | "timeout"
+  | "http_5xx"
+  | "http_status"
+  | "policy"
+  | "robots_disallowed"
+  | "digest_mismatch"
+  | "unexpected_not_modified"
+  /** A skill listed by an index that could not be read this pass, with nothing cached. */
+  | "index_unavailable";
+
+/** Why a probe was limited: a size cap, the pass budget, or Scout's own pacing refused the request (says nothing about the site). */
+export type ProbeLimitCode = "too_large" | "pass_budget" | "refused";
+
+export type IndexRejectReason = "index_not_json" | "index_not_object" | "index_schema" | "index_no_skills_array";
+
+export type ProbeCode = ProbeFailureCode | ProbeLimitCode | Exclude<TextRejectReason, "too_large"> | IndexEntryUnsupportedReason | IndexRejectReason;
+
+/** Every `ProbeCode`; the record type makes the compiler reject a missing or unknown one. */
+const PROBE_CODE_TABLE: Record<ProbeCode, true> = {
+  network: true,
+  timeout: true,
+  http_5xx: true,
+  http_status: true,
+  policy: true,
+  robots_disallowed: true,
+  digest_mismatch: true,
+  unexpected_not_modified: true,
+  index_unavailable: true,
+  too_large: true,
+  pass_budget: true,
+  refused: true,
+  empty: true,
+  nul_byte: true,
+  invalid_utf8: true,
+  binary: true,
+  html: true,
+  frontmatter_invalid: true,
+  frontmatter_executable: true,
+  invalid_entry: true,
+  duplicate: true,
+  archive: true,
+  file_type: true,
+  no_digest: true,
+  index_not_json: true,
+  index_not_object: true,
+  index_schema: true,
+  index_no_skills_array: true,
+};
+
+export const PROBE_CODES = Object.keys(PROBE_CODE_TABLE) as ProbeCode[];
 
 /** Accepted text plus what is needed to revalidate it. */
 export interface StoredText {
@@ -66,7 +134,7 @@ export interface ProbeRecord {
   /** Canonical source URL; the record's key. */
   url: string;
   status: ProbeStatus;
-  code?: string;
+  code?: ProbeCode;
   /** Last time the site answered this probe. */
   checkedAt: number;
   /** No request before this unless the caller refreshes: 24 h after a settled answer, the backoff after a failure. */
@@ -104,7 +172,7 @@ const FileSchema = z.object({
         kind: z.enum(PROBE_KINDS),
         url: z.string(),
         status: z.enum(PROBE_STATUSES),
-        code: z.string().max(64).optional(),
+        code: z.enum(PROBE_CODES as [ProbeCode, ...ProbeCode[]]).optional(),
         checkedAt: z.number(),
         nextCheckAt: z.number(),
         failures: z.int().min(0),
@@ -115,8 +183,13 @@ const FileSchema = z.object({
     .max(64),
 });
 
+/** `stored` if it may still stand in for the site after a failure at `now`, else undefined (see `DISCOVERY_STALE_TEXT_MAX_MS`). */
+export function usableLastGood(stored: StoredText | undefined, now: number): StoredText | undefined {
+  return stored && now - stored.fetchedAt <= DISCOVERY_STALE_TEXT_MAX_MS ? stored : undefined;
+}
+
 /** When a probe last answered `checkedAt`, the next time it may be asked again. */
-export function nextCheckAt(checkedAt: number, status: ProbeStatus, code: string | undefined, failures: number): number {
+export function nextCheckAt(checkedAt: number, status: ProbeStatus, code: ProbeCode | undefined, failures: number): number {
   if (status !== "failed" || code === "robots_disallowed") return checkedAt + DISCOVERY_FRESH_MS;
   const step = DISCOVERY_BACKOFF_MS[Math.min(Math.max(failures, 1), DISCOVERY_BACKOFF_MS.length) - 1] ?? DISCOVERY_FRESH_MS;
   return checkedAt + step;
@@ -144,6 +217,14 @@ export interface DiscoveryCacheOptions {
 function invalidReason(file: DiscoveryCacheFile, origin: string, now: number): string | null {
   if (file.origin !== origin) return "origin";
   const encoder = new TextEncoder();
+  const seen = new Set<string>();
+  const sameOrigin = (value: string): boolean => {
+    try {
+      return new URL(value).origin === origin;
+    } catch {
+      return false;
+    }
+  };
   for (const probe of file.probes) {
     let url: URL;
     try {
@@ -152,12 +233,15 @@ function invalidReason(file: DiscoveryCacheFile, origin: string, now: number): s
       return "url";
     }
     if (url.origin !== origin || url.href !== probe.url) return "url";
+    if (seen.has(probe.url)) return "duplicate_url";
+    seen.add(probe.url);
     if (!Number.isFinite(probe.checkedAt) || !Number.isFinite(probe.nextCheckAt)) return "checked_at";
     if (probe.checkedAt > now + DISCOVERY_FUTURE_TOLERANCE_MS) return "future";
     if ((probe.kind === "skill") !== (probe.skill !== undefined)) return "skill";
     if (probe.status === "found" && !probe.stored) return "stored";
     const stored = probe.stored;
     if (stored) {
+      if (!sameOrigin(stored.finalUrl)) return "final_url";
       const bytes = encoder.encode(stored.text);
       if (bytes.byteLength !== stored.byteLength || bytes.byteLength > TEXT_MAX_BYTES[probe.kind]) return "size";
       if (sha256Hex(bytes) !== stored.sha256) return "hash";
@@ -185,11 +269,19 @@ export function createDiscoveryCache(options: DiscoveryCacheOptions): DiscoveryC
     }
     if (refusal) return invalid(`dir_${refusal}`);
     let raw: string;
+    let fd: number | null = null;
     try {
-      raw = readFileSync(join(dir, cacheFileName(canonical)), "utf8");
+      fd = openSync(join(dir, cacheFileName(canonical)), "r");
+      const st = fstatSync(fd);
+      if (!st.isFile()) return invalid("not_file");
+      if (st.size > DISCOVERY_CACHE_FILE_MAX_BYTES) return invalid("file_too_large");
+      raw = readFileSync(fd, "utf8");
     } catch {
       return null;
+    } finally {
+      if (fd !== null) closeSync(fd);
     }
+    if (raw.length > DISCOVERY_CACHE_FILE_MAX_BYTES) return invalid("file_too_large");
     let parsed: DiscoveryCacheFile;
     try {
       const json: unknown = JSON.parse(raw);

@@ -1,12 +1,13 @@
-import { createHash, randomBytes } from "node:crypto";
-import { lstatSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { randomBytes } from "node:crypto";
+import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { type SiteCatalog, SiteCatalogSchema } from "@scout/contracts";
 import { z } from "zod";
 import type { Clock } from "../clock.js";
 import { type Diagnostics, scoutHome } from "../diagnostics.js";
-import { type CatalogFetchOptions, SITEMAP_MAX_BYTES } from "./catalogFetch.js";
-import { isRefusal, type PacedCatalogFetch } from "./pacing.js";
+import { CACHE_STALE_MAX_MS, cacheFileName, checkPrivateDir, type DirRefusal, fsErrorCode } from "../privateCacheFile.js";
+import { type CatalogFetchOptions, nextValidators, SITEMAP_MAX_BYTES } from "./catalogFetch.js";
+import { isRefusal, type PacedFetch } from "./pacing.js";
 import { type CatalogResource, discoverCatalog, type Discovery, type DiscoverOptions } from "./resolver.js";
 
 /** Bump when the file shape or the resolver's output changes meaning; every older file is then ignored. */
@@ -16,13 +17,10 @@ export const CATALOG_CACHE_SCHEMA_VERSION = 3;
 export const CATALOG_FRESH_MS = 24 * 60 * 60 * 1000;
 
 /** When a refresh fails, a cached catalog younger than this is still served, marked stale. */
-export const CATALOG_STALE_MAX_MS = 7 * 24 * 60 * 60 * 1000;
+export const CATALOG_STALE_MAX_MS = CACHE_STALE_MAX_MS;
 
 /** A cached `fetchedAt` further than this in the future is treated as invalid (clock skew or tampering). */
 export const CATALOG_FUTURE_TOLERANCE_MS = 5 * 60 * 1000;
-
-/** Longest readable host prefix in a cache file name; the hash suffix keeps names unique. */
-const FILE_PREFIX_MAX = 100;
 
 const CacheFileSchema = z.object({
   schemaVersion: z.number(),
@@ -36,6 +34,7 @@ const CacheFileSchema = z.object({
       etag: z.string().optional(),
       lastModified: z.string().optional(),
       maxBytes: z.number().int().positive().optional(),
+      accept: z.string().max(256).optional(),
     }),
   ),
   catalog: SiteCatalogSchema,
@@ -59,8 +58,14 @@ export type CatalogCacheResult =
 
 export interface ResolveWithCacheOptions {
   origin: string;
-  /** One paced fetch for this origin; revalidation and discovery share its pacing, each in its own run window. */
-  fetch: PacedCatalogFetch;
+  /** One paced fetch for this origin; revalidation and discovery share its pacing. */
+  fetch: PacedFetch & { startWindow?: () => void };
+  /**
+   * Opens a new pacing window. Revalidation and rediscovery each call it when given, or
+   * else the fetch's own `startWindow` when it has one (a private paced fetch). A shared
+   * session's fetch has neither: the session's owner opened one window for the whole pass.
+   */
+  startWindow?: () => void;
   /** Skip the 24 h freshness window (the CLI's `--refresh`). Validators are still sent. */
   refresh?: boolean;
   /** Test hook; defaults to `discoverCatalog`. */
@@ -81,75 +86,40 @@ export interface CatalogCacheOptions {
 }
 
 /**
- * File name for an origin: a readable prefix (host lowercased, `:` and any other unsafe
- * character turned into `_`, at most 100 characters) then `-` and the first 16 hex digits
- * of the SHA-256 of the origin. The hash keeps names unique where the prefix collides
- * (`a_8443` vs `a:8443`) or is cut short, and the length bound keeps the temp name under
- * the file-system limit for any host.
- */
-export function cacheFileName(origin: string): string {
-  const url = new URL(origin);
-  if (url.protocol !== "https:") throw new TypeError("catalog origin must be https");
-  const name = url.host.toLowerCase().replace(/[^a-z0-9.-]/g, "_");
-  if (!name || /^\.+$/.test(name)) throw new TypeError("catalog origin has no usable host");
-  const hash = createHash("sha256").update(url.origin).digest("hex").slice(0, 16);
-  return `${name.slice(0, FILE_PREFIX_MAX)}-${hash}.json`;
-}
-
-export type DirRefusal = "symlink" | "not_directory" | "wrong_owner" | "not_private";
-
-/** Why `dir` is unsafe to use for the cache, or null if it is a private directory we own. Mirrors `ensurePrivateRunDir`. Throws if lstat fails. */
-export function checkPrivateDir(dir: string, uid: number = process.getuid?.() ?? -1): DirRefusal | null {
-  const st = lstatSync(dir);
-  if (st.isSymbolicLink()) return "symlink";
-  if (!st.isDirectory()) return "not_directory";
-  if (st.uid !== uid) return "wrong_owner";
-  if ((st.mode & 0o077) !== 0) return "not_private";
-  return null;
-}
-
-/** A short code for a file-system error, safe for diagnostics. */
-export function fsErrorCode(error: unknown): string {
-  switch ((error as NodeJS.ErrnoException | null)?.code) {
-    case "ENOTDIR":
-      return "enotdir";
-    case "EEXIST":
-      // mkdir hit an existing non-directory: most likely the cache dir path is a regular file.
-      return "not_directory";
-    case "ENAMETOOLONG":
-      return "enametoolong";
-    case "EACCES":
-    case "EPERM":
-      return "eacces";
-    default:
-      return "other";
-  }
-}
-
-/**
  * Ask the site whether each resource the cached catalog was built from has changed.
- * Returns true only if every one answers as before: `ok` resources return 304 to their
- * stored ETag / Last-Modified, `absent` ones are still absent, `error` ones still fail.
- * A resource with no validators counts as changed. A `refused` resource (never asked when
- * the catalog was built) counts as changed before any request is made, and so does a
- * probe the paced fetch refuses: neither says anything about the site. Stops at the first
- * change.
+ * Returns the resources with refreshed validators only if every one answers as before:
+ * `ok` resources return 304 to their stored ETag / Last-Modified, `absent` ones are still
+ * absent, `error` ones still fail; otherwise null. Each probe repeats the original
+ * request's `Accept` and size cap. A resource with no validators counts as changed. A
+ * `refused` resource (never asked when the catalog was built) counts as changed before
+ * any request is made, and so does a probe the paced fetch refuses: neither says anything
+ * about the site. Stops at the first change. Validators a 304 carries replace the stored
+ * ones (`nextValidators`), as resource discovery does, so the two caches keep sending the
+ * same conditional request for a URL they share.
  */
-async function unchanged(resources: readonly CatalogResource[], fetch: PacedCatalogFetch): Promise<boolean> {
-  if (resources.length === 0 || resources.some((resource) => resource.status === "refused")) return false;
+async function revalidate(resources: readonly CatalogResource[], fetch: PacedFetch): Promise<CatalogResource[] | null> {
+  if (resources.length === 0 || resources.some((resource) => resource.status === "refused")) return null;
+  const updated: CatalogResource[] = [];
   for (const resource of resources) {
     const opts: CatalogFetchOptions = { maxBytes: resource.maxBytes ?? SITEMAP_MAX_BYTES };
+    if (resource.accept !== undefined) opts.accept = resource.accept;
     if (resource.status === "ok") {
-      if (!resource.etag && !resource.lastModified) return false;
+      if (!resource.etag && !resource.lastModified) return null;
       if (resource.etag) opts.ifNoneMatch = resource.etag;
       if (resource.lastModified) opts.ifModifiedSince = resource.lastModified;
     }
     const result = await fetch(resource.url, opts);
-    if (isRefusal(result)) return false;
+    if (isRefusal(result)) return null;
     const expected = resource.status === "ok" ? "not_modified" : resource.status;
-    if (result.kind !== expected) return false;
+    if (result.kind !== expected) return null;
+    if (resource.status === "ok") {
+      const { etag: _etag, lastModified: _lastModified, ...rest } = resource;
+      updated.push({ ...rest, ...nextValidators(resource, result) });
+    } else {
+      updated.push(resource);
+    }
   }
-  return true;
+  return updated;
 }
 
 /**
@@ -170,9 +140,11 @@ async function unchanged(resources: readonly CatalogResource[], fetch: PacedCata
  * dated more than 5 minutes in the future, or one that fails to parse, is treated as
  * missing and overwritten.
  *
- * Run windows: revalidation and rediscovery each get their own paced-fetch window
- * (`startWindow`), so a slow revalidation under a long crawl delay cannot spend the
- * deadline or budget rediscovery needs. The crawl delay carries across both.
+ * Run windows: with a private paced fetch, revalidation and rediscovery each get their
+ * own window (`startWindow`), so a slow revalidation under a long crawl delay cannot spend
+ * the deadline or budget rediscovery needs. The crawl delay carries across both. On a
+ * shared origin session the session's owner opens the window, and the whole resolve
+ * (with whatever else runs in the pass) shares it.
  *
  * Refusals: a request the paced fetch refused (budget or deadline) is stored as a
  * `refused` resource, never as the site's answer. A cached catalog with any `refused`
@@ -298,18 +270,23 @@ export function createCatalogCache(options: CatalogCacheOptions): CatalogCache {
 
     if (cached && !request.refresh && now - cached.fetchedAt < CATALOG_FRESH_MS) return report("fresh", cached.catalog);
 
+    const startWindow = (): void => {
+      if (request.startWindow) request.startWindow();
+      else request.fetch.startWindow?.();
+    };
+
     if (cached) {
       request.fetch.setCrawlDelay(cached.crawlDelayMs);
-      request.fetch.startWindow();
-      let same = false;
+      startWindow();
+      let same: CatalogResource[] | null = null;
       try {
-        same = await unchanged(cached.resources, request.fetch);
+        same = await revalidate(cached.resources, request.fetch);
       } catch {
-        same = false;
+        same = null;
       }
       if (same) {
         const bumped = clock.now();
-        const file: CatalogCacheFile = { ...cached, fetchedAt: bumped, catalog: { ...cached.catalog, fetchedAt: bumped } };
+        const file: CatalogCacheFile = { ...cached, fetchedAt: bumped, resources: same, catalog: { ...cached.catalog, fetchedAt: bumped } };
         save(file);
         return report("not_modified", file.catalog);
       }
@@ -317,7 +294,7 @@ export function createCatalogCache(options: CatalogCacheOptions): CatalogCache {
 
     const young = cached !== null && clock.now() - cached.fetchedAt < CATALOG_STALE_MAX_MS;
     let discovery: Discovery | null = null;
-    request.fetch.startWindow();
+    startWindow();
     try {
       discovery = await discover({ origin, fetch: request.fetch, clock, ...(diagnostics ? { diagnostics } : {}) });
     } catch {

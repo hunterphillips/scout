@@ -81,4 +81,19 @@ describe("parseSkillsIndex", () => {
     const parsed = parseSkillsIndex(index([skill()], { mcpServers: [{ url: "https://s.example/mcp" }] }), INDEX_URL, ORIGIN);
     expect(parsed.ok && parsed.entries.map((e) => e.url)).toEqual([`${ORIGIN}/.well-known/agent-skills/checkout/SKILL.md`]);
   });
+
+  it("treats non-string fields and an oversized description as invalid entries without echoing them", () => {
+    const huge = "d".repeat(64 * 1024);
+    const parsed = parseSkillsIndex(
+      index([skill({ name: 1 }), skill({ name: "a", url: {} }), skill({ name: "b", type: 7 }), skill({ name: "c", description: huge }), skill({ name: "d", digest: 5 })]),
+      INDEX_URL,
+      ORIGIN,
+    );
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.entries.map((e) => (e.disposition === "unsupported" ? e.reason : e.disposition))).toEqual(["invalid_entry", "invalid_entry", "invalid_entry", "invalid_entry", "invalid_entry"]);
+    expect(parsed.entries[0]?.name).toBeUndefined();
+    expect(parsed.entries[1]?.url).toBeUndefined();
+    expect(parsed.entries[3]?.description).toBeUndefined();
+  });
 });

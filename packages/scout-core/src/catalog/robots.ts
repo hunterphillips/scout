@@ -1,4 +1,4 @@
-import { type CatalogFetch, TEXT_SOURCE_MAX_BYTES } from "./catalogFetch.js";
+import { type CatalogFetch, ROBOTS_ACCEPT, TEXT_SOURCE_MAX_BYTES } from "./catalogFetch.js";
 
 /** Scout's product token for `User-agent` matching (case-insensitive). */
 export const ROBOTS_PRODUCT_TOKEN = "scout";
@@ -245,7 +245,7 @@ export function isAllowed(rules: Pick<RobotsRules, "rules"> | CompiledRobots, ra
  * is exposed so the resolver can tighten this without changing the parser.
  */
 export async function fetchRobots(origin: string, fetch: CatalogFetch): Promise<FetchedRobots> {
-  const result = await fetch(`${origin}/robots.txt`, { maxBytes: TEXT_SOURCE_MAX_BYTES, accept: "text/plain" });
+  const result = await fetch(`${origin}/robots.txt`, { maxBytes: TEXT_SOURCE_MAX_BYTES, accept: ROBOTS_ACCEPT });
   if (result.kind === "ok") return { ...parseRobots(result.body), source: "fetched" };
   return { rules: [], sitemaps: [], skippedRules: { tooLong: 0, overLimit: 0, tooManyWildcards: 0 }, source: result.kind === "absent" ? "absent" : "error" };
 }

@@ -176,9 +176,9 @@ describe("discoverCatalog", () => {
     expect(result.catalog.errors).toEqual(["robots:error"]);
     expect(result.failed).toBe(false);
     expect(result.resources).toEqual([
-      { url: `${ORIGIN}/robots.txt`, status: "error", maxBytes: TEXT_SOURCE_MAX_BYTES },
-      { url: `${ORIGIN}/llms.txt`, status: "absent", maxBytes: TEXT_SOURCE_MAX_BYTES },
-      { url: `${ORIGIN}/sitemap.xml`, status: "ok", etag: '"s1"', lastModified: "Mon, 01 Sep 2026 00:00:00 GMT", maxBytes: SITEMAP_MAX_BYTES },
+      { url: `${ORIGIN}/robots.txt`, status: "error", maxBytes: TEXT_SOURCE_MAX_BYTES, accept: "text/plain" },
+      { url: `${ORIGIN}/llms.txt`, status: "absent", maxBytes: TEXT_SOURCE_MAX_BYTES, accept: "text/markdown, text/plain" },
+      { url: `${ORIGIN}/sitemap.xml`, status: "ok", etag: '"s1"', lastModified: "Mon, 01 Sep 2026 00:00:00 GMT", maxBytes: SITEMAP_MAX_BYTES, accept: "application/xml, text/xml" },
     ]);
     const event = events.find((e) => e.name === "catalog_discover");
     expect(event?.fields).toMatchObject({ origin: ORIGIN, candidateCount: 1, robotsSource: "error" });

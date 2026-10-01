@@ -1,10 +1,10 @@
 import { join } from "node:path";
 import type { Clock } from "../clock.js";
 import type { Diagnostics } from "../diagnostics.js";
-import { type GuardedFetchOptions, type GuardedFetchResult, guardedFetch } from "../fetch/guardedFetch.js";
+import type { GuardedFetchOptions, GuardedFetchResult } from "../fetch/guardedFetch.js";
+import { createOriginFetchSession, type OriginFetchSession } from "../fetch/originSession.js";
 import { type CatalogCacheResult, createCatalogCache } from "./cache.js";
-import { createCoalescingFetch } from "../fetch/inflight.js";
-import { createPacedCatalogFetch, type PacedCatalogFetch, type Sleep } from "./pacing.js";
+import type { Sleep } from "./pacing.js";
 
 export interface CatalogResolverOptions {
   /** Scout's home directory; the cache lives in `<scoutHome>/cache/catalog`. */
@@ -36,56 +36,12 @@ export interface CatalogResolution {
 export interface CatalogResolver {
   /**
    * `session` runs the resolve on a caller's shared origin fetch (see
-   * `createOriginFetchSession`); without one, the resolve gets a private session. With a
-   * shared session, `stats` also count requests other callers made during this resolve.
+   * `createOriginFetchSession`); the session's owner has opened its pacing window, and the
+   * resolve opens none. Without one, the resolve gets a private session and opens its own
+   * windows (one for revalidation, one for rediscovery). With a shared session, `stats`
+   * also count requests other callers made during this resolve.
    */
   resolve(origin: string, options?: { refresh?: boolean; session?: OriginFetchSession }): Promise<CatalogResolution>;
-}
-
-/** Network totals of one session so far. */
-export interface OriginFetchStats {
-  requests: number;
-  refused: number;
-  bytesReceived: number;
-}
-
-/**
- * One origin's outbound fetch for one pass, shared by every caller in that pass (catalog
- * resolution and capability discovery). Requests go through one paced queue (crawl delay,
- * budget, deadline, origin check), and identical requests share one network call and one
- * decoded body (`createCoalescingFetch`). Make a new session per pass.
- */
-export interface OriginFetchSession {
-  readonly origin: string;
-  readonly fetch: PacedCatalogFetch;
-  stats(): OriginFetchStats;
-}
-
-export interface OriginFetchSessionOptions {
-  origin: string;
-  clock: Clock;
-  /** Test hook; defaults to the real `guardedFetch`. */
-  guardedFetch?: (url: string, options: GuardedFetchOptions) => Promise<GuardedFetchResult>;
-  /** Test hook; defaults to `setTimeout`. */
-  sleep?: Sleep;
-}
-
-export function createOriginFetchSession(options: OriginFetchSessionOptions): OriginFetchSession {
-  const origin = new URL(options.origin).origin;
-  const baseFetch = options.guardedFetch ?? guardedFetch;
-  let bytesReceived = 0;
-  const countingFetch = async (url: string, fetchOptions: GuardedFetchOptions): Promise<GuardedFetchResult> => {
-    const result = await baseFetch(url, fetchOptions);
-    if (result.kind === "ok") bytesReceived += result.bytes.byteLength;
-    return result;
-  };
-  const paced = createPacedCatalogFetch({ origin, clock: options.clock, guardedFetch: countingFetch, ...(options.sleep ? { sleep: options.sleep } : {}) });
-  const fetch = createCoalescingFetch(paced) as PacedCatalogFetch;
-  fetch.setCrawlDelay = paced.setCrawlDelay;
-  fetch.startWindow = paced.startWindow;
-  Object.defineProperty(fetch, "refused", { get: () => paced.refused });
-  Object.defineProperty(fetch, "requests", { get: () => paced.requests });
-  return { origin, fetch, stats: () => ({ requests: paced.requests, refused: paced.refused, bytesReceived }) };
 }
 
 /**
@@ -99,18 +55,21 @@ export function createCatalogResolver(options: CatalogResolverOptions): CatalogR
 
   return {
     async resolve(origin, { refresh = false, session: shared } = {}) {
-      const session =
-        shared ??
-        createOriginFetchSession({
+      let session = shared;
+      let startWindow: (() => void) | undefined;
+      if (!session) {
+        session = createOriginFetchSession({
           origin,
           clock,
           ...(options.guardedFetch ? { guardedFetch: options.guardedFetch } : {}),
           ...(options.sleep ? { sleep: options.sleep } : {}),
         });
+        startWindow = session.startWindow;
+      }
       if (session.origin !== new URL(origin).origin) throw new TypeError("session is for another origin");
       const before = session.stats();
       const started = clock.now();
-      const result = await cache.resolve({ origin, fetch: session.fetch, refresh });
+      const result = await cache.resolve({ origin, fetch: session.fetch, refresh, ...(startWindow ? { startWindow } : {}) });
       const after = session.stats();
       return {
         result,

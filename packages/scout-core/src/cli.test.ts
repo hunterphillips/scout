@@ -325,6 +325,18 @@ describe("runCli", () => {
     expect(JSON.parse(json.out()).items[0]).toMatchObject({ kind: "llms_txt", status: "found", source: "cache" });
   });
 
+  it("discover exits 1 when robots.txt errored and nothing was found, 0 when only absent", async () => {
+    const { runCli } = await import("./cli.js");
+    const down = async (url: string): Promise<GuardedFetchResult> =>
+      new URL(url).pathname === "/robots.txt" ? { kind: "error", reason: "network", message: "reset" } : { kind: "absent", status: 404 };
+    const failed = io({ guardedFetch: down });
+    expect(await runCli(["discover", ORIGIN], failed.io)).toBe(1);
+    expect(failed.out()).toMatch(/^robots\s+error/m);
+
+    const empty = io({ guardedFetch: fakeSite().guardedFetch });
+    expect(await runCli(["discover", ORIGIN, "--refresh"], empty.io)).toBe(0);
+  });
+
   it("discover refuses a non-origin before fetching anything", async () => {
     const { runCli } = await import("./cli.js");
     const site = fakeSite();

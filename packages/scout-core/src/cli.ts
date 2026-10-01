@@ -10,6 +10,7 @@ import { type VerifyFetch, type VerifyResult, verifyTargets } from "./catalog/ve
 import { type Clock, systemClock } from "./clock.js";
 import { createDiagnostics, defaultDiagnosticsPath, type Diagnostics, scoutHome } from "./diagnostics.js";
 import type { GuardedFetchOptions, GuardedFetchResult } from "./fetch/guardedFetch.js";
+import { createOriginFetchSession } from "./fetch/originSession.js";
 
 /**
  * Scout's developer CLI: `node packages/scout-core/dist/cli.js <command>`.
@@ -21,7 +22,9 @@ import type { GuardedFetchOptions, GuardedFetchResult } from "./fetch/guardedFet
  *   the first URL's; a URL on any other origin is a usage error.
  * - `discover <origin> [--refresh] [--json]` runs website resource discovery (`llms.txt`,
  *   `AGENTS.md`, the skills index and its skills) through the on-disk discovery cache and
- *   prints one line per probe. Resource text is never printed; `--json` omits it too.
+ *   prints one line per probe. Resource text is never printed; `--json` omits it too. It
+ *   runs on one origin fetch session and opens that session's single pacing window. Exits
+ *   1 when robots.txt could not be fetched (an error, not a 404) and nothing was found.
  * - `rank <origin>` is not available until Phase 3.
  *
  * Only `catalog`, `discover`, and `verify` touch the network, and only when invoked. Importing this
@@ -34,6 +37,7 @@ export const VERIFY_CLI_MAX_URLS = 10;
 export const USAGE = `usage:
   cli.js catalog <https-origin> [--refresh] [--json]
   cli.js discover <https-origin> [--refresh] [--json]
+                                    (exits 1 if robots.txt errored and nothing was found)
   cli.js verify <url>...            (at most ${VERIFY_CLI_MAX_URLS} URLs, all on one origin)
   cli.js rank <https-origin>        (Phase 3)
 `;
@@ -221,9 +225,18 @@ async function discoverCommand(origin: string, opts: { refresh: boolean; json: b
     ...(deps.guardedFetch ? { guardedFetch: deps.guardedFetch } : {}),
     ...(deps.sleep ? { sleep: deps.sleep } : {}),
   });
-  const result = await discoverer.discover(origin, { refresh: opts.refresh });
+  // The CLI owns this pass's session, so it opens the one pacing window.
+  const session = createOriginFetchSession({
+    origin,
+    clock,
+    ...(deps.guardedFetch ? { guardedFetch: deps.guardedFetch } : {}),
+    ...(deps.sleep ? { sleep: deps.sleep } : {}),
+  });
+  session.startWindow();
+  const result = await discoverer.discover(origin, { refresh: opts.refresh, session });
   io.stdout(opts.json ? `${JSON.stringify(withoutText(result), null, 2)}\n` : formatDiscovery(result));
-  return EXIT_OK;
+  const nothingFound = !result.items.some((item) => item.status === "found") && result.externalReferences.length === 0;
+  return result.robots === "error" && nothingFound ? EXIT_FAIL : EXIT_OK;
 }
 
 /** The result with each resource's text replaced by its length, for printing. */

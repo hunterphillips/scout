@@ -2,9 +2,10 @@ import { chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, s
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { cacheFileName } from "../privateCacheFile.js";
 import { createDiagnostics, type DiagnosticFields, type Diagnostics } from "../diagnostics.js";
 import type { GuardedFetchOptions, GuardedFetchResult } from "../fetch/guardedFetch.js";
-import { cacheFileName, CATALOG_CACHE_SCHEMA_VERSION, CATALOG_FRESH_MS, CATALOG_STALE_MAX_MS, createCatalogCache } from "./cache.js";
+import { CATALOG_CACHE_SCHEMA_VERSION, CATALOG_FRESH_MS, CATALOG_STALE_MAX_MS, createCatalogCache } from "./cache.js";
 import { SITEMAP_MAX_BYTES, TEXT_SOURCE_MAX_BYTES } from "./catalogFetch.js";
 import { createPacedCatalogFetch, type PacedCatalogFetchOptions } from "./pacing.js";
 

@@ -146,6 +146,7 @@ export {
   RUN_DEADLINE_MS,
   type PacedCatalogFetch,
   type PacedCatalogFetchOptions,
+  type PacedFetch,
   type Sleep,
 } from "./catalog/pacing.js";
 export {
@@ -162,8 +163,8 @@ export {
   type Discovery,
   type DiscoveryStats,
 } from "./catalog/resolver.js";
+export { CACHE_STALE_MAX_MS, cacheFileName } from "./privateCacheFile.js";
 export {
-  cacheFileName,
   CATALOG_CACHE_SCHEMA_VERSION,
   CATALOG_FRESH_MS,
   CATALOG_FUTURE_TOLERANCE_MS,
@@ -177,11 +178,13 @@ export {
   type ResolveWithCacheOptions,
 } from "./catalog/cache.js";
 export {
-  createCatalogResolver,
   createOriginFetchSession,
   type OriginFetchSession,
   type OriginFetchSessionOptions,
   type OriginFetchStats,
+} from "./fetch/originSession.js";
+export {
+  createCatalogResolver,
   type CatalogResolution,
   type CatalogResolveStats,
   type CatalogResolver,

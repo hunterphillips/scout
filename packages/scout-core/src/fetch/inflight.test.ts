@@ -85,4 +85,18 @@ describe("createCoalescingFetch", () => {
     await fetch("https://s.example/llms.txt");
     expect(calls).toBe(2);
   });
+
+  it("sends one larger request for two waiters whose caps both exceed the overflowing one in flight", async () => {
+    const { inner, calls, release } = gatedFetch({ "/llms.txt": "x".repeat(200) });
+    const fetch = createCoalescingFetch(inner);
+    const small = fetch("https://s.example/llms.txt", { maxBytes: 100 });
+    const a = fetch("https://s.example/llms.txt", { maxBytes: 500 });
+    const b = fetch("https://s.example/llms.txt", { maxBytes: 500 });
+    release();
+    expect(await small).toMatchObject({ kind: "error", reason: "too_large" });
+    const [ra, rb] = await Promise.all([a, b]);
+    expect(ra.kind).toBe("ok");
+    expect(rb).toBe(ra);
+    expect(calls.map((c) => c.opts.maxBytes)).toEqual([100, 500]);
+  });
 });

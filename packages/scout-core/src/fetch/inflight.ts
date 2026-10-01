@@ -35,6 +35,12 @@ function tooLarge(maxBytes: number): GuardedFetchResult {
  * the one in flight waits for it and reuses an `ok` answer (it fits), or makes its own
  * request if the smaller cap was what failed. Non-error results for `RETAINED_ROOT_PATHS`
  * are kept until the wrapper is dropped; everything else is forgotten once settled.
+ *
+ * Validators are part of the key, so a conditional request is shared only with callers
+ * holding exactly the same ETag and Last-Modified. On a warm pass the catalog and resource
+ * discovery share `/llms.txt` only because both store validators by the same rule
+ * (`nextValidators`) and send the same `Accept`; a caller without validators (or with
+ * other ones) makes its own request.
  */
 export function createCoalescingFetch(inner: CoalescibleFetch): CoalescibleFetch {
   const pending = new Map<string, Pending>();

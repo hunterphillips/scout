@@ -8,61 +8,54 @@
 
 import { join } from "node:path";
 import type { ResourceKind } from "@scout/contracts";
-import type { CatalogFetch, CatalogFetchOptions } from "../catalog/catalogFetch.js";
-import { isRefusal } from "../catalog/pacing.js";
-import { createOriginFetchSession, type OriginFetchSession } from "../catalog/resolveCatalog.js";
+import { type CatalogFetchOptions, LLMS_TXT_ACCEPT, nextValidators } from "../catalog/catalogFetch.js";
+import { isRefusal, type PacedFetch } from "../catalog/pacing.js";
 import { type CompiledRobots, compileRobots, fetchRobots, isAllowed, type RobotsSource } from "../catalog/robots.js";
 import type { Clock } from "../clock.js";
 import type { Diagnostics } from "../diagnostics.js";
 import type { GuardedFetchOptions, GuardedFetchResult } from "../fetch/guardedFetch.js";
+import { createOriginFetchSession, type OriginFetchSession } from "../fetch/originSession.js";
 import {
   createDiscoveryCache,
   DISCOVERY_CACHE_SCHEMA_VERSION,
   type DiscoveryCache,
+  type IndexRejectReason,
   isDue,
   nextCheckAt,
+  type ProbeCode,
+  type ProbeFailureCode,
   type ProbeKind,
   type ProbeRecord,
   type ProbeStatus,
   type SkillDescriptor,
   type StoredText,
+  usableLastGood,
 } from "./discoveryCache.js";
-import { type IndexEntryUnsupportedReason, parseSkillsIndex, type SkillsIndexParse } from "./skillsIndex.js";
-import { TEXT_MAX_BYTES, type TextRejectReason, validateText } from "./textValidation.js";
+import { parseSkillsIndex, type SkillsIndexParse } from "./skillsIndex.js";
+import { TEXT_MAX_BYTES, validateText } from "./textValidation.js";
+
+export type { IndexRejectReason, ProbeCode, ProbeFailureCode, ProbeLimitCode } from "./discoveryCache.js";
 
 export const LLMS_TXT_PATH = "/llms.txt";
 export const AGENTS_MD_PATH = "/AGENTS.md";
 export const SKILLS_INDEX_PATH = "/.well-known/agent-skills/index.json";
 
-/** Most skill fetches outstanding at once. */
+/**
+ * Most skill fetches outstanding at once. Nominal today: every request goes through the
+ * origin's serial paced queue, so two outstanding fetches still reach the site one at a time.
+ */
 export const SKILL_FETCH_CONCURRENCY = 2;
 
-/** Most accepted resource bytes (llms.txt, AGENTS.md, skills) in one pass. */
+/**
+ * Most accepted resource bytes (llms.txt, AGENTS.md, skills) in one pass. Today's caps sum
+ * to ~1.5 MiB (128 KiB + 128 KiB + 20 skills x 64 KiB), so this cannot bind yet; it guards
+ * against a future change to those caps or to the index entry limit.
+ */
 export const MAX_ACCEPTED_BYTES_PER_PASS = 2 * 1024 * 1024;
 
+/** `AGENTS.md` and skills. `llms.txt` uses the catalog's `LLMS_TXT_ACCEPT` so a shared session can answer both from one request. */
 const TEXT_ACCEPT = "text/markdown, text/plain";
 const INDEX_ACCEPT = "application/json";
-
-/** Why a probe failed: the site's transport answer, a Scout protection, or a refused skill body. */
-export type ProbeFailureCode =
-  | "network"
-  | "timeout"
-  | "http_5xx"
-  | "http_status"
-  | "policy"
-  /** Scout's own pacing refused the request (budget, deadline); says nothing about the site. */
-  | "refused"
-  | "robots_disallowed"
-  | "digest_mismatch"
-  | "unexpected_not_modified"
-  /** A skill listed by an index that could not be read this pass, with nothing cached. */
-  | "index_unavailable";
-
-export type ProbeLimitCode = "too_large" | "pass_budget";
-
-export type IndexRejectReason = "index_not_json" | "index_not_object" | "index_schema" | "index_no_skills_array";
-
-export type ProbeCode = ProbeFailureCode | ProbeLimitCode | Exclude<TextRejectReason, "too_large"> | IndexEntryUnsupportedReason | IndexRejectReason;
 
 /** Where an item's answer came from this pass. */
 export type ProbeSource = "network" | "not_modified" | "cache" | "none";
@@ -74,6 +67,8 @@ export interface AcquiredResource {
   /** Always the site origin: only same-origin resources are fetched. */
   publisherOrigin: string;
   sourceUrl: string;
+  /** The URL the text was finally served from (a same-host redirect may change the path). */
+  finalUrl: string;
   text: string;
   sha256: string;
   byteLength: number;
@@ -92,8 +87,9 @@ export interface ProbeItem {
   code?: ProbeCode;
   source: ProbeSource;
   /**
-   * `found`: the accepted text. `failed` transiently, or `limited` by the pass budget: the
-   * last good copy, if any. Never for the skills index.
+   * `found`: the accepted text. `failed` transiently (or on a digest mismatch), or `limited`
+   * by the pass budget or a pacing refusal: the last good copy, if any, and only while it
+   * was downloaded less than `DISCOVERY_STALE_TEXT_MAX_MS` ago. Never for the skills index.
    */
   resource?: AcquiredResource;
   /** Skills only: the index entry. */
@@ -124,8 +120,8 @@ export interface DiscoveryResult {
 }
 
 export interface DiscoverSiteResourcesOptions {
-  /** The origin's paced fetch, usually a shared `OriginFetchSession.fetch`. */
-  fetch: CatalogFetch & { setCrawlDelay?: (ms: number | undefined) => void; readonly refused?: number; readonly requests?: number };
+  /** The origin's paced fetch, usually a shared `OriginFetchSession.fetch`. Discovery never opens a pacing window; the fetch's owner does. */
+  fetch: PacedFetch;
   clock: Clock;
   cache?: DiscoveryCache;
   diagnostics?: Diagnostics;
@@ -184,9 +180,14 @@ interface ProbeRequest {
  * validators when it holds text, so a 304 keeps that text. Bodies must pass
  * `validateText`; skills must also match their published SHA-256.
  *
- * Partial failure: a transient failure keeps the last good text on the item (and in the
- * cache) and backs off; a pacing refusal or the pass budget leaves the cached record as it
- * was, so the next pass retries instead of freezing a partial result.
+ * Partial failure: a transient failure (or a skill body that no longer matches its
+ * unchanged published digest) keeps the last good text on the item (and in the cache) and
+ * backs off, until that text is older than `DISCOVERY_STALE_TEXT_MAX_MS`; then it is
+ * dropped. A pacing refusal (`limited`, code `refused`) or the pass budget leaves the
+ * cached record as it was, so the next pass retries instead of freezing a partial result.
+ *
+ * Pacing windows: discovery never opens one. The fetch's owner (an `OriginFetchSession`)
+ * does, once per pass.
  */
 export async function discoverSiteResources(originInput: string, options: DiscoverSiteResourcesOptions): Promise<DiscoveryResult> {
   const origin = new URL(originInput).origin;
@@ -195,8 +196,8 @@ export async function discoverSiteResources(originInput: string, options: Discov
   const refresh = options.refresh ?? false;
   const maxAccepted = options.maxAcceptedBytes ?? MAX_ACCEPTED_BYTES_PER_PASS;
   const started = clock.now();
-  const requestsAtStart = fetch.requests ?? 0;
-  const refusedAtStart = fetch.refused ?? 0;
+  const requestsAtStart = fetch.requests;
+  const refusedAtStart = fetch.refused;
 
   const cached = cache?.load(origin) ?? null;
   const previous = new Map((cached?.probes ?? []).map((record) => [record.url, record]));
@@ -209,7 +210,7 @@ export async function discoverSiteResources(originInput: string, options: Discov
   const loadRobots = (): Promise<CompiledRobots> => {
     robots ??= fetchRobots(origin, fetch).then((fetched) => {
       robotsSource = fetched.source;
-      if (fetched.source === "fetched") fetch.setCrawlDelay?.(fetched.crawlDelayMs);
+      if (fetched.source === "fetched") fetch.setCrawlDelay(fetched.crawlDelayMs);
       return compileRobots(fetched);
     });
     return robots;
@@ -222,6 +223,7 @@ export async function discoverSiteResources(originInput: string, options: Discov
       siteOrigin: origin,
       publisherOrigin: origin,
       sourceUrl: request.url,
+      finalUrl: stored.finalUrl,
       text: stored.text,
       sha256: stored.sha256,
       byteLength: stored.byteLength,
@@ -280,8 +282,15 @@ export async function discoverSiteResources(originInput: string, options: Discov
       keep(prev);
       return item(request, "limited", "none", "pass_budget");
     }
+    if (prev.status !== "found" && prev.stored && !usableLastGood(prev.stored, clock.now())) {
+      // The last good copy outlived the stale limit: forget it, keep the rest of the record.
+      const { stored: _dropped, ...rest } = prev;
+      next.set(prev.url, rest);
+      dirty = true;
+      return item(request, prev.status, "cache", prev.code);
+    }
     keep(prev);
-    return item(request, prev.status, "cache", prev.code as ProbeCode | undefined, prev.stored);
+    return item(request, prev.status, "cache", prev.code, prev.stored);
   };
 
   const probe = async (request: ProbeRequest): Promise<ProbeItem> => {
@@ -291,16 +300,18 @@ export async function discoverSiteResources(originInput: string, options: Discov
     if (prev && request.skill && prev.skill?.sha256 !== request.skill.sha256) prev = undefined;
     if (prev && (!request.network || !isDue(prev, clock.now(), refresh))) return fromRecord(request, prev);
     if (!request.network) return item(request, "failed", "none", "index_unavailable");
+    // `lastGood` supplies validators; only `keptText` (younger than the stale limit) stands in for the site after a failure.
     const lastGood = prev?.stored;
+    const keptText = usableLastGood(lastGood, clock.now());
     const priorFailures = prev?.status === "failed" ? prev.failures : 0;
     const fail = (code: ProbeFailureCode, keepText: boolean): ProbeItem => {
-      record(request, "failed", code, priorFailures + 1, keepText ? lastGood : undefined);
-      return item(request, "failed", "network", code, keepText ? lastGood : undefined);
+      record(request, "failed", code, priorFailures + 1, keepText ? keptText : undefined);
+      return item(request, "failed", "network", code, keepText ? keptText : undefined);
     };
 
     if (request.kind !== "skills_index" && acceptedBytes >= maxAccepted) {
       keep(prev);
-      return item(request, "limited", "none", "pass_budget", lastGood);
+      return item(request, "limited", "none", "pass_budget", keptText);
     }
     const url = new URL(request.url);
     if (!isAllowed(await loadRobots(), url.pathname + url.search)) {
@@ -314,8 +325,9 @@ export async function discoverSiteResources(originInput: string, options: Discov
     const result = await fetch(request.url, opts);
 
     if (isRefusal(result)) {
+      // Scout's own pacing said no: a limit, not news about the site.
       keep(prev);
-      return item(request, "failed", "none", "refused", lastGood);
+      return item(request, "limited", "none", "refused", keptText);
     }
     switch (result.kind) {
       case "absent":
@@ -325,13 +337,10 @@ export async function discoverSiteResources(originInput: string, options: Discov
         if (!lastGood) return fail("unexpected_not_modified", false);
         if (!admit(request, lastGood.byteLength)) {
           keep(prev);
-          return item(request, "limited", "none", "pass_budget", lastGood);
+          return item(request, "limited", "none", "pass_budget", keptText);
         }
-        const stored: StoredText = {
-          ...lastGood,
-          ...(result.etag !== undefined ? { etag: result.etag } : {}),
-          ...(result.lastModified !== undefined ? { lastModified: result.lastModified } : {}),
-        };
+        const { etag: _etag, lastModified: _lastModified, ...text } = lastGood;
+        const stored: StoredText = { ...text, ...nextValidators(lastGood, result) };
         record(request, "found", undefined, 0, stored);
         return item(request, "found", "not_modified", undefined, stored);
       }
@@ -348,10 +357,12 @@ export async function discoverSiteResources(originInput: string, options: Discov
           record(request, status, checked.reason, 0);
           return item(request, status, "network", checked.reason);
         }
-        if (request.skill && checked.sha256 !== request.skill.sha256) return fail("digest_mismatch", false);
+        // The cached copy matched the published digest when it was fetched; a mismatch now is
+        // the publisher's inconsistency, not evidence that copy is wrong, so it is kept.
+        if (request.skill && checked.sha256 !== request.skill.sha256) return fail("digest_mismatch", true);
         if (!admit(request, checked.byteLength)) {
           keep(prev);
-          return item(request, "limited", "none", "pass_budget", lastGood);
+          return item(request, "limited", "none", "pass_budget", keptText);
         }
         const stored: StoredText = {
           text: checked.text,
@@ -360,8 +371,7 @@ export async function discoverSiteResources(originInput: string, options: Discov
           fetchedAt: clock.now(),
           finalUrl: result.finalUrl,
           ...(result.contentType !== undefined ? { contentType: result.contentType } : {}),
-          ...(result.etag !== undefined ? { etag: result.etag } : {}),
-          ...(result.lastModified !== undefined ? { lastModified: result.lastModified } : {}),
+          ...nextValidators({}, result),
         };
         record(request, "found", undefined, 0, stored);
         return item(request, "found", "network", undefined, stored);
@@ -371,7 +381,7 @@ export async function discoverSiteResources(originInput: string, options: Discov
 
   const root = (kind: ProbeKind, path: string, accept: string): ProbeRequest => ({ kind, url: `${origin}${path}`, accept, network: true });
   const items: ProbeItem[] = [];
-  items.push(await probe(root("llms_txt", LLMS_TXT_PATH, TEXT_ACCEPT)));
+  items.push(await probe(root("llms_txt", LLMS_TXT_PATH, LLMS_TXT_ACCEPT)));
   items.push(await probe(root("agents_md", AGENTS_MD_PATH, TEXT_ACCEPT)));
   const indexRequest = root("skills_index", SKILLS_INDEX_PATH, INDEX_ACCEPT);
   let indexItem = await probe(indexRequest);
@@ -418,8 +428,8 @@ export async function discoverSiteResources(originInput: string, options: Discov
   }
 
   const ms = clock.now() - started;
-  const requests = (fetch.requests ?? 0) - requestsAtStart;
-  const refused = (fetch.refused ?? 0) - refusedAtStart;
+  const requests = fetch.requests - requestsAtStart;
+  const refused = fetch.refused - refusedAtStart;
   if (diagnostics) {
     const counts: Record<ProbeStatus, number> = { found: 0, absent: 0, failed: 0, unsupported: 0, limited: 0 };
     let fromCache = 0;
@@ -452,7 +462,9 @@ export async function discoverSiteResources(originInput: string, options: Discov
       agentsMd: items[1]?.status ?? "none",
       skillsIndex: indexItem.status,
     });
-    const source = cached === null ? "miss" : fromCache === items.length ? "fresh" : "revalidated";
+    // Only probed items count: an index entry Scout never asks about (`source: "none"`) says nothing about freshness.
+    const probed = items.filter((it) => it.source !== "none").length;
+    const source = cached === null ? "miss" : fromCache === probed ? "fresh" : "revalidated";
     diagnostics.event("resource_cache", {
       origin,
       source,
@@ -485,7 +497,11 @@ export interface SiteResourceDiscovererOptions {
 }
 
 export interface SiteResourceDiscoverer {
-  /** `session` shares one paced, coalesced fetch with a catalog resolve of the same origin. */
+  /**
+   * `session` shares one paced, coalesced fetch with a catalog resolve of the same origin;
+   * its owner has opened the pacing window. Without one, discovery gets a private session
+   * and opens its window itself.
+   */
   discover(origin: string, options?: { refresh?: boolean; session?: OriginFetchSession }): Promise<DiscoveryResult>;
 }
 
@@ -495,16 +511,18 @@ export function createSiteResourceDiscoverer(options: SiteResourceDiscovererOpti
   const cache = createDiscoveryCache({ clock, dir: join(options.scoutHome, "cache", "discovery"), ...(diagnostics ? { diagnostics } : {}) });
   return {
     async discover(origin, { refresh = false, session } = {}) {
-      const own =
-        session ??
-        createOriginFetchSession({
+      let active = session;
+      if (!active) {
+        active = createOriginFetchSession({
           origin,
           clock,
           ...(options.guardedFetch ? { guardedFetch: options.guardedFetch } : {}),
           ...(options.sleep ? { sleep: options.sleep } : {}),
         });
-      if (own.origin !== new URL(origin).origin) throw new TypeError("session is for another origin");
-      return discoverSiteResources(origin, { fetch: own.fetch, clock, cache, refresh, ...(diagnostics ? { diagnostics } : {}) });
+        active.startWindow();
+      }
+      if (active.origin !== new URL(origin).origin) throw new TypeError("session is for another origin");
+      return discoverSiteResources(origin, { fetch: active.fetch, clock, cache, refresh, ...(diagnostics ? { diagnostics } : {}) });
     },
   };
 }

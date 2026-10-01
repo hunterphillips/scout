@@ -20,9 +20,17 @@ export const RUN_DEADLINE_MS = 90_000;
 
 export type Sleep = (ms: number) => Promise<void>;
 
-export interface PacedCatalogFetch extends CatalogFetch {
+/** A paced fetch as seen by a caller that runs inside a window someone else controls. */
+export interface PacedFetch extends CatalogFetch {
   /** Minimum gap between the end of one request and the start of the next (robots `Crawl-delay`). */
   setCrawlDelay(ms: number | undefined): void;
+  /** Requests refused because the budget was spent, the run deadline passed, or the URL left the origin. Counts across windows. */
+  readonly refused: number;
+  /** Requests that reached `guardedFetch`, across windows. */
+  readonly requests: number;
+}
+
+export interface PacedCatalogFetch extends PacedFetch {
   /**
    * Start a new run window: the deadline restarts from the next request and the request
    * budget is refilled. The crawl delay and the end time of the last request are kept, so
@@ -30,10 +38,6 @@ export interface PacedCatalogFetch extends CatalogFetch {
    * revalidation and another for rediscovery.
    */
   startWindow(): void;
-  /** Requests refused because the budget was spent, the run deadline passed, or the URL left the origin. Counts across windows. */
-  readonly refused: number;
-  /** Requests that reached `guardedFetch`, across windows. */
-  readonly requests: number;
 }
 
 export interface PacedCatalogFetchOptions {
@@ -141,4 +145,18 @@ export function createPacedCatalogFetch(options: PacedCatalogFetchOptions): Pace
   Object.defineProperty(fetch, "refused", { get: () => refused });
   Object.defineProperty(fetch, "requests", { get: () => requests });
   return fetch;
+}
+
+/**
+ * `paced` without its window control, for callers that share a window someone else owns.
+ * Requests go through `wrap(paced)` (coalescing, say); the crawl delay and the counters are
+ * `paced`'s own.
+ */
+export function withoutWindowControl(paced: PacedCatalogFetch, wrap: (fetch: CatalogFetch) => CatalogFetch = (fetch) => fetch): PacedFetch {
+  const call = wrap(paced);
+  const view = ((url: string, opts?: CatalogFetchOptions) => call(url, opts)) as PacedFetch;
+  view.setCrawlDelay = (ms) => paced.setCrawlDelay(ms);
+  Object.defineProperty(view, "refused", { get: () => paced.refused });
+  Object.defineProperty(view, "requests", { get: () => paced.requests });
+  return view;
 }

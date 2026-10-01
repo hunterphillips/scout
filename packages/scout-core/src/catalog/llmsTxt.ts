@@ -1,4 +1,4 @@
-import { type CatalogFetch, TEXT_SOURCE_MAX_BYTES } from "./catalogFetch.js";
+import { type CatalogFetch, LLMS_TXT_ACCEPT, TEXT_SOURCE_MAX_BYTES } from "./catalogFetch.js";
 import { sameOriginHttpsUrl } from "./sameOrigin.js";
 import { CANDIDATE_DESCRIPTION_MAX, CANDIDATE_TITLE_MAX, sanitizeLabel } from "./sanitizeLabel.js";
 
@@ -100,7 +100,7 @@ export function parseLlmsTxt(text: string, origin: string, baseUrl: string = `${
  */
 export async function fetchLlmsTxt(origin: string, fetch: CatalogFetch): Promise<FetchedLlmsTxt> {
   const rootUrl = `${origin}/llms.txt`;
-  const root = await fetch(rootUrl, { maxBytes: TEXT_SOURCE_MAX_BYTES, accept: "text/markdown, text/plain" });
+  const root = await fetch(rootUrl, { maxBytes: TEXT_SOURCE_MAX_BYTES, accept: LLMS_TXT_ACCEPT });
   if (root.kind === "absent") return { found: false, source: "absent" };
   if (root.kind !== "ok") return { found: false, source: "error" };
 
@@ -113,7 +113,7 @@ export async function fetchLlmsTxt(origin: string, fetch: CatalogFetch): Promise
   let nestedSkipped = Math.max(0, parsed.nestedLlmsTxtUrls.length - MAX_NESTED_LLMS_TXT);
 
   for (const nestedUrl of parsed.nestedLlmsTxtUrls.slice(0, MAX_NESTED_LLMS_TXT)) {
-    const result = await fetch(nestedUrl, { maxBytes: TEXT_SOURCE_MAX_BYTES, accept: "text/markdown, text/plain" });
+    const result = await fetch(nestedUrl, { maxBytes: TEXT_SOURCE_MAX_BYTES, accept: LLMS_TXT_ACCEPT });
     if (result.kind !== "ok") {
       nestedFailed += 1;
       continue;

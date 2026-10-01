@@ -3,7 +3,7 @@ import { type Candidate, type SiteCatalog, SiteCatalogSchema } from "@scout/cont
 import type { Clock } from "../clock.js";
 import type { Diagnostics } from "../diagnostics.js";
 import type { GuardedFetchResult } from "../fetch/guardedFetch.js";
-import type { CatalogFetch, CatalogFetchOptions } from "./catalogFetch.js";
+import { type CatalogFetch, type CatalogFetchOptions, nextValidators } from "./catalogFetch.js";
 import { fetchLlmsTxt } from "./llmsTxt.js";
 import { isRefusal } from "./pacing.js";
 import { compileRobots, fetchRobots, isAllowed, type RobotsSource } from "./robots.js";
@@ -53,6 +53,8 @@ export interface CatalogResource {
   lastModified?: string;
   /** The size cap discovery used for this URL, so revalidation probes use the same one. */
   maxBytes?: number;
+  /** The `Accept` discovery sent, so revalidation sends the same request (and can share it with resource discovery). */
+  accept?: string;
 }
 
 export interface DiscoveryStats {
@@ -159,12 +161,11 @@ function catalogVersion(candidates: readonly Draft[]): string {
   return hash.digest("hex").slice(0, 16);
 }
 
-function recordResource(resources: Map<string, CatalogResource>, url: string, result: GuardedFetchResult, maxBytes: number | undefined): void {
+function recordResource(resources: Map<string, CatalogResource>, url: string, result: GuardedFetchResult, opts: CatalogFetchOptions | undefined): void {
   const status: CatalogResource["status"] = isRefusal(result) ? "refused" : result.kind === "not_modified" ? "error" : result.kind;
-  const resource: CatalogResource = { url, status };
-  if (result.kind === "ok" && result.etag) resource.etag = result.etag;
-  if (result.kind === "ok" && result.lastModified) resource.lastModified = result.lastModified;
-  if (maxBytes !== undefined) resource.maxBytes = maxBytes;
+  const resource: CatalogResource = { url, status, ...(result.kind === "ok" ? nextValidators({}, result) : {}) };
+  if (opts?.maxBytes !== undefined) resource.maxBytes = opts.maxBytes;
+  if (opts?.accept !== undefined) resource.accept = opts.accept;
   resources.set(url, resource);
 }
 
@@ -195,7 +196,7 @@ export async function discoverCatalog(options: DiscoverOptions): Promise<Discove
   const resources = new Map<string, CatalogResource>();
   const recording: CatalogFetch = async (url, opts?: CatalogFetchOptions) => {
     const result = await options.fetch(url, opts);
-    recordResource(resources, url, result, opts?.maxBytes);
+    recordResource(resources, url, result, opts);
     return result;
   };
 
