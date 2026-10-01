@@ -25,7 +25,8 @@ branch ceremony for the PoC; merge and move on).
 `../thoughts/shared/plans/2026-10-01-scout-website-agent-implementation.md` (architecture:
 `../thoughts/shared/plans/2026-10-01-scout-website-agent-design.md`). Its "Implementation
 progress" section is the new phase log. **Pivot Phase 1 (prove the agent connection)
-passed its gate the same day**; Phase 2 (website capabilities) is in progress. The old
+passed its gate the same day**; Phase 2 (website capabilities) is in progress: P2.2, P2.3,
+P2.4 done; P2.1 and P2.7 in progress; P2.5, P2.6 not started. The old
 build above is still intact and still not wired into the app; the legacy
 `personal-context-mcp` package stays untouched until pivot Phase 4.
 
@@ -68,6 +69,18 @@ the plan's phase log):
   validated skills root under `scout-<kind>-<hex>/`; `store.lock` keeps the dev CLI from
   writing while the core runs), `privateCacheFile.ts`. Dev CLI: `discover <origin>` and
   `capability list|approve|decline|revoke|policy` (both read/write `SCOUT_HOME`).
+- Pivot P2.4 (production agent socket, `run/agent.sock`): `localSocketFiles.ts` (socket
+  file lifecycle shared by both servers: 0700 run dir, stale probe, publish after chmod
+  0600, inode-checked unlink), `agentSocketServer.ts` (16 KiB in / 64 KiB out; hello
+  within 5 s; `close()` stops accepting first), `agentApi/{auth,grants,readAudit,
+  handlers}.ts` (`run/agent-token` rotated 0600 per start; browser-context grant
+  `agentBrowserContext` in `config.json`, default false, re-read on every call; 200-entry
+  read audit; pure `call(frame, connection)` backend with per-read pins released when the
+  read ends, `sweepExpired()` before each GC), `installedRecord.ts` (reads `installed.json`
+  for `skillsRoot`; the exporter is wired only when one is recorded — P2.6 writes it).
+  `main.ts` opens the capability store once for the core's lifetime (start: store → GC →
+  `core.sock` → startup export sync → token → `agent.sock`; shutdown the reverse, deadline
+  2 s). Job tokens are an in-memory table nothing populates until Phase 3.
 - `scripts/agent-check/` + `npm run test:agent-contract` and
   `npm run verify:agent -- --case <hotload|baseline|selected-tool|cancel> --home <dir>`:
   the Phase 1 compatibility checks. Read `scripts/agent-check/README.md` before running
