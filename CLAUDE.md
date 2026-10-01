@@ -26,7 +26,7 @@ branch ceremony for the PoC; merge and move on).
 `../thoughts/shared/plans/2026-10-01-scout-website-agent-design.md`). Its "Implementation
 progress" section is the new phase log. **Pivot Phase 1 (prove the agent connection)
 passed its gate the same day**; Phase 2 (website capabilities) is in progress: P2.2, P2.3,
-P2.4 done; P2.1 and P2.7 in progress; P2.5, P2.6 not started. The old
+P2.4, P2.7 done; P2.1 and P2.6 in progress; P2.5 not started. The old
 build above is still intact and still not wired into the app; the legacy
 `personal-context-mcp` package stays untouched until pivot Phase 4.
 
@@ -81,6 +81,15 @@ the plan's phase log):
   `main.ts` opens the capability store once for the core's lifetime (start: store → GC →
   `core.sock` → startup export sync → token → `agent.sock`; shutdown the reverse, deadline
   2 s). Job tokens are an in-memory table nothing populates until Phase 3.
+- Pivot P2.7 (optional retrieval-tool setup CLI): `agents/{backendDefinition,
+  environmentBindings,profileCli}.ts` behind `cli.js agent inspect|enable|disable|refresh|
+  status` (`--allow-start` gates every backend launch, exit 3 without it; exit 2 while
+  `agent-profile.lock` is held). A user-owned JSON definition pins command/args/cwd/env;
+  secrets are `{file, pointer}` bindings resolved in memory from 0600 files, literals in a
+  0600 definition become pointers, and a readable definition may hold only allowlisted
+  literals. A backend that prompts (sampling/elicitation/roots) during inspection is marked
+  `unavailable: auth_prompt` in the profile and skipped by `planJobTools`. The core does not
+  yet hold the profile lock or react to `tools.revision` (Phase 3).
 - `scripts/agent-check/` + `npm run test:agent-contract` and
   `npm run verify:agent -- --case <hotload|baseline|selected-tool|cancel> --home <dir>`:
   the Phase 1 compatibility checks. Read `scripts/agent-check/README.md` before running
