@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 import { EXTENSION_ID_RE, extensionIdFromManifestKey, extensionIdFromPem, generateKeyPem, idFromBytes, manifestKey } from "./extension-key.mjs";
 import { findOnPath, isExecutableFile, resolveClaude } from "./executables.mjs";
 import { shDoubleQuote, wrapperScript, fileMarker } from "./files.mjs";
-import { allowedPath, upsertEntry } from "./installed.mjs";
+import { allowedPath, readInstalled, upsertEntry } from "./installed.mjs";
 import { layout } from "./paths.mjs";
 
 describe("extension ID", () => {
@@ -73,6 +73,31 @@ describe("installed record", () => {
     expect(r.files.map((f) => f.path)).toEqual(["/a", "/b"]);
     expect(() => upsertEntry(r, { path: "/c", kind: "bogus" })).toThrow();
   });
+
+  it("keeps one mcp-registration and one skill entry even when the path changes", () => {
+    let r = { version: 1, marker: "m", files: [] };
+    r = upsertEntry(r, { path: "/n /r/packages/scout-mcp/dist/main.js", kind: "mcp-registration" });
+    r = upsertEntry(r, { path: "/m /r/packages/scout-mcp/dist/main.js", kind: "mcp-registration" });
+    expect(r.files.map((f) => f.path)).toEqual(["/m /r/packages/scout-mcp/dist/main.js"]);
+  });
+
+  it("reads records written before the agent integration, and rejects a bad skillsRoot", () => {
+    const dir = mkdtempSync(join(tmpdir(), "installed-"));
+    try {
+      const p = join(dir, "installed.json");
+      const old = { version: 1, marker: "m", files: [{ path: "/s/config.json", kind: "config" }] };
+      writeFileSync(p, JSON.stringify(old));
+      expect(readInstalled(p)).toEqual(old);
+      writeFileSync(p, JSON.stringify({ ...old, skillsRoot: "/u/.claude/skills" }));
+      expect(readInstalled(p).skillsRoot).toBe("/u/.claude/skills");
+      for (const bad of ["", "relative/skills", "/u/../skills", 3]) {
+        writeFileSync(p, JSON.stringify({ ...old, skillsRoot: bad }));
+        expect(() => readInstalled(p)).toThrow(/skillsRoot/);
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("allowedPath", () => {
@@ -92,5 +117,17 @@ describe("allowedPath", () => {
     expect(allowedPath("extension-manifest-key", "/x/manifest.json", L)).toBe(false);
     expect(allowedPath("config", "/s/../s/config.json", L)).toBe(false);
     expect(allowedPath("bogus", L.scoutConfig, L)).toBe(false);
+  });
+
+  it("accepts the integration skill only at <skillsRoot>/scout-integration/SKILL.md, and only a node + scout-mcp registration", () => {
+    const record = { skillsRoot: "/u/.claude/skills" };
+    expect(allowedPath("skill", "/u/.claude/skills/scout-integration/SKILL.md", L, record)).toBe(true);
+    expect(allowedPath("skill", "/u/.claude/skills/other/SKILL.md", L, record)).toBe(false);
+    expect(allowedPath("skill", "/u/.claude/skills/scout-integration/SKILL.md", L, {})).toBe(false);
+    expect(allowedPath("skill", "/u/.claude/skills/scout-integration/SKILL.md", L)).toBe(false);
+    expect(allowedPath("mcp-registration", "/usr/bin/node /r/packages/scout-mcp/dist/main.js", L)).toBe(true);
+    expect(allowedPath("mcp-registration", "/bin/sh -c", L)).toBe(false);
+    expect(allowedPath("mcp-registration", "/usr/bin/node /r/packages/scout-mcp/dist/main.js --x", L)).toBe(false);
+    expect(allowedPath("mcp-registration", "node /r/packages/scout-mcp/dist/main.js", L)).toBe(false);
   });
 });

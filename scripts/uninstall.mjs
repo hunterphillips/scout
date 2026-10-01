@@ -8,9 +8,14 @@
 // Entries whose path is outside what setup could have written (lib/installed.mjs
 // allowedPath) are skipped and reported.
 //
-// Usage: node scripts/uninstall.mjs [--dry-run] [--yes] [--include-key]
-// Env overrides: SCOUT_HOME, PERSONAL_CONTEXT_HOME (see lib/paths.mjs); the other paths
-// come from installed.json, checked against allowedPath.
+// The agent integration (the `scout` MCP registration and the scout-integration skill) is
+// removed with everything else, or alone with --agent-integration; each part only while it is
+// still exactly what setup installed (lib/agent-integration.mjs). Scout app skill wrappers in
+// the skills root are never touched; uninstall reports how many remain.
+//
+// Usage: node scripts/uninstall.mjs [--dry-run] [--yes] [--include-key] [--agent-integration]
+// Env overrides: SCOUT_HOME, PERSONAL_CONTEXT_HOME, SCOUT_CLAUDE_BIN (see lib/paths.mjs); the
+// other paths, and the skills root, come from installed.json, checked against allowedPath.
 // Never touches ~/.rook, ~/.scout/logs, or anything not listed.
 
 import { lstatSync, readFileSync, rmdirSync, statSync, unlinkSync } from "node:fs";
@@ -20,11 +25,13 @@ import { extensionIdFromPem } from "./lib/extension-key.mjs";
 import { PC_MERGED_KEYS, allowedPath, readInstalled } from "./lib/installed.mjs";
 import { exists, fileMarker, readJsonObject, writeJson } from "./lib/files.mjs";
 import { isMain } from "./lib/is-main.mjs";
+import { isIntegrationEntry, removeIntegration } from "./lib/agent-integration.mjs";
 
 export function parseArgs(argv) {
-  const opts = { dryRun: false, yes: false, includeKey: false };
+  const opts = { dryRun: false, yes: false, includeKey: false, agentIntegration: false };
   for (const a of argv) {
     if (a === "--dry-run") opts.dryRun = true;
+    else if (a === "--agent-integration") opts.agentIntegration = true;
     else if (a === "--yes") opts.yes = true;
     else if (a === "--include-key") opts.includeKey = true;
     else throw new Error(`unknown argument: ${a}`);
@@ -55,9 +62,9 @@ export async function ttyConfirm(question, { input = process.stdin, output = pro
 }
 
 /** Decide what to do with one entry: { action: "remove"|"strip-key"|"strip-merged"|"gone"|"keep"|"skip", reason }. */
-export function judge(entry, marker, { includeKey }, L) {
+export function judge(entry, marker, { includeKey }, L, record) {
   const p = entry.path;
-  if (!allowedPath(entry.kind, p, L)) return { action: "skip", reason: `not a path setup writes for kind ${entry.kind}; not touching` };
+  if (!allowedPath(entry.kind, p, L, record)) return { action: "skip", reason: `not a path setup writes for kind ${entry.kind}; not touching` };
   if (!exists(p)) return { action: "gone", reason: "already absent" };
   if (!isRegularFile(p)) return { action: "skip", reason: "not a regular file" };
   switch (entry.kind) {
@@ -126,7 +133,7 @@ function removeDirIfEmpty(dir, out, dryRun) {
   }
 }
 
-export async function runUninstall(argv, { env = process.env, out = console.log, err = console.error, confirm = ttyConfirm } = {}) {
+export async function runUninstall(argv, { env = process.env, out = console.log, err = console.error, confirm = ttyConfirm, claudeFallbacks, mcpTimeoutMs } = {}) {
   let opts, record;
   const L = layout({ env });
   try {
@@ -141,11 +148,21 @@ export async function runUninstall(argv, { env = process.env, out = console.log,
     return 0;
   }
 
-  out(`Files listed in ${L.installed}:`);
-  for (const f of record.files) out(`  ${String(f.kind).padEnd(22)} ${f.path}`);
+  const hasIntegration = record.files.some(isIntegrationEntry) || "skillsRoot" in record;
+  if (opts.agentIntegration && !hasIntegration) {
+    out(`Nothing to uninstall: ${L.installed} lists no agent integration.`);
+    return 0;
+  }
+  const listed = opts.agentIntegration ? record.files.filter(isIntegrationEntry) : record.files;
+  out(`${opts.agentIntegration ? "Agent integration" : "Files"} listed in ${L.installed}:`);
+  for (const f of listed) out(`  ${String(f.kind).padEnd(22)} ${f.path}`);
   if (opts.dryRun) out(`Dry run: nothing is changed.`);
   else if (!opts.yes) {
-    const answer = await confirm("Remove the files above that still carry this install's marker? [y/N] ");
+    const answer = await confirm(
+      opts.agentIntegration
+        ? "Remove the MCP registration and skill above if they are still exactly what setup installed? [y/N] "
+        : "Remove the files above that still carry this install's marker? [y/N] ",
+    );
     if (answer === null) {
       err("uninstall: stdin is not a terminal; re-run with --yes to confirm. Nothing changed.");
       return 1;
@@ -156,10 +173,22 @@ export async function runUninstall(argv, { env = process.env, out = console.log,
     }
   }
 
-  const remaining = [];
   let skipped = 0;
-  for (const entry of record.files) {
-    const { action, reason } = judge(entry, record.marker, opts, L);
+  let working = record;
+  if (hasIntegration) {
+    const r = removeIntegration(record, { env, L, dryRun: opts.dryRun, claudeFallbacks, mcpTimeoutMs });
+    for (const line of r.lines) out(line);
+    skipped += r.left;
+    working = r.record;
+  }
+
+  const remaining = [];
+  for (const entry of working.files) {
+    if (opts.agentIntegration || isIntegrationEntry(entry)) {
+      remaining.push(entry);
+      continue;
+    }
+    const { action, reason } = judge(entry, record.marker, opts, L, record);
     const would = opts.dryRun ? "would " : "";
     if (action === "remove") {
       if (!opts.dryRun) unlinkSync(entry.path);
@@ -187,15 +216,17 @@ export async function runUninstall(argv, { env = process.env, out = console.log,
     }
   }
 
-  if (remaining.length === 0) {
+  const final = { ...working, files: remaining };
+  if (remaining.length === 0 && !("skillsRoot" in final)) {
     if (!opts.dryRun) unlinkSync(L.installed);
     out(`${opts.dryRun ? "would remove" : "removed"} ${L.installed}`);
-  } else if (remaining.length === record.files.length) {
+  } else if (JSON.stringify(final) === JSON.stringify(record)) {
     out(`${opts.dryRun ? "would leave" : "left"} ${L.installed} unchanged`);
   } else {
-    if (!opts.dryRun) writeJson(L.installed, { ...record, files: remaining }, 0o600);
-    out(`${opts.dryRun ? "would keep" : "kept"} ${L.installed} listing the ${remaining.length} file(s) not removed`);
+    if (!opts.dryRun) writeJson(L.installed, final, 0o600);
+    out(`${opts.dryRun ? "would keep" : "kept"} ${L.installed} listing the ${remaining.length} entr${remaining.length === 1 ? "y" : "ies"} not removed`);
   }
+  if (opts.agentIntegration) return skipped > 0 ? 2 : 0;
   removeDirIfEmpty(L.binDir, out, opts.dryRun);
   removeDirIfEmpty(L.runDir, out, opts.dryRun);
   out(`Left in place: ${L.logsDir} (including diagnostics.jsonl) and any file not listed above.`);
