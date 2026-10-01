@@ -39,6 +39,8 @@ export interface OriginFetchSession {
    * Irreversible; a new pass makes a new session.
    */
   cancel(): void;
+  /** Whether `cancel` has been called. A cancelled pass's results are partial and must not be persisted. */
+  isCancelled(): boolean;
   stats(): OriginFetchStats;
 }
 
@@ -60,12 +62,17 @@ export function createOriginFetchSession(options: OriginFetchSessionOptions): Or
     if (result.kind === "ok") bytesReceived += result.bytes.byteLength;
     return result;
   };
+  let cancelled = false;
   const paced = createPacedCatalogFetch({ origin, clock: options.clock, guardedFetch: countingFetch, ...(options.sleep ? { sleep: options.sleep } : {}) });
   return {
     origin,
     fetch: withoutWindowControl(paced, createCoalescingFetch),
     startWindow: () => paced.startWindow(),
-    cancel: () => paced.cancel(),
+    cancel: () => {
+      cancelled = true;
+      paced.cancel();
+    },
+    isCancelled: () => cancelled,
     stats: () => ({ requests: paced.requests, refused: paced.refused, bytesReceived }),
   };
 }

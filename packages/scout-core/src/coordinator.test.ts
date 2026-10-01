@@ -101,6 +101,7 @@ function fakeCapabilities() {
         fetch: undefined as unknown as OriginFetchSession["fetch"],
         startWindow: () => void (rec.windows += 1),
         cancel: () => void (rec.cancels += 1),
+        isCancelled: () => rec.cancels > 0,
         stats: () => ({ requests: 0, refused: 0, bytesReceived: 0 }),
       };
     },

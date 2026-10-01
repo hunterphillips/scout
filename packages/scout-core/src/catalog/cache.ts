@@ -68,6 +68,11 @@ export interface ResolveWithCacheOptions {
   startWindow?: () => void;
   /** Skip the 24 h freshness window (the CLI's `--refresh`). Validators are still sent. */
   refresh?: boolean;
+  /**
+   * Whether the pass this resolve runs in was cancelled (the origin session's
+   * `isCancelled`). Checked before every write: a cancelled pass's catalog is never saved.
+   */
+  isCancelled?: () => boolean;
   /** Test hook; defaults to `discoverCatalog`. */
   discover?: (options: DiscoverOptions) => Promise<Discovery>;
 }
@@ -159,6 +164,12 @@ async function revalidate(resources: readonly CatalogResource[], fetch: PacedFet
  * cached catalog is under 7 days old, the cached one is kept and served stale (diagnostics
  * code `rediscovery_refused`). A run cut short by Scout's own limits says nothing about
  * the site, so it must not shrink a complete catalog.
+ *
+ * Cancellation: when the pass was cancelled (`isCancelled`; pause, permission loss,
+ * disconnect, stop), nothing is written, whatever the run produced: its requests after the
+ * cancel were refused, so its catalog is partial and says nothing about the site. A
+ * `catalog_cache_skipped` event (`reason: "cancelled"`) records the skip. A live pass with
+ * a failed sub-fetch (a sitemap that 500s, say) is not cancelled and still saves.
  */
 export function createCatalogCache(options: CatalogCacheOptions): CatalogCache {
   const dir = options.dir ?? join(scoutHome(), "cache", "catalog");
@@ -270,6 +281,15 @@ export function createCatalogCache(options: CatalogCacheOptions): CatalogCache {
 
     if (cached && !request.refresh && now - cached.fetchedAt < CATALOG_FRESH_MS) return report("fresh", cached.catalog);
 
+    /** Save unless the pass was cancelled. */
+    const persist = (file: CatalogCacheFile): void => {
+      if (request.isCancelled?.()) {
+        diagnostics?.event("catalog_cache_skipped", { origin, reason: "cancelled" });
+        return;
+      }
+      save(file);
+    };
+
     const startWindow = (): void => {
       if (request.startWindow) request.startWindow();
       else request.fetch.startWindow?.();
@@ -287,7 +307,7 @@ export function createCatalogCache(options: CatalogCacheOptions): CatalogCache {
       if (same) {
         const bumped = clock.now();
         const file: CatalogCacheFile = { ...cached, fetchedAt: bumped, resources: same, catalog: { ...cached.catalog, fetchedAt: bumped } };
-        save(file);
+        persist(file);
         return report("not_modified", file.catalog);
       }
     }
@@ -311,7 +331,7 @@ export function createCatalogCache(options: CatalogCacheOptions): CatalogCache {
       return report("stale", cached.catalog, "rediscovery_refused");
     }
     if (discovery && !discovery.failed) {
-      save(fromDiscovery(origin, discovery, cached));
+      persist(fromDiscovery(origin, discovery, cached));
       return report(cached ? "refetched" : "miss", discovery.catalog);
     }
     if (cached && young) return report("stale", cached.catalog);

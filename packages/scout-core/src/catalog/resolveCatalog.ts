@@ -69,7 +69,7 @@ export function createCatalogResolver(options: CatalogResolverOptions): CatalogR
       if (session.origin !== new URL(origin).origin) throw new TypeError("session is for another origin");
       const before = session.stats();
       const started = clock.now();
-      const result = await cache.resolve({ origin, fetch: session.fetch, refresh, ...(startWindow ? { startWindow } : {}) });
+      const result = await cache.resolve({ origin, fetch: session.fetch, refresh, isCancelled: session.isCancelled, ...(startWindow ? { startWindow } : {}) });
       const after = session.stats();
       return {
         result,

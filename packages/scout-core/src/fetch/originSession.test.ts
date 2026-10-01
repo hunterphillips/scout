@@ -26,7 +26,9 @@ describe("createOriginFetchSession", () => {
     for (let i = 0; i < 5; i++) await Promise.resolve();
     expect(calls).toEqual(["/robots.txt"]);
 
+    expect(session.isCancelled()).toBe(false);
     session.cancel();
+    expect(session.isCancelled()).toBe(true);
     release();
     expect((await inFlight).kind).toBe("ok");
     expect(isRefusal(await queued)).toBe(true);
