@@ -88,8 +88,8 @@ export interface ProbeItem {
   source: ProbeSource;
   /**
    * `found`: the accepted text. `failed` transiently (or on a digest mismatch), or `limited`
-   * by the pass budget or a pacing refusal: the last good copy, if any, and only while it
-   * was downloaded less than `DISCOVERY_STALE_TEXT_MAX_MS` ago. Never for the skills index.
+   * by the pass budget or a pacing refusal: the last good copy, if any, and only while the
+   * site confirmed it less than `DISCOVERY_STALE_TEXT_MAX_MS` ago. Never for the skills index.
    */
   resource?: AcquiredResource;
   /** Skills only: the index entry. */
@@ -182,8 +182,8 @@ interface ProbeRequest {
  *
  * Partial failure: a transient failure (or a skill body that no longer matches its
  * unchanged published digest) keeps the last good text on the item (and in the cache) and
- * backs off, until that text is older than `DISCOVERY_STALE_TEXT_MAX_MS`; then it is
- * dropped. A pacing refusal (`limited`, code `refused`) or the pass budget leaves the
+ * backs off, until the site last confirmed that text (a 200 or a 304) more than
+ * `DISCOVERY_STALE_TEXT_MAX_MS` ago; then it is dropped. A pacing refusal (`limited`, code `refused`) or the pass budget leaves the
  * cached record as it was, so the next pass retries instead of freezing a partial result.
  *
  * Pacing windows: discovery never opens one. The fetch's owner (an `OriginFetchSession`)
@@ -340,7 +340,8 @@ export async function discoverSiteResources(originInput: string, options: Discov
           return item(request, "limited", "none", "pass_budget", keptText);
         }
         const { etag: _etag, lastModified: _lastModified, ...text } = lastGood;
-        const stored: StoredText = { ...text, ...nextValidators(lastGood, result) };
+        // A 304 confirms the stored text is current; `fetchedAt` stays the last full download.
+        const stored: StoredText = { ...text, confirmedAt: clock.now(), ...nextValidators(lastGood, result) };
         record(request, "found", undefined, 0, stored);
         return item(request, "found", "not_modified", undefined, stored);
       }
@@ -369,6 +370,7 @@ export async function discoverSiteResources(originInput: string, options: Discov
           sha256: checked.sha256,
           byteLength: checked.byteLength,
           fetchedAt: clock.now(),
+          confirmedAt: clock.now(),
           finalUrl: result.finalUrl,
           ...(result.contentType !== undefined ? { contentType: result.contentType } : {}),
           ...nextValidators({}, result),

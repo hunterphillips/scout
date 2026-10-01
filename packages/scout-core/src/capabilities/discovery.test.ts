@@ -366,7 +366,7 @@ describe("discoverSiteResources", () => {
       expect(stored).toMatchObject({ status: "failed", code: "digest_mismatch", stored: { text: SKILL } });
     });
 
-    it("drops the last good text once it is older than the 7-day stale limit", async () => {
+    it("drops the last good text once the site has not confirmed it for over 7 days", async () => {
       const site = fullSite();
       const d = discoverer(site.guardedFetch);
       const started = now;
@@ -390,6 +390,42 @@ describe("discoverSiteResources", () => {
       const fresh = one(await d.discover(ORIGIN), "agents_md");
       expect(fresh).toMatchObject({ status: "failed", code: "http_5xx", source: "network" });
       expect(fresh.resource).toBeUndefined();
+    });
+
+    it("counts the stale limit from the last 304 confirmation, not the last download", async () => {
+      const site = fullSite();
+      const d = discoverer(site.guardedFetch);
+      const started = now;
+      await d.discover(ORIGIN);
+      // Thirty days of daily passes, each answered 304.
+      for (let day = 1; day <= 30; day++) {
+        now = started + day * 24 * HOUR + HOUR;
+        expect(one(await d.discover(ORIGIN), "agents_md")).toMatchObject({ status: "found", source: "not_modified" });
+      }
+      const stored = createDiscoveryCache({ clock, dir: join(home, "cache", "discovery") }).load(ORIGIN)?.probes.find((p) => p.kind === "agents_md")?.stored;
+      expect(stored).toMatchObject({ fetchedAt: started, confirmedAt: now });
+
+      site.site["/AGENTS.md"] = { status: 503 };
+      now += 25 * HOUR;
+      expect(one(await d.discover(ORIGIN), "agents_md")).toMatchObject({ status: "failed", code: "http_5xx", resource: { text: AGENTS, fetchedAt: started } });
+    });
+
+    it("falls back to fetchedAt for a record written without confirmedAt", async () => {
+      const site = fullSite();
+      const d = discoverer(site.guardedFetch);
+      const started = now;
+      await d.discover(ORIGIN);
+      const dir = join(home, "cache", "discovery");
+      const path = join(dir, readdirSync(dir)[0] as string);
+      const file = JSON.parse(readFileSync(path, "utf8")) as { probes: { stored?: { confirmedAt?: number } }[] };
+      for (const probe of file.probes) delete probe.stored?.confirmedAt;
+      writeFileSync(path, JSON.stringify(file));
+
+      site.site["/AGENTS.md"] = { status: 503 };
+      now = started + 6 * 24 * HOUR;
+      expect(one(await d.discover(ORIGIN), "agents_md").resource?.text).toBe(AGENTS);
+      now = started + 8 * 24 * HOUR;
+      expect(one(await d.discover(ORIGIN), "agents_md").resource).toBeUndefined();
     });
 
     it("refresh still sends validators and keeps the text on a 304", async () => {

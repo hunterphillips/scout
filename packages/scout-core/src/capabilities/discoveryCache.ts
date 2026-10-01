@@ -37,9 +37,9 @@ export const DISCOVERY_BACKOFF_MS: readonly number[] = [15 * 60 * 1000, 60 * 60 
 export const DISCOVERY_FUTURE_TOLERANCE_MS = 5 * 60 * 1000;
 
 /**
- * A failed probe keeps its last good text only while the text was downloaded less than
- * this long ago (the catalog cache's stale limit). Older text is dropped and the probe
- * reports a plain failure.
+ * A failed probe keeps its last good text only while the site confirmed it (a 200 or a
+ * 304, `StoredText.confirmedAt`) less than this long ago (the catalog cache's stale limit).
+ * Older text is dropped and the probe reports a plain failure.
  */
 export const DISCOVERY_STALE_TEXT_MAX_MS = CACHE_STALE_MAX_MS;
 
@@ -114,6 +114,12 @@ export interface StoredText {
   byteLength: number;
   /** When these bytes were downloaded (a 304 does not move it). */
   fetchedAt: number;
+  /**
+   * When the site last confirmed these bytes are current: set on every 200 and refreshed on
+   * every 304. The stale-text limit counts from here. Absent in older records, which fall
+   * back to `fetchedAt`.
+   */
+  confirmedAt?: number;
   /** URL the body was finally served from (same host); relative index entries resolve against it. */
   finalUrl: string;
   contentType?: string;
@@ -157,6 +163,7 @@ const StoredTextSchema = z.object({
   sha256: z.string().regex(/^[0-9a-f]{64}$/),
   byteLength: z.int().min(0),
   fetchedAt: z.number(),
+  confirmedAt: z.number().optional(),
   finalUrl: z.string(),
   contentType: z.string().optional(),
   etag: z.string().optional(),
@@ -185,7 +192,7 @@ const FileSchema = z.object({
 
 /** `stored` if it may still stand in for the site after a failure at `now`, else undefined (see `DISCOVERY_STALE_TEXT_MAX_MS`). */
 export function usableLastGood(stored: StoredText | undefined, now: number): StoredText | undefined {
-  return stored && now - stored.fetchedAt <= DISCOVERY_STALE_TEXT_MAX_MS ? stored : undefined;
+  return stored && now - (stored.confirmedAt ?? stored.fetchedAt) <= DISCOVERY_STALE_TEXT_MAX_MS ? stored : undefined;
 }
 
 /** When a probe last answered `checkedAt`, the next time it may be asked again. */
@@ -242,6 +249,8 @@ function invalidReason(file: DiscoveryCacheFile, origin: string, now: number): s
     const stored = probe.stored;
     if (stored) {
       if (!sameOrigin(stored.finalUrl)) return "final_url";
+      if (!Number.isFinite(stored.fetchedAt) || (stored.confirmedAt !== undefined && !Number.isFinite(stored.confirmedAt))) return "checked_at";
+      if ((stored.confirmedAt ?? stored.fetchedAt) > now + DISCOVERY_FUTURE_TOLERANCE_MS) return "future";
       const bytes = encoder.encode(stored.text);
       if (bytes.byteLength !== stored.byteLength || bytes.byteLength > TEXT_MAX_BYTES[probe.kind]) return "size";
       if (sha256Hex(bytes) !== stored.sha256) return "hash";
