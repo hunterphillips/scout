@@ -1,13 +1,13 @@
+import { spawnSync } from "node:child_process";
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import type { ManagedPaths } from "./authPreflight.js";
 import { buildJobSurface, SCOUT_TOOL_NAMES } from "./jobSurface.js";
 import { fakeBackend, selection } from "./testing/fakeBackend.js";
 import { defaultManagedPaths } from "./claudeJob.js";
 import { BRIDGE_JOB_MAX_BYTES } from "./contextToolBridge.js";
-import { BRIDGE_SERVER_NAME, checkManagedPolicy, managedSettingsConflict, planJobTools, type ToolPlanOptions } from "./toolPolicy.js";
+import { BRIDGE_SERVER_NAME, checkManagedPolicy, managedSettingsConflict, planJobTools, type JobManagedPaths, type ToolPlanOptions } from "./toolPolicy.js";
 import { MAX_ARG_CHARS, MAX_ARGS, MAX_CONNECTIONS, MAX_DESCRIPTION_CHARS, MAX_SELECTIONS, ToolsProfileSchema, type ToolsProfile } from "./toolProfile.js";
 
 const SECRET = "SENTINEL-PLAN-SECRET-9a0b";
@@ -86,6 +86,13 @@ describe("planJobTools", () => {
     expect(planJobTools({ ...opts(tools), maxBridgeJobBytes: 64 * BRIDGE_JOB_MAX_BYTES }).ok).toBe(true);
   });
 
+  it("carries a connection's literal env into the bridge job verbatim", () => {
+    const a = fakeBackend(dir(), "notes", "honest", { env: { NOTES_TOKEN: SECRET }, literalEnv: { PATH: "/usr/bin:/bin" } });
+    const plan = planJobTools(opts({ connections: [a.connection], selections: [selection("notes", "lookup", true)] }));
+    expect(plan.ok && plan.bridgeJob!.connections[0]!.literalEnv).toEqual({ PATH: "/usr/bin:/bin" });
+    expect(JSON.stringify(plan.ok && plan.bridgeJob)).not.toContain(SECRET);
+  });
+
   it("an optional tool whose command is gone is reported unavailable and left out; Scout alone still runs", () => {
     const a = fakeBackend(dir(), "notes", "honest");
     const plan = planJobTools(opts({ connections: [{ ...a.connection, command: "/nonexistent-scout-test/notes-mcp" }], selections: [selection("notes", "lookup", false)] }));
@@ -98,7 +105,7 @@ describe("planJobTools", () => {
 });
 
 describe("checkManagedPolicy", () => {
-  function managed(files: Record<string, unknown>, extra: Partial<ManagedPaths> = {}): ManagedPaths {
+  function managed(files: Record<string, unknown>, extra: Partial<JobManagedPaths> = {}): JobManagedPaths {
     const d = dir();
     const paths: string[] = [];
     for (const [name, content] of Object.entries(files)) {
@@ -106,7 +113,7 @@ describe("checkManagedPolicy", () => {
       writeFileSync(p, typeof content === "string" ? content : JSON.stringify(content));
       paths.push(p);
     }
-    return { files: [...paths, join(d, "absent.json")], dropInDirs: [join(d, "absent.d")], opaque: [join(d, "absent.plist")], ...extra };
+    return { files: [...paths, join(d, "absent.json")], dropInDirs: [join(d, "absent.d")], opaque: [join(d, "absent.plist")], mcpFiles: [join(d, "managed-mcp.json")], ...extra };
   }
 
   it("absent files are fine; harmless settings are fine", () => {
@@ -122,9 +129,46 @@ describe("checkManagedPolicy", () => {
     ["managed permission rules only", { allowManagedPermissionRulesOnly: true }, "managed_permission_rules_only"],
     ["managed MCP servers only", { allowManagedMcpServersOnly: true }, "managed_mcp_servers_only"],
     ["a forced permission mode", { permissions: { defaultMode: "acceptEdits" } }, "managed_permission_mode"],
+    ["an empty MCP allowlist", { allowedMcpServers: [] }, "managed_mcp_allowlist"],
+    ["an MCP allowlist without the bridge", { allowedMcpServers: [{ serverName: "scout" }] }, "managed_mcp_allowlist"],
+    ["an MCP allowlist admitting Scout by command only", { allowedMcpServers: [{ serverCommand: ["/usr/local/bin/node"] }, { serverName: "scout" }] }, "managed_mcp_allowlist"],
+    ["an MCP allowlist with a malformed entry (the CLI enforces it as empty)", { allowedMcpServers: [{ serverName: "scout" }, { serverName: "scout_bridge" }, { serverName: "a b" }] }, "managed_mcp_allowlist"],
+    ["an MCP allowlist that is not an array", { allowedMcpServers: { serverName: "scout" } }, "managed_mcp_allowlist"],
+    ["an MCP denylist naming the bridge", { deniedMcpServers: [{ serverName: "scout_bridge" }] }, "managed_mcp_denylist"],
+    ["an MCP denylist naming Scout's server", { deniedMcpServers: [{ serverName: "other" }, { serverName: "scout" }] }, "managed_mcp_denylist"],
+    ["an MCP denylist by command (may match Scout's argv)", { deniedMcpServers: [{ serverCommand: ["/usr/local/bin/node", "x.js"] }] }, "managed_mcp_denylist"],
   ])("refuses %s", (_label, settings, detail) => {
     expect(checkManagedPolicy(managed({ "m.json": settings }))).toEqual({ ok: false, detail });
     expect(managedSettingsConflict(settings)).toBe(detail);
+  });
+
+  it("MCP allow and deny lists that leave Scout's servers alone are fine", () => {
+    const ok = {
+      allowedMcpServers: [{ serverName: "scout" }, { serverName: "scout_bridge" }, { serverUrl: "https://*.example.com/*" }],
+      deniedMcpServers: [{ serverName: "other" }, { serverUrl: "https://evil.example/*" }],
+    };
+    expect(checkManagedPolicy(managed({ "m.json": ok }))).toEqual({ ok: true });
+  });
+
+  it("a managed MCP config (managed-mcp.json) refuses whenever it is present, whatever it holds", () => {
+    const paths = managed({});
+    writeFileSync(paths.mcpFiles![0]!, JSON.stringify({ mcpServers: {} }));
+    expect(checkManagedPolicy(paths)).toEqual({ ok: false, detail: "managed_mcp_file" });
+    writeFileSync(paths.mcpFiles![0]!, "");
+    expect(checkManagedPolicy(paths)).toEqual({ ok: false, detail: "managed_mcp_file" });
+  });
+
+  it("the default locations include the managed MCP config on macOS and Linux", () => {
+    const paths = defaultManagedPaths({ HOME: "/x/home" }, () => "someone");
+    if (process.platform === "darwin") expect(paths.mcpFiles).toEqual(["/Library/Application Support/ClaudeCode/managed-mcp.json"]);
+    if (process.platform === "linux") expect(paths.mcpFiles).toEqual(["/etc/claude-code/managed-mcp.json"]);
+  });
+
+  it("a managed settings path that is a FIFO fails closed without blocking", (ctx) => {
+    const paths = managed({});
+    const fifo = paths.files.at(-1)!; // the absent.json slot
+    if (spawnSync("mkfifo", [fifo]).status !== 0) return ctx.skip();
+    expect(checkManagedPolicy(paths)).toEqual({ ok: false, detail: "managed_unreadable" });
   });
 
   it("checks drop-in fragments like any managed file", () => {
@@ -150,5 +194,7 @@ describe("checkManagedPolicy", () => {
     expect(checkManagedPolicy(defaultManagedPaths(env, throwing))).toEqual({ ok: false, detail: "managed_user_unknown" });
     expect(checkManagedPolicy(defaultManagedPaths(env, () => ""))).toEqual({ ok: false, detail: "managed_user_unknown" });
     expect(checkManagedPolicy(defaultManagedPaths(env, () => "a/b"))).toEqual({ ok: false, detail: "managed_user_unknown" });
+    // No HOME and no CLAUDE_CONFIG_DIR: the config dir cannot be located either.
+    expect(checkManagedPolicy(defaultManagedPaths({}, () => "someone"))).toEqual({ ok: false, detail: "managed_user_unknown" });
   });
 });

@@ -60,7 +60,7 @@ import { mapOutcome, recordUsage } from "./mapOutcome.js";
 import { MODEL_RE, profileFingerprint, type AgentProfile } from "./profile.js";
 import { buildJobInstructions, buildJobPrompt } from "./prompt.js";
 import { createStreamMonitor } from "./streamMonitor.js";
-import { checkManagedPolicy, defaultBridgeEntrypoint, planJobTools, type JobManagedPaths, type ToolPlanOptions } from "./toolPolicy.js";
+import { checkManagedPolicy, defaultBridgeEntrypoint, managedMcpFilesFor, planJobTools, type JobManagedPaths, type ManagedPolicyResult, type ToolPlanOptions } from "./toolPolicy.js";
 
 export type { SpawnFn, SnapshotFn } from "./childSupervisor.js";
 
@@ -232,9 +232,15 @@ export function launchProfileFailure(e: unknown): Out {
   }
 }
 
-/** The managed-settings locations for the job's environment: this platform, its CLI config dir, the OS user. */
+/**
+ * The managed-settings locations for the job's environment: this platform, its CLI config
+ * dir, the OS user. Without a config dir (no CLAUDE_CONFIG_DIR and no HOME) the server-managed
+ * cache cannot be located: `userUnknown`, so the check fails closed.
+ */
 export function defaultManagedPaths(env: Readonly<Record<string, string>>, username: () => string = () => userInfo().username): JobManagedPaths {
-  const configDir = env.CLAUDE_CONFIG_DIR ?? join(env.HOME!, ".claude");
+  const unknown: JobManagedPaths = { files: [], dropInDirs: [], opaque: [], userUnknown: true };
+  const configDir = env.CLAUDE_CONFIG_DIR ?? (env.HOME ? join(env.HOME, ".claude") : undefined);
+  if (!configDir) return unknown;
   let user: string | undefined;
   try {
     user = username();
@@ -242,8 +248,8 @@ export function defaultManagedPaths(env: Readonly<Record<string, string>>, usern
     // below
   }
   // Per-user MDM policy is keyed by the OS account; without one, fail closed.
-  if (!user || user.includes("/")) return { files: [], dropInDirs: [], opaque: [], userUnknown: true };
-  return managedPathsFor(process.platform, configDir, user);
+  if (!user || user.includes("/")) return unknown;
+  return { ...managedPathsFor(process.platform, configDir, user), mcpFiles: managedMcpFilesFor(process.platform) };
 }
 
 // ---------- the adapter ----------
@@ -352,7 +358,12 @@ export function createClaudeJobAdapter(deps: ClaudeJobDeps): ClaudeJobAdapter {
     }
     const jobDir = launch.cwd;
     try {
-      const policy = checkManagedPolicy(deps.managedPaths ?? defaultManagedPaths(launch.env));
+      let policy: ManagedPolicyResult;
+      try {
+        policy = checkManagedPolicy(deps.managedPaths ?? defaultManagedPaths(launch.env));
+      } catch {
+        policy = { ok: false, detail: "managed_user_unknown" }; // locating the managed files failed: fail closed
+      }
       if (!policy.ok) return { result: { status: "error", reason: "unsupported_configuration" }, termination: "unsupported_configuration", detail: policy.detail };
       let surface: JobSurface;
       try {

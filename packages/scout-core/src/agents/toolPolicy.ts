@@ -16,7 +16,8 @@
 // Before launch each connection a selection uses is prepared: its command must still be an
 // absolute executable file and its environment bindings must resolve (toolProfile.ts). The
 // resolution here is a dry run: the values are checked and discarded. The bridge's job file
-// carries the bindings (`{file, pointer}`), never the values; the bridge resolves them again
+// carries the bindings (`{file, pointer}`), never the values, plus the definition's
+// non-secret `literalEnv` verbatim; the bridge resolves them again
 // in memory just before it starts each backend. A connection that cannot be prepared makes
 // its tools unavailable: a required one blocks the job (`tool_unavailable`), an optional one
 // is reported unavailable in the job details and left out of the bridge. At startup the
@@ -44,16 +45,34 @@
 //   - `allowManagedPermissionRulesOnly: true`: the job's exact --allowedTools list is ignored
 //     and only managed rules apply;
 //   - `allowManagedMcpServersOnly: true`: the job's servers are not what loads;
-//   - `permissions.defaultMode` other than `dontAsk`: unattended denial is not assured.
+//   - `permissions.defaultMode` other than `dontAsk`: unattended denial is not assured;
+//   - `allowedMcpServers` (an array) without a `{serverName}` entry for each of `scout` and
+//     `scout_bridge` (`managed_mcp_allowlist`). Observed: entries carry exactly one of
+//     `serverName` (letters, digits, `-`, `_`), `serverCommand` ([command, ...args], exact)
+//     or `serverUrl`; undefined allows all; an empty array allows none; an invalid value is
+//     enforced as an empty allowlist. Inferred: a `serverCommand` entry cannot be relied on
+//     to admit Scout's servers (their argv names per-job paths), so only names count, and
+//     both names are required even for a job without the bridge (the check runs before the
+//     plan). Any malformed entry refuses;
+//   - `deniedMcpServers` (an array) with a `{serverName}` entry naming `scout` or
+//     `scout_bridge`, or any `serverCommand` entry (`managed_mcp_denylist`). Observed: names
+//     are compared verbatim; the denylist wins over the allowlist; an invalid list is
+//     dropped. Inferred: a command entry may match Scout's node argv, which this check
+//     does not compare, so it refuses; `serverUrl` entries cannot match a stdio server.
+// The managed MCP config `managed-mcp.json` (macOS: /Library/Application Support/ClaudeCode/,
+// Linux: /etc/claude-code/; observed next to managed-settings.json in the CLI's managed
+// config list) "has exclusive control over MCP servers" while it exists, so the job's
+// servers are ignored: its presence refuses (`managed_mcp_file`), whatever it contains.
 // A managed file that is unreadable or malformed, an MDM plist (not parsed), or a platform
 // without known locations also refuses: fail closed. Absent files are fine. Managed
 // `permissions.allow` rules are accepted: built-in tools are off (`--tools ""`) and every
 // MCP tool the job can see is already on its exact list.
 
-import { constants as fsc, closeSync, fstatSync, openSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { readdirSync, statSync } from "node:fs";
 import { createRequire } from "node:module";
 import { join } from "node:path";
 import { isExecutableFile, type ManagedPaths } from "./authPreflight.js";
+import { isMissing, readPrivateFile } from "./privateFile.js";
 import { BRIDGE_DEFAULT_LIMITS, BRIDGE_JOB_MAX_BYTES, type BridgeJob } from "./contextToolBridge.js";
 import { mcpToolName, SCOUT_SERVER_NAME, SCOUT_TOOL_NAMES, scoutServerSpec, type JobServerSpec, type JobSurfaceSpec, type ScoutServerOptions } from "./jobSurface.js";
 import { resolveEnvBindings, type Connection, type EnvBinding, type ToolsProfile } from "./toolProfile.js";
@@ -111,6 +130,7 @@ export function planJobTools(o: ToolPlanOptions): ToolPlan {
         if (isExecutableFile(c.command)) {
           resolve(c.env); // dry run: the values are discarded here
           entry = { id: c.id, command: c.command, args: [...c.args], env: Object.fromEntries(Object.entries(c.env).map(([k, b]) => [k, { file: b.file, pointer: b.pointer }])) };
+          if (c.literalEnv) entry.literalEnv = { ...c.literalEnv }; // non-secret, carried verbatim
         }
       } catch {
         entry = undefined; // a binding that does not resolve: the codes stay out of the plan
@@ -166,6 +186,9 @@ export type ManagedPolicyDetail =
   | "managed_plugin_only"
   | "managed_permission_rules_only"
   | "managed_mcp_servers_only"
+  | "managed_mcp_allowlist"
+  | "managed_mcp_denylist"
+  | "managed_mcp_file"
   | "managed_permission_mode"
   | "managed_unreadable"
   | "managed_not_inspected"
@@ -176,26 +199,47 @@ export type ManagedPolicyResult = { ok: true } | { ok: false; detail: ManagedPol
 
 const MANAGED_MAX_BYTES = 1024 * 1024;
 const isRec = (v: unknown): v is Record<string, unknown> => v !== null && typeof v === "object" && !Array.isArray(v);
-const isMissing = (e: unknown): boolean => ["ENOENT", "ENOTDIR"].includes((e as NodeJS.ErrnoException | null)?.code ?? "");
 
-/** One managed JSON file: undefined when absent; throws "unreadable" when it cannot be read or parsed as an object. */
+/**
+ * One managed JSON file: undefined when absent; throws when it cannot be read (a symlink, a
+ * FIFO or anything not a regular file included) or parsed as an object.
+ */
 function readManaged(path: string): Record<string, unknown> | undefined {
-  let fd: number;
+  let text: string;
   try {
-    fd = openSync(path, fsc.O_RDONLY);
+    text = readPrivateFile(path, MANAGED_MAX_BYTES, { private: false }).toString("utf8");
   } catch (e) {
-    if (isMissing(e)) return undefined;
+    if ((e as { code?: unknown }).code === "missing") return undefined;
     throw new Error("unreadable");
   }
-  try {
-    const st = fstatSync(fd);
-    if (!st.isFile() || st.size > MANAGED_MAX_BYTES) throw new Error("unreadable");
-    const j: unknown = JSON.parse(readFileSync(fd, "utf8"));
-    if (!isRec(j)) throw new Error("unreadable");
-    return j;
-  } finally {
-    closeSync(fd);
-  }
+  const j: unknown = JSON.parse(text);
+  if (!isRec(j)) throw new Error("unreadable");
+  return j;
+}
+
+/** The MCP server names a job may register; managed allow/deny lists must admit both. */
+const JOB_SERVER_NAMES: readonly string[] = [SCOUT_SERVER_NAME, BRIDGE_SERVER_NAME];
+const SERVER_NAME_RE = /^[a-zA-Z0-9_-]+$/;
+
+/** Whether exactly one of serverName / serverCommand / serverUrl is set and well formed (the CLI's allowlist entry shape). */
+function mcpListEntryValid(e: unknown): e is Record<string, unknown> {
+  if (!isRec(e)) return false;
+  const set = ["serverName", "serverCommand", "serverUrl"].filter((k) => e[k] !== undefined);
+  if (set.length !== 1) return false;
+  if (e.serverName !== undefined) return typeof e.serverName === "string" && SERVER_NAME_RE.test(e.serverName);
+  if (e.serverCommand !== undefined) return Array.isArray(e.serverCommand) && e.serverCommand.length > 0 && e.serverCommand.every((x) => typeof x === "string");
+  return typeof e.serverUrl === "string";
+}
+
+function mcpAllowlistExcludes(list: unknown): boolean {
+  if (!Array.isArray(list) || !list.every(mcpListEntryValid)) return true; // the CLI enforces an invalid allowlist as empty
+  const named = new Set(list.flatMap((e) => (typeof e.serverName === "string" ? [e.serverName] : [])));
+  return !JOB_SERVER_NAMES.every((n) => named.has(n));
+}
+
+function mcpDenylistExcludes(list: unknown): boolean {
+  if (!Array.isArray(list)) return false; // the CLI drops an invalid denylist
+  return list.some((e) => isRec(e) && ((typeof e.serverName === "string" && JOB_SERVER_NAMES.includes(e.serverName)) || e.serverCommand !== undefined));
 }
 
 /** Why one managed settings object defeats a job's restrictions, if it does. */
@@ -206,13 +250,26 @@ export function managedSettingsConflict(s: Record<string, unknown>): ManagedPoli
   if (s.strictPluginOnlyCustomization !== undefined && s.strictPluginOnlyCustomization !== false) return "managed_plugin_only";
   if (s.allowManagedPermissionRulesOnly === true) return "managed_permission_rules_only";
   if (s.allowManagedMcpServersOnly === true) return "managed_mcp_servers_only";
+  if (s.allowedMcpServers !== undefined && mcpAllowlistExcludes(s.allowedMcpServers)) return "managed_mcp_allowlist";
+  if (s.deniedMcpServers !== undefined && mcpDenylistExcludes(s.deniedMcpServers)) return "managed_mcp_denylist";
   const mode = isRec(s.permissions) ? s.permissions.defaultMode : undefined;
   if (mode !== undefined && mode !== "dontAsk") return "managed_permission_mode";
   return undefined;
 }
 
-/** Managed-settings locations for a job; `userUnknown` when the OS user (which keys per-user MDM policy) could not be determined. */
-export type JobManagedPaths = ManagedPaths & { userUnknown?: boolean };
+/**
+ * Managed-settings locations for a job: the billing preflight's (ManagedPaths) plus
+ * `mcpFiles`, the managed MCP configs whose presence refuses; `userUnknown` when the OS user
+ * (which keys per-user MDM policy) could not be determined.
+ */
+export type JobManagedPaths = ManagedPaths & { mcpFiles?: string[]; userUnknown?: boolean };
+
+/** The managed MCP config locations (`managed-mcp.json` in the managed settings dir). */
+export function managedMcpFilesFor(platform: string): string[] {
+  if (platform === "darwin") return ["/Library/Application Support/ClaudeCode/managed-mcp.json"];
+  if (platform === "linux") return ["/etc/claude-code/managed-mcp.json"];
+  return [];
+}
 
 /** Check every managed settings location; the first conflict wins. Never throws. */
 export function checkManagedPolicy(paths: JobManagedPaths): ManagedPolicyResult {
@@ -241,12 +298,22 @@ export function checkManagedPolicy(paths: JobManagedPaths): ManagedPolicyResult 
     const conflict = s && managedSettingsConflict(s);
     if (conflict) return { ok: false, detail: conflict };
   }
-  for (const p of paths.opaque) {
+  const present = (p: string): boolean | "unreadable" => {
     try {
       statSync(p);
-      return { ok: false, detail: "managed_not_inspected" };
+      return true;
     } catch (e) {
-      if (!isMissing(e)) return { ok: false, detail: "managed_unreadable" };
+      return isMissing(e) ? false : "unreadable";
+    }
+  };
+  for (const [list, detail] of [
+    [paths.mcpFiles ?? [], "managed_mcp_file"],
+    [paths.opaque, "managed_not_inspected"],
+  ] as const) {
+    for (const p of list) {
+      const r = present(p);
+      if (r === "unreadable") return { ok: false, detail: "managed_unreadable" };
+      if (r) return { ok: false, detail };
     }
   }
   return { ok: true };
