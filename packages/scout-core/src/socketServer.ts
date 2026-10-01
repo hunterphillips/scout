@@ -3,12 +3,14 @@
 // The socket's files (private run dir, stale probe, publish after chmod 0600, inode-checked
 // removal) are handled by localSocketFiles.ts, shared with the agent socket.
 // Frames are length-prefixed JSON (see @scout/contracts/frame). Each connection must
-// open with a valid hello; anything else before it closes the connection. After hello,
-// bad frames are dropped and counted, and valid observation frames reach the caller.
+// open with a hello; anything else before it closes the connection. A hello for another
+// protocol is answered with upgrade_required and closed, so mixed versions fail closed
+// instead of continuing with ambiguous permissions. After a protocol-2 hello, bad frames
+// are dropped and counted, and valid observation frames reach the caller.
 
 import { createServer, type Server, type Socket } from "node:net";
 import { join } from "node:path";
-import { BRIDGE_PROTOCOL, BridgeFrameSchema, type ObservationFrame, type ToChromeFrame } from "@scout/contracts";
+import { AnyHelloSchema, BRIDGE_PROTOCOL, BridgeFrameSchema, type ObservationFrame, type ToChromeFrame } from "@scout/contracts";
 import { encodeFrame, FrameDecoder, MAX_FRAME_FROM_CHROME, MAX_FRAME_TO_CHROME } from "@scout/contracts/frame";
 import type { Diagnostics } from "./diagnostics.js";
 import { type PublishedSocket, publishPrivateSocket } from "./localSocketFiles.js";
@@ -23,6 +25,8 @@ export {
 export const SOCKET_NAME = "core.sock";
 /** A connection that has not sent hello by then is closed. */
 export const HELLO_TIMEOUT_MS = 5_000;
+/** After upgrade_required, how long the peer gets to read it and close before we destroy the socket. */
+export const UPGRADE_CLOSE_MS = 1_000;
 
 /** One native-host connection that has completed hello. */
 export interface SocketClient {
@@ -37,7 +41,7 @@ export interface SocketClient {
 export interface SocketServerOptions {
   runDir: string;
   socketName?: string;
-  /** Called synchronously when a connection completes hello. */
+  /** Called synchronously when a connection completes a protocol-2 hello. */
   onClient: (client: SocketClient) => void;
   diagnostics: Diagnostics;
   helloTimeoutMs?: number;
@@ -68,6 +72,7 @@ export function createSocketServer(options: SocketServerOptions): SocketServer {
     const frameHandlers: Array<(f: ObservationFrame) => void> = [];
     const closeHandlers: Array<() => void> = [];
     let helloDone = false;
+    let rejected = false;
     const helloTimer = setTimeout(() => {
       diagnostics.event("bridge_rejected", { conn: id, code: "hello-timeout" });
       sock.destroy();
@@ -93,15 +98,24 @@ export function createSocketServer(options: SocketServerOptions): SocketServer {
 
     sock.on("data", (chunk: Buffer) => {
       for (const r of decoder.push(chunk)) {
-        if (sock.destroyed) return;
+        if (sock.destroyed || rejected) return;
         if (!helloDone) {
-          const hello = r.ok ? BridgeFrameSchema.safeParse(r.value) : null;
-          if (hello?.success && hello.data.type === "hello" && hello.data.protocol === BRIDGE_PROTOCOL) {
+          const hello = r.ok ? AnyHelloSchema.safeParse(r.value) : null;
+          if (hello?.success && hello.data.protocol === BRIDGE_PROTOCOL) {
             helloDone = true;
             clearTimeout(helloTimer);
             diagnostics.event("bridge_hello", { conn: id });
             options.onClient(client);
             continue;
+          }
+          clearTimeout(helloTimer);
+          rejected = true;
+          if (hello?.success) {
+            // Tell the host which protocol we speak, then close: it reports upgrade_required.
+            diagnostics.event("bridge_rejected", { conn: id, code: "upgrade_required", protocol: hello.data.protocol });
+            sock.end(encodeFrame({ type: "upgrade_required", protocol: BRIDGE_PROTOCOL } satisfies ToChromeFrame, MAX_FRAME_TO_CHROME));
+            setTimeout(() => sock.destroy(), UPGRADE_CLOSE_MS).unref();
+            return;
           }
           diagnostics.event("bridge_rejected", { conn: id, code: r.ok ? "handshake" : r.code });
           sock.destroy();
