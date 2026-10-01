@@ -32,6 +32,7 @@ const library = {
 };
 const capabilities = {
   type: "capabilities",
+  coreInstanceId: "0123456789abcdef0123456789abcdef",
   revision: 1,
   approvalRevision: 4,
   offers: [offer],
@@ -63,6 +64,7 @@ describe("panel frames (core -> app)", () => {
       { type: "ack", commandId: "a1", ok: false, code: "stale_revision", revision: 4 },
       { type: "ack", commandId: "a1", ok: false, code: "unavailable" },
       { type: "audit", entries: [{ at: 1, role: "interactive", method: "current_site", outcome: "ok", origin: "https://docs.example.com" }] },
+      { type: "audit", entries: [{ at: 1, role: "job", method: "current_site", outcome: "not_granted" }] },
       { type: "grant", agentBrowserContext: true },
       { type: "state", status: "idle", visitEpoch: 2, detail: "docs.example.com", permitted: true },
     ];
@@ -94,6 +96,11 @@ describe("panel frames (core -> app)", () => {
       { type: "ack", commandId: "a1", ok: false, code: "boom" },
       { type: "ack", commandId: "has space", ok: true, revision: 0, approvalRevision: 0 },
       { type: "audit", entries: [{ at: 1, role: "admin", method: "current_site", outcome: "ok" }] },
+      { type: "audit", entries: [{ at: 1, role: "interactive", method: "current_site", outcome: "made_up" }] },
+      { ...capabilities, coreInstanceId: undefined },
+      { ...capabilities, coreInstanceId: "" },
+      { ...capabilities, coreInstanceId: "x".repeat(65) },
+      { ...capabilities, coreInstanceId: "has space" },
       { type: "grant" },
     ];
     for (const f of bad) expect(PanelStateSchema.safeParse(f).success).toBe(false);
@@ -107,8 +114,8 @@ describe("native commands (app -> core)", () => {
     { type: "approve", commandId: "c2", resourceId: RES, version: HASH, expectedRevision: 3 },
     { type: "decline", commandId: "c3", resourceId: RES, version: HASH, expectedRevision: 3 },
     { type: "revoke", commandId: "c4", resourceId: RES, expectedRevision: 3 },
-    { type: "set_auto_acquire", commandId: "c5", origin: "https://docs.example.com", enabled: true, acknowledgeRisk: true },
-    { type: "set_agent_browser_context", commandId: "c6", enabled: false },
+    { type: "set_auto_acquire", commandId: "c5", origin: "https://docs.example.com", enabled: true, expectedEnabled: false, acknowledgeRisk: true },
+    { type: "set_agent_browser_context", commandId: "c6", enabled: false, expectedEnabled: true },
     { type: "refresh_capabilities", commandId: "c7" },
   ];
 
@@ -126,9 +133,11 @@ describe("native commands (app -> core)", () => {
       { type: "approve", commandId: "c", resourceId: RES, version: HASH, expectedRevision: -1 },
       { type: "approve", commandId: "c", resourceId: RES, version: HASH, expectedRevision: 1, text: "resource body" },
       { type: "revoke", commandId: "c", resourceId: RES },
-      { type: "set_auto_acquire", commandId: "c", origin: "https://x.example/path", enabled: true, acknowledgeRisk: true },
-      { type: "set_auto_acquire", commandId: "c", origin: "https://x.example", enabled: true },
-      { type: "set_agent_browser_context", commandId: "c", enabled: "yes" },
+      { type: "set_auto_acquire", commandId: "c", origin: "https://x.example/path", enabled: true, expectedEnabled: false, acknowledgeRisk: true },
+      { type: "set_auto_acquire", commandId: "c", origin: "https://x.example", enabled: true, expectedEnabled: false },
+      { type: "set_auto_acquire", commandId: "c", origin: "https://x.example", enabled: true, acknowledgeRisk: true },
+      { type: "set_agent_browser_context", commandId: "c", enabled: "yes", expectedEnabled: false },
+      { type: "set_agent_browser_context", commandId: "c", enabled: true },
       { type: "preview", commandId: "c", resourceId: RES, version: HASH, cursor: "x".repeat(65) },
       { type: "refresh_capabilities", commandId: "c", config: {} },
     ];
@@ -147,8 +156,8 @@ describe("native commands (app -> core)", () => {
       { type: "approve", commandId: longest, resourceId: RES, version: HASH, expectedRevision: maxInt },
       { type: "decline", commandId: longest, resourceId: RES, version: HASH, expectedRevision: maxInt },
       { type: "revoke", commandId: longest, resourceId: RES, expectedRevision: maxInt },
-      { type: "set_auto_acquire", commandId: longest, origin, enabled: false, acknowledgeRisk: false },
-      { type: "set_agent_browser_context", commandId: longest, enabled: false },
+      { type: "set_auto_acquire", commandId: longest, origin, enabled: false, expectedEnabled: false, acknowledgeRisk: false },
+      { type: "set_agent_browser_context", commandId: longest, enabled: false, expectedEnabled: false },
       { type: "refresh_capabilities", commandId: longest },
     ];
     for (const c of largest) {

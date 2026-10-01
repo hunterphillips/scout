@@ -14,10 +14,12 @@
 // least recent library entries, then the oldest offers; `truncated` says something was cut.
 //
 // The emitter coalesces change notifications (debounced) and skips a frame identical to the
-// last one sent; `refresh()` sends at once, even when unchanged. `revision` increases with
-// every frame sent, so the app can discard an older one.
+// last one sent; `refresh()` sends at once, even when unchanged. Every frame carries the core's
+// `coreInstanceId` (drawn once per start); `revision` increases with every frame sent under it,
+// so the app can discard an older one and resets its high-water mark when the id changes.
 
 import {
+  CORE_INSTANCE_ID_MAX_CHARS,
   CAPABILITY_CONFLICTS_MAX,
   CAPABILITY_LIBRARY_MAX,
   CAPABILITY_OFFERS_MAX,
@@ -46,7 +48,7 @@ export interface CapabilitiesInput {
   currentOrigin: string | null;
 }
 
-export type CapabilitiesBody = Omit<PanelCapabilities, "type" | "revision">;
+export type CapabilitiesBody = Omit<PanelCapabilities, "type" | "coreInstanceId" | "revision">;
 
 function cut<T>(items: readonly T[], max: number): { items: T[]; cut: boolean } {
   return { items: items.slice(0, max), cut: items.length > max };
@@ -120,8 +122,9 @@ export function buildCapabilities(input: CapabilitiesInput): CapabilitiesBody {
 }
 
 const bytes = (value: unknown): number => Buffer.byteLength(JSON.stringify(value), "utf8");
-/** The frame's size as sent, with the largest revision the emitter could stamp on it. */
-const frameBytes = (body: CapabilitiesBody): number => bytes({ type: "capabilities", revision: Number.MAX_SAFE_INTEGER, ...body });
+/** The frame's size as sent, with the longest instance id and largest revision the emitter could stamp on it. */
+const frameBytes = (body: CapabilitiesBody): number =>
+  bytes({ type: "capabilities", coreInstanceId: "x".repeat(CORE_INSTANCE_ID_MAX_CHARS), revision: Number.MAX_SAFE_INTEGER, ...body });
 
 /**
  * Drop the least recent library entries, then the oldest offers (both lists are newest first),
@@ -149,6 +152,8 @@ const rank = (s: OriginSetting, current: string | null): number => (s.autoAcquir
 export interface CapabilitiesEmitterOptions {
   /** Read on every frame: the store snapshot, conflicts, grants, and current visit right now. */
   input: () => CapabilitiesInput;
+  /** This core start's id, stamped on every frame. */
+  coreInstanceId: string;
   emit: (frame: PanelCapabilities) => void;
   timers?: Timers;
   delayMs?: number;
@@ -185,7 +190,7 @@ export function createCapabilitiesEmitter(options: CapabilitiesEmitterOptions): 
     last = key;
     revision++;
     options.diagnostics?.event("capabilities_emitted", { offers: body.offers.length, library: body.library.length, truncated: body.truncated });
-    options.emit({ type: "capabilities", revision, ...body });
+    options.emit({ type: "capabilities", coreInstanceId: options.coreInstanceId, revision, ...body });
   };
   const debounced = createDebounced(() => send(false), options.delayMs ?? CAPABILITIES_DEBOUNCE_MS, options.timers);
 

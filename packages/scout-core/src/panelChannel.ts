@@ -26,6 +26,8 @@ export type PanelStore = CommandStore & PreviewStore & { snapshot(): StoreState 
 
 export interface PanelChannelOptions {
   store: PanelStore;
+  /** This core start's id (the one agent.sock replies carry); stamped on every `capabilities` frame. */
+  coreInstanceId: string;
   /** The exporter's last recorded conflicts; empty when there is no exporter. */
   exportConflicts: () => readonly ExportConflict[];
   readBrowserContextGrant: () => boolean;
@@ -74,6 +76,7 @@ export function createPanelChannel(options: PanelChannelOptions): PanelChannel {
       }
       return { state: store.snapshot(), conflicts, isPermitted: options.isPermitted, currentOrigin: options.currentOrigin() };
     },
+    coreInstanceId: options.coreInstanceId,
     emit,
     diagnostics,
     ...(options.timers ? { timers: options.timers } : {}),

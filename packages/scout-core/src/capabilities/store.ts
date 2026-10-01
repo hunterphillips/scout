@@ -236,9 +236,10 @@ export interface CapabilityStore {
    * resource is already blocked and nothing changes (`changed: false`), nothing is committed but `onRevoked` still
    * runs (with `revokedVersions: []`) and export cleanup is still scheduled, so re-revoking
    * retries a wrapper removal that failed before. `onRevoked` runs inside the mutation queue:
-   * it must not await a store mutation or `close()`.
+   * it must not await a store mutation or `close()`. With `expectedRevision`, an unblocked
+   * resource at another revision is a StaleApprovalError, checked inside the queue.
    */
-  revoke(resourceId: string): Promise<RevokeResult>;
+  revoke(resourceId: string, expectedRevision?: number): Promise<RevokeResult>;
   setOriginPolicy(command: PolicyCommand): Promise<{ changed: boolean; approvalRevision: number }>;
   collectGarbage(): Promise<GcReport>;
 }
@@ -625,12 +626,12 @@ export async function createCapabilityStore(options: CapabilityStoreOptions): Pr
         return { changed, approvalRevision: state.approvalRevision, revision: resourceRevision(command.resourceId) };
       }),
 
-    revoke: (resourceId) =>
+    revoke: (resourceId, expectedRevision) =>
       serialize(async () => {
         assertWritable();
         // (1) Commit the block, then drop the resource's pins so no later collection keeps them.
         // A failed commit throws before the pins are touched.
-        const { state: next, changed, revokedVersions } = applyRevoke(state, resourceId, clock.now());
+        const { state: next, changed, revokedVersions } = applyRevoke(state, resourceId, clock.now(), expectedRevision);
         if (changed) commit(next);
         for (const keys of pins.values()) for (const k of [...keys]) if (k.startsWith(`${resourceId}\0`)) keys.delete(k);
         diagnostics?.event("capability_decision", { resource: shortId(resourceId), action: "revoke", changed, revision: state.approvalRevision });

@@ -20,14 +20,19 @@
 //   its write queue (StaleApprovalError -> `stale_revision`). Approving a pending version also
 //   requires its site origin to be Chrome-permitted now (`not_permitted`): an offer the user
 //   could no longer see is not accepted. Re-approving a revoked resource's version has no such
-//   check; that is the library's explicit re-approval.
-// - revoke: checked here against the in-memory revision just before the store call; a
-//   resource that is already blocked acks `ok` whatever the revision (the store re-runs its
-//   revocation hooks and export cleanup). Revocation is not content-specific, so a version
-//   recorded between the check and the queued write is revoked too.
-// - set_auto_acquire: origin policies carry no revision, so there is no stale check. Turning it
-//   on needs `acknowledgeRisk: true` (`invalid` otherwise) and the origin Chrome-permitted now
-//   (`not_permitted`); turning it off always applies.
+//   check; that is the library's explicit re-approval. A version the resource does not record
+//   is `not_found`.
+// - revoke: the store checks `expectedRevision` inside its write queue; a resource that is
+//   already blocked acks `ok` whatever the revision (the store re-runs its revocation hooks and
+//   export cleanup).
+// - The two consent toggles are compare-and-set on `expectedEnabled`, the value the user saw;
+//   a different current value acks `stale_revision` (no `revision`) and writes nothing, so a
+//   delayed or retried toggle (even one the ID cache forgot) never undoes a later one.
+//   set_auto_acquire compares with the origin's policy (none = off) inside the store's queue.
+//   Turning it on also needs `acknowledgeRisk: true` (`invalid` otherwise) and the origin
+//   Chrome-permitted now (`not_permitted`). set_agent_browser_context compares with the grant
+//   as the agent API reads it; an enable that the agent API does not read back as on (another
+//   invalid key in config.json) acks `invalid`.
 // Acks for commands not about one resource carry `revision: 0`.
 
 import type { MutationCommand, PanelAck } from "@scout/contracts";
@@ -37,7 +42,7 @@ import type { Diagnostics } from "./diagnostics.js";
 
 export const COMMAND_CACHE_SIZE = 256;
 
-export type CommandStore = Pick<CapabilityStore, "getResource" | "approve" | "decline" | "revoke" | "setOriginPolicy" | "approvalRevision">;
+export type CommandStore = Pick<CapabilityStore, "getResource" | "originPolicy" | "approve" | "decline" | "revoke" | "setOriginPolicy" | "approvalRevision">;
 
 export interface NativeCommandsOptions {
   store: CommandStore;
@@ -97,7 +102,8 @@ export function createNativeCommands(options: NativeCommandsOptions): NativeComm
         const r = store.getResource(cmd.resourceId);
         if (!r) return { ack: failed(id, "not_found") };
         const v = r.resource.versions.find((x) => x.hash === cmd.version);
-        if (cmd.type === "approve" && v?.state === "pending" && !options.isPermitted(r.resource.siteOrigin)) {
+        if (!v) return { ack: failed(id, "not_found", r.revision) };
+        if (cmd.type === "approve" && v.state === "pending" && !options.isPermitted(r.resource.siteOrigin)) {
           return { ack: failed(id, "not_permitted", r.revision) };
         }
         const decision = { resourceId: cmd.resourceId, version: cmd.version, expectedRevision: cmd.expectedRevision };
@@ -115,25 +121,32 @@ export function createNativeCommands(options: NativeCommandsOptions): NativeComm
       case "revoke": {
         const r = store.getResource(cmd.resourceId);
         if (!r) return { ack: failed(id, "not_found") };
-        if (!r.resource.blocked && r.revision !== cmd.expectedRevision) return { ack: failed(id, "stale_revision", r.revision) };
         try {
-          const result = await store.revoke(cmd.resourceId);
+          const result = await store.revoke(cmd.resourceId, cmd.expectedRevision);
           return { ack: ok(id, result.revision, result.approvalRevision), cleanup: result.cleanup };
         } catch (error) {
           return { ack: fromError(id, error, cmd.resourceId) };
         }
       }
       case "set_auto_acquire": {
+        if ((store.originPolicy(cmd.origin)?.autoAcquire ?? false) !== cmd.expectedEnabled) return { ack: failed(id, "stale_revision") };
         if (cmd.enabled && !cmd.acknowledgeRisk) return { ack: failed(id, "invalid") };
         if (cmd.enabled && !options.isPermitted(cmd.origin)) return { ack: failed(id, "not_permitted") };
         try {
-          const result = await store.setOriginPolicy({ origin: cmd.origin, autoAcquire: cmd.enabled, acknowledgeRisk: cmd.acknowledgeRisk });
+          const result = await store.setOriginPolicy({
+            origin: cmd.origin,
+            autoAcquire: cmd.enabled,
+            acknowledgeRisk: cmd.acknowledgeRisk,
+            expectedAutoAcquire: cmd.expectedEnabled,
+          });
           return { ack: ok(id, 0, result.approvalRevision) };
         } catch (error) {
           return { ack: fromError(id, error) };
         }
       }
-      case "set_agent_browser_context":
+      case "set_agent_browser_context": {
+        // Read and write are synchronous, so no other command runs between the compare and the set.
+        if (options.readBrowserContextGrant() !== cmd.expectedEnabled) return { ack: failed(id, "stale_revision") };
         try {
           options.writeBrowserContextGrant(cmd.enabled);
         } catch {
@@ -141,8 +154,10 @@ export function createNativeCommands(options: NativeCommandsOptions): NativeComm
         }
         // Announce what the agent API will read, not what was asked: another invalid key in
         // config.json makes the whole file count as not granted.
-        options.onGrantChanged(options.readBrowserContextGrant());
-        return { ack: ok(id, 0) };
+        const now = options.readBrowserContextGrant();
+        options.onGrantChanged(now);
+        return { ack: now === cmd.enabled ? ok(id, 0) : failed(id, "invalid") };
+      }
       case "refresh_capabilities":
         options.refreshCapabilities();
         return { ack: ok(id, 0) };

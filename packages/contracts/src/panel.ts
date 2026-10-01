@@ -12,7 +12,7 @@
 // whose effect already applied gets the same `ok: true` ack and changes nothing.
 
 import { z } from "zod";
-import { AGENT_METHODS } from "./agent.js";
+import { AGENT_METHODS, AGENT_STATUS_CODES, CoreInstanceIdSchema } from "./agent.js";
 import {
   ContentHashSchema,
   HttpsOriginSchema,
@@ -139,7 +139,13 @@ export const OriginSettingSchema = z.object({
 /** The whole capability view, re-sent on every change. */
 export const PanelCapabilitiesSchema = z.object({
   type: z.literal("capabilities"),
-  /** Increases with every frame this core sends; a lower one is stale. */
+  /**
+   * Drawn once per core start (the same id agent.sock replies carry), at most
+   * CORE_INSTANCE_ID_MAX_CHARS. `revision` restarts at 1 under a new id: the app resets its
+   * high-water mark when the id changes.
+   */
+  coreInstanceId: CoreInstanceIdSchema,
+  /** Increases with every frame sent under one `coreInstanceId`; a lower one under the same id is stale. */
   revision: Revision,
   /** The store's approval revision at the time of the frame. */
   approvalRevision: Revision,
@@ -205,7 +211,7 @@ export const AuditEntrySchema = z.object({
   role: z.enum(["interactive", "job"]),
   method: z.enum(AGENT_METHODS),
   /** `ok` or an agent status code. */
-  outcome: z.string(),
+  outcome: z.enum([...AGENT_STATUS_CODES, "ok"]),
   origin: z.string().optional(),
 });
 
@@ -241,8 +247,13 @@ export const PreviewCommandSchema = cmd("preview", { resourceId: ResourceIdSchem
 export const ApproveCommandSchema = cmd("approve", { resourceId: ResourceIdSchema, version: ContentHashSchema, expectedRevision: Revision });
 export const DeclineCommandSchema = cmd("decline", { resourceId: ResourceIdSchema, version: ContentHashSchema, expectedRevision: Revision });
 export const RevokeCommandSchema = cmd("revoke", { resourceId: ResourceIdSchema, expectedRevision: Revision });
-export const SetAutoAcquireCommandSchema = cmd("set_auto_acquire", { origin: HttpsOriginSchema, enabled: z.boolean(), acknowledgeRisk: z.boolean() });
-export const SetAgentBrowserContextCommandSchema = cmd("set_agent_browser_context", { enabled: z.boolean() });
+/**
+ * The two consent toggles are compare-and-set: `expectedEnabled` is the value the user saw.
+ * When the current value differs the ack is `stale_revision` (no `revision`) and nothing
+ * changes, so a delayed or retried toggle never undoes a later one.
+ */
+export const SetAutoAcquireCommandSchema = cmd("set_auto_acquire", { origin: HttpsOriginSchema, enabled: z.boolean(), expectedEnabled: z.boolean(), acknowledgeRisk: z.boolean() });
+export const SetAgentBrowserContextCommandSchema = cmd("set_agent_browser_context", { enabled: z.boolean(), expectedEnabled: z.boolean() });
 export const RefreshCapabilitiesCommandSchema = cmd("refresh_capabilities", {});
 
 export const NativeCommandSchema = z.discriminatedUnion("type", [

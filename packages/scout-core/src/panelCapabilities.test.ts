@@ -5,6 +5,7 @@ import { join } from "node:path";
 import {
   CAPABILITIES_FRAME_MAX_BYTES,
   CAPABILITY_CONFLICTS_MAX,
+  CORE_INSTANCE_ID_MAX_CHARS,
   CAPABILITY_LIBRARY_MAX,
   CAPABILITY_OFFERS_MAX,
   LIBRARY_VERSIONS_MAX,
@@ -110,7 +111,7 @@ describe("buildCapabilities", () => {
     const states = Object.fromEntries(body.library.map((l) => [l.resourceId, l.state]));
     expect(states).toEqual({ [skill.id]: "no_default", [other.id]: "no_default", [declined.id]: "no_default", [revoked.id]: "blocked" });
     expect(body.truncated).toBe(false);
-    const frame: PanelCapabilities = { type: "capabilities", revision: 1, ...body };
+    const frame: PanelCapabilities = { type: "capabilities", coreInstanceId: "core-a", revision: 1, ...body };
     expect(PanelStateSchema.safeParse(frame).success).toBe(true);
   });
 
@@ -210,7 +211,7 @@ describe("buildCapabilities", () => {
     expect(unbounded).toBeGreaterThan(CAPABILITIES_FRAME_MAX_BYTES);
 
     const body = buildCapabilities({ state: { ...base, resources }, conflicts, isPermitted: () => true, currentOrigin: null });
-    const frame: PanelCapabilities = { type: "capabilities", revision: Number.MAX_SAFE_INTEGER, ...body };
+    const frame: PanelCapabilities = { type: "capabilities", coreInstanceId: "x".repeat(CORE_INSTANCE_ID_MAX_CHARS), revision: Number.MAX_SAFE_INTEGER, ...body };
     expect(Buffer.byteLength(JSON.stringify(frame))).toBeLessThan(CAPABILITIES_FRAME_MAX_BYTES);
     expect(body.truncated).toBe(true);
     expect(PanelStateSchema.safeParse(frame).success).toBe(true);
@@ -264,10 +265,11 @@ describe("capabilities emitter", () => {
     const t = fakeTimers();
     const frames: PanelCapabilities[] = [];
     let permitted: string[] = [A];
-    const emitter = createCapabilitiesEmitter({ input: () => input(permitted), emit: (f) => void frames.push(f), timers: t.timers });
+    const emitter = createCapabilitiesEmitter({ input: () => input(permitted), coreInstanceId: "core-a", emit: (f) => void frames.push(f), timers: t.timers });
     emitter.refresh();
     expect(frames).toHaveLength(1);
     expect(frames[0]!.revision).toBe(1);
+    expect(frames[0]!.coreInstanceId).toBe("core-a");
 
     await ingest(A, "/llms.txt", "guide");
     emitter.changed();
@@ -293,9 +295,38 @@ describe("capabilities emitter", () => {
 
     emitter.refresh();
     expect(frames).toHaveLength(4);
+    expect(frames.every((f) => f.coreInstanceId === "core-a" && PanelStateSchema.safeParse(f).success)).toBe(true);
     emitter.stop();
     emitter.changed();
     emitter.refresh();
     expect(frames).toHaveLength(4);
+  });
+
+  it("refresh during a pending debounce sends once and cancels the timer", async () => {
+    const t = fakeTimers();
+    const frames: PanelCapabilities[] = [];
+    const emitter = createCapabilitiesEmitter({ input: () => input([A]), coreInstanceId: "core-a", emit: (f) => void frames.push(f), timers: t.timers });
+    await ingest(A, "/llms.txt", "guide");
+    emitter.changed();
+    expect(t.pending).toBe(1);
+    emitter.refresh();
+    expect(frames).toHaveLength(1);
+    expect(t.pending).toBe(0);
+    t.fire();
+    expect(frames).toHaveLength(1);
+  });
+
+  it("a second core instance starts its own revision sequence under a new id", () => {
+    const t = fakeTimers();
+    const first: PanelCapabilities[] = [];
+    const a = createCapabilitiesEmitter({ input: () => input([A]), coreInstanceId: "core-a", emit: (f) => void first.push(f), timers: t.timers });
+    a.refresh();
+    a.refresh();
+    a.stop();
+    const second: PanelCapabilities[] = [];
+    const b = createCapabilitiesEmitter({ input: () => input([A]), coreInstanceId: "core-b", emit: (f) => void second.push(f), timers: t.timers });
+    b.refresh();
+    expect(first.at(-1)).toMatchObject({ coreInstanceId: "core-a", revision: 2 });
+    expect(second[0]).toMatchObject({ coreInstanceId: "core-b", revision: 1 });
   });
 });

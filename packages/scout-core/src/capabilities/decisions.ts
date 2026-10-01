@@ -360,9 +360,16 @@ export function applyDecline(input: StoreState, cmd: DecisionCommand, now: numbe
  * cleared and the resource is blocked until the user explicitly approves a version again.
  * Returns the versions that were readable before (approved or superseded).
  */
-export function applyRevoke(input: StoreState, resourceId: string, now: number): { state: StoreState; changed: boolean; revokedVersions: string[] } {
+export function applyRevoke(
+  input: StoreState,
+  resourceId: string,
+  now: number,
+  expectedRevision?: number,
+): { state: StoreState; changed: boolean; revokedVersions: string[] } {
   const found = findResource(input, resourceId);
   if (!found) throw new DecisionError("not_found");
+  // An already-blocked resource is revoked again whatever revision the caller saw.
+  if (expectedRevision !== undefined && !found.resource.blocked && found.revision !== expectedRevision) throw new StaleApprovalError("revision");
   const state = clone(input);
   const r = findResource(state, resourceId)!;
   const revokedVersions: string[] = [];
@@ -387,12 +394,15 @@ export interface PolicyCommand {
   autoAcquire: boolean;
   /** Required (true) to turn auto-acquire on: the user saw and accepted the risk text. */
   acknowledgeRisk?: boolean;
+  /** When given, the setting the user saw: a different current setting is a StaleApprovalError and nothing changes. */
+  expectedAutoAcquire?: boolean;
 }
 
 /** Turn auto-acquire on (needs the risk acknowledgement) or off (forgets the acknowledgement). */
 export function applyPolicy(input: StoreState, cmd: PolicyCommand, now: number): { state: StoreState; changed: boolean } {
   if (typeof cmd.origin !== "string" || !isHttpsOrigin(cmd.origin)) throw new DecisionError("invalid_origin");
   const has = input.policies.some((p) => p.origin === cmd.origin);
+  if (cmd.expectedAutoAcquire !== undefined && cmd.expectedAutoAcquire !== has) throw new StaleApprovalError("revision");
   if (cmd.autoAcquire && cmd.acknowledgeRisk !== true) throw new DecisionError("risk_not_acknowledged");
   if (cmd.autoAcquire === has) return { state: input, changed: false };
   const state = clone(input);

@@ -157,9 +157,13 @@ export async function runStdio(deps: StdioDeps): Promise<StdioCore> {
     entries: () => readAudit.entries(),
   };
 
+  // One id per start, shared by agent.sock replies and Scout's window's capabilities frames.
+  const coreInstanceId = randomBytes(16).toString("hex");
+
   // The channel reads the coordinator's grants and visit lazily: it is first used after both exist.
   panel = createPanelChannel({
     store,
+    coreInstanceId,
     exportConflicts: () => exporter?.manifest().conflicts ?? [],
     readBrowserContextGrant: () => readBrowserContextGrant(home),
     writeBrowserContextGrant: (enabled) => writeBrowserContextGrant(home, enabled),
@@ -278,7 +282,7 @@ export async function runStdio(deps: StdioDeps): Promise<StdioCore> {
     }
     const auth = createAgentAuth({ interactiveToken: tokenFile.token });
     const handlers = createAgentHandlers({
-      coreInstanceId: randomBytes(16).toString("hex"),
+      coreInstanceId,
       auth,
       store,
       view: () => coordinator.agentView(),
