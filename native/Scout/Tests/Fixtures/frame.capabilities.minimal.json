@@ -1,0 +1,44 @@
+{
+  "type": "capabilities",
+  "revision": 1,
+  "approvalRevision": 0,
+  "offers": [
+    {
+      "resourceId": "res_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "version": "1111111111111111111111111111111111111111111111111111111111111111",
+      "kind": "llms_txt",
+      "siteOrigin": "https://docs.example.com",
+      "sourceUrl": "https://docs.example.com/llms.txt",
+      "byteLength": 120,
+      "fetchedAt": 1759300000000,
+      "resourceRevision": 1
+    }
+  ],
+  "library": [
+    {
+      "resourceId": "res_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "kind": "llms_txt",
+      "siteOrigin": "https://docs.example.com",
+      "sourceUrl": "https://docs.example.com/llms.txt",
+      "state": "no_default",
+      "versions": [
+        {
+          "hash": "1111111111111111111111111111111111111111111111111111111111111111",
+          "state": "pending",
+          "byteLength": 120,
+          "fetchedAt": 1759300000000
+        }
+      ],
+      "resourceRevision": 1
+    }
+  ],
+  "conflicts": [],
+  "origins": [
+    {
+      "origin": "https://docs.example.com",
+      "autoAcquire": false,
+      "permitted": true
+    }
+  ],
+  "truncated": false
+}

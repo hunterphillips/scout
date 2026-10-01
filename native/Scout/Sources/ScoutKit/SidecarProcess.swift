@@ -70,20 +70,24 @@ public final class SidecarProcess {
     }
 
     /// Never blocks: stdin is non-blocking, and a message that doesn't fit in the pipe
-    /// right now is dropped. Messages up to `PIPE_BUF` bytes are written whole or not
-    /// at all, so a drop never leaves half a line in the pipe.
-    public func send(_ command: NativeCommand) {
-        guard let stdin else { return }
+    /// right now is dropped. Messages under `PIPE_BUF` bytes are written whole or not
+    /// at all, so a drop never leaves half a line in the pipe. Returns whether the line
+    /// was written; the caller keeps a dropped window command pending and re-sends it.
+    @discardableResult
+    public func send(_ command: NativeCommand) -> Bool {
+        guard let stdin else { return false }
         let line = command.jsonLine()
-        guard line.count <= Int(PIPE_BUF) else {
-            drop("command is \(line.count) bytes, over PIPE_BUF")
-            return
+        guard line.count < PanelLimits.commandMaxBytes, line.count <= Int(PIPE_BUF) else {
+            drop("command is \(line.count) bytes, not under \(PanelLimits.commandMaxBytes)")
+            return false
         }
         let written = line.withUnsafeBytes { Darwin.write(stdin.fileDescriptor, $0.baseAddress, $0.count) }
         if written != line.count {
             let reason = written < 0 ? String(cString: strerror(errno)) : "short write \(written)"
             drop(reason)
+            return false
         }
+        return true
     }
 
     private func drop(_ reason: String) {

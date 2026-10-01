@@ -1,0 +1,17 @@
+{
+  "type": "preview",
+  "commandId": "app-2",
+  "resourceId": "res_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "version": "1111111111111111111111111111111111111111111111111111111111111111",
+  "seq": 1,
+  "offset": 40,
+  "totalBytes": 117,
+  "text": " Guide — naïve café ✓ 日本語\n# Guide — naïve café ✓ 日本語\n",
+  "sha256": "f5f87631e2c65588499362cb033b1032a148944812890e2495605dc8a36efedf",
+  "descriptor": {
+    "kind": "llms_txt",
+    "siteOrigin": "https://docs.example.com",
+    "sourceUrl": "https://docs.example.com/llms.txt",
+    "contentType": "text/plain; charset=utf-8"
+  }
+}

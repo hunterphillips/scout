@@ -1,0 +1,7 @@
+{
+  "type": "set_auto_acquire",
+  "commandId": "app-8",
+  "origin": "https://docs.example.com",
+  "enabled": true,
+  "acknowledgeRisk": true
+}

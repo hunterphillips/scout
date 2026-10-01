@@ -1,0 +1,19 @@
+{
+  "type": "preview",
+  "commandId": "app-9",
+  "resourceId": "res_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "version": "3333333333333333333333333333333333333333333333333333333333333333",
+  "seq": 0,
+  "offset": 0,
+  "totalBytes": 29,
+  "text": "---\nname: deploy\n---\nRun it.\n",
+  "sha256": "69f5128d56f438fdbcd0acae0b81a5e11cc6e22254c3d86bdf891baae304dcb6",
+  "descriptor": {
+    "kind": "skill",
+    "siteOrigin": "https://docs.example.com",
+    "sourceUrl": "https://docs.example.com/.well-known/agent-skills/deploy/SKILL.md",
+    "skill": {
+      "name": "deploy"
+    }
+  }
+}

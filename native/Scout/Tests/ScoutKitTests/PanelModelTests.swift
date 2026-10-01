@@ -57,3 +57,240 @@ import Testing
         #expect(model.text == "Connected")
     }
 }
+
+@Suite struct PanelModelCapabilityTests {
+    typealias F = ContractFixtures
+    let key = PreviewKey(resourceId: F.rid, version: F.v1)
+
+    /// Running, on docs.example.com, with one offer for it.
+    private func onSite(offers: [[String: Any]] = [TestFrames.offer()]) throws -> PanelModel {
+        var model = PanelModel(commands: CommandTracker(prefix: "t"))
+        _ = model.apply(.running)
+        _ = model.apply(.state(status: .idle, visitEpoch: 1, detail: "docs.example.com", permitted: true))
+        _ = model.apply(.capabilities(try TestFrames.capabilities(offers: offers, origins: [TestFrames.origin()])))
+        return model
+    }
+
+    private func loaded(_ model: inout PanelModel, _ key: PreviewKey, text: String = "hello ✓") {
+        guard let first = model.showPreview(key) else { return }
+        _ = TestFrames.answer(&model, first: first, with: TestFrames.chunks(of: text, key: key, size: 4))
+    }
+
+    @Test func indicatorDerivation() throws {
+        var model = PanelModel()
+        #expect(model.indicator == .nothing)
+        _ = model.apply(.setupNeeded("no config"))
+        #expect(model.indicator == .error("Setup needed"))
+        model = try onSite()
+        #expect(model.indicator == .offers(count: 1, host: "docs.example.com"))
+        #expect(model.compactLine == "Idle · docs.example.com · 1 offer")
+        #expect(model.text == "Idle\ndocs.example.com\n1 offer for docs.example.com")
+        // Another site: its offers are not this site's.
+        _ = model.apply(.state(status: .idle, visitEpoch: 2, detail: "other.example.org", permitted: true))
+        #expect(model.indicator == .nothing)
+        _ = model.apply(.results(visitEpoch: 2, outcome: .ok([ResultItem(candidateId: "c", title: "t", href: "h", reason: "r")])))
+        #expect(model.indicator == .results(count: 1))
+        _ = model.apply(.results(visitEpoch: 2, outcome: .error("timeout")))
+        #expect(model.indicator == .error("timeout"))
+        // An unpermitted visit shows no offers.
+        _ = model.apply(.state(status: .idle, visitEpoch: 3, detail: "docs.example.com", permitted: false))
+        #expect(model.currentHost == nil && model.currentOffers.isEmpty)
+    }
+
+    @Test func offersNeverExpandThePanel() throws {
+        var model = try onSite()
+        _ = model.apply(.capabilities(try TestFrames.capabilities(revision: 2, offers: [TestFrames.offer(), TestFrames.offer(rid: F.rid2)])))
+        #expect(!model.expanded && model.shownPreview == nil)
+        model.toggleExpanded()
+        #expect(model.expanded && model.section == .offers)
+        model.toggleExpanded()
+        #expect(!model.expanded)
+    }
+
+    @Test func approveOnlyWhenThePreviewIsComplete() throws {
+        var model = try onSite()
+        #expect(model.approveBlocker(key) == "Preview this version before approving it.")
+        #expect(model.approve(key) == nil)
+        #expect(model.canDecline(key))
+        let firstSent = model.showPreview(key)
+        let first = try #require(firstSent)
+        #expect(model.expanded && model.section == .preview && model.shownPreview == key)
+        #expect(model.showPreview(key) == nil)  // already loading: no second request
+        #expect(model.approveBlocker(key) == "Preview is still loading.")
+        let chunks = TestFrames.chunks(of: "hello ✓ world", key: key, size: 4)
+        _ = model.apply(.preview(TestFrames.with(chunks[0], commandId: first.commandId!)))
+        #expect(!model.canApprove(key))
+        model = try onSite()
+        loaded(&model, key)
+        #expect(model.preview(key)?.isComplete == true)
+        let approveSent = model.approve(key)
+        let approve = try #require(approveSent)
+        guard case let .panel(id, request) = approve else { Issue.record("not a panel command"); return }
+        #expect(request == .approve(resourceId: F.rid, version: F.v1, expectedRevision: 1))
+        // Pending: no duplicate approval and no decline.
+        #expect(model.approve(key) == nil && !model.canDecline(key))
+        #expect(model.decisionRecord(key)?.state == .pending)
+        _ = model.apply(.ack(.ok(commandId: id, revision: 2, approvalRevision: 1)))
+        #expect(model.approve(key) == nil)  // decided until the next frame
+        _ = model.apply(.capabilities(try TestFrames.capabilities(revision: 2, library: [
+            TestFrames.entry(defaultVersion: F.v1, versions: [(F.v1, "approved")], revision: 2)])))
+        #expect(model.approveBlocker(key) == ApprovalBlocker.alreadyApproved.reason)
+    }
+
+    @Test func hashMismatchKeepsApproveOff() throws {
+        var model = try onSite()
+        let firstSent = model.showPreview(key)
+        let first = try #require(firstSent)
+        let chunk = TestFrames.chunks(of: "abc", key: key, size: 10)[0]
+        let bad = PreviewChunk(commandId: first.commandId!, resourceId: F.rid, version: F.v1, seq: 0, offset: 0,
+            totalBytes: 3, text: "abc", sha256: F.v3, descriptor: chunk.descriptor, nextCursor: nil)
+        _ = model.apply(.preview(bad))
+        #expect(model.preview(key)?.phase == .failed(.hashMismatch))
+        #expect(!model.canApprove(key))
+        #expect(model.problems.contains(.preview(key, .hashMismatch)))
+        // Loading it again starts over from the first chunk.
+        guard case let .panel(_, request)? = model.showPreview(key) else { Issue.record("no restart"); return }
+        #expect(request == .preview(resourceId: F.rid, version: F.v1, cursor: nil))
+    }
+
+    @Test func expandedPreviewSurvivesNewFramesAndTabs() throws {
+        var model = try onSite()
+        loaded(&model, key, text: "the guide")
+        let before = model.preview(key)
+        // A new offer arrives, the old one is gone, and the user switches tabs.
+        _ = model.apply(.capabilities(try TestFrames.capabilities(revision: 2, offers: [TestFrames.offer(rid: F.rid2, version: F.v2)])))
+        _ = model.apply(.state(status: .idle, visitEpoch: 9, detail: "other.example.org", permitted: true))
+        _ = model.apply(.state(status: .working, visitEpoch: 9, detail: nil))
+        #expect(model.expanded && model.section == .preview)
+        #expect(model.shownPreview == key)
+        #expect(model.preview(key) == before && model.preview(key)?.text == "the guide")
+        // The offer is gone, so Approve says why rather than approving something else.
+        #expect(model.approveBlocker(key) == ApprovalBlocker.notOffered.reason)
+        // Only a user action changes the shown preview.
+        _ = model.showPreview(PreviewKey(resourceId: F.rid2, version: F.v2))
+        #expect(model.shownPreview == PreviewKey(resourceId: F.rid2, version: F.v2))
+    }
+
+    @Test func chunksFromAnAbandonedRequestAreIgnored() throws {
+        var model = try onSite()
+        let firstSent = model.showPreview(key)
+        let first = try #require(firstSent)
+        let chunks = TestFrames.chunks(of: "0123456789abcdef", key: key, size: 4)
+        let second = model.apply(.preview(TestFrames.with(chunks[0], commandId: first.commandId!)))
+        #expect(second.count == 1)
+        // A core restart restarts the load; the old chain's next chunk must not land in the new one.
+        _ = model.apply(.starting)
+        let restarted = model.apply(.running)
+        #expect(restarted.count == 1)
+        _ = model.apply(.preview(TestFrames.with(chunks[1], commandId: second[0].commandId!)))
+        #expect(model.preview(key)?.phase == .loading && model.preview(key)?.bytes.isEmpty == true)
+        _ = TestFrames.answer(&model, first: restarted[0], with: chunks)
+        #expect(model.preview(key)?.isComplete == true)
+    }
+
+    @Test func restartResendsPendingApprovalWithItsId() throws {
+        var model = try onSite()
+        loaded(&model, key)
+        let approveSent = model.approve(key)
+        let approve = try #require(approveSent)
+        model.markSent(approve, written: true)
+        _ = model.apply(.starting)
+        #expect(model.capabilities.capabilities == nil)
+        let resent = model.apply(.running)
+        #expect(resent == [approve])
+        // A restarted core's capability revisions start over.
+        _ = model.apply(.capabilities(try TestFrames.capabilities(revision: 0, offers: [TestFrames.offer()])))
+        #expect(model.capabilities.offers.count == 1)
+    }
+
+    @Test func failedCommandsAreProblemsAndRetryKeepsTheId() throws {
+        var model = try onSite()
+        loaded(&model, key)
+        let approveSent = model.approve(key)
+        let approve = try #require(approveSent)
+        _ = model.apply(.ack(.failed(commandId: approve.commandId!, code: .storeError, revision: nil)))
+        guard case let .command(record)? = model.problems.first else { Issue.record("no problem"); return }
+        #expect(record.state == .failed(.storeError))
+        #expect(model.retry(approve.commandId!) == approve)
+        #expect(model.problems.isEmpty)
+        // After a failure the user may decide again, under a new ID.
+        _ = model.apply(.ack(.failed(commandId: approve.commandId!, code: .staleRevision, revision: 3)))
+        let againSent = model.approve(key)
+        let again = try #require(againSent)
+        #expect(again.commandId != approve.commandId)
+    }
+
+    @Test func libraryReapprovalAndUnpermittedPendingVersions() throws {
+        var model = PanelModel(commands: CommandTracker(prefix: "t"))
+        _ = model.apply(.running)
+        let other = "https://other.example.org"
+        _ = model.apply(.capabilities(try TestFrames.capabilities(
+            library: [
+                TestFrames.entry(state: "blocked", defaultVersion: nil, versions: [(F.v1, "revoked")], revision: 7),
+                TestFrames.entry(rid: F.rid2, origin: other, state: "no_default", defaultVersion: nil,
+                                 versions: [(F.v2, "pending")], revision: 2),
+            ],
+            origins: [TestFrames.origin(other, permitted: false)])))
+        // Re-approving a revoked resource is gated on a complete preview like an offer.
+        #expect(!model.canApprove(key))
+        loaded(&model, key)
+        guard case let .panel(_, request)? = model.approve(key) else { Issue.record("no approve"); return }
+        #expect(request == .approve(resourceId: F.rid, version: F.v1, expectedRevision: 7))
+        // A pending version for a site Chrome does not grant cannot be approved.
+        let pending = PreviewKey(resourceId: F.rid2, version: F.v2)
+        loaded(&model, pending)
+        #expect(model.approveBlocker(pending) == ApprovalBlocker.siteNotPermitted.reason)
+        // Revoke uses the entry's revision and runs once at a time.
+        #expect(!model.canRevoke(F.rid))  // already blocked
+        guard case let .panel(_, revoke)? = model.revoke(F.rid2) else { Issue.record("no revoke"); return }
+        #expect(revoke == .revoke(resourceId: F.rid2, expectedRevision: 2))
+        #expect(model.revoke(F.rid2) == nil)
+    }
+
+    @Test func settingsCommands() throws {
+        var model = try onSite()
+        #expect(model.setAutoAcquire(origin: F.origin, enabled: true, acknowledgeRisk: false) == nil)
+        guard case let .panel(id, on)? = model.setAutoAcquire(origin: F.origin, enabled: true, acknowledgeRisk: true) else {
+            Issue.record("no command"); return
+        }
+        #expect(on == .setAutoAcquire(origin: F.origin, enabled: true, acknowledgeRisk: true))
+        #expect(model.setAutoAcquire(origin: F.origin, enabled: false, acknowledgeRisk: false) == nil)  // pending
+        _ = model.apply(.ack(.ok(commandId: id, revision: 0, approvalRevision: 0)))
+        guard case let .panel(_, off)? = model.setAutoAcquire(origin: F.origin, enabled: false, acknowledgeRisk: true) else {
+            Issue.record("no command"); return
+        }
+        #expect(off == .setAutoAcquire(origin: F.origin, enabled: false, acknowledgeRisk: false))
+
+        // The grant shows what the core reports, not what was asked.
+        let grantSent = model.setAgentBrowserContext(true)
+        let grant = try #require(grantSent)
+        #expect(model.setAgentBrowserContext(true) == nil)
+        _ = model.apply(.ack(.ok(commandId: grant.commandId!, revision: 0, approvalRevision: 0)))
+        _ = model.apply(.grant(agentBrowserContext: false))
+        #expect(model.capabilities.agentBrowserContext == false)
+
+        #expect(model.pauseCommand() == .pause)
+        _ = model.apply(.state(status: .paused, visitEpoch: nil, detail: nil))
+        #expect(model.pauseCommand() == .resume)
+        #expect(model.refreshCapabilities() != nil)
+    }
+
+    @Test func staleCapabilitiesFrameIsDropped() throws {
+        var model = try onSite()
+        _ = model.apply(.capabilities(try TestFrames.capabilities(revision: 5, offers: [])))
+        _ = model.apply(.capabilities(try TestFrames.capabilities(revision: 4, offers: [TestFrames.offer()])))
+        #expect(model.capabilities.offers.isEmpty)
+    }
+
+    @Test func conflictsAndSidecarAreProblems() throws {
+        var model = PanelModel()
+        _ = model.apply(.running)
+        _ = model.apply(.capabilities(try TestFrames.capabilities(conflicts: [
+            ["name": "scout-skill-0123456789abcdef", "resourceId": F.rid, "code": "foreign_collision"]])))
+        guard case let .conflict(c)? = model.problems.first else { Issue.record("no conflict"); return }
+        #expect(c.code == .foreignCollision)
+        _ = model.apply(.stopped)
+        guard case let .sidecar(text)? = model.problems.first else { Issue.record("no sidecar problem"); return }
+        #expect(text.hasPrefix("Scout core kept exiting"))
+    }
+}

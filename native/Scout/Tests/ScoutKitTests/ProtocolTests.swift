@@ -78,12 +78,29 @@ import Testing
         #expect(ignored == 10)
     }
 
-    @Test func dropsOversizedLineWithoutNewline() {
+    @Test func dropsOversizedLineThroughItsNewline() {
         var parser = JSONLParser()
         _ = parser.append(Data(repeating: 0x61, count: JSONLParser.maxLineBytes + 1))
         #expect(parser.ignoredLineCount == 1)
-        let next = parser.append(Data((#"{"type":"state","status":"idle"}"# + "\n").utf8))
-        #expect(next.count == 1)
+        // The rest of the oversized line is discarded too, then parsing resumes.
+        _ = parser.append(Data(repeating: 0x61, count: 1000))
+        let next = parser.append(Data(("aaa\n" + #"{"type":"state","status":"idle"}"# + "\n").utf8))
+        #expect(next == [.state(status: .idle, visitEpoch: nil, detail: nil)])
+        #expect(parser.ignoredLineCount == 1)
+    }
+
+    @Test func largeFrameSplitIntoSmallChunksParsesOnce() throws {
+        var parser = JSONLParser()
+        let line = Data(#"{"type":"grant","agentBrowserContext":true,"pad":""#.utf8)
+            + Data(repeating: 0x61, count: 300_000) + Data("\"}\n".utf8)
+        var states: [PanelState] = []
+        var i = 0
+        while i < line.count {
+            states += parser.append(line[i..<min(i + 4096, line.count)])
+            i += 4096
+        }
+        #expect(states == [.grant(agentBrowserContext: true)])
+        #expect(parser.ignoredLineCount == 0)
     }
 
     @Test func finishCountsAnUnfinishedLastLineOnce() {
