@@ -3,24 +3,48 @@
 // and speaks JSONL on stdin (NativeCommand) and stdout (PanelState). Logs go to stderr
 // only. The native host reaches the core on <scoutHome>/run/core.sock.
 //
+// Scout's MCP adapter reaches it on <scoutHome>/run/agent.sock with the token in
+// <scoutHome>/run/agent-token, both published only after the capability store is open and
+// its startup export sync has settled.
+//
+// The core opens the capability store once for its lifetime (its lock keeps the dev CLI
+// from writing meanwhile), collects garbage at start and hourly, and wires the store's
+// revocation hook to the agent socket. Skill wrappers are exported only when the
+// installer's record (installed.json) names a skills root.
+//
 // The process exits 0 when stdin closes (the app quit or crashed), on SIGTERM/SIGINT/
-// SIGHUP, or on a `shutdown` command, after closing the socket server and removing the
-// socket file. It never outlives the app by more than SHUTDOWN_DEADLINE_MS.
+// SIGHUP, or on a `shutdown` command, after closing both sockets (which releases the agent
+// connections' pins), then the store, then removing the token file. It never outlives the
+// app by more than SHUTDOWN_DEADLINE_MS.
 
+import { randomBytes } from "node:crypto";
 import { realpathSync } from "node:fs";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
 import type { Readable, Writable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { NativeCommandSchema, type PanelState } from "@scout/contracts";
+import { createAgentAuth, type InteractiveTokenFile, writeInteractiveTokenFile } from "./agentApi/auth.js";
+import { readBrowserContextGrant } from "./agentApi/grants.js";
+import { createAgentHandlers } from "./agentApi/handlers.js";
+import { createReadAudit } from "./agentApi/readAudit.js";
+import { type AgentSocketServer, createAgentSocketServer } from "./agentSocketServer.js";
+import { createSkillExporter, ExportError, type SkillExporter } from "./capabilities/exports.js";
+import { type CapabilityStore, createCapabilityStore, StoreCorruptError } from "./capabilities/store.js";
+import { StoreLockedError } from "./capabilities/storeLock.js";
+import { createCatalogCache } from "./catalog/cache.js";
 import { type Clock, systemClock } from "./clock.js";
 import { ConfigError, type CoreConfig, readConfig } from "./config.js";
 import { type Coordinator, createCoordinator } from "./coordinator.js";
 import { createDiagnostics, defaultDiagnosticsPath, type Diagnostics, scoutHome } from "./diagnostics.js";
+import { createOriginFetchSession } from "./fetch/originSession.js";
+import { InstalledRecordError, readInstalledRecord } from "./installedRecord.js";
 import { createSocketServer, SocketServerError } from "./socketServer.js";
 
 /** Hard cap on shutdown: exit anyway if closing takes longer. */
 export const SHUTDOWN_DEADLINE_MS = 500;
+/** How often the capability store collects garbage while the core runs (also once at start). */
+export const GC_INTERVAL_MS = 60 * 60 * 1000;
 
 export const EXIT_OK = 0;
 export const EXIT_START_FAILED = 1;
@@ -59,6 +83,34 @@ export async function runStdio(deps: StdioDeps): Promise<StdioCore> {
     return { shutdown: async () => {} };
   }
 
+  const runDir = join(home, "run");
+  const exporter = openExporter(home, diagnostics);
+
+  // The agent socket is built once the token exists; the store's revocation hook reaches it then.
+  let agentServer: AgentSocketServer | null = null;
+  let store: CapabilityStore;
+  try {
+    store = await createCapabilityStore({
+      scoutHome: home,
+      clock,
+      diagnostics,
+      onRevoked: (resourceId) => agentServer?.resourceRevoked(resourceId),
+      ...(exporter ? { syncExports: (state) => exporter.sync(state) } : {}),
+    });
+  } catch (e) {
+    const code =
+      e instanceof StoreCorruptError ? `capability-store-${e.code}` : e instanceof StoreLockedError ? "capability-store-locked" : "capability-store-unreadable";
+    deps.log(`scout-core: ${code}`);
+    diagnostics.event("start_failed", { code });
+    deps.exit(EXIT_START_FAILED);
+    return { shutdown: async () => {} };
+  }
+  const collectGarbage = (): void =>
+    void store.collectGarbage().catch(() => diagnostics.event("capability_gc_failed", {}));
+  collectGarbage();
+  const gcTimer = setInterval(collectGarbage, GC_INTERVAL_MS);
+  gcTimer.unref();
+
   let stdoutOpen = true;
   const emitPanel = (state: PanelState): void => {
     if (!stdoutOpen) return;
@@ -73,8 +125,11 @@ export async function runStdio(deps: StdioDeps): Promise<StdioCore> {
       diagnostics,
       emitPanel,
       onShutdownRequested: () => void shutdown("shutdown-command"),
+      capabilities: { store, createFetchSession: (origin) => createOriginFetchSession({ origin, clock }) },
     });
   } catch {
+    clearInterval(gcTimer);
+    await store.close();
     deps.log("scout-core: config-invalid-destinations");
     diagnostics.event("start_failed", { code: "config-invalid-destinations" });
     deps.exit(EXIT_START_FAILED);
@@ -82,17 +137,28 @@ export async function runStdio(deps: StdioDeps): Promise<StdioCore> {
   }
 
   const server = createSocketServer({
-    runDir: join(home, "run"),
+    runDir,
     onClient: (client) => coordinator.attachClient(client),
     diagnostics,
   });
+  let tokenFile: InteractiveTokenFile | null = null;
+
+  // Sockets first (their connections' pins go with them), then the store, then the token.
+  let closing: Promise<void> | null = null;
+  const closeAll = (): Promise<void> =>
+    (closing ??= (async () => {
+      clearInterval(gcTimer);
+      await Promise.all([server.close(), agentServer?.close()]);
+      await store.close();
+      tokenFile?.remove();
+    })());
 
   // stdin lines are not length-capped: the only writer is the native app that launched
   // us over a private pipe, and its commands are a few dozen bytes. Deliberate.
   const rl = createInterface({ input: deps.stdin, crlfDelay: Infinity });
   let shuttingDown: Promise<void> | null = null;
-  // Settles (never rejects) once start() has finished either way, so a shutdown that
-  // arrives mid-bind closes the listener that bind is about to produce.
+  // Settles (never rejects) once start has finished either way, so a shutdown that
+  // arrives mid-bind closes the listeners that bind is about to produce.
   let startSettled: Promise<void> = Promise.resolve();
   const shutdown = (reason: string): Promise<void> => {
     if (shuttingDown !== null) return shuttingDown;
@@ -105,7 +171,7 @@ export async function runStdio(deps: StdioDeps): Promise<StdioCore> {
     coordinator.stop();
     rl.close();
     const deadline = new Promise<void>((resolve) => setTimeout(resolve, SHUTDOWN_DEADLINE_MS).unref());
-    const closed = startSettled.then(() => server.close());
+    const closed = startSettled.then(closeAll);
     void Promise.race([closed, deadline]).then(() => {
       deps.exit(EXIT_OK);
       finished();
@@ -138,7 +204,37 @@ export async function runStdio(deps: StdioDeps): Promise<StdioCore> {
     void shutdown("stdout-error");
   });
 
-  const starting = server.start();
+  /** core.sock, then (once wrappers are reconciled) the token and agent.sock. Stops early when shutdown began. */
+  const startSockets = async (): Promise<void> => {
+    await server.start();
+    await store.startupExportSync;
+    if (shuttingDown !== null) return;
+    try {
+      tokenFile = writeInteractiveTokenFile(runDir);
+    } catch {
+      throw new StartError("agent-token-write-failed");
+    }
+    const auth = createAgentAuth({ interactiveToken: tokenFile.token });
+    const audit = createReadAudit();
+    const handlers = createAgentHandlers({
+      coreInstanceId: randomBytes(16).toString("hex"),
+      auth,
+      store,
+      view: () => coordinator.agentView(),
+      catalog: createCatalogCache({ clock, dir: join(home, "cache", "catalog"), diagnostics }),
+      browserContextGranted: () => readBrowserContextGrant(home),
+      audit,
+      clock,
+    });
+    agentServer = createAgentSocketServer({ runDir, handlers, auth, audit, diagnostics });
+    try {
+      await agentServer.start();
+    } catch (e) {
+      throw new StartError(`agent-${e instanceof SocketServerError ? e.code : "listen-failed"}`);
+    }
+  };
+
+  const starting = startSockets();
   startSettled = starting.then(
     () => {},
     () => {},
@@ -146,7 +242,7 @@ export async function runStdio(deps: StdioDeps): Promise<StdioCore> {
   try {
     await starting;
   } catch (e) {
-    const code = e instanceof SocketServerError ? e.code : "listen-failed";
+    const code = e instanceof SocketServerError || e instanceof StartError ? e.code : "listen-failed";
     deps.log(`scout-core: socket server refused to start: ${code}`);
     diagnostics.event("start_failed", { code });
     // The app left while we were binding: shutdown already owns the exit.
@@ -156,13 +252,42 @@ export async function runStdio(deps: StdioDeps): Promise<StdioCore> {
     shuttingDown = Promise.resolve();
     coordinator.stop();
     rl.close();
+    await closeAll();
     deps.exit(EXIT_START_FAILED);
     return { shutdown: async () => {} };
   }
-  // stdin may have closed while the socket was binding; that shutdown closes the server.
+  // stdin may have closed while the sockets were binding; that shutdown closes them.
   if (shuttingDown !== null) await shuttingDown;
-  else deps.log(`scout-core: listening on ${server.socketPath} (chromeBundleId ${config.chromeBundleId})`);
+  else deps.log(`scout-core: listening on ${server.socketPath} and ${join(runDir, "agent.sock")} (chromeBundleId ${config.chromeBundleId})`);
   return { shutdown };
+}
+
+class StartError extends Error {
+  constructor(readonly code: string) {
+    super(code);
+    this.name = "StartError";
+  }
+}
+
+/**
+ * The skill exporter for the skills root the installer recorded, or undefined when none is
+ * recorded or the record or root is unusable (reported to diagnostics, never fatal).
+ */
+function openExporter(home: string, diagnostics: Diagnostics): SkillExporter | undefined {
+  let skillsRoot: string | undefined;
+  try {
+    skillsRoot = readInstalledRecord(home).skillsRoot;
+  } catch (e) {
+    diagnostics.event("installed_record_invalid", { code: e instanceof InstalledRecordError ? e.code : "installed-unreadable" });
+    return undefined;
+  }
+  if (skillsRoot === undefined) return undefined;
+  try {
+    return createSkillExporter({ scoutHome: home, skillsRoot, diagnostics });
+  } catch (e) {
+    diagnostics.event("skills_root_invalid", { code: e instanceof ExportError ? e.code : "unknown" });
+    return undefined;
+  }
 }
 
 export async function main(argv: readonly string[] = process.argv.slice(2)): Promise<void> {

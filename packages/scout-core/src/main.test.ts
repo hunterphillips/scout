@@ -1,6 +1,6 @@
 // Drives the built dist/main.js as the native app would: a child process on pipes.
 import { type ChildProcessWithoutNullStreams, execFileSync, spawn } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { connect, Server } from "node:net";
 import { tmpdir } from "node:os";
@@ -8,6 +8,7 @@ import { PassThrough } from "node:stream";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { encodeFrame, FrameDecoder, MAX_FRAME_FROM_CHROME } from "@scout/contracts/frame";
+import { createSocketBackend } from "@scout/scout-mcp/client";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { DEFAULT_DESTINATIONS, readConfig, readDestinations } from "./config.js";
 import type { Diagnostics } from "./diagnostics.js";
@@ -122,6 +123,26 @@ describe("main --stdio", () => {
     });
   }
 
+  it("publishes core.sock, agent.sock and a 0600 token; shutdown removes the agent files and releases the store", async () => {
+    const c = await startReady();
+    const run = join(home, "run");
+    expect(lstatSync(join(run, "agent.sock")).mode & 0o777).toBe(0o600);
+    expect(lstatSync(join(run, "agent-token")).mode & 0o777).toBe(0o600);
+    expect(existsSync(socketPath())).toBe(true);
+    expect(existsSync(join(home, "capabilities", "store.lock"))).toBe(true);
+    // The token works against the running core's agent socket.
+    const backend = createSocketBackend({ socketPath: join(run, "agent.sock"), tokenFile: join(run, "agent-token") });
+    const res = await backend.call({ protocol: 1, requestId: "r1", method: "list_resources", params: {} });
+    backend.close();
+    expect(res).toMatchObject({ status: "ok", result: { resources: [] } });
+
+    c.child.stdin.end();
+    expect((await c.exited).code).toBe(0);
+    expect(existsSync(join(run, "agent.sock"))).toBe(false);
+    expect(existsSync(join(run, "agent-token"))).toBe(false);
+    expect(existsSync(join(home, "capabilities", "store.lock"))).toBe(false);
+  });
+
   it("exits 0 on a shutdown command", async () => {
     const c = await startReady();
     c.child.stdin.write(`${JSON.stringify({ type: "shutdown" })}\n`);
@@ -229,7 +250,8 @@ describe("runStdio (in process)", () => {
     stdout.resume();
     const logs: string[] = [];
     const exits: Array<{ code: number; socketLeft: boolean }> = [];
-    const diagnostics: Diagnostics = { failures: 0, event: () => {} };
+    const events: string[] = [];
+    const diagnostics: Diagnostics = { failures: 0, event: (name) => void events.push(name) };
     const socketPath = join(home, "run", "core.sock");
     const run = () =>
       runStdio({
@@ -240,7 +262,7 @@ describe("runStdio (in process)", () => {
         exit: (code) => void exits.push({ code, socketLeft: existsSync(socketPath) }),
         diagnostics,
       });
-    return { stdin, stdout, logs, exits, socketPath, run };
+    return { stdin, stdout, logs, exits, socketPath, run, events };
   };
   const settle = () => new Promise((r) => setTimeout(r, 50));
 
@@ -253,6 +275,37 @@ describe("runStdio (in process)", () => {
     expect(h.exits.map((e) => e.code)).toEqual([1]);
     expect(h.logs.join("\n")).toContain("runtime-dir-not-private");
     expect(h.logs.some((l) => l.includes("shutdown ("))).toBe(false);
+  });
+
+  it("exports skill wrappers only when installed.json records a skills root", async () => {
+    const plain = harness();
+    await plain.run();
+    plain.stdin.end();
+    await until(() => plain.exits.length > 0);
+    expect(plain.events).not.toContain("capability_export");
+
+    // The skills root must be a real path (tmpdir is behind a symlink on macOS).
+    mkdirSync(join(home, "skills"));
+    const skills = realpathSync(join(home, "skills"));
+    writeFileSync(join(home, "installed.json"), JSON.stringify({ skillsRoot: skills }));
+    const wired = harness();
+    await wired.run();
+    wired.stdin.end();
+    await until(() => wired.exits.length > 0);
+    expect(wired.events).toContain("capability_export");
+    expect(wired.exits.map((e) => e.code)).toEqual([0]);
+  });
+
+  it("a malformed installed.json is reported and treated as absent", async () => {
+    writeFileSync(join(home, "installed.json"), JSON.stringify({ skillsRoot: 42 }));
+    const h = harness();
+    await h.run();
+    expect(existsSync(join(home, "run", "agent.sock"))).toBe(true);
+    h.stdin.end();
+    await until(() => h.exits.length > 0);
+    expect(h.events).toContain("installed_record_invalid");
+    expect(h.events).not.toContain("capability_export");
+    expect(h.exits.map((e) => e.code)).toEqual([0]);
   });
 
   it("a stdout error (EPIPE) shuts down with 0 after removing the socket", async () => {
@@ -323,12 +376,19 @@ describe("readConfig chromeBundleId", () => {
   it("defaults to stable Chrome when config.json or the field is missing", () => {
     expect(readConfig(home).chromeBundleId).toBe("com.google.Chrome");
     writeFileSync(join(home, "config.json"), JSON.stringify({ destinations: ["docs.stripe.com"] }));
-    expect(readConfig(home)).toEqual({ destinations: ["docs.stripe.com"], chromeBundleId: "com.google.Chrome" });
+    expect(readConfig(home)).toEqual({ destinations: ["docs.stripe.com"], chromeBundleId: "com.google.Chrome", agentBrowserContext: false });
   });
 
   it("reads a configured bundle id", () => {
     writeFileSync(join(home, "config.json"), JSON.stringify({ chromeBundleId: "com.google.chrome.for.testing" }));
-    expect(readConfig(home)).toEqual({ destinations: DEFAULT_DESTINATIONS, chromeBundleId: "com.google.chrome.for.testing" });
+    expect(readConfig(home)).toEqual({ destinations: DEFAULT_DESTINATIONS, chromeBundleId: "com.google.chrome.for.testing", agentBrowserContext: false });
+  });
+
+  it("reads the agent browser-context grant and refuses a non-boolean one", () => {
+    writeFileSync(join(home, "config.json"), JSON.stringify({ agentBrowserContext: true }));
+    expect(readConfig(home).agentBrowserContext).toBe(true);
+    writeFileSync(join(home, "config.json"), JSON.stringify({ agentBrowserContext: "yes" }));
+    expect(() => readConfig(home)).toThrow("config-invalid-agent-browser-context");
   });
 
   it.each([[""], ["com.google.Chrome;rm"], ["com google"], [42], [null], [["com.google.Chrome"]]])(
