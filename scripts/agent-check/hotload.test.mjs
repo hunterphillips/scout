@@ -50,7 +50,7 @@ describe("hotload: refusals and dry run", () => {
     expect(r.text).toContain("stands in for an interactive session");
     expect(r.text).toContain("every user-scope MCP server and plugin (counted, not named)");
     expect(r.text).toContain("one per turn");
-    expect(r.text).toContain("also on SIGINT/SIGTERM");
+    expect(r.text).toContain("also on SIGINT/SIGTERM/SIGHUP");
     expect(r.text).toContain("inference requests: at most 2");
     expect(snapshotTree(w.root)).toEqual(before);
     expect(w.lines()).toEqual([]);
@@ -341,8 +341,8 @@ describe("hotload: ownership", () => {
   });
 
   it.each([
-    ["mcp-add-fail", { ok: false, status: 1, timedOut: false }],
-    ["mcp-add-hang", { ok: false, status: null, timedOut: true }],
+    ["mcp-add-fail", { ok: false, status: 1, signal: null, timedOut: false }],
+    ["mcp-add-hang", { ok: false, status: null, signal: "SIGKILL", timedOut: true }],
   ])("%s: an add that wrote the entry and then failed is still removed", async (mode, add) => {
     const w = makeWorld(mode);
     const r = await w.run(["--case", "hotload", "--authorize-real-root"], { mcpTimeoutMs: 1500 });
@@ -351,6 +351,22 @@ describe("hotload: ownership", () => {
     expect(r.report.registration.add).toEqual(add);
     expect(r.report.cleanup).toMatchObject({ ok: true, registration: "removed" });
     expect(w.registry()).toEqual({});
+    expect(sessions(w)).toEqual([]);
+  });
+
+  it.each([
+    ["mcp-get-hang", { status: null, signal: "SIGKILL", timedOut: true }],
+    ["mcp-get-killed", { status: null, signal: "SIGKILL", timedOut: false }],
+  ])("%s after add wrote the entry: state unknown, entry left alone, cleanup not ok", async (mode, exit) => {
+    const w = makeWorld(mode);
+    const r = await w.run(["--case", "hotload", "--authorize-real-root"], { mcpTimeoutMs: 1500 });
+    expect(r.code).toBe(1);
+    expect(r.report.registration.add).toMatchObject({ ok: true });
+    expect(r.report.registration.get).toEqual({ exists: "unknown", exit });
+    expect(r.report.failures).toEqual(expect.arrayContaining(["registration_failed", "cleanup_incomplete"]));
+    expect(r.report.cleanup).toMatchObject({ ok: false, registration: "unknown_state", registrationExit: exit });
+    expect(Object.keys(w.registry())).toEqual([r.report.name]);
+    expect(w.lines().filter((l) => l.subcommand?.[1] === "remove")).toEqual([]);
     expect(sessions(w)).toEqual([]);
   });
 
@@ -378,7 +394,7 @@ describe("hotload: ownership", () => {
 });
 
 describe("hotload: abort", () => {
-  it.each(["SIGINT", "SIGTERM"])("%s to the script process mid-turn: session stopped, both additions removed, report says aborted", async (sig) => {
+  it.each(["SIGINT", "SIGTERM", "SIGHUP"])("%s to the script process mid-turn: session stopped, both additions removed, report says aborted", async (sig) => {
     const w = makeWorld("hang-turn2");
     const run = w.spawnRun(["--case", "hotload", "--authorize-real-root"], { turnTimeoutMs: 60_000 });
     expect(await waitFor(() => w.lines().some((l) => l.turn === 2))).toBe(true);
@@ -421,6 +437,25 @@ describe("hotload: abort", () => {
     expect(w.registry()).toEqual({});
     expect(signals.listenerCount("SIGINT")).toBe(0);
     expect(signals.listenerCount("uncaughtException")).toBe(0);
+  }, 30_000);
+});
+
+describe("hotload: two-session abort", () => {
+  it("an abort between a restart's close and the next open closes each session once and counts real processes", async () => {
+    const w = makeWorld("hotload-static");
+    const signals = new EventEmitter();
+    const r = await w.run(
+      ["--case", "hotload", "--authorize-real-root", "--two-session", "--max-inference", "3"],
+      { hooks: { afterTurn: (n) => void (n === 2 && setTimeout(() => signals.emit("SIGINT"), 0)) } },
+      signals,
+    );
+    expect(r.code).toBe(1);
+    expect(r.report).toMatchObject({ outcome: "aborted" });
+    expect(r.report.sessions).toHaveLength(1);
+    expect(sessions(w)).toHaveLength(1);
+    expect(r.report.sessions[0].close).toMatchObject({ processesRemaining: 0 });
+    expect(r.report.sessions[0].close.closeFailed).toBeUndefined();
+    expect(r.report.cleanup).toMatchObject({ ok: true, processesRemaining: 0, registration: "removed", skillDir: "removed" });
   }, 30_000);
 });
 

@@ -18,6 +18,11 @@
 // SKILL.md with the content hash we recorded. Anything else is left in place and reported.
 // Removal is attempted whenever `add` was attempted, whatever `add` reported: an `add` that
 // wrote the entry and then failed or timed out must not leak it.
+//
+// `get` means absent only on exit 1 with the CLI's "No MCP server named ..." message. A
+// timeout, a signal, any other exit, or unparseable output is `unknown`: cleanup then leaves
+// the entry alone and reports `unknown_state` with the exit status/signal only (never the
+// CLI's text). A `remove` whose result `get` cannot confirm is `removal_unverified`.
 
 import { spawnSync } from "node:child_process";
 import { lstatSync, mkdirSync, readdirSync, readFileSync, rmdirSync, unlinkSync, writeFileSync } from "node:fs";
@@ -33,14 +38,23 @@ export const MCP_TIMEOUT_MS = 60_000;
  */
 export function claudeRun(claudePath, args, { env, cwd, timeoutMs = MCP_TIMEOUT_MS }) {
   const r = spawnSync(claudePath, args, { env: { ...env }, cwd, encoding: "utf8", timeout: timeoutMs, killSignal: "SIGKILL", stdio: ["ignore", "pipe", "pipe"] });
-  return { status: r.error ? null : r.status, timedOut: r.error?.code === "ETIMEDOUT", stdout: r.stdout ?? "" };
+  return { status: r.error ? null : r.status, signal: r.signal ?? null, timedOut: r.error?.code === "ETIMEDOUT", stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
 }
 
-/** `claude mcp get <name>`, parsed. `lines` holds only the descriptive fields, for the report. */
+/** How a `claude mcp` run ended, for the report: exit status, signal, timeout. No output text. */
+export const exitOf = (r) => ({ status: r.status, signal: r.signal, timedOut: r.timedOut });
+
+const notFound = (name, r) => r.status === 1 && r.signal === null && !r.timedOut && [r.stdout, r.stderr].some((t) => t.includes(`No MCP server named "${name}"`));
+
+/**
+ * `claude mcp get <name>`, parsed. `exists` is true, false (only the CLI's explicit not-found
+ * answer) or "unknown" (with `exit`). Only the descriptive fields are kept, for the report.
+ */
 export function mcpGet(claudePath, name, opts) {
   const r = claudeRun(claudePath, ["mcp", "get", name], opts);
+  if (notFound(name, r)) return { exists: false };
   const rows = r.stdout.split("\n");
-  if (r.status !== 0 || rows[0] !== `${name}:`) return { exists: r.status === 0 ? "unknown" : false, status: r.status };
+  if (r.status !== 0 || r.signal !== null || rows[0] !== `${name}:`) return { exists: "unknown", exit: exitOf(r) };
   const field = (k) => rows.map((l) => new RegExp(`^\\s+${k}: ?(.*)$`).exec(l)?.[1]).find((v) => v !== undefined);
   return {
     exists: true,
@@ -56,22 +70,28 @@ export function ownsRegistration(get, expected) {
   return get.exists === true && typeof get.scope === "string" && get.scope.startsWith("User config") && get.type === "stdio" && get.command === expected.command && get.args === expected.args.join(" ");
 }
 
-/** `claude mcp add --scope user`. Returns `{ ok, status, timedOut }`; the caller cleans up either way. */
+/** `claude mcp add --scope user`. Returns `{ ok, status, signal, timedOut }`; the caller cleans up either way. */
 export function mcpAddUser(claudePath, name, command, args, opts) {
   const r = claudeRun(claudePath, ["mcp", "add", "--scope", "user", name, "--", command, ...args], opts);
-  return { ok: r.status === 0, status: r.status, timedOut: r.timedOut };
+  return { ok: r.status === 0 && r.signal === null, ...exitOf(r) };
 }
 
 /**
- * Remove our registration if, and only if, it is still exactly ours. Returns
- * `removed` | `absent` | `left_changed` | `remove_failed`.
+ * Remove our registration if, and only if, it is still exactly ours. Returns `{ state, exit? }`,
+ * state one of `removed` | `absent` | `left_changed` | `unknown_state` (the first `get` could not
+ * tell; nothing touched) | `remove_failed` | `removal_unverified` (removed, but `get` could not
+ * confirm it). `exit` is the failing run's status/signal.
  */
 export function removeOwnedRegistration(claudePath, name, expected, opts) {
   const before = mcpGet(claudePath, name, opts);
-  if (before.exists === false) return "absent";
-  if (!ownsRegistration(before, expected)) return "left_changed";
-  if (claudeRun(claudePath, ["mcp", "remove", "--scope", "user", name], opts).status !== 0) return "remove_failed";
-  return mcpGet(claudePath, name, opts).exists === false ? "removed" : "remove_failed";
+  if (before.exists === false) return { state: "absent" };
+  if (before.exists === "unknown") return { state: "unknown_state", exit: before.exit };
+  if (!ownsRegistration(before, expected)) return { state: "left_changed" };
+  const rm = claudeRun(claudePath, ["mcp", "remove", "--scope", "user", name], opts);
+  if (rm.status !== 0 || rm.signal !== null) return { state: "remove_failed", exit: exitOf(rm) };
+  const after = mcpGet(claudePath, name, opts);
+  if (after.exists === false) return { state: "removed" };
+  return after.exists === "unknown" ? { state: "removal_unverified", exit: after.exit } : { state: "remove_failed" };
 }
 
 /** Whether anything exists at `path` (a dangling symlink counts). */

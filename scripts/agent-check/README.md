@@ -30,7 +30,7 @@ never created.
 
 Exit codes: 0 the check passed (or a dry run), 1 the check failed or stopped, 2 refused.
 
-SIGINT or SIGTERM during a run stops the session, runs the same cleanup as a normal end
+SIGINT, SIGTERM or SIGHUP during a run stops the session, runs the same cleanup as a normal end
 (once; a second signal is ignored), writes the report with outcome `aborted`, and exits 1.
 An uncaught exception or unhandled rejection is treated the same way.
 
@@ -101,7 +101,11 @@ Cleanup always runs. The skill directory is removed only if it still holds exact
 `SKILL.md` that was written, by hash. The registration is removed only if `claude mcp
 get` still shows the same command and args at user scope. That check runs even when `mcp
 add` failed or timed out, since it may have written the entry first. Anything changed is
-left in place and reported.
+left in place and reported. `get` counts as "absent" only when it exits 1 with the CLI's
+"No MCP server named ..." message. A timeout, a signal or any other error leaves the entry
+alone and reports `unknown_state` with the exit status or signal. A removal that `get`
+cannot confirm is reported as `removal_unverified`. Either way cleanup is marked
+incomplete.
 
 **baseline.** One background job through the real job adapter, with Scout context only.
 Passes on `ok` with at least one pick and at least one Scout tool call.

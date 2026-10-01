@@ -51,6 +51,7 @@ export function startSession(o) {
     waiter?.done();
   });
   const tree = child.pid === undefined ? undefined : new OwnedTree(child.pid);
+  let closing;
 
   return {
     pid: child.pid,
@@ -84,19 +85,23 @@ export function startSession(o) {
       tree?.poll(psSnapshot());
       if (!exited) sup.terminate();
     },
-    /** End stdin, wait for exit, then terminate and reap whatever remains. Returns tree evidence. */
-    async close() {
-      tree?.poll(psSnapshot());
-      child.stdin?.end();
-      const exitedCleanly = exited || (await Promise.race([new Promise((r) => child.once("exit", () => r(true))), new Promise((r) => setTimeout(() => r(false), EXIT_WAIT_MS))]));
-      if (!exitedCleanly) sup.terminate();
-      await sup.waitExit();
-      await sup.drainOutput();
-      stream.end();
-      await sup.reap();
-      sup.dispose();
-      const remaining = tree ? tree.alive(psSnapshot()).length : 0;
-      return { exitedOnStdinEnd: exitedCleanly, processesSeen: tree?.identities().length ?? 0, processesRemaining: remaining };
+    /** End stdin, wait for exit, then terminate and reap whatever remains. Returns tree evidence. Idempotent. */
+    close() {
+      return (closing ??= doClose());
     },
   };
+
+  async function doClose() {
+    tree?.poll(psSnapshot());
+    child.stdin?.end();
+    const exitedCleanly = exited || (await Promise.race([new Promise((r) => child.once("exit", () => r(true))), new Promise((r) => setTimeout(() => r(false), EXIT_WAIT_MS))]));
+    if (!exitedCleanly) sup.terminate();
+    await sup.waitExit();
+    await sup.drainOutput();
+    stream.end();
+    await sup.reap();
+    sup.dispose();
+    const remaining = tree ? tree.alive(psSnapshot()).length : 0;
+    return { exitedOnStdinEnd: exitedCleanly, processesSeen: tree?.identities().length ?? 0, processesRemaining: remaining };
+  }
 }

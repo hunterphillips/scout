@@ -51,10 +51,10 @@ export function parseArgs(argv) {
   return { opts: o };
 }
 
-export const ABORT_EVENTS = Object.freeze(["SIGINT", "SIGTERM", "uncaughtException", "unhandledRejection"]);
+export const ABORT_EVENTS = Object.freeze(["SIGINT", "SIGTERM", "SIGHUP", "uncaughtException", "unhandledRejection"]);
 
 /**
- * While a check runs, SIGINT/SIGTERM (and, as a last resort, an uncaught exception or
+ * While a check runs, SIGINT/SIGTERM/SIGHUP (and, as a last resort, an uncaught exception or
  * unhandled rejection) abort it: the case stops its session, runs its one cleanup, and the
  * report is still written with outcome `aborted`. A second signal during cleanup is ignored.
  * Returns the AbortSignal and an uninstall function.

@@ -316,7 +316,7 @@ export async function runHotload(o, deps) {
       "  stand-in: one headless multi-turn `claude -p` stream-json process stands in for an interactive session (not an interactive session)",
       `  loads: every user-scope MCP server and plugin (counted, not named); limits: --tools ${sessionLimits.tools}, hooks disabled, --setting-sources ${sessionLimits.settingSources}, dontAsk with --allowedTools ${sessionLimits.allowedTools.join(",")}, --max-turns ${MAX_TURNS}`,
       `  inference requests: at most ${Math.min(o.maxInference, 4)}, one per turn (turn 1 list skills; turn 2 list then use the skill${o.twoSession ? "; a fresh session if turn 1's MCP load or turn 2's invocation fails" : ""}${o.withRevocation ? "; read after revocation" : ""}); API calls per turn are in turns[].usage.turns`,
-      "  cleanup (also on SIGINT/SIGTERM): skill dir removed if unchanged; registration removed if `mcp get` shows our command at user scope (even if `mcp add` failed); session, fixture and throwaway dir removed",
+      "  cleanup (also on SIGINT/SIGTERM/SIGHUP): skill dir removed if unchanged; registration removed if `mcp get` shows our command at user scope (even if `mcp add` failed); session, fixture and throwaway dir removed",
       `  report: ${join(o.home, "agent-check", "hotload-<timestamp>.json")}`,
     ];
     for (const l of lines) out(l);
@@ -344,6 +344,7 @@ export async function runHotload(o, deps) {
   let fixture;
   let profile;
   let session;
+  const handles = []; // one per sessions[] entry
   let mcpCommand;
   let aborted = false;
   let abortReason;
@@ -368,6 +369,13 @@ export async function runHotload(o, deps) {
   else deps.abortSignal?.addEventListener("abort", onAbort, { once: true });
   const checkAbort = () => {
     if (aborted) throw new Aborted();
+  };
+
+  // Close session i once; close() is idempotent too, so a restart and cleanup can both ask.
+  // A close that throws is recorded as unknown, never as zero processes left.
+  const closeSession = async (i) => {
+    if (sessions[i].close) return;
+    sessions[i].close = await handles[i].close().catch((e) => ({ closeFailed: true, error: e?.code ?? e?.name ?? "unknown", processesRemaining: null }));
   };
 
   const turnOn = async (s, purpose, text) => {
@@ -434,7 +442,8 @@ export async function runHotload(o, deps) {
     if (label === "acceptance") {
       const before = mcpGet(o.claudePath, name, io);
       if (before.exists !== false) {
-        failures.push("registration_exists");
+        failures.push(before.exists === "unknown" ? "registration_state_unknown" : "registration_exists");
+        if (before.exit) registration.getBefore = before.exit;
         return;
       }
       checkAbort();
@@ -443,7 +452,7 @@ export async function runHotload(o, deps) {
       registration.add = add;
       registered = add.ok;
       const got = mcpGet(o.claudePath, name, io);
-      registration.get = { scope: got.scope, health: got.health, type: got.type, command: got.command, args: got.args };
+      registration.get = got.exists === "unknown" ? { exists: "unknown", exit: got.exit } : { exists: got.exists, scope: got.scope, health: got.health, type: got.type, command: got.command, args: got.args };
       registration.ownedAfterAdd = ownsRegistration(got, mcpCommand);
       checkAbort();
       if (!registered || !registration.ownedAfterAdd) {
@@ -462,10 +471,11 @@ export async function runHotload(o, deps) {
       checkAbort();
       const s = startSession({ claudePath: o.claudePath, args: argv, cwd: profile.cwd, env: profile.env, ...(deps.killGraceMs ? { killGraceMs: deps.killGraceMs } : {}) });
       sessions.push({ n: sessions.length + 1, startedAt: new Date().toISOString() });
+      handles.push(s);
       return s;
     };
     const restart = async () => {
-      sessions.at(-1).close = await session.close();
+      await closeSession(handles.length - 1);
       checkAbort();
       session = open();
     };
@@ -554,15 +564,17 @@ export async function runHotload(o, deps) {
   const cleanupOnce = () =>
     (cleanupP ??= (async () => {
       // Always: session, skill dir, registration, fixture, throwaway dir.
-      if (session) sessions.at(-1).close = await session.close().catch(() => ({ closeFailed: true }));
+      for (let i = 0; i < handles.length; i++) await closeSession(i);
       cleanup.skillDir = skill ? removeOwnedSkill(skill.dir, skill.hash) : "not_created";
       if (skill?.removedAtRevocation === "removed" && cleanup.skillDir === "absent") cleanup.skillDir = "removed_at_revocation";
       if (label === "acceptance" && addAttempted) {
         // Whatever `add` reported: it may have written the entry and then failed or timed out.
-        cleanup.registration = removeOwnedRegistration(o.claudePath, name, mcpCommand, { env: profile.env, cwd: profile.cwd, ...(deps.mcpTimeoutMs ? { timeoutMs: deps.mcpTimeoutMs } : {}) });
-        if (cleanup.registration === "absent" && !registered) cleanup.registration = "not_registered";
+        const rm = removeOwnedRegistration(o.claudePath, name, mcpCommand, { env: profile.env, cwd: profile.cwd, ...(deps.mcpTimeoutMs ? { timeoutMs: deps.mcpTimeoutMs } : {}) });
+        cleanup.registration = rm.state === "absent" && !registered ? "not_registered" : rm.state;
+        if (rm.exit) cleanup.registrationExit = rm.exit;
       } else cleanup.registration = label === "acceptance" ? "not_registered" : "none (mcp-config file)";
-      const proc = sessions.map((s) => s.close?.processesRemaining ?? 0).reduce((a, b) => a + b, 0);
+      const counts = sessions.map((s) => s.close?.processesRemaining);
+      const proc = counts.some((c) => typeof c !== "number") ? null : counts.reduce((a, b) => a + b, 0);
       if (fixture) {
         for (let i = 0; i < 20 && fixture.openConnections() > 0; i++) await new Promise((r) => setTimeout(r, 50));
         cleanup.fixtureConnectionsAtEnd = fixture.openConnections();

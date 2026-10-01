@@ -37,6 +37,7 @@
 //   not-listed                the listing says none, but the skill is used anyway
 //   hang-turn2                the second turn never answers
 //   mcp-add-fail | mcp-add-hang   `mcp add` writes the entry, then exits 1 | never exits
+//   mcp-get-hang | mcp-get-killed  `mcp get` of an existing entry never exits | is SIGKILLed
 // Turns are recognized by their text: "use it with the Skill tool" first writes a
 // "Skills seen:" line, then (if a proof skill is visible) invokes the Skill tool, follows
 // the SKILL.md it read (calls the read tool it names with the resource ID it names) and
@@ -126,6 +127,8 @@ function mcp(args, mode) {
   if (cmd === "get") {
     const name = plain[0];
     const s = Object.hasOwn(servers, name) ? servers[name] : undefined;
+    if (s && mode === "mcp-get-hang") return new Promise(() => setInterval(() => {}, 1000));
+    if (s && mode === "mcp-get-killed") process.kill(process.pid, "SIGKILL");
     if (!s) return fail(`No MCP server named "${name}". Run \`claude mcp add\` to add one.`);
     return out(
       `${name}:\n  Scope: User config (available in all your projects)\n  Status: ✔ Connected\n  Type: stdio\n  Command: ${s.command}\n  Args: ${s.args.join(" ")}\n  Environment:\n\nTo remove this server, run: claude mcp remove ${name} -s user\n`,
