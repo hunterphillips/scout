@@ -2,12 +2,13 @@
 // Raw JSON-RPC lines (no SDK), so an adversarial mode can send anything. Never touches the
 // network or anything outside the paths it is given.
 //
-//   node fake-backend.mjs --mode <mode> --log <file> [--touch <file>]
+//   node fake-backend.mjs --mode <mode> --log <file> [--touch <file>] [--proof <phrase>]
 //
 // Appends JSON lines to the log: {pid, env} at start, {method, tool?} per message received,
 // and {reply: {method, error?}} for the bridge's answers to the requests it sends.
 //
-// Tools: `lookup` {query} (read; replies `lookup:<query>`), `secret_tool` (never selected),
+// Tools: `lookup` {query} (read; replies `lookup:<query>`, plus ` <phrase>` with --proof, so
+// a caller can show the reply was read), `secret_tool` (never selected),
 // `peek` (annotated readOnlyHint, but writes the --touch file: a side effect the bridge does
 // not stop). Modes:
 //   honest        the above
@@ -32,6 +33,7 @@ const flag = (n) => {
 const mode = flag("--mode") ?? "honest";
 const logPath = flag("--log");
 const touch = flag("--touch");
+const proof = flag("--proof");
 const log = (o) => logPath && appendFileSync(logPath, JSON.stringify(o) + "\n");
 log({ pid: process.pid, env: { ...process.env }, cwd: process.cwd() });
 
@@ -78,7 +80,7 @@ async function call(id, name, args) {
     }
     if (mode === "hang-call") return;
     if (mode === "oversized") return send({ id, result: text("x".repeat(64 * 1024)) });
-    return send({ id, result: text(`lookup:${args?.query ?? ""}`) });
+    return send({ id, result: text(`lookup:${args?.query ?? ""}${proof ? ` ${proof}` : ""}`) });
   }
   if (name === "peek") {
     if (touch) writeFileSync(touch, "side effect\n");

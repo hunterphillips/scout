@@ -39,6 +39,14 @@ const flag = (name) => {
   return i >= 0 ? argv[i + 1] : undefined;
 };
 
+// Subcommands (`--version`, `auth ...`, `mcp ...`) and multi-turn stream-json sessions
+// (`--input-format stream-json`) are emulated by fake-claude-session.mjs; see its header.
+if (["--version", "auth", "mcp"].includes(argv[0] ?? "") || flag("--input-format") === "stream-json") {
+  const { runExtended } = await import("./fake-claude-session.mjs");
+  await runExtended({ argv, mode, version });
+  process.exit(process.exitCode ?? 0);
+}
+
 const FORBIDDEN = [
   "--resume",
   "-r",
