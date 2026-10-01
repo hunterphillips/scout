@@ -5,8 +5,10 @@ import { afterEach, describe, expect, it } from "vitest";
 import type { ManagedPaths } from "./authPreflight.js";
 import { buildJobSurface, SCOUT_TOOL_NAMES } from "./jobSurface.js";
 import { fakeBackend, selection } from "./testing/fakeBackend.js";
+import { defaultManagedPaths } from "./claudeJob.js";
+import { BRIDGE_JOB_MAX_BYTES } from "./contextToolBridge.js";
 import { BRIDGE_SERVER_NAME, checkManagedPolicy, managedSettingsConflict, planJobTools, type ToolPlanOptions } from "./toolPolicy.js";
-import type { ToolsProfile } from "./toolProfile.js";
+import { MAX_ARG_CHARS, MAX_ARGS, MAX_CONNECTIONS, MAX_DESCRIPTION_CHARS, MAX_SELECTIONS, ToolsProfileSchema, type ToolsProfile } from "./toolProfile.js";
 
 const SECRET = "SENTINEL-PLAN-SECRET-9a0b";
 const dirs: string[] = [];
@@ -36,7 +38,7 @@ describe("planJobTools", () => {
     expect(plan.spec.allowedTools).toEqual(scoutTools);
   });
 
-  it("with selected tools: one bridge server, exact bridged grants, secrets only in the bridge job", () => {
+  it("with selected tools: one bridge server, exact bridged grants, bindings (never values) in the bridge job", () => {
     const d = dir();
     const a = fakeBackend(d, "notes", "honest", { env: { NOTES_TOKEN: SECRET } });
     const b = fakeBackend(d, "tracker", "honest");
@@ -51,7 +53,8 @@ describe("planJobTools", () => {
     expect(surface.mcpConfig.mcpServers[BRIDGE_SERVER_NAME]).toEqual({ type: "stdio", command: process.execPath, args: ["/x/bridgeMain.js", "--job", "/x/job/bridge.json"] });
     expect(JSON.stringify(surface.mcpConfig)).not.toContain(SECRET);
     expect(surface.expected[1]).toEqual({ name: BRIDGE_SERVER_NAME, tools: ["mcp__scout_bridge__lookup", "mcp__scout_bridge__peek"], required: true, optionalTools: ["mcp__scout_bridge__lookup"] });
-    expect(plan.bridgeJob!.connections.find((c) => c.id === "notes")!.env).toEqual({ NOTES_TOKEN: SECRET });
+    expect(plan.bridgeJob!.connections.find((c) => c.id === "notes")!.env).toEqual({ NOTES_TOKEN: { file: a.definitionFile, pointer: "/env/NOTES_TOKEN" } });
+    expect(JSON.stringify(plan.bridgeJob)).not.toContain(SECRET);
     expect(plan.bridgeJob!.tools.map((t) => t.name)).toEqual(["lookup", "peek"]);
   });
 
@@ -64,7 +67,23 @@ describe("planJobTools", () => {
   it("a required tool whose bindings do not resolve blocks the job", () => {
     const a = fakeBackend(dir(), "notes", "honest", { env: { NOTES_TOKEN: SECRET } });
     chmodSync(a.definitionFile, 0o644);
-    expect(planJobTools(opts({ connections: [a.connection], selections: [selection("notes", "lookup", true)] }))).toEqual({ ok: false, detail: "required_connection_unavailable" });
+    expect(planJobTools(opts({ connections: [a.connection], selections: [selection("notes", "lookup", true)] }))).toEqual({ ok: false, reason: "tool_unavailable", detail: "required_connection_unavailable" });
+  });
+
+  it("a profile within its own caps whose bridge job would exceed the bridge's cap: unsupported_configuration before launch", () => {
+    const d = dir();
+    // Arguments of control characters: each serializes as a six-byte JSON escape.
+    const arg = "\u0001".repeat(MAX_ARG_CHARS);
+    const connections = Array.from({ length: MAX_CONNECTIONS }, (_, i) => ({ ...fakeBackend(d, `c${i}`, "honest").connection, args: Array.from({ length: MAX_ARGS }, () => arg) }));
+    const perConnection = MAX_SELECTIONS / MAX_CONNECTIONS;
+    const selections = Array.from({ length: MAX_SELECTIONS }, (_, i) => ({
+      ...selection(`c${Math.floor(i / perConnection)}`, `tool_${i}`, false),
+      description: "\u0001".repeat(MAX_DESCRIPTION_CHARS),
+    }));
+    const tools = ToolsProfileSchema.parse({ connections, selections }); // the profile permits it
+    expect(planJobTools(opts(tools))).toEqual({ ok: false, reason: "unsupported_configuration", detail: "bridge_job_too_large" });
+    // The cap is the bridge's own: the same plan under a cap that fits is accepted.
+    expect(planJobTools({ ...opts(tools), maxBridgeJobBytes: 64 * BRIDGE_JOB_MAX_BYTES }).ok).toBe(true);
   });
 
   it("an optional tool whose command is gone is reported unavailable and left out; Scout alone still runs", () => {
@@ -121,5 +140,15 @@ describe("checkManagedPolicy", () => {
     const plist = managed({ "x.plist": "<plist/>" });
     expect(checkManagedPolicy({ files: [], dropInDirs: [], opaque: plist.files.slice(0, 1) })).toEqual({ ok: false, detail: "managed_not_inspected" });
     expect(checkManagedPolicy({ files: [], dropInDirs: [], opaque: [], unsupported: true })).toEqual({ ok: false, detail: "managed_unknown_platform" });
+  });
+
+  it("an OS user that cannot be determined is its own refusal, not an unknown platform", () => {
+    const env = { HOME: "/x/home" };
+    const throwing = (): string => {
+      throw new Error("no passwd entry");
+    };
+    expect(checkManagedPolicy(defaultManagedPaths(env, throwing))).toEqual({ ok: false, detail: "managed_user_unknown" });
+    expect(checkManagedPolicy(defaultManagedPaths(env, () => ""))).toEqual({ ok: false, detail: "managed_user_unknown" });
+    expect(checkManagedPolicy(defaultManagedPaths(env, () => "a/b"))).toEqual({ ok: false, detail: "managed_user_unknown" });
   });
 });

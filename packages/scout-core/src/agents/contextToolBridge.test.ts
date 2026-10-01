@@ -3,7 +3,7 @@
 // mode. Unselected names and changed schemas must never reach a backend.
 
 import { spawn } from "node:child_process";
-import { chmodSync, existsSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -65,11 +65,11 @@ interface Setup {
   listChanged: number;
 }
 
-function jobFor(defs: { def: FakeBackendDef; env: Record<string, string> }[], selections: ToolSelection[], limits: Partial<BridgeJob["limits"]> = {}): BridgeJob {
+function jobFor(defs: FakeBackendDef[], selections: ToolSelection[], limits: Partial<BridgeJob["limits"]> = {}): BridgeJob {
   return {
     version: 1,
     limits: { ...BRIDGE_DEFAULT_LIMITS, ...limits },
-    connections: defs.map(({ def, env }) => ({ id: def.connection.id, command: def.connection.command, args: def.connection.args, env })),
+    connections: defs.map((def) => ({ id: def.connection.id, command: def.connection.command, args: def.connection.args, env: def.connection.env })),
     tools: selections.map((s) => ({ name: s.toolName, connectionId: s.connectionId, description: s.description, inputSchema: s.inputSchema, schemaHash: s.schemaHash })),
   };
 }
@@ -91,7 +91,7 @@ async function setup(mode: string, selections: (id: string) => ToolSelection[], 
   const dir = tempDir();
   const backend = fakeBackend(dir, "notes", mode, opts);
   backends.push(backend);
-  const { client, listChanged } = await connect(dir, jobFor([{ def: backend, env: opts.env ?? {} }], selections("notes"), opts.limits));
+  const { client, listChanged } = await connect(dir, jobFor([backend], selections("notes"), opts.limits));
   return {
     dir,
     backend,
@@ -176,7 +176,7 @@ describe("context tool bridge (B13)", () => {
     expect(s.backend.calls()).toEqual(["peek"]);
   });
 
-  it("the backend sees exactly its bound environment, cwd /", async () => {
+  it("the backend sees exactly its bound environment, cwd /; the job file holds bindings, never the values", async () => {
     const env = { NOTES_TOKEN: "SENTINEL-BACKEND-SECRET-1d2e", LANG: "C" };
     const s = await setup("honest", (id) => [selection(id, "lookup", true)], { env });
     await names(s.client);
@@ -185,6 +185,21 @@ describe("context tool bridge (B13)", () => {
     const { __CF_USER_TEXT_ENCODING: _cf, ...seen } = start.env!;
     expect(seen).toEqual(env);
     expect(start.cwd).toBe("/");
+    const jobText = readFileSync(join(s.dir, "bridge.json"), "utf8");
+    expect(jobText).not.toContain(env.NOTES_TOKEN);
+    expect(JSON.parse(jobText).connections[0].env.NOTES_TOKEN).toEqual({ file: s.backend.definitionFile, pointer: "/env/NOTES_TOKEN" });
+  });
+
+  it("bindings that no longer resolve at spawn: the backend is never started and its tools are not advertised", async () => {
+    const dir = tempDir();
+    const broken = fakeBackend(dir, "broken", "honest", { env: { NOTES_TOKEN: "SENTINEL-BACKEND-SECRET-77aa" } });
+    const live = fakeBackend(dir, "live", "honest");
+    backends.push(broken, live);
+    chmodSync(broken.definitionFile, 0o644); // changed after the core's dry run
+    const { client } = await connect(dir, jobFor([broken, live], [selection("broken", "lookup", true), selection("live", "peek", false)]));
+    expect(await names(client)).toEqual(["peek"]);
+    await expect(client.callTool({ name: "lookup", arguments: { query: "q" } })).rejects.toThrow();
+    expect(broken.lines()).toEqual([]);
   });
 
   it("a backend that never starts: its tools are not advertised; others still are; it dies with the bridge", async () => {
@@ -192,7 +207,7 @@ describe("context tool bridge (B13)", () => {
     const dead = fakeBackend(dir, "dead", "never-start");
     const live = fakeBackend(dir, "live", "honest");
     backends.push(dead, live);
-    const { client } = await connect(dir, jobFor([{ def: dead, env: {} }, { def: live, env: {} }], [selection("dead", "lookup", false), { ...selection("live", "peek", false) }], { startupMs: 300 }));
+    const { client } = await connect(dir, jobFor([dead, live], [selection("dead", "lookup", false), { ...selection("live", "peek", false) }], { startupMs: 300 }));
     expect(await names(client)).toEqual(["peek"]);
     await waitFor(() => dead.pids().length === 1 && live.pids().length === 1);
     const pids = [...dead.pids(), ...live.pids()];
@@ -204,7 +219,7 @@ describe("context tool bridge (B13)", () => {
     const dir = tempDir();
     const jobFile = join(dir, "bridge.json");
     const backend = fakeBackend(dir, "notes", "honest");
-    writeFileSync(jobFile, JSON.stringify(jobFor([{ def: backend, env: {} }], [selection("notes", "lookup", true)])), { mode: 0o644 });
+    writeFileSync(jobFile, JSON.stringify(jobFor([backend], [selection("notes", "lookup", true)])), { mode: 0o644 });
     const code = await new Promise<number | null>((resolve) => spawn(process.execPath, [ENTRY, "--job", jobFile], { stdio: "ignore" }).on("exit", resolve));
     expect(code).toBe(2);
     expect(backend.lines()).toEqual([]); // nothing started

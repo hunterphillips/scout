@@ -4,14 +4,18 @@
 //
 // Input: one private job file (0600, owned, regular, ≤ 1 MiB) the core writes into the job
 // dir just before launch. It lists the selected connections (absolute command, argv, and
-// the environment values the core resolved in memory from the user's bindings) and the
-// selected tools with their frozen descriptions, input schemas and schema hashes.
+// the user's environment bindings as `{file, pointer}`, never their values) and the
+// selected tools with their frozen descriptions, input schemas and schema hashes. The core
+// refuses a job whose file would exceed the cap (toolPolicy.ts).
 //
 // Behaviour:
 //   - Each connection used by a selected tool is started once, as a child of the bridge
 //     (same process group, so the job's process-tree kill covers it), argv-only, cwd `/`,
 //     with exactly its bound environment: nothing from the bridge's, the core's or the
-//     CLI's environment. Its stderr is discarded.
+//     CLI's environment. The bridge resolves the bindings in memory (resolveEnvBindings)
+//     immediately before the spawn and writes the values nowhere. A connection whose
+//     bindings no longer resolve is not started: its tools are unavailable. Its stderr is
+//     discarded.
 //   - Startup is bounded (`limits.startupMs` per connection). The bridge lists the tools
 //     once and keeps a selected tool only if it exists with an input schema whose hash
 //     equals the frozen one. A changed or missing tool, or a connection that never starts,
@@ -42,7 +46,7 @@ import { ReadBuffer, serializeMessage } from "@modelcontextprotocol/sdk/shared/s
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { CallToolRequestSchema, CallToolResultSchema, ErrorCode, ListToolsRequestSchema, McpError, type CallToolResult, type JSONRPCMessage, type Tool } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
-import { CONNECTION_ID_RE, isAllowedEnvName, MAX_ARGS, MAX_CONNECTIONS, MAX_SELECTIONS, schemaHash, SELECTED_TOOL_RE } from "./toolProfile.js";
+import { CONNECTION_ID_RE, EnvBindingSchema, isAllowedEnvName, MAX_ARGS, MAX_CONNECTIONS, MAX_ENV_BINDINGS, MAX_SELECTIONS, resolveEnvBindings, schemaHash, SELECTED_TOOL_RE } from "./toolProfile.js";
 
 export const BRIDGE_JOB_MAX_BYTES = 1024 * 1024;
 /** A backend line longer than this closes that backend. */
@@ -71,7 +75,7 @@ export const BridgeJobSchema = z
           id: z.string().regex(CONNECTION_ID_RE),
           command: abs,
           args: z.array(z.string().refine((a) => !a.includes("\0"))).max(MAX_ARGS),
-          env: z.record(z.string(), z.string()).refine((e) => Object.keys(e).every(isAllowedEnvName)),
+          env: z.record(z.string(), EnvBindingSchema).refine((e) => Object.keys(e).length <= MAX_ENV_BINDINGS && Object.keys(e).every(isAllowedEnvName)),
         }),
       )
       .min(1)
@@ -243,7 +247,11 @@ interface Backend {
   client: Client;
 }
 
-export function createContextToolBridge(job: BridgeJob, onCode: (code: string) => void = () => {}): ContextToolBridge {
+export function createContextToolBridge(
+  job: BridgeJob,
+  onCode: (code: string) => void = () => {},
+  resolve: (env: BridgeJob["connections"][number]["env"]) => Record<string, string> = (env) => resolveEnvBindings(env),
+): ContextToolBridge {
   const stats: BridgeStats = { advertised: [], dropped: [], forwardedCalls: 0, refusedCalls: 0, refusedBackendRequests: 0 };
   const backends = new Map<string, Backend>();
   /** Every transport started, including those that failed to start. */
@@ -264,7 +272,15 @@ export function createContextToolBridge(job: BridgeJob, onCode: (code: string) =
 
   async function startConnection(conn: BridgeJob["connections"][number]): Promise<void> {
     const selected = job.tools.filter((t) => t.connectionId === conn.id);
-    const transport = new ExactEnvStdioTransport(conn.command, conn.args, conn.env);
+    let env: Record<string, string>;
+    try {
+      env = resolve(conn.env); // in memory, just before the spawn; never written anywhere
+    } catch {
+      onCode("binding-unresolved");
+      for (const t of selected) stats.dropped.push({ tool: t.name, code: "connection_unavailable" });
+      return;
+    }
+    const transport = new ExactEnvStdioTransport(conn.command, conn.args, env);
     transports.push(transport);
     const client = new Client({ name: "scout-bridge", version: "0" }, { capabilities: {} });
     // Every request a backend makes of us is refused; every notification (list_changed included) is ignored.

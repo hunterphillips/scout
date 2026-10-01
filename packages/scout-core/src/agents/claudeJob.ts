@@ -4,8 +4,8 @@
 // profile's absolute claude path and explicit model) whose private 0700 cwd is
 // `SCOUT_HOME/run/jobs/<request-id>/`. Four 0600 files go there (mcp.json, settings.json,
 // instructions.md, agent-token), plus bridge.json when the profile selects user tools (the
-// bridge's job file, holding the resolved backend environment, which never enters the
-// CLI's own environment); the CLI is spawned argv-only, detached, with the request on
+// bridge's job file, holding the backend environment bindings but never their values, which
+// only the bridge resolves, in memory, at spawn); the CLI is spawned argv-only, detached, with the request on
 // stdin; the job dir is removed when the job ends, however it ends.
 //
 // Tool surface (toolPolicy.ts): Scout's server, plus the forwarding bridge for the
@@ -60,7 +60,7 @@ import { mapOutcome, recordUsage } from "./mapOutcome.js";
 import { MODEL_RE, profileFingerprint, type AgentProfile } from "./profile.js";
 import { buildJobInstructions, buildJobPrompt } from "./prompt.js";
 import { createStreamMonitor } from "./streamMonitor.js";
-import { checkManagedPolicy, defaultBridgeEntrypoint, planJobTools, type ToolPlanOptions } from "./toolPolicy.js";
+import { checkManagedPolicy, defaultBridgeEntrypoint, planJobTools, type JobManagedPaths, type ToolPlanOptions } from "./toolPolicy.js";
 
 export type { SpawnFn, SnapshotFn } from "./childSupervisor.js";
 
@@ -233,16 +233,16 @@ export function launchProfileFailure(e: unknown): Out {
 }
 
 /** The managed-settings locations for the job's environment: this platform, its CLI config dir, the OS user. */
-export function defaultManagedPaths(env: Readonly<Record<string, string>>): ManagedPaths {
+export function defaultManagedPaths(env: Readonly<Record<string, string>>, username: () => string = () => userInfo().username): JobManagedPaths {
   const configDir = env.CLAUDE_CONFIG_DIR ?? join(env.HOME!, ".claude");
   let user: string | undefined;
   try {
-    user = userInfo().username;
+    user = username();
   } catch {
     // below
   }
   // Per-user MDM policy is keyed by the OS account; without one, fail closed.
-  if (!user || user.includes("/")) return { files: [], dropInDirs: [], opaque: [], unsupported: true };
+  if (!user || user.includes("/")) return { files: [], dropInDirs: [], opaque: [], userUnknown: true };
   return managedPathsFor(process.platform, configDir, user);
 }
 
@@ -364,7 +364,7 @@ export function createClaudeJobAdapter(deps: ClaudeJobDeps): ClaudeJobAdapter {
         };
         if (deps.bridgeLimits) planOpts.limits = deps.bridgeLimits;
         const plan = planJobTools(planOpts);
-        if (!plan.ok) return { result: { status: "error", reason: "tool_unavailable" }, termination: "tool_unavailable", detail: plan.detail };
+        if (!plan.ok) return { result: { status: "error", reason: plan.reason }, termination: plan.reason, detail: plan.detail };
         for (const u of plan.unavailable) details.optionalTools.push({ ...u, status: "unavailable" });
         surface = buildJobSurface(plan.spec);
         const write = (name: string, text: string): void => writeFileSync(join(jobDir, name), text, { mode: 0o600, flag: "wx" });

@@ -14,12 +14,17 @@
 //     bridge advertises nothing else, so no allow rule, hook decision or skill metadata can
 //     widen what a job can call.
 // Before launch each connection a selection uses is prepared: its command must still be an
-// absolute executable file and its environment bindings must resolve (toolProfile.ts). A
-// connection that cannot be prepared makes its tools unavailable: a required one blocks
-// the job (`tool_unavailable`), an optional one is reported unavailable in the job details
-// and left out of the bridge. At startup the bridge drops a tool that is missing or whose
-// schema changed; the init check (initCheck.ts) applies the same required/optional rule to
-// what the CLI then lists. Scout's own tools alone are a supported baseline.
+// absolute executable file and its environment bindings must resolve (toolProfile.ts). The
+// resolution here is a dry run: the values are checked and discarded. The bridge's job file
+// carries the bindings (`{file, pointer}`), never the values; the bridge resolves them again
+// in memory just before it starts each backend. A connection that cannot be prepared makes
+// its tools unavailable: a required one blocks the job (`tool_unavailable`), an optional one
+// is reported unavailable in the job details and left out of the bridge. At startup the
+// bridge drops a tool whose connection's bindings no longer resolve, that is missing, or
+// whose schema changed; the init check (initCheck.ts) applies the same required/optional
+// rule to what the CLI then lists. Scout's own tools alone are a supported baseline. A job
+// file larger than the bridge accepts (BRIDGE_JOB_MAX_BYTES) refuses the job before launch
+// (`unsupported_configuration`).
 //
 // checkManagedPolicy reads the managed settings Claude Code applies on top of every other
 // source (same locations as the billing preflight, managedPathsFor in authPreflight.ts;
@@ -49,7 +54,7 @@ import { constants as fsc, closeSync, fstatSync, openSync, readdirSync, readFile
 import { createRequire } from "node:module";
 import { join } from "node:path";
 import { isExecutableFile, type ManagedPaths } from "./authPreflight.js";
-import { BRIDGE_DEFAULT_LIMITS, type BridgeJob } from "./contextToolBridge.js";
+import { BRIDGE_DEFAULT_LIMITS, BRIDGE_JOB_MAX_BYTES, type BridgeJob } from "./contextToolBridge.js";
 import { mcpToolName, SCOUT_SERVER_NAME, SCOUT_TOOL_NAMES, scoutServerSpec, type JobServerSpec, type JobSurfaceSpec, type ScoutServerOptions } from "./jobSurface.js";
 import { resolveEnvBindings, type Connection, type EnvBinding, type ToolsProfile } from "./toolProfile.js";
 
@@ -66,8 +71,10 @@ export interface ToolPlanOptions {
   /** How the CLI starts the bridge: `<nodePath> <entrypoint> --job <jobFile>`. */
   bridge: { nodePath: string; entrypoint: string; jobFile: string };
   limits?: BridgeJob["limits"];
-  /** Test seam. */
+  /** Test seam: the dry-run resolution. */
   resolveEnv?: (env: Readonly<Record<string, EnvBinding>>) => Record<string, string>;
+  /** Test seam: the bridge's job file cap. */
+  maxBridgeJobBytes?: number;
 }
 
 export interface UnavailableTool {
@@ -80,12 +87,13 @@ export type ToolPlan =
   | {
       ok: true;
       spec: JobSurfaceSpec;
-      /** The bridge's private job file content (holds resolved secrets); absent without selected tools. */
+      /** The bridge's private job file content (bindings, never values); absent without selected tools. */
       bridgeJob?: BridgeJob;
       /** Optional selected tools left out before launch. */
       unavailable: UnavailableTool[];
     }
-  | { ok: false; detail: "required_connection_unavailable" };
+  | { ok: false; reason: "tool_unavailable"; detail: "required_connection_unavailable" }
+  | { ok: false; reason: "unsupported_configuration"; detail: "bridge_job_too_large" };
 
 export function planJobTools(o: ToolPlanOptions): ToolPlan {
   const scout = scoutServerSpec(o.scout);
@@ -100,7 +108,10 @@ export function planJobTools(o: ToolPlanOptions): ToolPlan {
     if (!prepared.has(c.id)) {
       let entry: BridgeJob["connections"][number] | undefined;
       try {
-        if (isExecutableFile(c.command)) entry = { id: c.id, command: c.command, args: [...c.args], env: resolve(c.env) };
+        if (isExecutableFile(c.command)) {
+          resolve(c.env); // dry run: the values are discarded here
+          entry = { id: c.id, command: c.command, args: [...c.args], env: Object.fromEntries(Object.entries(c.env).map(([k, b]) => [k, { file: b.file, pointer: b.pointer }])) };
+        }
       } catch {
         entry = undefined; // a binding that does not resolve: the codes stay out of the plan
       }
@@ -114,7 +125,7 @@ export function planJobTools(o: ToolPlanOptions): ToolPlan {
   for (const s of selections) {
     const conn = byId.get(s.connectionId);
     if (conn && prepare(conn)) offered.push(s);
-    else if (s.required) return { ok: false, detail: "required_connection_unavailable" };
+    else if (s.required) return { ok: false, reason: "tool_unavailable", detail: "required_connection_unavailable" };
     else unavailable.push({ server: BRIDGE_SERVER_NAME, tool: mcpToolName(BRIDGE_SERVER_NAME, s.toolName) });
   }
   if (offered.length === 0) return { ok: true, spec: { servers: [scout], allowedTools: allowed }, unavailable };
@@ -134,6 +145,10 @@ export function planJobTools(o: ToolPlanOptions): ToolPlan {
     connections: [...usedIds].map((id) => prepared.get(id)!),
     tools: offered.map((s) => ({ name: s.toolName, connectionId: s.connectionId, description: s.description, inputSchema: s.inputSchema, schemaHash: s.schemaHash })),
   };
+  // The profile's caps allow a job file larger than the bridge reads: refuse it here, not at the bridge.
+  if (Buffer.byteLength(JSON.stringify(bridgeJob), "utf8") > (o.maxBridgeJobBytes ?? BRIDGE_JOB_MAX_BYTES)) {
+    return { ok: false, reason: "unsupported_configuration", detail: "bridge_job_too_large" };
+  }
   return {
     ok: true,
     spec: { servers: [scout, bridgeServer], allowedTools: [...allowed, ...offered.map((s) => mcpToolName(BRIDGE_SERVER_NAME, s.toolName))] },
@@ -154,7 +169,8 @@ export type ManagedPolicyDetail =
   | "managed_permission_mode"
   | "managed_unreadable"
   | "managed_not_inspected"
-  | "managed_unknown_platform";
+  | "managed_unknown_platform"
+  | "managed_user_unknown";
 
 export type ManagedPolicyResult = { ok: true } | { ok: false; detail: ManagedPolicyDetail };
 
@@ -195,8 +211,12 @@ export function managedSettingsConflict(s: Record<string, unknown>): ManagedPoli
   return undefined;
 }
 
+/** Managed-settings locations for a job; `userUnknown` when the OS user (which keys per-user MDM policy) could not be determined. */
+export type JobManagedPaths = ManagedPaths & { userUnknown?: boolean };
+
 /** Check every managed settings location; the first conflict wins. Never throws. */
-export function checkManagedPolicy(paths: ManagedPaths): ManagedPolicyResult {
+export function checkManagedPolicy(paths: JobManagedPaths): ManagedPolicyResult {
+  if (paths.userUnknown) return { ok: false, detail: "managed_user_unknown" };
   if (paths.unsupported) return { ok: false, detail: "managed_unknown_platform" };
   const files = [...paths.files];
   for (const dir of paths.dropInDirs) {
