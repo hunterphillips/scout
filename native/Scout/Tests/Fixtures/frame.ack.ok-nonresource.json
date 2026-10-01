@@ -1,0 +1,7 @@
+{
+  "type": "ack",
+  "commandId": "app-4",
+  "ok": true,
+  "revision": 0,
+  "approvalRevision": 5
+}

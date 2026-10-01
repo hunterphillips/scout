@@ -224,7 +224,7 @@ describe("coordinator", () => {
     const { panel, connect } = setup();
     expect(panel).toEqual([{ type: "state", status: "disconnected" }]);
     connect();
-    expect(panel.at(-1)).toEqual({ type: "state", status: "idle", visitEpoch: 0 });
+    expect(panel.at(-1)).toEqual({ type: "state", status: "idle", visitEpoch: 0, permitted: false });
   });
 
   it("an active visit's idle state carries the permitted hostname only; leaving drops it", () => {
@@ -233,10 +233,10 @@ describe("coordinator", () => {
     chrome();
     c.observe(focus({ url: "https://docs.stripe.com/payments/checkout?q=secret#frag" }));
     const state = panel.at(-1);
-    expect(state).toEqual({ type: "state", status: "idle", visitEpoch: coordinator.tracker.epoch, detail: "docs.stripe.com" });
+    expect(state).toEqual({ type: "state", status: "idle", visitEpoch: coordinator.tracker.epoch, detail: "docs.stripe.com", permitted: true });
     expect(JSON.stringify(state)).not.toContain("payments");
     coordinator.handleNativeCommand({ type: "frontmost", bundleId: "com.apple.Terminal", at: 1 });
-    expect(panel.at(-1)).toEqual({ type: "state", status: "idle", visitEpoch: coordinator.tracker.epoch });
+    expect(panel.at(-1)).toEqual({ type: "state", status: "idle", visitEpoch: coordinator.tracker.epoch, permitted: false });
     expect(panel.at(-1)).not.toHaveProperty("detail");
   });
 
@@ -264,7 +264,7 @@ describe("coordinator", () => {
     c.observe(focus());
     expect(coordinator.tracker.current()).not.toBeNull();
     const epoch = coordinator.tracker.epoch;
-    expect(panel.slice(before)).toEqual([{ type: "state", status: "idle", visitEpoch: epoch, detail: "docs.stripe.com" }]);
+    expect(panel.slice(before)).toEqual([{ type: "state", status: "idle", visitEpoch: epoch, detail: "docs.stripe.com", permitted: true }]);
 
     c.observe(focus({ title: "retitled" }));
     chrome();
@@ -292,7 +292,7 @@ describe("coordinator", () => {
     c.observe(focus());
     coordinator.handleNativeCommand({ type: "frontmost", bundleId: "com.apple.Terminal", at: 1 });
     expect(coordinator.tracker.current()).toBeNull();
-    expect(panel.at(-1)).toEqual({ type: "state", status: "idle", visitEpoch: coordinator.tracker.epoch });
+    expect(panel.at(-1)).toEqual({ type: "state", status: "idle", visitEpoch: coordinator.tracker.epoch, permitted: false });
   });
 
   it("page_text from the focused tab bumps contextRevision and is acked to the host", () => {
@@ -412,6 +412,7 @@ describe("coordinator", () => {
       status: "idle",
       visitEpoch: coordinator.tracker.epoch,
       detail: "docs.stripe.com",
+      permitted: true,
     });
   });
 
@@ -424,7 +425,7 @@ describe("coordinator", () => {
     expect(coordinator.tracker.current()).toBeNull();
     expect(events.some((e) => e.name === "stale_sensor_frame")).toBe(true);
     old.disconnect();
-    expect(panel.at(-1)?.status).toBe("idle");
+    expect((panel.at(-1) as { status?: string } | undefined)?.status).toBe("idle");
     live.observe(focus());
     expect(coordinator.tracker.current()).not.toBeNull();
   });
@@ -437,7 +438,7 @@ describe("coordinator", () => {
     expect(coordinator.tracker.current()).not.toBeNull();
     connect(2);
     expect(coordinator.tracker.current()).toBeNull();
-    expect(panel.at(-1)).toEqual({ type: "state", status: "idle", visitEpoch: coordinator.tracker.epoch });
+    expect(panel.at(-1)).toEqual({ type: "state", status: "idle", visitEpoch: coordinator.tracker.epoch, permitted: false });
   });
 
   it("losing the live sensor ends the visit and emits disconnected", () => {
@@ -449,7 +450,7 @@ describe("coordinator", () => {
     expect(coordinator.tracker.current()).toBeNull();
     expect(panel.at(-1)).toEqual({ type: "state", status: "disconnected" });
     const again = connect(2);
-    expect(panel.at(-1)).toEqual({ type: "state", status: "idle", visitEpoch: coordinator.tracker.epoch });
+    expect(panel.at(-1)).toEqual({ type: "state", status: "idle", visitEpoch: coordinator.tracker.epoch, permitted: false });
     expect(again.closed).toBe(false);
   });
 
@@ -910,5 +911,69 @@ describe("coordinator dwell and discovery", () => {
     c.observe(s.focus());
     s.advance(DWELL_MS);
     expect(s.events.find((e) => e.name === "discovery_skipped")?.fields).toMatchObject({ reason: "not_wired" });
+  });
+});
+
+describe("coordinator panel wiring", () => {
+  const RES = `res_${"a".repeat(64)}`;
+  const HASH = "b".repeat(64);
+
+  function withPanel(capabilities?: CoordinatorCapabilities) {
+    const handled: unknown[] = [];
+    let changes = 0;
+    const s = setup({
+      panel: { handle: async (cmd) => void handled.push(cmd), capabilitiesChanged: () => void (changes += 1) },
+      ...(capabilities ? { capabilities } : {}),
+    });
+    return { ...s, handled, changes: () => changes };
+  }
+
+  it("routes window commands to the panel channel and leaves the old commands alone", () => {
+    const s = withPanel();
+    const approve = { type: "approve", commandId: "a1", resourceId: RES, version: HASH, expectedRevision: 1 } as const;
+    s.coordinator.handleNativeCommand(approve);
+    s.coordinator.handleNativeCommand({ type: "preview", commandId: "p1", resourceId: RES, version: HASH });
+    s.coordinator.handleNativeCommand({ type: "pause" });
+    expect(s.handled).toEqual([approve, { type: "preview", commandId: "p1", resourceId: RES, version: HASH }]);
+  });
+
+  it("without a panel channel a window command gets an unavailable ack", () => {
+    const s = setup();
+    s.coordinator.handleNativeCommand({ type: "refresh_capabilities", commandId: "r1" });
+    expect(s.panel.at(-1)).toEqual({ type: "ack", commandId: "r1", ok: false, code: "unavailable" });
+  });
+
+  it("tells the channel when grants are applied or cleared and when the visit changes", () => {
+    const s = withPanel();
+    const c = s.connect();
+    const afterConnect = s.changes();
+    expect(afterConnect).toBeGreaterThanOrEqual(2); // cleared on attach, then the snapshot
+    s.chrome();
+    c.observe(s.focus());
+    expect(s.changes()).toBeGreaterThan(afterConnect);
+    const beforeLoss = s.changes();
+    s.grant(c, ["https://github.com/*"]);
+    expect(s.changes()).toBeGreaterThan(beforeLoss);
+    const beforeDisconnect = s.changes();
+    c.disconnect();
+    expect(s.changes()).toBeGreaterThan(beforeDisconnect);
+  });
+
+  it("tells the channel after an ingest commits and again when its export sync settles", async () => {
+    const caps = fakeCapabilities();
+    const cleanup = deferred<{ ok: boolean }>();
+    caps.capabilities.store.ingest = async (discovery) => ({ origin: discovery.origin, results: [], skipped: 0, cleanup: cleanup.promise });
+    const s = withPanel(caps.capabilities);
+    const c = s.connect();
+    s.chrome();
+    c.observe(s.focus());
+    s.advance(DWELL_MS);
+    const before = s.changes();
+    caps.passes[0]!.discover.resolve(discoveryFor("https://docs.stripe.com"));
+    await flush();
+    expect(s.changes()).toBe(before + 1);
+    cleanup.resolve({ ok: true });
+    await flush();
+    expect(s.changes()).toBe(before + 2);
   });
 });

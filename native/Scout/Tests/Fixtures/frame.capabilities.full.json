@@ -1,0 +1,84 @@
+{
+  "type": "capabilities",
+  "coreInstanceId": "core-7f3a9c",
+  "revision": 7,
+  "approvalRevision": 4,
+  "offers": [
+    {
+      "resourceId": "res_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "version": "3333333333333333333333333333333333333333333333333333333333333333",
+      "kind": "skill",
+      "siteOrigin": "https://docs.example.com",
+      "sourceUrl": "https://docs.example.com/.well-known/agent-skills/deploy/SKILL.md",
+      "byteLength": 2048,
+      "fetchedAt": 1759300000500.5,
+      "resourceRevision": 3,
+      "skill": {
+        "name": "deploy",
+        "description": "Deploy the docs site"
+      }
+    }
+  ],
+  "library": [
+    {
+      "resourceId": "res_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "kind": "llms_txt",
+      "siteOrigin": "https://docs.example.com",
+      "sourceUrl": "https://docs.example.com/llms.txt",
+      "defaultVersion": "2222222222222222222222222222222222222222222222222222222222222222",
+      "state": "approved",
+      "versions": [
+        {
+          "hash": "2222222222222222222222222222222222222222222222222222222222222222",
+          "state": "approved",
+          "byteLength": 130,
+          "fetchedAt": 1759300000100
+        },
+        {
+          "hash": "1111111111111111111111111111111111111111111111111111111111111111",
+          "state": "superseded",
+          "byteLength": 120,
+          "fetchedAt": 1759300000000
+        }
+      ],
+      "resourceRevision": 5
+    },
+    {
+      "resourceId": "res_cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "kind": "skill",
+      "siteOrigin": "https://docs.example.com",
+      "sourceUrl": "https://docs.example.com/.well-known/agent-skills/lint/SKILL.md",
+      "state": "blocked",
+      "versions": [
+        {
+          "hash": "4444444444444444444444444444444444444444444444444444444444444444",
+          "state": "revoked",
+          "byteLength": 2048,
+          "fetchedAt": 1759300000500.5
+        }
+      ],
+      "resourceRevision": 3
+    }
+  ],
+  "conflicts": [
+    {
+      "name": "scout-skill-0123456789abcdef",
+      "resourceId": "res_cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "code": "left_modified"
+    }
+  ],
+  "origins": [
+    {
+      "origin": "https://docs.example.com",
+      "autoAcquire": true,
+      "acknowledgedAt": 1759300000900,
+      "permitted": true
+    },
+    {
+      "origin": "https://other.example.org:8443",
+      "autoAcquire": false,
+      "permitted": false
+    }
+  ],
+  "truncated": true
+}

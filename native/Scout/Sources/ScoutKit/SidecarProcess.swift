@@ -8,6 +8,15 @@ public enum SidecarStatus: Sendable, Equatable {
     case stopped
 }
 
+/// What became of one `SidecarProcess.send`.
+public enum SendOutcome: Sendable, Equatable {
+    case written
+    /// The pipe was full (`EAGAIN`) or the child is gone: send it again later.
+    case retryLater
+    /// The line is not under `PanelLimits.commandMaxBytes`; sending it again cannot help.
+    case oversize
+}
+
 /// Runs `node scout-core/dist/main.js --stdio` as a child process. Reads `PanelState`
 /// JSONL from its stdout, writes `NativeCommand` JSONL to its stdin, and leaves its
 /// stderr on the app's stderr. Restarts it on exit, subject to `RestartPolicy`.
@@ -24,7 +33,7 @@ public final class SidecarProcess {
 
     public var ignoredLineCount: Int { parser.ignoredLineCount + ignoredBefore }
 
-    /// Commands dropped because the child's stdin was full or closed.
+    /// Commands not written: the child's stdin was full or closed, or the line was too long.
     public private(set) var droppedCommandCount = 0
 
     private let resolveLaunch: () -> SidecarLaunch
@@ -69,21 +78,26 @@ public final class SidecarProcess {
         launch()
     }
 
-    /// Never blocks: stdin is non-blocking, and a message that doesn't fit in the pipe
-    /// right now is dropped. Messages up to `PIPE_BUF` bytes are written whole or not
-    /// at all, so a drop never leaves half a line in the pipe.
-    public func send(_ command: NativeCommand) {
-        guard let stdin else { return }
+    /// Never blocks: stdin is non-blocking, and a line that doesn't fit in the pipe right now
+    /// is not written. Lines under `PIPE_BUF` bytes are written whole or not at all, so nothing
+    /// ever leaves half a line in the pipe. The caller keeps a `.retryLater` window command
+    /// pending and re-sends it; an `.oversize` one can never be written and is failed instead.
+    @discardableResult
+    public func send(_ command: NativeCommand) -> SendOutcome {
         let line = command.jsonLine()
-        guard line.count <= Int(PIPE_BUF) else {
-            drop("command is \(line.count) bytes, over PIPE_BUF")
-            return
+        // macOS PIPE_BUF is 512, the same bound as `commandMaxBytes`.
+        guard line.count < PanelLimits.commandMaxBytes, line.count <= Int(PIPE_BUF) else {
+            drop("command is \(line.count) bytes, not under \(PanelLimits.commandMaxBytes)")
+            return .oversize
         }
+        guard let stdin else { return .retryLater }
         let written = line.withUnsafeBytes { Darwin.write(stdin.fileDescriptor, $0.baseAddress, $0.count) }
         if written != line.count {
             let reason = written < 0 ? String(cString: strerror(errno)) : "short write \(written)"
             drop(reason)
+            return .retryLater
         }
+        return .written
     }
 
     private func drop(_ reason: String) {

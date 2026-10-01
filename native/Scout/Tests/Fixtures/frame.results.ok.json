@@ -1,0 +1,13 @@
+{
+  "type": "results",
+  "visitEpoch": 3,
+  "status": "ok",
+  "items": [
+    {
+      "candidateId": "c1",
+      "title": "Webhooks",
+      "href": "https://docs.example.com/webhooks",
+      "reason": "matches"
+    }
+  ]
+}

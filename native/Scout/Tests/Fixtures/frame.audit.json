@@ -1,0 +1,18 @@
+{
+  "type": "audit",
+  "entries": [
+    {
+      "at": 1759300001000,
+      "role": "interactive",
+      "method": "current_site",
+      "outcome": "ok",
+      "origin": "https://docs.example.com"
+    },
+    {
+      "at": 1759300002000,
+      "role": "job",
+      "method": "read_resource",
+      "outcome": "not_granted"
+    }
+  ]
+}

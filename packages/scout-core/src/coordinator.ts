@@ -37,6 +37,12 @@
 // is called with the permission state that check saw. A permission loss, pause, or
 // navigation while the store's own ingest is in flight is not caught: that ingest commits
 // with `chromePermitted: true`. The window is the store's write, and is accepted.
+//
+// Scout's window commands (those with a `commandId`) go to the panel channel
+// (panelChannel.ts), which answers them; without one each gets an `unavailable` ack. The
+// coordinator tells the channel when the capability view may have changed: a permissions
+// snapshot applied or cleared (offers follow Chrome's grants), the visit changed, or an ingest
+// committed (and again when its export sync settles).
 
 import type {
   ActiveVisit,
@@ -50,6 +56,7 @@ import { createActivityForwarder, type ActivityForwarder, type ActivitySend } fr
 import type { AgentView } from "./agentApi/handlers.js";
 import type { DiscoveryResult } from "./capabilities/discovery.js";
 import type { CapabilityStore } from "./capabilities/store.js";
+import type { PanelChannel } from "./panelChannel.js";
 import type { CatalogResolution } from "./catalog/resolveCatalog.js";
 import type { Clock, Timers } from "./clock.js";
 import type { Diagnostics } from "./diagnostics.js";
@@ -80,6 +87,8 @@ export interface CoordinatorOptions {
   onShutdownRequested?: () => void;
   /** Resource discovery on settled visits. Without it a settle is only logged. */
   capabilities?: CoordinatorCapabilities;
+  /** Scout's window commands and capability view. Without it those commands are refused. */
+  panel?: Pick<PanelChannel, "handle" | "capabilitiesChanged">;
 }
 
 export interface CoordinatorCapabilities {
@@ -126,6 +135,7 @@ export function createCoordinator(options: CoordinatorOptions): Coordinator {
   const resumeCache = createResumeCache<unknown>({ clock, diagnostics });
   const permissions = createPermissionState({ diagnostics });
   const caps = options.capabilities;
+  const panelChanged = (): void => options.panel?.capabilitiesChanged();
 
   let paused = false;
   let stopped = false;
@@ -148,8 +158,8 @@ export function createCoordinator(options: CoordinatorOptions): Coordinator {
   };
 
   const idleState = (visitEpoch: number, visit: ActiveVisit | null): PanelState => {
-    if (visit === null) return { type: "state", status: "idle", visitEpoch };
-    return { type: "state", status: "idle", visitEpoch, detail: new URL(visit.origin).hostname };
+    if (visit === null) return { type: "state", status: "idle", visitEpoch, permitted: false };
+    return { type: "state", status: "idle", visitEpoch, detail: new URL(visit.origin).hostname, permitted: true };
   };
 
   const emitCurrent = (): void => {
@@ -221,7 +231,8 @@ export function createCoordinator(options: CoordinatorOptions): Coordinator {
       }
       const chromePermitted = permissions.isPermitted(origin);
       const report = await c.store.ingest(discovery.value, { chromePermitted });
-      void report.cleanup.catch(() => {});
+      panelChanged();
+      void report.cleanup.then(panelChanged, () => {});
       diagnostics.event("discovery_ingested", {
         origin,
         epoch,
@@ -275,6 +286,7 @@ export function createCoordinator(options: CoordinatorOptions): Coordinator {
 
   const onVisitChange = (change: VisitChange): void => {
     if (change.previous === null && change.visit === null) return;
+    panelChanged();
     if (change.visit === null) dwell.cancel("visit_ended");
     else if (!paused && liveClient !== null) dwell.arm(change.visit);
     if (paused || liveClient === null) return;
@@ -321,6 +333,7 @@ export function createCoordinator(options: CoordinatorOptions): Coordinator {
     if (runningPass !== null && !permissions.isPermitted(runningPass.visit.origin)) cancelRunningPass("permission_lost");
     tracker.recompute();
     syncPolicy();
+    panelChanged();
   };
 
   const handleObservation = (obs: BrowserObservation, client: SocketClient): void => {
@@ -360,6 +373,7 @@ export function createCoordinator(options: CoordinatorOptions): Coordinator {
     cancelRunningPass("disconnected");
     permissions.clear();
     lastPolicy = null;
+    panelChanged();
   };
 
   const sensorLost = (): void => {
@@ -413,6 +427,9 @@ export function createCoordinator(options: CoordinatorOptions): Coordinator {
           coordinator.stop();
           options.onShutdownRequested?.();
           return;
+        default:
+          if (options.panel) void options.panel.handle(cmd);
+          else options.emitPanel({ type: "ack", commandId: cmd.commandId, ok: false, code: "unavailable" });
       }
     },
     attachClient(client) {

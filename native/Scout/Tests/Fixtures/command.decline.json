@@ -1,0 +1,7 @@
+{
+  "type": "decline",
+  "commandId": "app-6",
+  "resourceId": "res_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "version": "1111111111111111111111111111111111111111111111111111111111111111",
+  "expectedRevision": 1
+}
