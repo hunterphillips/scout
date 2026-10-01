@@ -399,8 +399,9 @@ export async function createCapabilityStore(options: CapabilityStoreOptions): Pr
           .then(
             () => resolve({ ok: true }),
             () => {
-              diagnostics?.event("capability_export_failed", { reason, ...(resourceId ? { resource: shortId(resourceId) } : {}) });
+              // Settle first: a throwing diagnostics sink must not leave close() waiting on this sync.
               resolve({ ok: false });
+              diagnostics?.event("capability_export_failed", { reason, ...(resourceId ? { resource: shortId(resourceId) } : {}) });
             },
           );
       });
