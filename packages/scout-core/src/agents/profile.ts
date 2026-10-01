@@ -10,21 +10,23 @@
 // - The fingerprint is a hash of the canonical profile content. Job requests and revisit
 //   cache keys carry it, so an edited profile never reuses an older job's result.
 //
-// Extension point (P1.3 / P2.7): selected user tool references will be added here as a new
-// field. Until then the schema is strict, so a profile that already names tools is refused
-// rather than silently run without them.
+// - `tools` (optional, toolProfile.ts): the existing MCP tools the user selected for jobs and
+//   the reviewed stdio definitions that serve them, as references and bindings only, never
+//   secret values. The schema stays strict: an unknown field is refused, never ignored.
 
 import { createHash } from "node:crypto";
 import { closeSync, constants as fsc, fstatSync, openSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import { z } from "zod";
 import { resolveOnPath, type Env } from "./authPreflight.js";
+import { canonicalJson, ToolsProfileSchema } from "./toolProfile.js";
 
 export const AGENT_PROFILE_FILE = "agent-profile.json";
 export const AGENT_PROFILE_SCHEMA_VERSION = 1;
 /** Hunter's 2026-09-30 choice for the initial Claude profile. Editable in the profile file. */
 export const DEFAULT_AGENT_MODEL = "claude-sonnet-5-5";
-const PROFILE_MAX_BYTES = 16 * 1024;
+/** Room for the selected tools' frozen input schemas. */
+const PROFILE_MAX_BYTES = 512 * 1024;
 
 /** Only a plain alias or model name; never anything that parses as a flag. Same rule as the legacy service's MODEL_RE. */
 export const MODEL_RE = /^[A-Za-z0-9][A-Za-z0-9._\-[\]]{0,63}$/;
@@ -46,6 +48,7 @@ export const AgentProfileSchema = z.strictObject({
   model: z.string().regex(PROFILE_MODEL_RE, {
     message: "model must be a full Claude model name such as claude-sonnet-5-5, not an alias such as sonnet",
   }),
+  tools: ToolsProfileSchema.optional(),
 });
 
 export type AgentProfile = z.infer<typeof AgentProfileSchema>;
@@ -64,10 +67,12 @@ export class AgentProfileError extends Error {
   }
 }
 
-/** Stable hash of the profile content (keys sorted), hex. */
+/**
+ * Stable hash of the profile content (keys sorted at every depth), hex. Any change to the
+ * selected tools, their schemas or the connection definitions changes it.
+ */
 export function profileFingerprint(profile: AgentProfile): string {
-  const canonical = JSON.stringify(Object.fromEntries(Object.entries(profile).sort(([a], [b]) => a.localeCompare(b))));
-  return createHash("sha256").update(canonical, "utf8").digest("hex").slice(0, 32);
+  return createHash("sha256").update(canonicalJson(profile), "utf8").digest("hex").slice(0, 32);
 }
 
 export function agentProfilePath(home: string): string {
