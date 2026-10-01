@@ -222,9 +222,9 @@ export interface CapabilityStore {
   /** Keep a readable version from collection while a request uses it. Returns the read check. */
   pinVersion(requestId: string, resourceId: string, version: string): ReadResolution;
   /**
-   * Keep any recorded, non-revoked version of an unblocked resource (pending included) from
-   * collection while Scout's window previews it. False (nothing pinned) otherwise. Released by
-   * `releasePins`, and by a revocation like every pin.
+   * Keep any recorded version (pending, declined, or a blocked resource's revoked one) from
+   * collection while Scout's window previews it, read-only. False (nothing pinned) when the
+   * version is not recorded. Released by `releasePins`, and by a revocation like every pin.
    */
   pinForPreview(requestId: string, resourceId: string, version: string): boolean;
   releasePins(requestId: string): void;
@@ -236,9 +236,10 @@ export interface CapabilityStore {
    * resource is already blocked and nothing changes (`changed: false`), nothing is committed but `onRevoked` still
    * runs (with `revokedVersions: []`) and export cleanup is still scheduled, so re-revoking
    * retries a wrapper removal that failed before. `onRevoked` runs inside the mutation queue:
-   * it must not await a store mutation or `close()`.
+   * it must not await a store mutation or `close()`. With `expectedRevision`, an unblocked
+   * resource at another revision is a StaleApprovalError, checked inside the queue.
    */
-  revoke(resourceId: string): Promise<RevokeResult>;
+  revoke(resourceId: string, expectedRevision?: number): Promise<RevokeResult>;
   setOriginPolicy(command: PolicyCommand): Promise<{ changed: boolean; approvalRevision: number }>;
   collectGarbage(): Promise<GcReport>;
 }
@@ -563,7 +564,7 @@ export async function createCapabilityStore(options: CapabilityStoreOptions): Pr
     pinForPreview(requestId, resourceId, version) {
       const r = findResource(state, resourceId);
       const v = r?.resource.versions.find((x) => x.hash === version);
-      if (!r || r.resource.blocked || !v || v.state === "revoked") return false;
+      if (!r || !v) return false;
       if (!pins.has(requestId)) pins.set(requestId, new Set());
       pins.get(requestId)!.add(pinKey(resourceId, version));
       return true;
@@ -625,12 +626,12 @@ export async function createCapabilityStore(options: CapabilityStoreOptions): Pr
         return { changed, approvalRevision: state.approvalRevision, revision: resourceRevision(command.resourceId) };
       }),
 
-    revoke: (resourceId) =>
+    revoke: (resourceId, expectedRevision) =>
       serialize(async () => {
         assertWritable();
         // (1) Commit the block, then drop the resource's pins so no later collection keeps them.
         // A failed commit throws before the pins are touched.
-        const { state: next, changed, revokedVersions } = applyRevoke(state, resourceId, clock.now());
+        const { state: next, changed, revokedVersions } = applyRevoke(state, resourceId, clock.now(), expectedRevision);
         if (changed) commit(next);
         for (const keys of pins.values()) for (const k of [...keys]) if (k.startsWith(`${resourceId}\0`)) keys.delete(k);
         diagnostics?.event("capability_decision", { resource: shortId(resourceId), action: "revoke", changed, revision: state.approvalRevision });

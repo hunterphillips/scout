@@ -2,7 +2,18 @@ import { createHash } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { CAPABILITY_LIBRARY_MAX, CAPABILITY_OFFERS_MAX, type PanelCapabilities, PanelStateSchema, type ResourceKind } from "@scout/contracts";
+import {
+  CAPABILITIES_FRAME_MAX_BYTES,
+  CAPABILITY_CONFLICTS_MAX,
+  CORE_INSTANCE_ID_MAX_CHARS,
+  CAPABILITY_LIBRARY_MAX,
+  CAPABILITY_OFFERS_MAX,
+  LIBRARY_VERSIONS_MAX,
+  type PanelCapabilities,
+  PanelStateSchema,
+  type ResourceKind,
+  SOURCE_URL_MAX_CHARS,
+} from "@scout/contracts";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { StoreState } from "./capabilities/decisions.js";
 import type { DiscoveryResult, ProbeItem } from "./capabilities/discovery.js";
@@ -98,10 +109,23 @@ describe("buildCapabilities", () => {
     expect(buildCapabilities(input([])).offers).toEqual([]);
 
     const states = Object.fromEntries(body.library.map((l) => [l.resourceId, l.state]));
-    expect(states).toEqual({ [skill.id]: "pending_only", [other.id]: "pending_only", [declined.id]: "pending_only", [revoked.id]: "blocked" });
+    expect(states).toEqual({ [skill.id]: "no_default", [other.id]: "no_default", [declined.id]: "no_default", [revoked.id]: "blocked" });
     expect(body.truncated).toBe(false);
-    const frame: PanelCapabilities = { type: "capabilities", revision: 1, ...body };
+    const frame: PanelCapabilities = { type: "capabilities", coreInstanceId: "core-a", revision: 1, ...body };
     expect(PanelStateSchema.safeParse(frame).success).toBe(true);
+  });
+
+  it("offers only a resource's newest version, and only while it is pending", async () => {
+    const v1 = await ingest(A, "/llms.txt", "guide v1");
+    now += 1000;
+    const v2 = await ingest(A, "/llms.txt", "guide v2");
+    expect(store.getResource(v1.id)!.resource.versions.map((v) => v.state)).toEqual(["pending", "pending"]);
+    expect(buildCapabilities(input([A])).offers.map((o) => o.version)).toEqual([v2.version]);
+
+    // An older pending version behind a declined newer one is not offered.
+    await store.decline({ resourceId: v2.id, version: v2.version, expectedRevision: rev(v2.id) });
+    expect(store.getVersion(v1.id, v1.version)!.state).toBe("pending");
+    expect(buildCapabilities(input([A])).offers).toEqual([]);
   });
 
   it("lists library versions newest first, with the default and revision", async () => {
@@ -148,6 +172,60 @@ describe("buildCapabilities", () => {
     }
     const entry = buildCapabilities({ state: { ...base, resources: [many] }, conflicts: [], isPermitted: () => true, currentOrigin: null }).library[0]!;
     expect(entry.versions.map((v) => v.fetchedAt)).toEqual([1007, 1006, 1005, 1004, 1003, 1002]);
+
+    // A default older than the six newest is still listed, in place of the oldest other one.
+    const old = structuredClone(many);
+    old.resource.versions[0]!.state = "approved";
+    old.resource.defaultVersion = old.resource.versions[0]!.hash;
+    const withDefault = buildCapabilities({ state: { ...base, resources: [old] }, conflicts: [], isPermitted: () => true, currentOrigin: null }).library[0]!;
+    expect(withDefault.versions).toHaveLength(LIBRARY_VERSIONS_MAX);
+    expect(withDefault.versions.map((v) => v.fetchedAt)).toEqual([1007, 1006, 1005, 1004, 1003, old.resource.versions[0]!.fetchedAt]);
+    expect(withDefault.versions.at(-1)!.hash).toBe(withDefault.defaultVersion);
+  });
+
+  it("keeps the serialized frame under its byte budget at maximum field sizes", () => {
+    const base = store.snapshot();
+    // A 253-character hostname, distinct per resource.
+    const host = (i: number) => [`h${i}`.padEnd(63, "a"), "b".repeat(63), "c".repeat(63), "d".repeat(61)].join(".");
+    const resources: StoreState["resources"] = [];
+    for (let i = 0; i < CAPABILITY_LIBRARY_MAX; i++) {
+      const origin = `https://${host(i)}`;
+      const prefix = `${origin}/`;
+      const sourceUrl = prefix + "p".repeat(SOURCE_URL_MAX_CHARS - prefix.length);
+      const versions: StoreState["resources"][number]["resource"]["versions"] = [];
+      const meta: StoreState["resources"][number]["meta"] = {};
+      for (let j = 0; j < LIBRARY_VERSIONS_MAX; j++) {
+        const hash = sha(`r${i}v${j}`);
+        // The newest version of the first CAPABILITY_OFFERS_MAX resources is a pending skill (an offer).
+        const pending = j === LIBRARY_VERSIONS_MAX - 1 && i < CAPABILITY_OFFERS_MAX;
+        versions.push({ hash, blobRef: hash, byteLength: 131072, fetchedAt: i * 10 + j, state: pending ? "pending" : "declined", ...(pending ? {} : { decision: { actor: "user" as const, at: 1 } }) });
+        meta[hash] = { lastSeenAt: 1, ...(pending ? { skill: { name: "s".repeat(256), description: "d".repeat(4096), digest: hash } } : {}) };
+      }
+      resources.push({ resource: { id: `res_${sha(`r${i}`)}`, kind: "skill", siteOrigin: origin, publisherOrigin: origin, sourceUrl, versions, blocked: false }, revision: 99, meta });
+    }
+    const conflicts = Array.from({ length: CAPABILITY_CONFLICTS_MAX }, (_, i) => ({ name: `scout-skill-${sha(`c${i}`).slice(0, 16)}`, resourceId: resources[i]!.resource.id, code: "foreign_collision" as const }));
+    const unbounded = (() => {
+      const body = buildCapabilities({ state: { ...base, resources: resources.slice(0, 1) }, conflicts: [], isPermitted: () => true, currentOrigin: null });
+      return Buffer.byteLength(JSON.stringify(body.library[0])) * CAPABILITY_LIBRARY_MAX;
+    })();
+    expect(unbounded).toBeGreaterThan(CAPABILITIES_FRAME_MAX_BYTES);
+
+    const body = buildCapabilities({ state: { ...base, resources }, conflicts, isPermitted: () => true, currentOrigin: null });
+    const frame: PanelCapabilities = { type: "capabilities", coreInstanceId: "x".repeat(CORE_INSTANCE_ID_MAX_CHARS), revision: Number.MAX_SAFE_INTEGER, ...body };
+    expect(Buffer.byteLength(JSON.stringify(frame))).toBeLessThan(CAPABILITIES_FRAME_MAX_BYTES);
+    expect(body.truncated).toBe(true);
+    expect(PanelStateSchema.safeParse(frame).success).toBe(true);
+    // The least recent library entries went first; every kept entry is whole.
+    expect(body.library.length).toBeLessThan(CAPABILITY_LIBRARY_MAX);
+    expect(body.library[0]!.resourceId).toBe(resources.at(-1)!.resource.id);
+    expect(body.library.every((l) => l.versions.length === LIBRARY_VERSIONS_MAX)).toBe(true);
+    expect(body.conflicts).toHaveLength(CAPABILITY_CONFLICTS_MAX);
+
+    // A normal frame is untouched.
+    const small = buildCapabilities({ state: { ...base, resources: resources.slice(0, 3) }, conflicts: [], isPermitted: () => true, currentOrigin: null });
+    expect(small.truncated).toBe(false);
+    expect(small.library).toHaveLength(3);
+    expect(small.offers).toHaveLength(3);
   });
 
   it("carries export conflicts and origin settings", async () => {
@@ -187,10 +265,11 @@ describe("capabilities emitter", () => {
     const t = fakeTimers();
     const frames: PanelCapabilities[] = [];
     let permitted: string[] = [A];
-    const emitter = createCapabilitiesEmitter({ input: () => input(permitted), emit: (f) => void frames.push(f), timers: t.timers });
+    const emitter = createCapabilitiesEmitter({ input: () => input(permitted), coreInstanceId: "core-a", emit: (f) => void frames.push(f), timers: t.timers });
     emitter.refresh();
     expect(frames).toHaveLength(1);
     expect(frames[0]!.revision).toBe(1);
+    expect(frames[0]!.coreInstanceId).toBe("core-a");
 
     await ingest(A, "/llms.txt", "guide");
     emitter.changed();
@@ -216,9 +295,38 @@ describe("capabilities emitter", () => {
 
     emitter.refresh();
     expect(frames).toHaveLength(4);
+    expect(frames.every((f) => f.coreInstanceId === "core-a" && PanelStateSchema.safeParse(f).success)).toBe(true);
     emitter.stop();
     emitter.changed();
     emitter.refresh();
     expect(frames).toHaveLength(4);
+  });
+
+  it("refresh during a pending debounce sends once and cancels the timer", async () => {
+    const t = fakeTimers();
+    const frames: PanelCapabilities[] = [];
+    const emitter = createCapabilitiesEmitter({ input: () => input([A]), coreInstanceId: "core-a", emit: (f) => void frames.push(f), timers: t.timers });
+    await ingest(A, "/llms.txt", "guide");
+    emitter.changed();
+    expect(t.pending).toBe(1);
+    emitter.refresh();
+    expect(frames).toHaveLength(1);
+    expect(t.pending).toBe(0);
+    t.fire();
+    expect(frames).toHaveLength(1);
+  });
+
+  it("a second core instance starts its own revision sequence under a new id", () => {
+    const t = fakeTimers();
+    const first: PanelCapabilities[] = [];
+    const a = createCapabilitiesEmitter({ input: () => input([A]), coreInstanceId: "core-a", emit: (f) => void first.push(f), timers: t.timers });
+    a.refresh();
+    a.refresh();
+    a.stop();
+    const second: PanelCapabilities[] = [];
+    const b = createCapabilitiesEmitter({ input: () => input([A]), coreInstanceId: "core-b", emit: (f) => void second.push(f), timers: t.timers });
+    b.refresh();
+    expect(first.at(-1)).toMatchObject({ coreInstanceId: "core-a", revision: 2 });
+    expect(second[0]).toMatchObject({ coreInstanceId: "core-b", revision: 1 });
   });
 });

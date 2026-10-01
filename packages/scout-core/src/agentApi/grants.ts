@@ -5,7 +5,7 @@
 // A job connection never carries it in Phase 2. Scout's window turns it on or off through
 // `writeBrowserContextGrant`, which rewrites config.json atomically and keeps every other key.
 
-import { readFileSync } from "node:fs";
+import { readFileSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import type { AgentStatusCode } from "@scout/contracts";
 import { writeFileAtomic } from "../capabilities/atomicWrite.js";
@@ -31,12 +31,17 @@ export function browserContextGate(principal: AgentPrincipal, granted: boolean, 
   return undefined;
 }
 
+/** Undoes one grant write: puts the file's previous contents back (atomically) or removes the file it created. */
+export interface GrantWrite {
+  restore(): void;
+}
+
 /**
  * Set `agentBrowserContext` in config.json, keeping every other key as it is. A missing file
  * becomes one holding only the grant. Throws (writing nothing) when the existing file is
  * unreadable or not a JSON object.
  */
-export function writeBrowserContextGrant(home: string, enabled: boolean): void {
+export function writeBrowserContextGrant(home: string, enabled: boolean): GrantWrite {
   const path = join(home, "config.json");
   let config: Record<string, unknown> = {};
   let raw: string | null = null;
@@ -52,4 +57,11 @@ export function writeBrowserContextGrant(home: string, enabled: boolean): void {
   }
   config.agentBrowserContext = enabled;
   writeFileAtomic(path, `${JSON.stringify(config, null, 2)}\n`);
+  const previous = raw;
+  return {
+    restore() {
+      if (previous !== null) writeFileAtomic(path, previous);
+      else unlinkSync(path);
+    },
+  };
 }

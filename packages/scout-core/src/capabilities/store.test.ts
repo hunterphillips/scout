@@ -411,7 +411,7 @@ describe("garbage collection", () => {
     expect(listBlobFiles(store)).toEqual([`${sha("v1")}.txt`]);
   });
 
-  it("a preview pin keeps a pending version until released; blocked or revoked versions are not pinned", async () => {
+  it("a preview pin keeps a pending version until released; a blocked resource's versions can be pinned too", async () => {
     const store = await open();
     const a = await ingestOne(store, "pending text");
     expect(store.pinForPreview("p1", a.id, a.version)).toBe(true);
@@ -424,7 +424,8 @@ describe("garbage collection", () => {
     const b = await ingestOne(store, "other", { kind: "agents_md", path: "/AGENTS.md" });
     expect(store.pinForPreview("p2", b.id, b.version)).toBe(true);
     await store.revoke(b.id);
-    expect(store.pinForPreview("p3", b.id, b.version)).toBe(false);
+    expect(store.pinForPreview("p3", b.id, b.version)).toBe(true);
+    expect(store.pinForPreview("p3", b.id, "0".repeat(64))).toBe(false);
   });
 
   it("rediscovery keeps a pending version alive", async () => {

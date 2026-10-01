@@ -4,9 +4,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { MutationCommand, PanelAck } from "@scout/contracts";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { writeBrowserContextGrant } from "./agentApi/grants.js";
+import { createAgentAuth } from "./agentApi/auth.js";
+import { readBrowserContextGrant, writeBrowserContextGrant } from "./agentApi/grants.js";
+import { type AgentConnection, createAgentHandlers } from "./agentApi/handlers.js";
+import { createReadAudit } from "./agentApi/readAudit.js";
 import type { DiscoveryResult } from "./capabilities/discovery.js";
 import { type CapabilityStore, createCapabilityStore } from "./capabilities/store.js";
+import { createCatalogCache } from "./catalog/cache.js";
 import { readConfig } from "./config.js";
 import { type CommandStore, createNativeCommands, type NativeCommandsOptions } from "./nativeCommands.js";
 import { buildCapabilities } from "./panelCapabilities.js";
@@ -61,17 +65,21 @@ const rev = (id: string) => store.getResource(id)!.revision;
 function setup(extra: Partial<NativeCommandsOptions> & { permitted?: boolean; storeOverride?: CommandStore } = {}) {
   const acks: PanelAck[] = [];
   const grants: boolean[] = [];
-  const counts = { changed: 0, refresh: 0, approve: 0 };
+  const counts = { changed: 0, refresh: 0, approve: 0, policy: 0 };
   const base = extra.storeOverride ?? store;
   const counted: CommandStore = {
     getResource: (id) => base.getResource(id),
+    originPolicy: (o) => base.originPolicy(o),
     approve: (c) => {
       counts.approve++;
       return base.approve(c);
     },
     decline: (c) => base.decline(c),
-    revoke: (id) => base.revoke(id),
-    setOriginPolicy: (c) => base.setOriginPolicy(c),
+    revoke: (id, expected) => base.revoke(id, expected),
+    setOriginPolicy: (c) => {
+      counts.policy++;
+      return base.setOriginPolicy(c);
+    },
     get approvalRevision() {
       return base.approvalRevision;
     },
@@ -80,6 +88,7 @@ function setup(extra: Partial<NativeCommandsOptions> & { permitted?: boolean; st
     store: counted,
     isPermitted: () => extra.permitted ?? true,
     writeBrowserContextGrant: (enabled) => writeBrowserContextGrant(home, enabled),
+    readBrowserContextGrant: () => readBrowserContextGrant(home),
     emitAck: (a) => void acks.push(a),
     onStoreChanged: () => void counts.changed++,
     onGrantChanged: (enabled) => void grants.push(enabled),
@@ -169,7 +178,7 @@ describe("native commands", () => {
     expect(body.offers).toEqual([]);
   });
 
-  it("revoke blocks after commit, acks, and later previews are unavailable", async () => {
+  it("revoke blocks after commit, acks, and later previews stay readable", async () => {
     const t = await ingest("guide v1");
     await store.approve({ ...t, expectedRevision: rev(t.resourceId) });
     let blockedAtAck: boolean | undefined;
@@ -178,7 +187,7 @@ describe("native commands", () => {
     expect(blockedAtAck).toBe(true);
     expect(store.resolveRead(t.resourceId)).toEqual({ ok: false, code: "revoked" });
     const previews = createPreviewStream({ store, clock });
-    expect(previews.serve({ type: "preview", commandId: "p1", ...t })).toMatchObject({ ok: false, code: "unavailable" });
+    expect(previews.serve({ type: "preview", commandId: "p1", ...t })).toMatchObject({ ok: true, chunk: { text: "guide v1" } });
     // Revoking an already-blocked resource acks ok whatever revision the app had.
     const again = setup();
     await again.commands.handle({ type: "revoke", commandId: "r2", resourceId: t.resourceId, expectedRevision: 0 });
@@ -199,19 +208,19 @@ describe("native commands", () => {
 
   it("enabling auto-acquire needs the risk acknowledgement and the origin's grant", async () => {
     const s = setup();
-    await s.commands.handle({ type: "set_auto_acquire", commandId: "s1", origin: ORIGIN, enabled: true, acknowledgeRisk: false });
+    await s.commands.handle({ type: "set_auto_acquire", commandId: "s1", origin: ORIGIN, enabled: true, expectedEnabled: false, acknowledgeRisk: false });
     expect(s.acks[0]).toMatchObject({ ok: false, code: "invalid" });
     expect(store.originPolicy(ORIGIN)).toBeUndefined();
 
     const denied = setup({ permitted: false });
-    await denied.commands.handle({ type: "set_auto_acquire", commandId: "s2", origin: ORIGIN, enabled: true, acknowledgeRisk: true });
+    await denied.commands.handle({ type: "set_auto_acquire", commandId: "s2", origin: ORIGIN, enabled: true, expectedEnabled: false, acknowledgeRisk: true });
     expect(denied.acks[0]).toMatchObject({ ok: false, code: "not_permitted" });
 
-    await s.commands.handle({ type: "set_auto_acquire", commandId: "s3", origin: ORIGIN, enabled: true, acknowledgeRisk: true });
+    await s.commands.handle({ type: "set_auto_acquire", commandId: "s3", origin: ORIGIN, enabled: true, expectedEnabled: false, acknowledgeRisk: true });
     expect(s.acks[1]).toMatchObject({ ok: true, revision: 0, approvalRevision: store.approvalRevision });
     expect(store.originPolicy(ORIGIN)).toMatchObject({ autoAcquire: true });
     // Turning it off needs neither.
-    await denied.commands.handle({ type: "set_auto_acquire", commandId: "s4", origin: ORIGIN, enabled: false, acknowledgeRisk: false });
+    await denied.commands.handle({ type: "set_auto_acquire", commandId: "s4", origin: ORIGIN, enabled: false, expectedEnabled: true, acknowledgeRisk: false });
     expect(denied.acks[1]).toMatchObject({ ok: true });
     expect(store.originPolicy(ORIGIN)).toBeUndefined();
   });
@@ -219,24 +228,176 @@ describe("native commands", () => {
   it("the browser-context grant rewrites config.json, keeping other keys, and is announced", async () => {
     writeFileSync(join(home, "config.json"), JSON.stringify({ chromeBundleId: "com.google.chrome.for.testing", destinations: ["docs.stripe.com"], future: { x: 1 } }));
     const s = setup();
-    await s.commands.handle({ type: "set_agent_browser_context", commandId: "g1", enabled: true });
+    await s.commands.handle({ type: "set_agent_browser_context", commandId: "g1", enabled: true, expectedEnabled: false });
     expect(s.acks[0]).toMatchObject({ ok: true, revision: 0 });
     expect(s.grants).toEqual([true]);
     const cfg = JSON.parse(readFileSync(join(home, "config.json"), "utf8"));
     expect(cfg).toEqual({ chromeBundleId: "com.google.chrome.for.testing", destinations: ["docs.stripe.com"], future: { x: 1 }, agentBrowserContext: true });
     expect(readConfig(home).agentBrowserContext).toBe(true);
-    await s.commands.handle({ type: "set_agent_browser_context", commandId: "g2", enabled: false });
+    await s.commands.handle({ type: "set_agent_browser_context", commandId: "g2", enabled: false, expectedEnabled: true });
     expect(readConfig(home).agentBrowserContext).toBe(false);
     expect(s.grants).toEqual([true, false]);
+  });
+
+  it("an enable the agent API does not read back acks invalid and announces what it reads", async () => {
+    // Another invalid key makes the agent API treat the whole file as not granted.
+    const before = `{"chromeBundleId": 7,\n  "future":{"x":1}}`;
+    writeFileSync(join(home, "config.json"), before);
+    const s = setup();
+    await s.commands.handle({ type: "set_agent_browser_context", commandId: "g1", enabled: true, expectedEnabled: false });
+    expect(s.acks[0]).toEqual({ type: "ack", commandId: "g1", ok: false, code: "invalid" });
+    // The previous file is back byte for byte, so repairing the broken key grants nothing.
+    expect(readFileSync(join(home, "config.json"), "utf8")).toBe(before);
+    expect(readBrowserContextGrant(home)).toBe(false);
+    expect(s.grants).toEqual([false]);
+    writeFileSync(join(home, "config.json"), JSON.stringify({ chromeBundleId: "com.google.Chrome", future: { x: 1 } }));
+    expect(readBrowserContextGrant(home)).toBe(false);
   });
 
   it("a malformed config.json is left alone and the grant command fails", async () => {
     writeFileSync(join(home, "config.json"), "[1,2]");
     const s = setup();
-    await s.commands.handle({ type: "set_agent_browser_context", commandId: "g1", enabled: true });
+    await s.commands.handle({ type: "set_agent_browser_context", commandId: "g1", enabled: true, expectedEnabled: false });
     expect(s.acks[0]).toMatchObject({ ok: false, code: "store_error" });
     expect(s.grants).toEqual([]);
     expect(readFileSync(join(home, "config.json"), "utf8")).toBe("[1,2]");
+  });
+
+  it("approve or decline of a version the resource does not record is not_found", async () => {
+    const t = await ingest("guide v1");
+    const s = setup();
+    const version = sha("never recorded");
+    await s.commands.handle(approve("a1", { resourceId: t.resourceId, version }, rev(t.resourceId)));
+    await s.commands.handle({ type: "decline", commandId: "d1", resourceId: t.resourceId, version, expectedRevision: rev(t.resourceId) });
+    expect(s.acks).toEqual([
+      { type: "ack", commandId: "a1", ok: false, code: "not_found", revision: rev(t.resourceId) },
+      { type: "ack", commandId: "d1", ok: false, code: "not_found", revision: rev(t.resourceId) },
+    ]);
+    expect(s.counts.approve).toBe(0);
+  });
+
+  it("revoke's revision is checked inside the store queue", async () => {
+    const t = await ingest("guide v1");
+    const seen = rev(t.resourceId);
+    // A decision queued ahead of the revoke moves the revision after the command's own check would have run.
+    const ahead = store.decline({ ...t, expectedRevision: seen });
+    const s = setup();
+    const revoking = s.commands.handle({ type: "revoke", commandId: "r1", resourceId: t.resourceId, expectedRevision: seen });
+    await Promise.all([ahead, revoking]);
+    expect(rev(t.resourceId)).toBe(seen + 1);
+    expect(s.acks).toEqual([{ type: "ack", commandId: "r1", ok: false, code: "stale_revision", revision: seen + 1 }]);
+    expect(store.getResource(t.resourceId)!.resource.blocked).toBe(false);
+  });
+
+  describe("consent toggles are compare-and-set", () => {
+    const autoAcquire = (commandId: string, enabled: boolean, expectedEnabled: boolean): MutationCommand => ({
+      type: "set_auto_acquire",
+      commandId,
+      origin: ORIGIN,
+      enabled,
+      expectedEnabled,
+      acknowledgeRisk: enabled,
+    });
+    const grant = (commandId: string, enabled: boolean, expectedEnabled: boolean): MutationCommand => ({
+      type: "set_agent_browser_context",
+      commandId,
+      enabled,
+      expectedEnabled,
+    });
+
+    it("auto-acquire: a mismatch is stale_revision and writes nothing; a match applies", async () => {
+      const s = setup();
+      await s.commands.handle(autoAcquire("s1", true, true));
+      expect(s.acks[0]).toEqual({ type: "ack", commandId: "s1", ok: false, code: "stale_revision" });
+      expect(s.counts.policy).toBe(0);
+      expect(store.originPolicy(ORIGIN)).toBeUndefined();
+      await s.commands.handle(autoAcquire("s2", true, false));
+      expect(s.acks[1]).toMatchObject({ ok: true });
+      expect(store.originPolicy(ORIGIN)).toMatchObject({ autoAcquire: true });
+      const before = store.approvalRevision;
+      await s.commands.handle(autoAcquire("s3", false, false));
+      expect(s.acks[2]).toEqual({ type: "ack", commandId: "s3", ok: false, code: "stale_revision" });
+      expect(store.originPolicy(ORIGIN)).toMatchObject({ autoAcquire: true });
+      expect(store.approvalRevision).toBe(before);
+    });
+
+    it("auto-acquire: the comparison also runs inside the store queue", async () => {
+      const s = setup();
+      // Two enables the user sent from the same off state: only the first applies.
+      await Promise.all([s.commands.handle(autoAcquire("s1", true, false)), s.commands.handle(autoAcquire("s2", true, false))]);
+      expect(s.acks.map((a) => (a.ok ? "ok" : a.code))).toEqual(["ok", "stale_revision"]);
+      // Both passed the early check; the store refused the second.
+      expect(s.counts.policy).toBe(2);
+      expect(store.originPolicy(ORIGIN)).toMatchObject({ autoAcquire: true });
+    });
+
+    it("auto-acquire: a retried toggle is stale once applied, even with the ID cache cleared", async () => {
+      const s = setup();
+      await s.commands.handle(autoAcquire("on1", true, false));
+      // A fresh command executor on the same store stands in for a core restart.
+      const retryOn = setup();
+      await retryOn.commands.handle(autoAcquire("on1", true, false));
+      expect(retryOn.acks[0]).toEqual({ type: "ack", commandId: "on1", ok: false, code: "stale_revision" });
+      await s.commands.handle(autoAcquire("off1", false, true));
+      expect(store.originPolicy(ORIGIN)).toBeUndefined();
+      const retryOff = setup();
+      await retryOff.commands.handle(autoAcquire("off1", false, true));
+      expect(retryOff.acks[0]).toEqual({ type: "ack", commandId: "off1", ok: false, code: "stale_revision" });
+      expect(retryOn.counts.policy + retryOff.counts.policy).toBe(0);
+    });
+
+    it("browser context: a mismatch is stale_revision and writes nothing; a match applies", async () => {
+      const s = setup();
+      await s.commands.handle(grant("g1", true, true));
+      expect(s.acks[0]).toEqual({ type: "ack", commandId: "g1", ok: false, code: "stale_revision" });
+      expect(() => readFileSync(join(home, "config.json"))).toThrow();
+      expect(s.grants).toEqual([]);
+      await s.commands.handle(grant("g2", true, false));
+      expect(s.acks[1]).toMatchObject({ ok: true });
+      expect(readBrowserContextGrant(home)).toBe(true);
+      await s.commands.handle(grant("g3", false, false));
+      expect(s.acks[2]).toMatchObject({ ok: false, code: "stale_revision" });
+      expect(readBrowserContextGrant(home)).toBe(true);
+    });
+
+    it("browser context: a retried toggle is stale once applied, even with the ID cache cleared", async () => {
+      const s = setup();
+      await s.commands.handle(grant("on1", true, false));
+      const retryOn = setup();
+      await retryOn.commands.handle(grant("on1", true, false));
+      expect(retryOn.acks[0]).toEqual({ type: "ack", commandId: "on1", ok: false, code: "stale_revision" });
+      await s.commands.handle(grant("off1", false, true));
+      const retryOff = setup();
+      await retryOff.commands.handle(grant("off1", false, true));
+      expect(retryOff.acks[0]).toEqual({ type: "ack", commandId: "off1", ok: false, code: "stale_revision" });
+      expect(readBrowserContextGrant(home)).toBe(false);
+      expect(retryOn.grants.concat(retryOff.grants)).toEqual([]);
+    });
+
+    it("browser context: an open agent connection sees the toggle on its next current_site", async () => {
+      const clockNow = { now: () => now };
+      const handlers = createAgentHandlers({
+        coreInstanceId: "core-test",
+        auth: createAgentAuth({ interactiveToken: "tok" }),
+        store,
+        view: () => ({ currentSite: { origin: ORIGIN, url: `${ORIGIN}/a`, visitEpoch: 1 }, paused: false }),
+        catalog: createCatalogCache({ clock: clockNow, dir: join(home, "cache", "catalog") }),
+        browserContextGranted: () => readBrowserContextGrant(home),
+        audit: createReadAudit(),
+        clock: clockNow,
+      });
+      let n = 0;
+      const call = (method: "hello" | "current_site", params: object, conn: AgentConnection) =>
+        handlers.call({ protocol: 1, requestId: `q${++n}`, method, params }, conn) as { status: string; error?: { code: string } };
+      const conn: AgentConnection = { id: "c1", principal: null };
+      expect(call("hello", { token: "tok" }, conn).status).toBe("ok");
+      expect(call("current_site", {}, conn)).toMatchObject({ status: "error", error: { code: "not_granted" } });
+      const s = setup();
+      await s.commands.handle(grant("g1", true, false));
+      expect(call("current_site", {}, conn)).toMatchObject({ status: "ok", result: { site: { origin: ORIGIN } } });
+      await s.commands.handle(grant("g2", false, true));
+      expect(call("current_site", {}, conn)).toMatchObject({ status: "error", error: { code: "not_granted" } });
+    });
   });
 
   it("refresh_capabilities refreshes and acks", async () => {

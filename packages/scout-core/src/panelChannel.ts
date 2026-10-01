@@ -10,6 +10,7 @@
 // toggles it. A `preview` command answers with a chunk, or with a failure ack.
 
 import type { PanelAck, PanelCommand, PanelState } from "@scout/contracts";
+import type { GrantWrite } from "./agentApi/grants.js";
 import type { ReadAuditEntry } from "./agentApi/readAudit.js";
 import type { StoreState } from "./capabilities/decisions.js";
 import type { ExportConflict } from "./capabilities/exports.js";
@@ -26,10 +27,12 @@ export type PanelStore = CommandStore & PreviewStore & { snapshot(): StoreState 
 
 export interface PanelChannelOptions {
   store: PanelStore;
+  /** This core start's id (the one agent.sock replies carry); stamped on every `capabilities` frame. */
+  coreInstanceId: string;
   /** The exporter's last recorded conflicts; empty when there is no exporter. */
   exportConflicts: () => readonly ExportConflict[];
   readBrowserContextGrant: () => boolean;
-  writeBrowserContextGrant: (enabled: boolean) => void;
+  writeBrowserContextGrant: (enabled: boolean) => GrantWrite;
   getAudit: () => readonly ReadAuditEntry[];
   isPermitted: (origin: string) => boolean;
   currentOrigin: () => string | null;
@@ -74,6 +77,7 @@ export function createPanelChannel(options: PanelChannelOptions): PanelChannel {
       }
       return { state: store.snapshot(), conflicts, isPermitted: options.isPermitted, currentOrigin: options.currentOrigin() };
     },
+    coreInstanceId: options.coreInstanceId,
     emit,
     diagnostics,
     ...(options.timers ? { timers: options.timers } : {}),
@@ -94,6 +98,7 @@ export function createPanelChannel(options: PanelChannelOptions): PanelChannel {
     store,
     isPermitted: options.isPermitted,
     writeBrowserContextGrant: options.writeBrowserContextGrant,
+    readBrowserContextGrant: options.readBrowserContextGrant,
     emitAck: emit,
     onStoreChanged: () => capabilities.changed(),
     onGrantChanged: (enabled) => emit({ type: "grant", agentBrowserContext: enabled }),
