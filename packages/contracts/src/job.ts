@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { AgentRequestIdSchema, CoreInstanceIdSchema } from "./agent.js";
-import { CandidateSchema } from "./catalog.js";
+import { CANDIDATE_ID_MAX_CHARS, CandidateSchema } from "./catalog.js";
 import { HttpsOriginSchema } from "./capability.js";
 
 // A background recommendation job: what the core hands a fresh agent run, what the model
@@ -42,8 +42,7 @@ export const JobRequestSchema = z
 
 // ---------- model-facing output ----------
 
-/** A catalog candidate ID ("c" + base36 index), bounded. */
-const CANDIDATE_ID_MAX_CHARS = 32;
+/** A catalog candidate ID ("c" + base36 index), bounded as in CandidateSchema. */
 const CANDIDATE_ID_PATTERN = "^c[0-9a-z]+$";
 
 export const AgentPickSchema = z.strictObject({

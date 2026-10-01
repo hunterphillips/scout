@@ -2,11 +2,13 @@ import { z } from "zod";
 
 export const CANDIDATE_TITLE_MAX = 160;
 export const CANDIDATE_DESCRIPTION_MAX = 400;
+/** Longest candidate ID. The resolver's IDs ("c" + base36 index, at most 500) are far shorter. */
+export const CANDIDATE_ID_MAX_CHARS = 32;
 
 /** One link a site publishes about itself. */
 export const CandidateSchema = z.object({
   /** "c" + base36 index, stable per catalog version. */
-  id: z.string().regex(/^c[0-9a-z]+$/),
+  id: z.string().max(CANDIDATE_ID_MAX_CHARS).regex(/^c[0-9a-z]+$/),
   /**
    * As published, after WHATWG URL normalization (resolved, dot segments removed, host
    * lowercased). Any fragment and tracking parameters are kept; only the dedupe key drops them.

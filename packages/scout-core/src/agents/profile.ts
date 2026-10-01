@@ -4,7 +4,7 @@
 //
 // - `claudePath` is absolute; jobs never look `claude` up on PATH. createDefaultAgentProfile
 //   resolves it once, from the PATH it is given, when the profile is first written.
-// - `model` is explicit and required. The initial value is Hunter's 2026-09-30 choice,
+// - `model` is explicit, required and a full model name (no alias). The initial value is Hunter's 2026-09-30 choice,
 //   `claude-sonnet-5-5`; he may edit it. A job never inherits a CLI, settings or gateway
 //   default model, and the init check stops a job whose CLI reports a different model.
 // - The fingerprint is a hash of the canonical profile content. Job requests and revisit
@@ -29,6 +29,13 @@ const PROFILE_MAX_BYTES = 16 * 1024;
 /** Only a plain alias or model name; never anything that parses as a flag. Same rule as the legacy service's MODEL_RE. */
 export const MODEL_RE = /^[A-Za-z0-9][A-Za-z0-9._\-[\]]{0,63}$/;
 
+/**
+ * A profile's model: the full `claude-<family>-<major>-<minor>` name, optionally dated
+ * (`-YYYYMMDD`). A bare alias such as `sonnet` is refused: the init event reports the
+ * resolved name, so a job launched with an alias would always fail its model check.
+ */
+export const PROFILE_MODEL_RE = /^claude-[a-z]+-\d{1,3}-\d{1,3}(?:-\d{8})?$/;
+
 export const AgentProfileSchema = z.strictObject({
   schemaVersion: z.literal(AGENT_PROFILE_SCHEMA_VERSION),
   adapter: z.literal("claude-code"),
@@ -36,7 +43,9 @@ export const AgentProfileSchema = z.strictObject({
     .string()
     .max(1024)
     .refine((p) => isAbsolute(p) && !p.includes("\0"), { message: "claudePath must be absolute" }),
-  model: z.string().regex(MODEL_RE),
+  model: z.string().regex(PROFILE_MODEL_RE, {
+    message: "model must be a full Claude model name such as claude-sonnet-5-5, not an alias such as sonnet",
+  }),
 });
 
 export type AgentProfile = z.infer<typeof AgentProfileSchema>;

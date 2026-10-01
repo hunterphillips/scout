@@ -48,6 +48,8 @@ describe("contract schemas", () => {
     const c = { id: "c1z", sourceUrl: "https://x/a", title: "A", labelQuality: "slug", provenance: "sitemap" };
     expect(CandidateSchema.parse(c)).toEqual(c);
     expect(CandidateSchema.safeParse({ ...c, id: "1" }).success).toBe(false);
+    expect(CandidateSchema.safeParse({ ...c, id: `c${"z".repeat(31)}` }).success).toBe(true);
+    expect(CandidateSchema.safeParse({ ...c, id: `c${"z".repeat(32)}` }).success).toBe(false);
     expect(CandidateSchema.safeParse({ ...c, title: "x".repeat(161) }).success).toBe(false);
     expect(CandidateSchema.safeParse({ ...c, description: "x".repeat(401) }).success).toBe(false);
   });

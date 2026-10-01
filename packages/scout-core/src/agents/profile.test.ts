@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   AgentProfileError,
   agentProfilePath,
+  AgentProfileSchema,
   createDefaultAgentProfile,
   DEFAULT_AGENT_MODEL,
   loadAgentProfile,
@@ -65,12 +66,23 @@ describe("agent profile", () => {
     ["no model (no silent inheritance)", { schemaVersion: 1, adapter: "claude-code", claudePath: "/opt/bin/claude" }],
     ["a null model", { ...profile, model: null }],
     ["a flag-shaped model", { ...profile, model: "--dangerously-skip-permissions" }],
+    ["a bare model alias", { ...profile, model: "sonnet" }],
+    ["a family alias", { ...profile, model: "claude-sonnet" }],
+    ["a model without a minor version", { ...profile, model: "claude-opus-5" }],
     ["tool references before P1.3 supports them", { ...profile, tools: [{ server: "notes" }] }],
     ["another schema version", { ...profile, schemaVersion: 2 }],
   ])("refuses %s", (_l, content) => {
     const h = home();
     writeFileSync(agentProfilePath(h), JSON.stringify(content), { mode: 0o600 });
     expect(codeOf(() => loadAgentProfile(h))).toBe("profile: invalid");
+  });
+
+  it("accepts full model names, dated or not, and explains a refused alias", () => {
+    for (const model of ["claude-sonnet-5-5", "claude-opus-4-1", "claude-sonnet-4-5-20250929"]) expect(AgentProfileSchema.safeParse({ ...profile, model }).success).toBe(true);
+    const refused = AgentProfileSchema.safeParse({ ...profile, model: "sonnet" });
+    expect(refused.success).toBe(false);
+    expect(refused.error?.issues.map((i) => i.path.join("."))).toEqual(["model"]);
+    expect(refused.error?.issues[0]?.message).toMatch(/alias/);
   });
 
   it("refuses a missing, malformed or group-readable file", () => {

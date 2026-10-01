@@ -103,9 +103,10 @@ describe("job contracts", () => {
     deadlineMs: 26_000, candidates: [{ id: "c0", title: "Billing", labelQuality: "published" }], maxPicks: 3,
   };
 
-  it("accepts a job request and rejects duplicate candidates or a long deadline", () => {
+  it("accepts a job request and rejects duplicate candidates, an over-long candidate id or a long deadline", () => {
     expect(JobRequestSchema.safeParse(job).success).toBe(true);
     expect(JobRequestSchema.safeParse({ ...job, candidates: [job.candidates[0], job.candidates[0]] }).success).toBe(false);
+    expect(JobRequestSchema.safeParse({ ...job, candidates: [{ ...job.candidates[0], id: `c${"0".repeat(32)}` }] }).success).toBe(false);
     expect(JobRequestSchema.safeParse({ ...job, deadlineMs: 30_001 }).success).toBe(false);
     expect(JobRequestSchema.safeParse({ ...job, origin: "https://x.com/path" }).success).toBe(false);
   });
