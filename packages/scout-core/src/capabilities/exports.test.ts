@@ -56,9 +56,8 @@ beforeEach(() => {
 afterEach(() => rmSync(root, { recursive: true, force: true }));
 
 async function setup(): Promise<{ store: CapabilityStore; exporter: SkillExporter }> {
-  let exporter!: SkillExporter;
-  const store = await createCapabilityStore({ scoutHome, clock, syncExports: () => exporter.sync(store.snapshot()) });
-  exporter = createSkillExporter({ scoutHome, skillsRoot });
+  const exporter = createSkillExporter({ scoutHome, skillsRoot });
+  const store = await createCapabilityStore({ scoutHome, clock, syncExports: (state) => exporter.sync(state) });
   return { store, exporter };
 }
 
@@ -202,6 +201,22 @@ describe("skill export", () => {
     expect(readdirSync(outside).sort()).toEqual(["SKILL.md", "keep.txt"]);
   });
 
+  it("never sweeps temp files through a wrapper directory swapped for a symlink", async () => {
+    const { store, exporter } = await setup();
+    const s = await approvedSkill(store, "pay", "v1");
+    await exporter.sync(store.snapshot());
+    const dir = join(skillsRoot, s.name);
+    rmSync(dir, { recursive: true });
+    const temp = ".scout-tmp-SKILL.md.0123456789ab";
+    writeFileSync(join(outside, temp), "someone else's file", { mode: 0o600 });
+    symlinkSync(outside, dir);
+
+    expect((await exporter.sync(store.snapshot())).conflicts.map((c) => c.code)).toEqual(["left_symlink"]);
+    await store.revoke(s.id).then((r) => r.cleanup);
+    expect(exporter.manifest().conflicts.map((c) => c.code)).toEqual(["left_symlink"]);
+    expect(readdirSync(outside).sort()).toEqual([temp, "keep.txt"].sort());
+  });
+
   it("refuses a wrapper file that is a symlink", async () => {
     const { store, exporter } = await setup();
     const s = await approvedSkill(store, "pay", "v1");
@@ -257,17 +272,16 @@ describe("skill export", () => {
   });
 
   it("syncs exports after a user approval and after an auto-approving ingest; a failed sync keeps the approval", async () => {
-    let exporter!: SkillExporter;
+    const exporter = createSkillExporter({ scoutHome, skillsRoot });
     let failNext = false;
     const store = await createCapabilityStore({
       scoutHome,
       clock,
-      syncExports: async () => {
+      syncExports: async (state) => {
         if (failNext) throw new Error("sync failed");
-        return exporter.sync(store.snapshot());
+        return exporter.sync(state);
       },
     });
-    exporter = createSkillExporter({ scoutHome, skillsRoot });
 
     const report = await store.ingest(skillDiscovery([{ name: "pay", text: "v1" }]), { chromePermitted: false });
     const { resourceId, version } = report.results[0]!;
@@ -286,6 +300,43 @@ describe("skill export", () => {
     expect(await again.cleanup).toEqual({ ok: false });
     expect(store.getApprovedDefault(again.results[0]!.resourceId)?.hash).toBe(again.results[0]!.version);
     await store.close();
+  });
+
+  it("hands the sync the committed state and close() waits for a sync already running", async () => {
+    const exporter = createSkillExporter({ scoutHome, skillsRoot });
+    const seen: number[] = [];
+    let release!: () => void;
+    let started!: () => void;
+    const running = new Promise<void>((r) => (started = r));
+    const gate = new Promise<void>((r) => (release = r));
+    let gated = false;
+    const store = await createCapabilityStore({
+      scoutHome,
+      clock,
+      syncExports: async (state) => {
+        seen.push(state.approvalRevision);
+        if (gated) {
+          started();
+          await gate;
+        }
+        return exporter.sync(state);
+      },
+    });
+    await store.startupExportSync;
+    gated = true;
+    const s = await approvedSkill(store, "pay", "v1");
+    await running;
+    expect(seen.at(-1)).toBe(store.approvalRevision);
+
+    let closed = false;
+    const closing = store.close().then(() => (closed = true));
+    await new Promise((r) => setTimeout(r, 20));
+    expect(closed).toBe(false);
+    expect(existsSync(join(scoutHome, "capabilities", "store.lock"))).toBe(true);
+    release();
+    await closing;
+    expect(existsSync(join(scoutHome, "capabilities", "store.lock"))).toBe(false);
+    expect(existsSync(join(skillsRoot, s.name, "SKILL.md"))).toBe(true);
   });
 });
 

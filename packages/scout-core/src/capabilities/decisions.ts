@@ -9,8 +9,9 @@
 //   {"kind", "sourceUrl", "contentType"?, "skill"?: {"name", "description"?, "digest"}}
 // The descriptor is what the preview shows beside the text (a skill's index name and
 // description end up in its exported wrapper), so changing any of it is a new version.
-// `contentType` enters it normalized (normalizeContentType): parameters dropped, type/subtype
-// lowercased, so a charset or case flip by the publisher is not a new version. The stored
+// `contentType` enters it normalized (normalizeContentType): parameters dropped, whitespace
+// around the "/" removed, type/subtype lowercased, so a charset or case flip by the publisher is
+// not a new version; an empty value (or parameters with no type) counts as absent. The stored
 // `meta.contentType` keeps the value as served.
 //
 // Approval is per resource revision: every change to a resource (a new version, any decision)
@@ -113,15 +114,20 @@ export function stateInvariantError(state: StoreState): string | null {
   return null;
 }
 
-/** A media type as the content hash sees it: `Text/Markdown; charset=UTF-8` -> `text/markdown`. */
-export function normalizeContentType(contentType: string): string {
-  return contentType.split(";")[0]!.trim().toLowerCase();
+/**
+ * A media type as the content hash sees it: `Text / Markdown; charset=UTF-8` -> `text/markdown`.
+ * Empty, whitespace-only, or parameters with no type (`;charset=x`) -> undefined (absent).
+ */
+export function normalizeContentType(contentType: string): string | undefined {
+  const type = contentType.split(";")[0]!.trim().replace(/\s*\/\s*/g, "/").toLowerCase();
+  return type === "" ? undefined : type;
 }
 
 /** The content hash defined at the top of this file. */
 export function contentHash(kind: ResourceKind, sourceUrl: string, meta: Omit<VersionMeta, "lastSeenAt">, bytes: Uint8Array): string {
   const descriptor: Record<string, unknown> = { kind, sourceUrl };
-  if (meta.contentType !== undefined) descriptor.contentType = normalizeContentType(meta.contentType);
+  const contentType = meta.contentType === undefined ? undefined : normalizeContentType(meta.contentType);
+  if (contentType !== undefined) descriptor.contentType = contentType;
   if (meta.skill !== undefined) {
     const skill: Record<string, string> = { name: meta.skill.name };
     if (meta.skill.description !== undefined) skill.description = meta.skill.description;

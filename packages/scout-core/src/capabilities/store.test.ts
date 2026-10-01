@@ -6,7 +6,7 @@ import { join } from "node:path";
 import type { ResourceKind } from "@scout/contracts";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { DiagnosticFields, Diagnostics } from "../diagnostics.js";
-import { contentHash, DecisionError, StaleApprovalError } from "./decisions.js";
+import { contentHash, DecisionError, normalizeContentType, StaleApprovalError } from "./decisions.js";
 import type { DiscoveryResult, ProbeItem } from "./discovery.js";
 import { UNUSED_EXPIRY_MS } from "./garbageCollection.js";
 import { type CapabilityStore, type CapabilityStoreOptions, createCapabilityStore, listBlobFiles, StoreCorruptError, StoreReadOnlyError } from "./store.js";
@@ -132,6 +132,20 @@ describe("ingest and exact-preview approval", () => {
     expect(b.version).toBe(a.version);
     expect(b.outcome).toBe("unchanged");
     expect(store.getResource(a.id)!.resource.versions).toHaveLength(1);
+    // Whitespace around the slash is not a new version either.
+    expect((await ingestOne(store, "# Doc\n", { contentType: " text / markdown " })).outcome).toBe("unchanged");
+  });
+
+  it("treats an empty or type-less content type as absent", async () => {
+    const meta = (contentType?: string) => (contentType === undefined ? {} : { contentType });
+    const url = `${ORIGIN}/llms.txt`;
+    const absent = contentHash("llms_txt", url, meta(), Buffer.from("x"));
+    for (const ct of ["", "   ", ";charset=x", " ; charset=utf-8"]) {
+      expect(contentHash("llms_txt", url, meta(ct), Buffer.from("x"))).toBe(absent);
+    }
+    expect(contentHash("llms_txt", url, meta("text/plain"), Buffer.from("x"))).not.toBe(absent);
+    expect(normalizeContentType(" Text /\tMarkdown ; q=1")).toBe("text/markdown");
+    expect(normalizeContentType(";charset=x")).toBeUndefined();
   });
 
   it("skips found items whose bytes do not match their hash or that come from another origin", async () => {
@@ -242,6 +256,31 @@ describe("version retention", () => {
     store.releasePins("req");
     expect((await store.collectGarbage()).versions).toBe(1);
     expect(store.getVersion(v1.id, v1.version)).toBeUndefined();
+    expect(store.approvalRevision).toBe(before + 1);
+    expect(store.getApprovedDefault(v1.id)?.hash).toBe(v2.version);
+  });
+
+  it("bumps approvalRevision when an ingest trims a superseded version", async () => {
+    const store = await open();
+    const v1 = await ingestOne(store, "v1");
+    await approve(store, v1.id, v1.version);
+    now += 1000;
+    const v2 = await ingestOne(store, "v2");
+    await approve(store, v1.id, v2.version);
+    expect(store.getVersion(v1.id, v1.version)?.state).toBe("superseded");
+
+    // Three pending versions fit beside v1 and v2; the fourth pushes the oldest, v1, out.
+    const before = store.approvalRevision;
+    for (let i = 1; i <= 3; i++) {
+      now += 1000;
+      await ingestOne(store, `p${i}`);
+    }
+    expect(store.approvalRevision).toBe(before);
+    expect(store.getVersion(v1.id, v1.version)?.state).toBe("superseded");
+    now += 1000;
+    await ingestOne(store, "p4");
+    expect(store.getVersion(v1.id, v1.version)).toBeUndefined();
+    expect(store.resolveRead(v1.id, v1.version)).toEqual({ ok: false, code: "not_found" });
     expect(store.approvalRevision).toBe(before + 1);
     expect(store.getApprovedDefault(v1.id)?.hash).toBe(v2.version);
   });
@@ -379,11 +418,15 @@ describe("serialized mutations", () => {
     const [revoked, approved] = await Promise.allSettled([store.revoke(v1.id), approve(store, v1.id, v2.version)]);
     expect(revoked.status).toBe("fulfilled");
     expect(approved.status).toBe("rejected");
+    const reason = (approved as PromiseRejectedResult).reason;
+    expect(reason).toBeInstanceOf(StaleApprovalError);
+    expect(reason.code).toBe("revision");
     expect(store.resolveRead(v1.id)).toEqual({ ok: false, code: "revoked" });
     expect(store.resolveRead(v1.id, v2.version)).toEqual({ ok: false, code: "revoked" });
   });
 
-  it("a failed store.json write leaves the file and the reads unchanged", async () => {
+  // Root ignores directory permissions, so the write would not fail.
+  it.skipIf(process.getuid?.() === 0)("a failed store.json write leaves the file and the reads unchanged", async () => {
     const store = await open();
     const v1 = await ingestOne(store, "v1");
     const capDir = join(home, "capabilities");
@@ -400,7 +443,6 @@ describe("serialized mutations", () => {
     // The store is still usable once the directory is writable again.
     expect((await approve(store, v1.id, v1.version)).changed).toBe(true);
   });
-
 
   it("applies concurrent commands one at a time: of two approvals at one revision exactly one wins", async () => {
     const store = await open();
@@ -478,6 +520,19 @@ describe("corruption is an explicit error", () => {
 });
 
 describe("revocation hook failure", () => {
+  it("times out a hung onRevoked hook, still blocks reads, and runs the mutation queued behind it", async () => {
+    const store = await open({ onRevoked: () => new Promise(() => {}), limits: { onRevokedTimeoutMs: 20 } });
+    const v1 = await ingestOne(store, "v1");
+    await approve(store, v1.id, v1.version);
+    const [result, queued] = await Promise.all([store.revoke(v1.id), store.ingest(discovery([{ text: "v2" }]), { chromePermitted: false })]);
+    expect(result.hookFailed).toBe(true);
+    expect(result.hookError).toBe("on_revoked_timeout");
+    expect(store.resolveRead(v1.id)).toEqual({ ok: false, code: "revoked" });
+    expect(queued.results[0]!.outcome).toBe("blocked");
+    expect(events.some((e) => e.name === "capability_revoke_hook_failed" && e.fields.code === "on_revoked_timeout")).toBe(true);
+    await store.close();
+  });
+
   it("reports a failed onRevoked hook on the result and still blocks reads", async () => {
     const store = await open({
       onRevoked: () => {

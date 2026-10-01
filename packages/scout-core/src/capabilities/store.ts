@@ -22,9 +22,9 @@
 // the same deferred export sync; its failure never undoes the approval.
 //
 // One writer process at a time: opening takes `capabilities/store.lock` (storeLock.ts) and
-// `close()` releases it after the queued mutations have settled; a mutation that reaches
-// its commit after `close()` is refused, and an export sync scheduled to start after it is
-// skipped (resolves `ok: false`). A `readOnly` open takes no lock and refuses every
+// `close()` releases it after the queued mutations and in-flight export syncs have settled; a
+// mutation that reaches its commit after `close()` is refused, and an export sync scheduled to
+// start after it is skipped (resolves `ok: false`). A `readOnly` open takes no lock and refuses every
 // mutation; it reads a consistent store.json because writers replace it by rename.
 //
 // Opening a writable store also repairs what a crash can leave: it deletes blob files no
@@ -47,7 +47,7 @@ import { PrivateFileError, readPrivateFile } from "../agents/privateFile.js";
 import type { Clock } from "../clock.js";
 import type { Diagnostics } from "../diagnostics.js";
 import { checkPrivateDir, fsErrorCode } from "../privateCacheFile.js";
-import { fsyncDir, tempNamePattern, writeFileAtomic } from "./atomicWrite.js";
+import { fsyncDir, sweepTempFiles, tempNamePattern, writeFileAtomic } from "./atomicWrite.js";
 import {
   applyApprove,
   applyDecline,
@@ -174,14 +174,22 @@ export interface CapabilityStoreOptions {
   scoutHome: string;
   clock: Clock;
   diagnostics?: Diagnostics;
-  /** Called after a revocation is committed and before `revoke()` resolves. Errors are recorded, not rethrown. */
+  /**
+   * Called after a revocation is committed and before `revoke()` resolves. Errors and timeouts
+   * are recorded on the result, not rethrown. Runs inside the mutation queue: it must not await
+   * a store mutation or `close()`, which would wait on the revoke itself (until the timeout).
+   */
   onRevoked?: (resourceId: string, versions: readonly string[]) => void | Promise<void>;
-  /** Export sync after a revocation, an approval, or an auto-approving ingest (normally the skill exporter's sync). */
-  syncExports?: () => Promise<unknown>;
+  /**
+   * Export sync after a revocation, an approval, an auto-approving ingest, and a writable open
+   * (normally `exporter.sync`). Receives a copy of the committed state at the moment the sync
+   * starts (after the triggering mutation answered), so it never needs the store object.
+   */
+  syncExports?: (state: StoreState) => Promise<unknown>;
   /** Open without the writer lock; every mutation throws StoreReadOnlyError. */
   readOnly?: boolean;
-  /** Test hooks for the caps. */
-  limits?: { maxResources?: number; maxBlobBytes?: number };
+  /** Test hooks for the caps and the `onRevoked` bound (default ON_REVOKED_TIMEOUT_MS). */
+  limits?: { maxResources?: number; maxBlobBytes?: number; onRevokedTimeoutMs?: number };
 }
 
 export interface CapabilityStore {
@@ -189,7 +197,8 @@ export interface CapabilityStore {
   readonly readOnly: boolean;
   /**
    * Refuse new mutations, wait for queued ones to settle (any that reaches its commit is
-   * refused), then release the writer lock. Idempotent.
+   * refused), wait for export syncs already running (unstarted ones are skipped), then release
+   * the writer lock. Idempotent.
    */
   close(): Promise<void>;
   /** The export sync a writable open started (resolves `ok` at once when read-only or without `syncExports`). */
@@ -216,6 +225,13 @@ export interface CapabilityStore {
   ingest(discovery: DiscoveryResult, context: { chromePermitted: boolean }): Promise<IngestReport>;
   approve(command: DecisionCommand): Promise<ApproveResult>;
   decline(command: DecisionCommand): Promise<DecisionResult>;
+  /**
+   * Block every version of the resource; see the file header for the order of effects. When the
+   * resource is already blocked and nothing changes (`changed: false`), nothing is committed but `onRevoked` still
+   * runs (with `revokedVersions: []`) and export cleanup is still scheduled, so re-revoking
+   * retries a wrapper removal that failed before. `onRevoked` runs inside the mutation queue:
+   * it must not await a store mutation or `close()`.
+   */
   revoke(resourceId: string): Promise<RevokeResult>;
   setOriginPolicy(command: PolicyCommand): Promise<{ changed: boolean; approvalRevision: number }>;
   collectGarbage(): Promise<GcReport>;
@@ -225,22 +241,6 @@ const BLOB_NAME_RE = /^[0-9a-f]{64}\.txt$/;
 /** writeFileAtomic leftovers: store.json and exports.json temps beside them, blob temps in blobs/. */
 const CAP_TEMP_RE = tempNamePattern("store\\.json|exports\\.json");
 const BLOB_TEMP_RE = tempNamePattern("[0-9a-f]{64}\\.txt");
-
-/** Unlink the entries of `dir` whose names `match` accepts. Returns how many were removed. */
-function sweep(dir: string, match: (name: string) => boolean): number {
-  let removed = 0;
-  for (const name of readdirSync(dir)) {
-    if (!match(name)) continue;
-    try {
-      unlinkSync(join(dir, name));
-      removed++;
-    } catch {
-      // Gone already.
-    }
-  }
-  if (removed > 0) fsyncDir(dir);
-  return removed;
-}
 
 function ensurePrivateDir(dir: string): void {
   try {
@@ -310,8 +310,8 @@ export async function createCapabilityStore(options: CapabilityStoreOptions): Pr
 
   if (!readOnly) {
     const referenced = referencedBlobs(state);
-    const orphanBlobs = sweep(blobDir, (name) => BLOB_NAME_RE.test(name) && !referenced.has(name.slice(0, 64)));
-    const tempFiles = sweep(dir, (name) => CAP_TEMP_RE.test(name)) + sweep(blobDir, (name) => BLOB_TEMP_RE.test(name));
+    const orphanBlobs = sweepTempFiles(blobDir, (name) => BLOB_NAME_RE.test(name) && !referenced.has(name.slice(0, 64)));
+    const tempFiles = sweepTempFiles(dir, CAP_TEMP_RE) + sweepTempFiles(blobDir, BLOB_TEMP_RE);
     if (orphanBlobs > 0 || tempFiles > 0) diagnostics?.event("capability_gc", { orphanBlobs, tempFiles });
   }
 
@@ -385,21 +385,29 @@ export async function createCapabilityStore(options: CapabilityStoreOptions): Pr
 
   const resourceRevision = (id: string) => findResource(state, id)?.revision ?? 0;
 
+  /** Export syncs scheduled or running; close() waits for them before releasing the lock. */
+  const pendingSyncs = new Set<ExportSync>();
+
   /** Start the export sync after the current mutation has answered. Never rejects. */
   function scheduleExportSync(reason: string, resourceId?: string): ExportSync {
-    return new Promise((resolve) => {
+    const sync: ExportSync = new Promise((resolve) => {
       setImmediate(() => {
         if (!options.syncExports) return resolve({ ok: true });
         if (closed) return resolve({ ok: false });
-        options.syncExports().then(
-          () => resolve({ ok: true }),
-          () => {
-            diagnostics?.event("capability_export_failed", { reason, ...(resourceId ? { resource: shortId(resourceId) } : {}) });
-            resolve({ ok: false });
-          },
-        );
+        Promise.resolve()
+          .then(() => options.syncExports!(structuredClone(state)))
+          .then(
+            () => resolve({ ok: true }),
+            () => {
+              diagnostics?.event("capability_export_failed", { reason, ...(resourceId ? { resource: shortId(resourceId) } : {}) });
+              resolve({ ok: false });
+            },
+          );
       });
     });
+    pendingSyncs.add(sync);
+    void sync.then(() => pendingSyncs.delete(sync));
+    return sync;
   }
   const shortId = (id: string) => id.slice(4, 20);
 
@@ -408,7 +416,7 @@ export async function createCapabilityStore(options: CapabilityStoreOptions): Pr
     if (!options.onRevoked) return "ok";
     let timer: NodeJS.Timeout | undefined;
     const timeout = new Promise<"on_revoked_timeout">((resolve) => {
-      timer = setTimeout(() => resolve("on_revoked_timeout"), ON_REVOKED_TIMEOUT_MS);
+      timer = setTimeout(() => resolve("on_revoked_timeout"), options.limits?.onRevokedTimeoutMs ?? ON_REVOKED_TIMEOUT_MS);
     });
     try {
       const hook = Promise.resolve()
@@ -475,6 +483,8 @@ export async function createCapabilityStore(options: CapabilityStoreOptions): Pr
     async close() {
       closed = true;
       await tail;
+      // A sync already running finishes; one scheduled but not started resolves `ok: false`.
+      await Promise.all([...pendingSyncs]);
       lock?.release();
     },
     startupExportSync,

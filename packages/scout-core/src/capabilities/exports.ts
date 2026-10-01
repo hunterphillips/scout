@@ -32,7 +32,7 @@ import { z } from "zod";
 import { PrivateFileError, readPrivateFile } from "../agents/privateFile.js";
 import type { Diagnostics } from "../diagnostics.js";
 import { checkPrivateDir } from "../privateCacheFile.js";
-import { fsyncDir, tempNamePattern, writeFileAtomic } from "./atomicWrite.js";
+import { fsyncDir, sweepTempFiles, tempNamePattern, writeFileAtomic } from "./atomicWrite.js";
 import type { StoreState } from "./decisions.js";
 import { ownershipHash, wrapperName } from "./identity.js";
 import { DEFAULT_SERVER_NAME, renderSkillWrapper, WRAPPER_FILE } from "./wrapper.js";
@@ -173,27 +173,18 @@ type Inspection =
 
 const WRAPPER_TEMP_RE = tempNamePattern(WRAPPER_FILE.replaceAll(".", "\\."));
 
-/** Delete writeFileAtomic leftovers inside a manifest-owned wrapper directory; never inside a symlink. */
+/**
+ * Delete writeFileAtomic leftovers inside a manifest-owned wrapper directory; never inside a
+ * symlink, and nothing if the directory was swapped (different inode) after it was listed.
+ */
 function sweepWrapperTemps(dir: string): void {
-  let names: string[];
   try {
     const st = lstatSync(dir);
     if (st.isSymbolicLink() || !st.isDirectory()) return;
-    names = readdirSync(dir);
+    sweepTempFiles(dir, WRAPPER_TEMP_RE, { beforeUnlink: () => sameDir(dir, st.ino, st.dev) });
   } catch {
-    return; // Absent or unreadable: the inspection reports it.
+    // Absent or unreadable: the inspection reports it.
   }
-  let removed = 0;
-  for (const name of names) {
-    if (!WRAPPER_TEMP_RE.test(name)) continue;
-    try {
-      unlinkSync(join(dir, name));
-      removed++;
-    } catch {
-      // Gone, or not a file: the inspection reports what is left.
-    }
-  }
-  if (removed > 0) fsyncDir(dir);
 }
 
 /** Port of agent-check's removeOwnedSkill checks, generalized to a file list. */

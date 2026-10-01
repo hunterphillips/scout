@@ -6,7 +6,7 @@
 // rather than following it, so a planted link never redirects the write.
 
 import { randomBytes } from "node:crypto";
-import { closeSync, constants as fsc, fsyncSync, openSync, renameSync, unlinkSync, writeSync } from "node:fs";
+import { closeSync, constants as fsc, fsyncSync, openSync, readdirSync, renameSync, unlinkSync, writeSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 
 /** Temp files start with this, so a reader never mistakes one for a target. */
@@ -15,6 +15,30 @@ export const TEMP_PREFIX = ".scout-tmp-";
 /** The temp names writeFileAtomic creates for targets matching `target` (a regex source), for crash-leftover sweeps. */
 export function tempNamePattern(target: string): RegExp {
   return new RegExp(`^${TEMP_PREFIX.replaceAll(".", "\\.")}(?:${target})\\.[0-9a-f]{12}$`);
+}
+
+/**
+ * Unlink the entries of `dir` that `match` accepts (a regex, e.g. from tempNamePattern, or a
+ * predicate) and fsync `dir` if anything went. `beforeUnlink` runs once, after the listing and
+ * before the first unlink; returning false skips every unlink. Throws only if `dir` cannot be
+ * listed. Returns how many entries were removed.
+ */
+export function sweepTempFiles(dir: string, match: RegExp | ((name: string) => boolean), options: { beforeUnlink?: () => boolean } = {}): number {
+  const accept = typeof match === "function" ? match : (name: string) => match.test(name);
+  const names = readdirSync(dir).filter(accept);
+  if (names.length === 0) return 0;
+  if (options.beforeUnlink && !options.beforeUnlink()) return 0;
+  let removed = 0;
+  for (const name of names) {
+    try {
+      unlinkSync(join(dir, name));
+      removed++;
+    } catch {
+      // Gone already, or not a file.
+    }
+  }
+  if (removed > 0) fsyncDir(dir);
+  return removed;
 }
 
 /** Fsync a directory so a rename or unlink in it is durable. Best effort: some file systems refuse. */
