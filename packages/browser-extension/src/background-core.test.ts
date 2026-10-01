@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { CONTENT_SCRIPT_FILE, CONTENT_SCRIPT_ID, createBackground, GITHUB_PATTERN, HOST_NAME } from "./background-core.js";
 import { FOCUS_DEBOUNCE_MS } from "./focus-observer.js";
 import type { StatusSnapshot } from "./messages.js";
+import { BROAD_GRANT_TEXT, statusRows } from "./popup-view.js";
 import { activate, asChrome, DISABLED_POLICY, fakeClock, makeChrome, popupSender, sender } from "./test-fakes.js";
 import { approve, dropPort, lastPort, observations, pageText, setup } from "./test-harness.js";
 
@@ -130,7 +131,108 @@ describe("manifest-level wiring", () => {
   });
 });
 
+describe("granted list: the one source of truth", () => {
+  it("https://*/* alone is no GitHub grant: approval denied with 'permission', no content script, githubCapture false everywhere", async () => {
+    const { f, bg } = await setup({ granted: ["https://*/*"], local: { githubCapture: true } });
+    expect(await f.permissions.contains({ origins: [GITHUB_PATTERN] })).toBe(true); // what Chrome itself would answer
+    expect(await approve(bg, f)).toEqual({ approved: false, reason: "permission" });
+    expect(f._.registered).toEqual([]);
+    expect(observations(f, "permissions").at(-1)).toMatchObject({ granted: [], githubCapture: false });
+    const s = bg.snapshot();
+    expect(s).toMatchObject({ granted: [], githubCapture: false, broadGrantIgnored: true });
+    expect(f._.store["githubCapture"]).toBe(false); // toggle forced off
+    expect(statusRows(s)).toContainEqual(["Site access", BROAD_GRANT_TEXT]);
+    const after = (await bg.handleMessage({ type: "popup-github-capture", enabled: true }, popupSender())) as StatusSnapshot;
+    expect(after.githubCapture).toBe(false);
+    expect(f._.registered).toEqual([]);
+  });
+
+  it("losing the exact GitHub grant to a broad one unregisters the script; no all-sites row without a broad grant", async () => {
+    const { f, clock, bg } = await setup();
+    expect(f._.registered).toHaveLength(1);
+    expect(statusRows(bg.snapshot()).map(([k]) => k)).not.toContain("Site access");
+    f._.state.granted = ["https://*/*"];
+    await Promise.all(f.permissions.onRemoved.emit({ origins: [GITHUB_PATTERN] } as never));
+    await clock.advance(0);
+    expect(f._.registered).toEqual([]);
+    expect(bg.snapshot()).toMatchObject({ granted: [], githubCapture: false, broadGrantIgnored: true });
+    expect(observations(f, "permissions").at(-1)).toMatchObject({ granted: [], githubCapture: false });
+  });
+
+  it("a snapshot sent while a revoke's getAll is pending omits the revoked origin, and so does the focus after it", async () => {
+    const { f, clock } = await setup({ granted: [GITHUB_PATTERN, EXAMPLE], local: { githubCapture: true } });
+    activate(f, 12);
+    dropPort(f);
+    f._.state.host = "silent";
+    f._.state.autoEnable = false;
+    await clock.advance(1000); // reconnect; the new port waits for its policy
+    expect(f._.ports).toHaveLength(2);
+    const orig = f.permissions.getAll;
+    let release!: () => void;
+    const held = new Promise<void>((r) => (release = r));
+    f.permissions.getAll = async () => {
+      await held;
+      return orig();
+    };
+    f._.state.granted = [GITHUB_PATTERN];
+    f._.state.activeTabGrant = 12; // the popup's Remove click: Chrome still shows this tab's URL
+    const removed = Promise.all(f.permissions.onRemoved.emit({ origins: [EXAMPLE] } as never));
+    lastPort(f).onMessage.emit({ ...DISABLED_POLICY });
+    await clock.advance(0);
+    expect(kinds(lastPort(f).posted)).toEqual(["permissions", "focus"]);
+    const [perm, focus] = lastPort(f).posted;
+    expect(perm).toMatchObject({ granted: [GITHUB_PATTERN] });
+    expect(focus).toMatchObject({ kind: "focus", tabId: 12 });
+    for (const k of ["url", "title"]) expect(k in focus!).toBe(false);
+    release();
+    await removed;
+    await clock.advance(0);
+    expect(observations(f, "permissions").at(-1)).toMatchObject({ granted: [GITHUB_PATTERN] });
+    for (const o of observations(f, "focus").slice(-1)) expect("url" in o).toBe(false);
+  });
+
+  it("a failed getAll means no sites: empty snapshot, capture off, script unregistered", async () => {
+    const { f, clock, bg } = await setup({ granted: [GITHUB_PATTERN, STRIPE], local: { githubCapture: true } });
+    expect(f._.registered).toHaveLength(1);
+    f.permissions.getAll = async () => {
+      throw new Error("permissions unavailable");
+    };
+    await Promise.all(f.permissions.onAdded.emit({ origins: [STRIPE] } as never));
+    await clock.advance(0);
+    expect(observations(f, "permissions").at(-1)).toMatchObject({ granted: [], githubCapture: false });
+    expect(bg.snapshot()).toMatchObject({ granted: [], githubCapture: false });
+    expect(f._.registered).toEqual([]);
+    expect(await approve(bg, f)).toEqual({ approved: false, reason: "permission" });
+  });
+
+  it("the toggle persists before it changes: a failed write leaves it as it was", async () => {
+    const { f, bg } = await setup({ granted: [GITHUB_PATTERN] });
+    f._.state.storageSetFails = true;
+    await expect(bg.handleMessage({ type: "popup-github-capture", enabled: true }, popupSender())).rejects.toThrow();
+    expect(bg.snapshot().githubCapture).toBe(false);
+    expect(f._.registered).toEqual([]);
+    expect(await approve(bg, f)).toEqual({ approved: false, reason: "permission" });
+    f._.state.storageSetFails = false;
+    await bg.handleMessage({ type: "popup-github-capture", enabled: true }, popupSender());
+    expect(f._.store["githubCapture"]).toBe(true);
+    expect(bg.snapshot().githubCapture).toBe(true);
+    f._.state.storageSetFails = true;
+    await expect(bg.handleMessage({ type: "popup-github-capture", enabled: false }, popupSender())).rejects.toThrow();
+    expect(f._.store["githubCapture"]).toBe(true);
+    expect(bg.snapshot().githubCapture).toBe(true);
+  });
+});
+
 describe("capture policy", () => {
+  it("a first policy that already enables: the snapshot goes first, then the active issue tab is asked to refresh", async () => {
+    const { f, clock, bg } = await setup({ granted: [GITHUB_PATTERN], host: "silent", local: { githubCapture: true }, autoEnable: false });
+    lastPort(f).onMessage.emit(ENABLED(1));
+    await clock.advance(0);
+    expect(kinds(lastPort(f).posted)).toEqual(["permissions", "focus"]);
+    expect(f._.tabMessages.filter((m) => (m.msg as { type: string }).type === "refresh")).toEqual([{ tabId: 10, msg: { type: "refresh" } }]);
+    expect(await approve(bg, f)).toEqual({ approved: true });
+  });
+
   it("denies approval with 'policy' until the core enables capture", async () => {
     const { f, clock, bg } = await setup({ granted: [GITHUB_PATTERN], local: { githubCapture: true }, autoEnable: false });
     expect(bg.snapshot().policy).toEqual({ revision: 1, captureEnabled: false, paused: false });
@@ -184,10 +286,10 @@ describe("capture policy", () => {
 
   it("a policy that lands during approval's awaits cancels it", async () => {
     const { f, bg } = await setup();
-    const orig = f.permissions.contains;
-    f.permissions.contains = async (a) => {
+    const orig = f.windows.get;
+    f.windows.get = async (id) => {
       lastPort(f).onMessage.emit({ type: "capture_policy", revision: 3, paused: true, captureEnabled: true });
-      return orig(a);
+      return orig(id);
     };
     expect(await approve(bg, f)).toEqual({ approved: false, reason: "cancelled" });
   });

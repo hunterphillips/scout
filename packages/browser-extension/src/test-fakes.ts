@@ -211,6 +211,24 @@ export interface FakeTab {
   incognito: boolean;
 }
 
+/**
+ * Whether Chrome match pattern `pattern` covers `target` (a URL or another
+ * pattern), the way permissions.contains treats a broad grant: "<all_urls>",
+ * a "*" scheme (http/https), a "*" or "*.host" host, and "*" path globs.
+ */
+export function patternCovers(pattern: string, target: string): boolean {
+  if (pattern === "<all_urls>") return /^(https?|wss?|ftp|file):/.test(target);
+  const pm = /^(\*|[a-z]+):\/\/([^/]*)(\/.*)$/.exec(pattern);
+  const tm = /^([a-z]+):\/\/([^/]*)(\/.*)?$/.exec(target);
+  if (!pm || !tm) return false;
+  const [, ps, ph, pp] = pm as unknown as [string, string, string, string];
+  const [, ts, th, tp = "/"] = tm as unknown as [string, string, string, string | undefined];
+  if (ps === "*" ? ts !== "http" && ts !== "https" : ps !== ts) return false;
+  if (ph !== "*" && ph !== th && !(ph.startsWith("*.") && (th === ph.slice(2) || th.endsWith(ph.slice(1))))) return false;
+  const glob = new RegExp(`^${pp.split("*").map((x) => x.replace(/[.+?^${}()|[\]\\]/g, "\\$&")).join(".*")}$`);
+  return glob.test(tp);
+}
+
 /** The core's answer to hello: capture disabled until it has the extension's snapshot. */
 export const DISABLED_POLICY = { type: "capture_policy", revision: 1, paused: false, captureEnabled: false } as const;
 
@@ -240,8 +258,16 @@ export function makeChrome({
   const tabMessages: Array<{ tabId: number; msg: unknown }> = [];
   const store: Record<string, unknown> = { ...local };
   const ports: FakePort[] = [];
-  const state = { granted: [...granted], host, storageFails: false, lastFocusedWindow: 1, autoEnable, activeTabGrant: null as number | null };
-  const visible = (u: string) => state.granted.some((p) => u.startsWith(p.replace(/\*$/, "")));
+  const state = {
+    granted: [...granted],
+    host,
+    storageFails: false,
+    storageSetFails: false,
+    lastFocusedWindow: 1,
+    autoEnable,
+    activeTabGrant: null as number | null,
+  };
+  const visible = (u: string) => state.granted.some((p) => patternCovers(p, u));
   const enabledOn = new Set<FakePort>();
   /** The fake core: answer the first permissions snapshot on a port with an enabling policy. */
   const onPost = (port: FakePort, m: Record<string, unknown>) => {
@@ -288,7 +314,7 @@ export function makeChrome({
       onInstalled: ev<(d: unknown) => void>(),
     },
     permissions: {
-      contains: async ({ origins }: { origins: string[] }) => origins.every((o) => state.granted.includes(o)),
+      contains: async ({ origins }: { origins: string[] }) => origins.every((o) => state.granted.some((p) => patternCovers(p, o))),
       getAll: async () => ({ origins: [...state.granted], permissions: [] }),
       onAdded: ev(),
       onRemoved: ev(),
@@ -319,7 +345,7 @@ export function makeChrome({
       async query(q: { active?: boolean; lastFocusedWindow?: boolean; url?: string }) {
         return [...tabs.values()]
           .filter((t) => (!q.active || t.active) && (!q.lastFocusedWindow || t.windowId === state.lastFocusedWindow))
-          .filter((t) => q.url === undefined || (visible(t.url) && t.url.startsWith(q.url.replace(/\*$/, ""))))
+          .filter((t) => q.url === undefined || (visible(t.url) && patternCovers(q.url, t.url)))
           .map(view);
       },
       async sendMessage(tabId: number, msg: unknown) {
@@ -348,6 +374,7 @@ export function makeChrome({
           return { ...defaults, ...store };
         },
         async set(o: Record<string, unknown>) {
+          if (state.storageSetFails) throw new Error("storage unavailable");
           Object.assign(store, o);
         },
       },
@@ -398,7 +425,7 @@ export function sender(f: FakeChrome, { tabId = 10, url, documentId = "doc-1", f
 
 function fakeView(f: FakeChrome, t: FakeTab): chrome.tabs.Tab {
   const o: Record<string, unknown> = { id: t.id, windowId: t.windowId, active: t.active, incognito: t.incognito };
-  if (f._.state.granted.some((p) => t.url.startsWith(p.replace(/\*$/, "")))) o["url"] = t.url;
+  if (f._.state.granted.some((p) => patternCovers(p, t.url))) o["url"] = t.url;
   return o as unknown as chrome.tabs.Tab;
 }
 

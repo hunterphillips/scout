@@ -12,17 +12,17 @@
 //   and re-check after every await.
 //
 // Capture needs three things, each checked on approval and again before
-// forwarding: Chrome's GitHub grant, the user's GitHub-capture toggle, and a
+// forwarding: Chrome's exact GitHub grant (from the background's reconciled
+// list, never a broad all-sites grant), the user's GitHub-capture toggle, and a
 // core capture_policy on this port with capture enabled and not paused. The
 // policy can only take capture away; it never stands in for the other two.
 
 import { type PageTextObservation, PageTextObservationSchema } from "@scout/contracts";
-import { GITHUB_PATTERN } from "./hosts.js";
 import type { ApproveRequest, ApproveResponse, BackgroundToContent, DenialCode, PageTextMessage } from "./messages.js";
 import type { Clock } from "./reconnect.js";
 import { type IssueRoute, parseIssueRoute } from "./route.js";
 import { LIMITS } from "./selectors.js";
-import { activeTab, type Counters, policyAllowsCapture, post, type SharedState } from "./shared-state.js";
+import { activeTab, type Counters, githubCaptureOn, policyAllowsCapture, post, type SharedState } from "./shared-state.js";
 
 /** An approval older than the content script's longest settle (plus slack) is void. */
 export const APPROVAL_TTL_MS = LIMITS.maxWaitMs + 5_000;
@@ -54,9 +54,8 @@ export interface PageTextGate {
   cancelTabs(opts?: { stop?: boolean; except?: number | null }): void;
   /** Ask the active tab's script for a fresh capture (when capture is on and the port is open). */
   refreshActive(): Promise<void>;
-  githubGranted(): Promise<boolean>;
-  /** Chrome's GitHub grant and the user's toggle are both on. */
-  captureAllowed(): Promise<boolean>;
+  /** Chrome's exact GitHub grant and the user's toggle are both on. */
+  captureAllowed(): boolean;
   onTabUpdated(tabId: number, url: string | undefined): void;
   onTabRemoved(tabId: number): void;
 }
@@ -93,7 +92,7 @@ export function createPageTextGate(deps: GateDeps): PageTextGate {
   }
 
   async function refreshActive(): Promise<void> {
-    if (state.paused || !state.port || !state.githubCapture || !policyAllowsCapture(state)) return;
+    if (state.paused || !state.port || !githubCaptureOn(state) || !policyAllowsCapture(state)) return;
     const t = await activeTab(ch).catch(() => null);
     if (!t || t.incognito || t.id === undefined || !tabRoute(t)) return;
     sendToTab(t.id, { type: "refresh" });
@@ -123,19 +122,7 @@ export function createPageTextGate(deps: GateDeps): PageTextGate {
     );
   }
 
-  async function githubGranted(): Promise<boolean> {
-    try {
-      return (await ch.permissions.contains({ origins: [GITHUB_PATTERN] })) === true;
-    } catch {
-      return false;
-    }
-  }
-
-  async function captureAllowed(): Promise<boolean> {
-    if (!state.githubCapture) return false;
-    const granted = await githubGranted();
-    return granted && state.githubCapture; // the toggle may have gone off during the await
-  }
+  const captureAllowed = (): boolean => githubCaptureOn(state);
 
   /** The browser's record of `tabId` if it is the active tab of the focused, non-incognito window. */
   async function foregroundTab(tabId: number): Promise<Tab | null> {
@@ -163,7 +150,7 @@ export function createPageTextGate(deps: GateDeps): PageTextGate {
     }
     if (!policyAllowsCapture(state)) return deny("policy");
     const epoch = state.cancelEpoch;
-    if (!(await captureAllowed())) return deny("permission");
+    if (!captureAllowed()) return deny("permission");
     const fg = await foregroundTab(sender.tab.id).catch(() => null);
     if (!fg) return deny("not-foreground");
     if (tabRoute(fg)?.key !== route.key) return deny("route");
@@ -193,7 +180,7 @@ export function createPageTextGate(deps: GateDeps): PageTextGate {
     if (tabRoute(sender.tab)?.key !== msgRoute.key) return { reason: "url-changed" };
     if (state.paused) return { reason: "paused" };
     if (!policyAllowsCapture(state)) return { reason: "policy" };
-    if (!(await captureAllowed())) return { reason: "permission" };
+    if (!captureAllowed()) return { reason: "permission" };
     const fg = await foregroundTab(sender.tab.id).catch(() => null);
     if (!fg) return { reason: "not-foreground" };
     const current = tabRoute(fg);
@@ -241,7 +228,6 @@ export function createPageTextGate(deps: GateDeps): PageTextGate {
     onPageText,
     cancelTabs,
     refreshActive,
-    githubGranted,
     captureAllowed,
     onTabUpdated(tabId, url) {
       const a = approvals.get(tabId);

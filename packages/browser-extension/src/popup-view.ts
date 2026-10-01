@@ -25,11 +25,14 @@ export function captureText(s: StatusSnapshot): string {
   return s.policy.captureEnabled ? "on" : "waiting for Scout";
 }
 
+export const BROAD_GRANT_TEXT = "All-sites access is ignored; only sites allowed here count.";
+
 export function statusRows(s: StatusSnapshot): Array<[string, string]> {
   const c = s.counters;
   return [
     ["Status", statusText(s)],
     ["Allowed sites", s.granted.length > 0 ? s.granted.map(hostLabel).join(", ") : "none"],
+    ...(s.broadGrantIgnored ? [["Site access", BROAD_GRANT_TEXT] as [string, string]] : []),
     ["Issue text", captureText(s)],
     ["Sent", `focus ${c.focus} · issues ${c.forwarded} · acked ${c.acked} · dropped ${c.dropped} · denied ${c.denied}`],
   ];

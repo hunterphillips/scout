@@ -91,10 +91,10 @@ describe("page_text gate (through the background)", () => {
 
   it("a pause landing during the approval's awaits cancels it (cancel epoch)", async () => {
     const { f, bg } = await setup();
-    const orig = f.permissions.contains;
-    f.permissions.contains = async (a) => {
+    const orig = f.windows.get;
+    f.windows.get = async (id) => {
       await bg.handleMessage({ type: "popup-pause", paused: true }, popupSender());
-      return orig(a);
+      return orig(id);
     };
     expect((await approve(bg, f)).approved).toBe(false);
     expect(bg.approvals.size).toBe(0);
@@ -144,10 +144,10 @@ describe("page_text gate (standalone, shared state only)", () => {
     state.port = { postMessage: (m: unknown) => void posted.push(m) } as unknown as chrome.runtime.Port;
     state.policy = { revision: 2, captureEnabled: true, paused: false };
     state.githubCapture = true;
+    state.granted = [GITHUB_PATTERN];
     const tab = { id: 10, windowId: 1, active: true, incognito: false, url: ISSUE1 };
     const ch = {
       runtime: { id: EXT_ID },
-      permissions: { contains: async () => true },
       tabs: { query: async () => [tab], sendMessage: async () => {} },
       windows: { get: async () => ({ id: 1, focused: true, incognito: false }) },
     } as unknown as typeof chrome;

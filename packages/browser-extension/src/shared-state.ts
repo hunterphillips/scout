@@ -3,6 +3,7 @@
 // part can be built and tested on its own.
 
 import type { BrowserObservation } from "@scout/contracts";
+import { GITHUB_PATTERN } from "./hosts.js";
 import type { PolicyState, StatusSnapshot } from "./messages.js";
 import type { Clock } from "./reconnect.js";
 
@@ -25,6 +26,14 @@ export interface SharedState {
   permissionsRevision: number;
   /** Origins in the last snapshot sent: a focus carries a URL only for one of these. */
   sentGranted: ReadonlySet<string>;
+  /**
+   * The exact-origin patterns from the last successful permissions.getAll
+   * (empty after a failed one), pruned at once by a revoke. The only source of
+   * "is GitHub granted": a broad all-sites grant is not in it.
+   */
+  granted: readonly string[];
+  /** The last getAll also held a broad (non-exact) grant, which Scout ignores. */
+  broadGrantIgnored: boolean;
 }
 
 export type Counters = StatusSnapshot["counters"];
@@ -41,8 +50,16 @@ export function createSharedState(clock: Clock): SharedState {
     policy: null,
     permissionsRevision: seed,
     sentGranted: new Set(),
+    granted: [],
+    broadGrantIgnored: false,
   };
 }
+
+/** Chrome's exact GitHub grant is in the last reconciled list. */
+export const githubGranted = (state: SharedState): boolean => state.granted.includes(GITHUB_PATTERN);
+
+/** GitHub capture is effectively on: the user's toggle and the exact GitHub grant. */
+export const githubCaptureOn = (state: SharedState): boolean => state.githubCapture && githubGranted(state);
 
 /** The core's current policy lets the extension capture page text. */
 export const policyAllowsCapture = (state: SharedState): boolean =>

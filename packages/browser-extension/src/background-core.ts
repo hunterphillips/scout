@@ -19,7 +19,11 @@
 // Chrome granted, the GitHub-capture toggle, a fresh revision) and then a
 // focus observation. A grant change or toggle change sends a new snapshot and
 // focus the same way. The GitHub content script is registered only while
-// both the GitHub grant and the toggle are on.
+// both the exact GitHub grant and the toggle are on.
+//
+// "Granted" means an exact https origin in the last successful
+// permissions.getAll. A broad grant (https://*/* from Chrome's site-access
+// settings) is ignored everywhere, and a failed getAll means no sites.
 
 import { type CapturePolicy, isExactOriginPattern } from "@scout/contracts";
 import { GITHUB_PATTERN, HOST_NAME } from "./hosts.js";
@@ -28,7 +32,7 @@ import type { ApproveRequest, PageTextMessage, PopupRequest, StatusSnapshot } fr
 import { type Approval, createPageTextGate } from "./page-text-gate.js";
 import { createPortLink } from "./port.js";
 import type { Clock, ReconnectPolicy } from "./reconnect.js";
-import { activeTab, createSharedState, defaultClock, newCounters, policyAllowsCapture, post } from "./shared-state.js";
+import { activeTab, createSharedState, defaultClock, githubCaptureOn, githubGranted, newCounters, policyAllowsCapture, post } from "./shared-state.js";
 
 export { FOCUS_DEBOUNCE_MS, GITHUB_PATTERN, HOST_NAME };
 
@@ -71,7 +75,6 @@ export function createBackground(ch: typeof chrome, deps: BackgroundDeps = {}): 
   const state = createSharedState(clock);
   const counters = newCounters();
   let loaded: Promise<void> | null = null;
-  let granted: string[] = [];
   let chain: Promise<boolean> = Promise.resolve(false);
 
   /** Load persisted state once; every content message waits for it. Fails closed (paused, capture off). */
@@ -108,12 +111,14 @@ export function createBackground(ch: typeof chrome, deps: BackgroundDeps = {}): 
   function onPolicy(p: CapturePolicy): void {
     const prev = state.policy;
     if (prev !== null && p.revision < prev.revision) return; // a stale policy never overrides a newer one
-    const wasAllowed = policyAllowsCapture(state);
+    // The first policy after (re)connect is a transition from "no policy": treated
+    // as disabling (any read still in flight stops) even if it already enables.
+    const wasAllowed = prev !== null && policyAllowsCapture(state);
     state.policy = { revision: p.revision, captureEnabled: p.captureEnabled, paused: p.paused };
     const allowed = policyAllowsCapture(state);
-    if (!allowed) gate.cancelTabs(); // stop in-flight reads; content waits for a fresh refresh
+    if (!allowed || prev === null) gate.cancelTabs(); // stop in-flight reads; content waits for a fresh refresh
     if (prev === null) sendSnapshot(); // first policy on this port: the core needs our snapshot
-    else if (allowed && !wasAllowed) void gate.refreshActive();
+    if (allowed && !wasAllowed) void gate.refreshActive(); // after the snapshot, so capture follows it
   }
 
   /**
@@ -128,12 +133,12 @@ export function createBackground(ch: typeof chrome, deps: BackgroundDeps = {}): 
       kind: "permissions",
       revision,
       at: clock.now(),
-      granted: [...granted],
-      githubCapture: state.githubCapture && granted.includes(GITHUB_PATTERN),
+      granted: [...state.granted],
+      githubCapture: githubCaptureOn(state),
     });
     if (!ok) return;
     state.permissionsRevision = revision;
-    state.sentGranted = new Set(granted);
+    state.sentGranted = new Set(state.granted);
     void focus.flush();
   }
 
@@ -142,16 +147,18 @@ export function createBackground(ch: typeof chrome, deps: BackgroundDeps = {}): 
    * Refresh the granted list and (un)register the GitHub content script.
    * Losing the GitHub grant also turns the capture toggle off, so a later
    * grant alone never re-enables capture. Resolves to "GitHub capture allowed".
+   * Any failure means no sites: the list is emptied (so capture is effectively
+   * off) and the content script is unregistered.
    */
   function reconcile(): Promise<boolean> {
     chain = chain
       .then(async () => {
         await loadState();
-        const all = await ch.permissions.getAll();
-        granted = (all.origins ?? []).filter(isExactOriginPattern);
-        const gh = await gate.githubGranted();
-        if (!gh && state.githubCapture) await setGithubCapture(false);
-        const capture = gh && state.githubCapture;
+        const all = (await ch.permissions.getAll()).origins ?? [];
+        state.granted = all.filter(isExactOriginPattern);
+        state.broadGrantIgnored = all.length > state.granted.length;
+        if (!githubGranted(state) && state.githubCapture) await setGithubCapture(false);
+        const capture = githubCaptureOn(state);
         const regs = await ch.scripting.getRegisteredContentScripts({ ids: [CONTENT_SCRIPT_ID] });
         if (capture && regs.length === 0) await ch.scripting.registerContentScripts([{ ...CONTENT_SCRIPT }]);
         if (!capture) {
@@ -160,14 +167,20 @@ export function createBackground(ch: typeof chrome, deps: BackgroundDeps = {}): 
         }
         return capture;
       })
-      .catch(() => false);
+      .catch(async () => {
+        state.granted = [];
+        gate.cancelTabs({ stop: true });
+        await ch.scripting.unregisterContentScripts({ ids: [CONTENT_SCRIPT_ID] }).catch(() => {});
+        return false;
+      });
     return chain;
   }
 
+  /** Persist first; memory changes only once storage has the new value (a failed write changes nothing). */
   async function setGithubCapture(next: boolean): Promise<void> {
+    await ch.storage.local.set({ githubCapture: next });
     state.githubCapture = next;
     if (!next) gate.cancelTabs({ stop: true });
-    await ch.storage.local.set({ githubCapture: next });
   }
 
   /**
@@ -195,8 +208,9 @@ export function createBackground(ch: typeof chrome, deps: BackgroundDeps = {}): 
     return {
       link: link.linkState(),
       paused: state.paused,
-      granted: [...granted],
-      githubCapture: state.githubCapture,
+      granted: [...state.granted],
+      githubCapture: githubCaptureOn(state),
+      broadGrantIgnored: state.broadGrantIgnored,
       policy: state.policy ? { ...state.policy } : null,
       counters: { ...counters },
     };
@@ -218,7 +232,7 @@ export function createBackground(ch: typeof chrome, deps: BackgroundDeps = {}): 
 
   /** The popup's checkbox (a user gesture). Turning it on needs the GitHub grant. */
   async function onGithubToggle(enabled: boolean): Promise<void> {
-    if (enabled && !(await gate.githubGranted())) return;
+    if (enabled && !githubGranted(state)) return;
     if (enabled === state.githubCapture) return;
     await setGithubCapture(enabled);
     const capture = await reconcile();
@@ -267,7 +281,9 @@ export function createBackground(ch: typeof chrome, deps: BackgroundDeps = {}): 
     ch.permissions.onRemoved.addListener(async (removed?: chrome.permissions.Permissions) => {
       state.cancelEpoch++; // fail closed now; reconcile confirms and cleans up
       // A focus sent before the new snapshot must not carry a revoked origin's URL.
+      // Nor may a snapshot sent before reconcile's getAll resolves list it.
       const gone = new Set(removed?.origins ?? []);
+      state.granted = state.granted.filter((o) => !gone.has(o));
       state.sentGranted = new Set([...state.sentGranted].filter((o) => !gone.has(o)));
       await reconcile();
       sendSnapshot();
