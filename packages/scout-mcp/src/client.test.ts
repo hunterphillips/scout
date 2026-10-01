@@ -1,161 +1,129 @@
-// The Phase 1 fixture backend answers the agent protocol the way the Phase 2 core must.
+// The socket client against hand-rolled servers on temp Unix sockets.
 
-import { AGENT_RESPONSE_MAX_BYTES, agentResponseSchema, AGENT_CURSOR_TTL_MS, type AgentMethod, type AgentResponse } from "@scout/contracts";
-import { describe, expect, it } from "vitest";
-import { BackendError, createFixtureBackend, type FixtureBackend } from "./client.js";
-import { AGENTS_URL, LLMS_URL, LONG_TEXT, req, seed, SITE } from "./test-support/seed.js";
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { createServer, type Server, type Socket } from "node:net";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { AGENT_PROTOCOL_VERSION, AGENT_REQUEST_MAX_BYTES, AGENT_RESPONSE_MAX_BYTES } from "@scout/contracts";
+import { encodeFrame, FrameDecoder, frameHeader } from "@scout/contracts/frame";
+import { afterEach, describe, expect, it } from "vitest";
+import { BackendError, createSocketBackend } from "./client.js";
+import { req } from "./test-support/seed.js";
 
-const ok = <M extends AgentMethod>(r: AgentResponse<M>) => {
-  if (r.status !== "ok") throw new Error(`expected ok, got ${r.error.code}`);
-  return r.result;
-};
-const code = (r: AgentResponse) => (r.status === "error" ? r.error.code : "ok");
+const TOKEN = "fixture-token";
+const cleanups: (() => Promise<void> | void)[] = [];
+afterEach(async () => {
+  for (const c of cleanups.splice(0).reverse()) await c();
+});
 
-async function readAll(b: FixtureBackend, resourceId: string, version?: string): Promise<{ text: string; chunks: number; versions: Set<string> }> {
-  let text = "";
-  let chunks = 0;
-  const versions = new Set<string>();
-  let cursor: string | undefined;
-  do {
-    const r = ok(await b.call(req("read_resource", { resourceId, ...(version ? { version } : {}), ...(cursor ? { cursor } : {}) })));
-    text += r.text;
-    chunks++;
-    versions.add(r.version);
-    cursor = r.nextCursor;
-  } while (cursor);
-  return { text, chunks, versions };
+function tempHome(): { dir: string; socketPath: string; tokenFile: string } {
+  const dir = mkdtempSync(join(tmpdir(), "smcp-"));
+  cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
+  const tokenFile = join(dir, "agent-token");
+  writeFileSync(tokenFile, `${TOKEN}\n`, { mode: 0o600 });
+  return { dir, socketPath: join(dir, "agent.sock"), tokenFile };
 }
 
-describe("fixture backend", () => {
-  it("returns schema-valid responses carrying the core instance id", async () => {
-    const b = await createFixtureBackend(seed());
-    for (const [method, params] of [["current_site", {}], ["recent_activity", {}], ["site_links", {}], ["list_resources", {}]] as const) {
-      const res = await b.call(req(method, params));
-      expect(agentResponseSchema(method).safeParse(res).success).toBe(true);
-      expect(res.coreInstanceId).toBe("core-a");
-    }
+/**
+ * A core that accepts `hello`, then answers every later request with the raw bytes
+ * `reply(requestId)` returns. Records the hello tokens it receives.
+ */
+async function rawCore(socketPath: string, reply: (requestId: string) => Buffer, helloProtocol = AGENT_PROTOCOL_VERSION) {
+  const tokens: unknown[] = [];
+  const sockets = new Set<Socket>();
+  const server: Server = createServer((socket) => {
+    sockets.add(socket);
+    socket.on("close", () => sockets.delete(socket));
+    socket.on("error", () => {});
+    const decoder = new FrameDecoder({ maxBytes: AGENT_REQUEST_MAX_BYTES });
+    socket.on("data", (chunk: Buffer) => {
+      for (const frame of decoder.push(chunk)) {
+        if (!frame.ok) return void socket.destroy();
+        const { requestId, method, params } = frame.value as { requestId: string; method: string; params: { token?: string } };
+        if (method === "hello") {
+          tokens.push(params.token);
+          const res = { protocol: helloProtocol, requestId, coreInstanceId: "core-raw", status: "ok", result: { role: "interactive" } };
+          socket.write(encodeFrame(res, AGENT_RESPONSE_MAX_BYTES));
+        } else socket.write(reply(requestId));
+      }
+    });
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(socketPath, () => resolve());
+  });
+  chmodSync(socketPath, 0o600);
+  cleanups.push(
+    () =>
+      new Promise<void>((resolve) => {
+        for (const s of sockets) s.destroy();
+        server.close(() => resolve());
+      }),
+  );
+  return { tokens };
+}
+
+function backend(home: { socketPath: string; tokenFile: string }) {
+  const b = createSocketBackend({ socketPath: home.socketPath, tokenFile: home.tokenFile, timeoutMs: 2_000 });
+  cleanups.push(() => b.close());
+  return b;
+}
+
+async function failure(p: Promise<unknown>): Promise<string> {
+  try {
+    await p;
+  } catch (e) {
+    if (e instanceof BackendError) return e.code;
+    throw e;
+  }
+  return "ok";
+}
+
+const okSite = (requestId: string) =>
+  encodeFrame({ protocol: AGENT_PROTOCOL_VERSION, requestId, coreInstanceId: "core-raw", status: "ok", result: { site: null } }, AGENT_RESPONSE_MAX_BYTES);
+
+describe("socket client", () => {
+  it("talks to a core on a private socket", async () => {
+    const home = tempHome();
+    const core = await rawCore(home.socketPath, okSite);
+    const res = await backend(home).call(req("current_site", {}));
+    expect(res.status).toBe("ok");
+    expect(core.tokens).toEqual([TOKEN]);
   });
 
-  it("lists only approved resources: pending, declined and revoked never appear", async () => {
-    const b = await createFixtureBackend(seed());
-    const listed = ok(await b.call(req("list_resources", {}))).resources;
-    expect(listed.map((r) => r.sourceUrl).sort()).toEqual([LLMS_URL, "https://other.example.org/AGENTS.md", "https://cdn.example.net/skills/billing.md"].sort());
-    expect(listed.every((r) => r.approval === "approved")).toBe(true);
-    b.revoke(b.resourceIds[1]!);
-    expect(ok(await b.call(req("list_resources", { origin: SITE }))).resources.map((r) => r.sourceUrl)).toEqual([LLMS_URL]);
+  it("sends no token when the socket's directory is open to others", async () => {
+    const home = tempHome();
+    const core = await rawCore(home.socketPath, okSite);
+    chmodSync(home.dir, 0o755);
+    expect(await failure(backend(home).call(req("current_site", {})))).toBe("unavailable");
+    expect(core.tokens).toEqual([]);
   });
 
-  it("never reads pending or declined text, even by explicit version", async () => {
-    const b = await createFixtureBackend(seed());
-    const [, , , pending, declined] = b.resourceIds;
-    for (const id of [pending!, declined!]) {
-      expect(code(await b.call(req("read_resource", { resourceId: id })))).toBe("not_found");
-      expect(code(await b.call(req("read_resource", { resourceId: id, version: b.versionHashes(id)[0]! })))).toBe("not_found");
-    }
+  it("sends no token to a socket others can connect to", async () => {
+    const home = tempHome();
+    const core = await rawCore(home.socketPath, okSite);
+    chmodSync(home.socketPath, 0o666);
+    expect(await failure(backend(home).call(req("current_site", {})))).toBe("unavailable");
+    expect(core.tokens).toEqual([]);
   });
 
-  it("reads a resource in UTF-8-safe chunks pinned to one version", async () => {
-    const b = await createFixtureBackend(seed());
-    const id = b.resourceIds[0]!;
-    const { text, chunks, versions } = await readAll(b, id);
-    expect(text).toBe(LONG_TEXT);
-    expect(chunks).toBeGreaterThan(1);
-    expect([...versions]).toEqual([b.versionHashes(id)[1]]);
-    // The older approved version stays readable by explicit version, labeled superseded.
-    const old = ok(await b.call(req("read_resource", { resourceId: id, version: b.versionHashes(id)[0]! })));
-    expect(old.text).toBe("old guide");
-    expect(old.approval).toBe("superseded");
+  it("drops the connection with limit_exceeded on an oversized response frame", async () => {
+    const home = tempHome();
+    const big = AGENT_RESPONSE_MAX_BYTES + 1;
+    await rawCore(home.socketPath, () => Buffer.concat([frameHeader(big), Buffer.alloc(big, 0x20)]));
+    expect(await failure(backend(home).call(req("current_site", {})))).toBe("limit_exceeded");
   });
 
-  it("refuses a cursor used for another resource or version", async () => {
-    const b = await createFixtureBackend(seed());
-    const [llms, skill] = b.resourceIds;
-    const first = ok(await b.call(req("read_resource", { resourceId: llms! })));
-    expect(code(await b.call(req("read_resource", { resourceId: skill!, cursor: first.nextCursor! })))).toBe("not_found");
-    const other = b.versionHashes(llms!)[0]!;
-    expect(code(await b.call(req("read_resource", { resourceId: llms!, version: other, cursor: first.nextCursor! })))).toBe("not_found");
+  it("drops the connection with protocol_mismatch on a malformed frame", async () => {
+    const home = tempHome();
+    const body = Buffer.from("{not json", "utf8");
+    await rawCore(home.socketPath, () => Buffer.concat([frameHeader(body.length), body]));
+    expect(await failure(backend(home).call(req("current_site", {})))).toBe("protocol_mismatch");
   });
 
-  it("checks revocation on every chunk", async () => {
-    const b = await createFixtureBackend(seed());
-    const id = b.resourceIds[0]!;
-    const first = ok(await b.call(req("read_resource", { resourceId: id })));
-    b.revoke(id);
-    expect(code(await b.call(req("read_resource", { resourceId: id, cursor: first.nextCursor! })))).toBe("revoked");
-    expect(code(await b.call(req("read_resource", { resourceId: id })))).toBe("revoked");
-    expect(code(await b.call(req("read_resource", { resourceId: id, version: b.versionHashes(id)[0]! })))).toBe("revoked");
-  });
-
-  it("expires cursors", async () => {
-    let t = 1_000;
-    const b = await createFixtureBackend(seed({ now: () => t }));
-    const first = ok(await b.call(req("read_resource", { resourceId: b.resourceIds[0]! })));
-    t += AGENT_CURSOR_TTL_MS;
-    expect(code(await b.call(req("read_resource", { resourceId: b.resourceIds[0]!, cursor: first.nextCursor! })))).toBe("expired_snapshot");
-    expect(code(await b.call(req("site_links", { cursor: "made-up" })))).toBe("expired_snapshot");
-  });
-
-  it("gates browser context on the grant, then on pause; resources stay readable while paused", async () => {
-    const b = await createFixtureBackend(seed({ browserContextGranted: false }));
-    for (const m of ["current_site", "recent_activity", "site_links"] as const) expect(code(await b.call(req(m, {})))).toBe("not_granted");
-    expect(code(await b.call(req("list_resources", {})))).toBe("ok");
-    b.setBrowserContextGrant(true);
-    b.setPaused(true);
-    for (const m of ["current_site", "recent_activity", "site_links"] as const) expect(code(await b.call(req(m, {})))).toBe("paused");
-    expect(code(await b.call(req("read_resource", { resourceId: b.resourceIds[1]! })))).toBe("ok");
-  });
-
-  it("reports no current site honestly and keeps site_links to the current site", async () => {
-    const b = await createFixtureBackend(seed());
-    const links = ok(await b.call(req("site_links", { limit: 25 })));
-    expect(links.links).toHaveLength(25);
-    const rest = ok(await b.call(req("site_links", { cursor: links.nextCursor! })));
-    expect(rest.links).toHaveLength(5);
-    expect(rest.nextCursor).toBeUndefined();
-    b.setCurrentSite({ origin: "https://elsewhere.example", url: "https://elsewhere.example/", visitEpoch: 8 });
-    expect(code(await b.call(req("site_links", {})))).toBe("not_found");
-    b.setCurrentSite(null);
-    expect(ok(await b.call(req("current_site", {})))).toEqual({ site: null });
-  });
-
-  it("pages lists down to the response cap", async () => {
-    // Control characters escape to six bytes each: ten full entries would be ~480 KiB.
-    const heavy = "\u0001".repeat(8 * 1024);
-    const activity = Array.from({ length: 10 }, (_, i) => ({ origin: SITE, url: `${SITE}/${i}`, observedAt: i, title: `t${i}`, text: heavy, textTruncated: false }));
-    const b = await createFixtureBackend(seed({ activity }));
-    let seen = 0;
-    let cursor: string | undefined;
-    do {
-      const res = await b.call(req("recent_activity", cursor ? { cursor } : {}));
-      expect(Buffer.byteLength(JSON.stringify(res))).toBeLessThanOrEqual(AGENT_RESPONSE_MAX_BYTES);
-      const r = ok(res);
-      expect(r.entries.length).toBeGreaterThan(0);
-      expect(r.entries.length).toBeLessThan(10);
-      seen += r.entries.length;
-      cursor = r.nextCursor;
-    } while (cursor);
-    expect(seen).toBe(10);
-  });
-
-  it("shrinks a resource chunk whose escaped text would overflow the response", async () => {
-    const b = await createFixtureBackend(seed({ resources: [{ kind: "agents_md", siteOrigin: SITE, sourceUrl: AGENTS_URL, versions: [{ text: "\u0001".repeat(40_000), state: "approved" }] }] }));
-    const id = b.resourceIds[0]!;
-    const res = await b.call(req("read_resource", { resourceId: id }));
-    expect(Buffer.byteLength(JSON.stringify(res))).toBeLessThanOrEqual(AGENT_RESPONSE_MAX_BYTES);
-    expect((await readAll(b, id)).text).toBe("\u0001".repeat(40_000));
-  });
-
-  it("answers protocol_mismatch for another protocol version or a malformed request", async () => {
-    const b = await createFixtureBackend(seed());
-    expect(code(await b.call({ ...req("current_site", {}), protocol: 2 }))).toBe("protocol_mismatch");
-    expect(code(await b.call({ ...req("current_site", {}), method: "approve_resource" } as never))).toBe("protocol_mismatch");
-  });
-
-  it("checks the hello token and rejects every call while offline", async () => {
-    const b = await createFixtureBackend(seed());
-    expect(code(await b.call(req("hello", { token: "fixture-token" })))).toBe("ok");
-    expect(code(await b.call(req("hello", { token: "wrong" })))).toBe("not_granted");
-    b.setOnline(false);
-    await expect(b.call(req("list_resources", {}))).rejects.toBeInstanceOf(BackendError);
+  it("reports protocol_mismatch for a core that speaks a newer protocol", async () => {
+    const home = tempHome();
+    await rawCore(home.socketPath, okSite, AGENT_PROTOCOL_VERSION + 1);
+    expect(await failure(backend(home).call(req("current_site", {})))).toBe("protocol_mismatch");
   });
 });

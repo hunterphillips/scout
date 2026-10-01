@@ -1,11 +1,12 @@
 // Test-only: serve a fixture backend on a Unix socket with the agent framing, so the real
 // stdio adapter can be driven end to end. The first frame must be an accepted `hello`;
-// anything else closes the connection. Phase 2's core owns the production server.
+// anything else closes the connection. The socket is chmod 0600, as the core publishes it. Phase 2's core owns the production server.
 
+import { chmodSync } from "node:fs";
 import { createServer, type Server } from "node:net";
 import { AGENT_PROTOCOL_VERSION, AGENT_REQUEST_MAX_BYTES, AGENT_RESPONSE_MAX_BYTES, type AgentRequestOf } from "@scout/contracts";
 import { encodeFrame, FrameDecoder } from "@scout/contracts/frame";
-import type { FixtureBackend } from "../client.js";
+import type { FixtureBackend } from "../fixture.js";
 
 export interface FixtureSocket {
   /** Frames received, hello included. */
@@ -47,6 +48,8 @@ export async function serveFixture(backend: FixtureBackend, socketPath: string):
     server.once("error", reject);
     server.listen(socketPath, () => resolve());
   });
+  // The client sends its token only to a socket with no group or other bits, as the core publishes it.
+  chmodSync(socketPath, 0o600);
   return {
     requests,
     close: () =>

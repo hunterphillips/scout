@@ -1,7 +1,7 @@
 // Synthetic fixture data shared by the scout-mcp tests. Nothing here is real browsing.
 
 import { AGENT_PROTOCOL_VERSION, type AgentMethod, type AgentParams, type AgentRequestOf } from "@scout/contracts";
-import type { FixtureSeed } from "../client.js";
+import type { FixtureSeed } from "../fixture.js";
 
 export const SITE = "https://docs.example.com";
 export const LLMS_URL = `${SITE}/llms.txt`;

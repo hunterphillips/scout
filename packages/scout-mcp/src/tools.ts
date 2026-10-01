@@ -11,6 +11,12 @@
 // page text, resource bodies), one block fenced by a fresh random nonce and labeled as
 // website-authored. The fence helps the model tell the two apart; it is not a security
 // boundary.
+//
+// Paged reads are checked against what they continue. The adapter remembers, for each
+// `list_resources` and `read_resource` cursor it handed out, what that cursor pins (the
+// origin filter; the resource and version). A response that does not match its request or
+// its cursor's pin is `protocol_mismatch`. A cursor this adapter did not hand out (or has
+// forgotten, e.g. after a restart) is `expired_snapshot` without asking the core.
 
 import { randomBytes } from "node:crypto";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -59,6 +65,13 @@ export interface ScoutMcpOptions {
   newNonce?: () => string;
 }
 
+/** Most cursor pins kept; the oldest is forgotten first. */
+const MAX_PINS = 1000;
+
+type CursorPin =
+  | { method: "list_resources"; origin: string | undefined }
+  | { method: "read_resource"; resourceId: string; version: string };
+
 const errorResult = (code: AgentStatusCode): CallToolResult => ({
   content: [{ type: "text", text: `Scout ${code}: ${STATUS_EXPLANATIONS[code]}` }],
   isError: true,
@@ -67,6 +80,13 @@ const errorResult = (code: AgentStatusCode): CallToolResult => ({
 export function createScoutMcpServer(opts: ScoutMcpOptions): McpServer {
   const { backend } = opts;
   const nonce = opts.newNonce ?? (() => randomBytes(12).toString("hex"));
+  const pins = new Map<string, CursorPin>();
+  const pin = (cursor: string | undefined, p: CursorPin): void => {
+    if (cursor === undefined) return;
+    pins.delete(cursor);
+    while (pins.size >= MAX_PINS) pins.delete(pins.keys().next().value!);
+    pins.set(cursor, p);
+  };
 
   const render = (meta: Record<string, unknown>, website?: { from: string; body: string }): CallToolResult => {
     let text = `Scout ${JSON.stringify(meta)}`;
@@ -171,10 +191,19 @@ export function createScoutMcpServer(opts: ScoutMcpOptions): McpServer {
       inputSchema: ListResourcesParamsSchema,
       annotations: RO_ANNOTATIONS,
     },
-    (args) =>
-      run("list_resources", args, (r, coreInstanceId) =>
-        render({ coreInstanceId, resources: r.resources, ...(r.nextCursor ? { nextCursor: r.nextCursor } : {}) }),
-      ),
+    (args) => {
+      let origin = args.origin;
+      if (args.cursor !== undefined) {
+        const p = pins.get(args.cursor);
+        if (p?.method !== "list_resources" || (args.origin !== undefined && args.origin !== p.origin)) return errorResult("expired_snapshot");
+        origin = p.origin;
+      }
+      return run("list_resources", args, (r, coreInstanceId) => {
+        if (origin !== undefined && r.resources.some((x) => x.siteOrigin !== origin)) return errorResult("protocol_mismatch");
+        pin(r.nextCursor, { method: "list_resources", origin });
+        return render({ coreInstanceId, resources: r.resources, ...(r.nextCursor ? { nextCursor: r.nextCursor } : {}) });
+      });
+    },
   );
 
   server.registerTool(
@@ -187,8 +216,17 @@ export function createScoutMcpServer(opts: ScoutMcpOptions): McpServer {
       inputSchema: ReadResourceParamsSchema,
       annotations: RO_ANNOTATIONS,
     },
-    (args) =>
-      run("read_resource", args, (r, coreInstanceId) => {
+    (args) => {
+      let version = args.version;
+      if (args.cursor !== undefined) {
+        const p = pins.get(args.cursor);
+        if (p?.method !== "read_resource") return errorResult("expired_snapshot");
+        if (p.resourceId !== args.resourceId || (version !== undefined && version !== p.version)) return errorResult("not_found");
+        version = p.version;
+      }
+      return run("read_resource", args, (r, coreInstanceId) => {
+        if (r.resourceId !== args.resourceId || (version !== undefined && r.version !== version)) return errorResult("protocol_mismatch");
+        pin(r.nextCursor, { method: "read_resource", resourceId: r.resourceId, version: r.version });
         const end = r.offset + Buffer.byteLength(r.text, "utf8");
         const meta = {
           coreInstanceId, resourceId: r.resourceId, kind: r.kind, siteOrigin: r.siteOrigin, publisherOrigin: r.publisherOrigin,
@@ -196,7 +234,8 @@ export function createScoutMcpServer(opts: ScoutMcpOptions): McpServer {
           ...(r.nextCursor ? { nextCursor: r.nextCursor } : { complete: true }),
         };
         return render(meta, { from: r.sourceUrl, body: r.text });
-      }),
+      });
+    },
   );
 
   return server;

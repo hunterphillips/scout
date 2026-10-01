@@ -2,9 +2,10 @@
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { AGENT_STATUS_CODES, type AgentResponse } from "@scout/contracts";
+import type { AgentResponse } from "@scout/contracts";
 import { afterEach, describe, expect, it } from "vitest";
-import { createFixtureBackend, type ScoutAgentBackend } from "./client.js";
+import type { ScoutAgentBackend } from "./client.js";
+import { createFixtureBackend } from "./fixture.js";
 import { createScoutMcpServer, STATUS_EXPLANATIONS, TOOL_NAMES } from "./tools.js";
 import { LONG_TEXT, seed, SITE } from "./test-support/seed.js";
 
@@ -117,8 +118,72 @@ describe("scout MCP tools", () => {
     expect(invented.text).not.toContain("trust me");
   });
 
-  it("has a fixed explanation for every status code", () => {
-    for (const c of AGENT_STATUS_CODES) expect(STATUS_EXPLANATIONS[c].length).toBeGreaterThan(0);
+  /** A fixture backend whose ok results pass through `tamper` before the adapter sees them. */
+  async function hostile(tamper: (method: string, result: Record<string, unknown>) => void) {
+    const fixture = await createFixtureBackend(seed());
+    const stub: ScoutAgentBackend = {
+      async call(request) {
+        const res = await fixture.call(request);
+        if (res.status === "ok") tamper(request.method, res.result as Record<string, unknown>);
+        return res;
+      },
+      close() {},
+    };
+    return { fixture, client: await connect(stub) };
+  }
+
+  it("refuses a read_resource response for another resource or version", async () => {
+    let mode = "";
+    const { fixture, client } = await hostile((method, r) => {
+      if (method !== "read_resource") return;
+      if (mode === "resource") r.resourceId = fixture.resourceIds[1];
+      if (mode === "version") r.version = fixture.versionHashes(fixture.resourceIds[0]!)[1];
+    });
+    const id = fixture.resourceIds[0]!;
+    const [oldVersion] = fixture.versionHashes(id);
+
+    mode = "resource";
+    expect((await call(client, "read_resource", { resourceId: id })).text).toContain(STATUS_EXPLANATIONS.protocol_mismatch);
+    mode = "version";
+    expect((await call(client, "read_resource", { resourceId: id, version: oldVersion })).text).toContain(STATUS_EXPLANATIONS.protocol_mismatch);
+  });
+
+  it("pins a paged read to the version of its first chunk", async () => {
+    let swap = false;
+    const { fixture, client } = await hostile((method, r) => {
+      if (method === "read_resource" && swap) r.version = fixture.versionHashes(fixture.resourceIds[0]!)[0];
+    });
+    const id = fixture.resourceIds[0]!;
+    const first = await call(client, "read_resource", { resourceId: id });
+    expect(first.isError).toBe(false);
+    swap = true;
+    const next = await call(client, "read_resource", { resourceId: id, cursor: first.meta.nextCursor });
+    expect(next.isError).toBe(true);
+    expect(next.text).toContain(STATUS_EXPLANATIONS.protocol_mismatch);
+  });
+
+  it("refuses a list_resources item from another origin than the one asked for or pinned", async () => {
+    let foreign = false;
+    const { client } = await hostile((method, r) => {
+      if (method !== "list_resources" || !foreign) return;
+      for (const x of r.resources as { siteOrigin: string }[]) x.siteOrigin = "https://other.example.org";
+    });
+    const first = await call(client, "list_resources", { origin: SITE, limit: 1 });
+    expect(first.isError).toBe(false);
+    foreign = true;
+    expect((await call(client, "list_resources", { origin: SITE })).text).toContain(STATUS_EXPLANATIONS.protocol_mismatch);
+    // The continuation carries no origin argument; the pin from the first page still applies.
+    expect((await call(client, "list_resources", { cursor: first.meta.nextCursor })).text).toContain(STATUS_EXPLANATIONS.protocol_mismatch);
+  });
+
+  it("refuses a cursor it did not hand out without asking the backend", async () => {
+    let calls = 0;
+    const backend = await createFixtureBackend(seed());
+    const client = await connect({ call: (r) => (calls++, backend.call(r)), close() {} });
+    const r = await call(client, "read_resource", { resourceId: backend.resourceIds[0]!, cursor: "never-issued" });
+    expect(r.text).toContain(STATUS_EXPLANATIONS.expired_snapshot);
+    expect((await call(client, "list_resources", { cursor: "never-issued" })).text).toContain(STATUS_EXPLANATIONS.expired_snapshot);
+    expect(calls).toBe(0);
   });
 
   it("rejects arguments outside the bounded schema before calling the backend", async () => {

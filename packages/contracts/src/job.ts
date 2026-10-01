@@ -42,8 +42,12 @@ export const JobRequestSchema = z
 
 // ---------- model-facing output ----------
 
+/** A catalog candidate ID ("c" + base36 index), bounded. */
+const CANDIDATE_ID_MAX_CHARS = 32;
+const CANDIDATE_ID_PATTERN = "^c[0-9a-z]+$";
+
 export const AgentPickSchema = z.strictObject({
-  id: z.string().min(1).max(32),
+  id: z.string().max(CANDIDATE_ID_MAX_CHARS).regex(new RegExp(CANDIDATE_ID_PATTERN)),
   reason: z.string().min(1).max(JOB_REASON_MAX_CHARS),
 });
 
@@ -85,7 +89,7 @@ export const JOB_AGENT_OUTPUT_JSON_SCHEMA = deepFreeze({
         additionalProperties: false,
         required: ["id", "reason"],
         properties: {
-          id: { type: "string", minLength: 1, maxLength: 32 },
+          id: { type: "string", minLength: 2, maxLength: CANDIDATE_ID_MAX_CHARS, pattern: CANDIDATE_ID_PATTERN },
           reason: { type: "string", minLength: 1, maxLength: JOB_REASON_MAX_CHARS },
         },
       },

@@ -120,6 +120,9 @@ describe("job contracts", () => {
     expect(JobAgentOutputSchema.safeParse({ status: "ok", items: [{ id: "c0", reason: "x".repeat(141) }] }).success).toBe(false);
     expect(JobAgentOutputSchema.safeParse({ status: "empty", items: [] }).success).toBe(false);
     expect(JobAgentOutputSchema.safeParse({ status: "ok", items: [{ ...pick("c0"), url: "https://evil" }] }).success).toBe(false);
+    for (const id of ["a", "c", "C0", "c0/../x", "https://evil", `c${"0".repeat(32)}`]) {
+      expect(JobAgentOutputSchema.safeParse({ status: "ok", items: [pick(id)] }).success).toBe(false);
+    }
     for (const status of ["error", "unavailable", "cancelled"]) {
       expect(JobAgentOutputSchema.safeParse({ status }).success).toBe(false);
     }

@@ -1,42 +1,27 @@
 // The adapter's backend: anything that answers agent-protocol requests.
 //
-// - createSocketBackend: the production client. It talks to the core's `run/agent.sock`
-//   with the length-prefixed frame codec, authenticates each new connection with `hello`,
-//   and never starts a core. A missing core, a dropped connection or a timeout rejects
-//   with `unavailable`; the next call reconnects and re-authenticates.
-// - createFixtureBackend: the Phase 1 in-memory backend. It answers the same requests with
-//   the same responses the Phase 2 core will, so tests and compatibility checks prove the
-//   wire interface without a production backend. It also serves `recent_activity`, which the
-//   product backend reports `unavailable` until Phase 3; that is fixture data, never history.
+// createSocketBackend is the production client. It talks to the core's `run/agent.sock`
+// with the length-prefixed frame codec, authenticates each new connection with `hello`,
+// and never starts a core. Before sending the token it checks that the socket and its
+// directory belong to this user and are private. A missing core, a dropped connection or a
+// timeout rejects with `unavailable`; the next call reconnects and re-authenticates.
+// The in-memory fixture backend is in fixture.ts.
 
-import { createHash, randomBytes } from "node:crypto";
-import { closeSync, constants, fstatSync, openSync, readFileSync } from "node:fs";
+import { randomBytes } from "node:crypto";
+import { closeSync, constants, fstatSync, lstatSync, openSync, readFileSync } from "node:fs";
 import { createConnection, type Socket } from "node:net";
+import { dirname } from "node:path";
 import {
-  AGENT_CURSOR_TTL_MS,
   AGENT_PROTOCOL_VERSION,
   AGENT_REQUEST_MAX_BYTES,
   AGENT_RESPONSE_MAX_BYTES,
-  AgentRequestIdSchema,
-  AgentRequestSchema,
   AgentResponseEnvelopeSchema,
   AgentTokenSchema,
-  deriveResourceId,
-  RECENT_ACTIVITY_MAX_LIMIT,
-  RESOURCE_CHUNK_MAX_BYTES,
-  ResourceSchema,
-  type ActivityEntry,
   type AgentMethod,
-  type AgentParams,
   type AgentRequest,
   type AgentRequestOf,
   type AgentResponse,
-  type AgentResult,
   type AgentStatusCode,
-  type CurrentSiteResult,
-  type ResourceKind,
-  type ResourceVersionState,
-  type SiteLink,
 } from "@scout/contracts";
 import { encodeFrame, FrameDecoder, FrameError } from "@scout/contracts/frame";
 
@@ -57,8 +42,6 @@ export interface ScoutAgentBackend {
   call<M extends AgentMethod>(request: AgentRequestOf<M>): Promise<AgentResponse<M>>;
   close(): void;
 }
-
-const byteLength = (v: unknown): number => Buffer.byteLength(JSON.stringify(v), "utf8");
 
 // ---------------------------------------------------------------------------
 // Production client over the agent socket
@@ -96,6 +79,22 @@ export function readTokenFile(path: string): string {
   }
 }
 
+/**
+ * True when the socket's parent is a real directory owned by `uid` with mode 0700, and the
+ * socket is a Unix socket owned by `uid` with no group or other permission bits. Mirrors
+ * native-host's checkRuntimeDir (not imported: scout-mcp must not depend on that package).
+ */
+export function isPrivateSocket(socketPath: string, uid: number = process.getuid?.() ?? -1): boolean {
+  try {
+    const dir = lstatSync(dirname(socketPath));
+    if (dir.isSymbolicLink() || !dir.isDirectory() || dir.uid !== uid || (dir.mode & 0o777) !== 0o700) return false;
+    const sock = lstatSync(socketPath);
+    return sock.isSocket() && sock.uid === uid && (sock.mode & 0o077) === 0;
+  } catch {
+    return false;
+  }
+}
+
 export const newRequestId = (): string => randomBytes(12).toString("base64url");
 
 interface Pending {
@@ -128,7 +127,12 @@ export function createSocketBackend(opts: SocketBackendOptions): ScoutAgentBacke
         reject(new BackendError("unavailable"));
       }, timeoutMs);
       c.pending.set(request.requestId, { resolve, reject, timer });
-      c.socket.write(frame);
+      c.socket.write(frame, (err) => {
+        if (!err || !c.pending.has(request.requestId)) return;
+        c.pending.delete(request.requestId);
+        clearTimeout(timer);
+        reject(new BackendError("unavailable"));
+      });
     });
 
   const connect = (): Promise<Connection> =>
@@ -138,6 +142,11 @@ export function createSocketBackend(opts: SocketBackendOptions): ScoutAgentBacke
         token = readTokenFile(opts.tokenFile);
       } catch (e) {
         reject(e);
+        return;
+      }
+      // The token goes only to a socket this user owns in a private directory.
+      if (!isPrivateSocket(opts.socketPath)) {
+        reject(new BackendError("unavailable"));
         return;
       }
       const socket = createConnection(opts.socketPath);
@@ -212,327 +221,5 @@ export function createSocketBackend(opts: SocketBackendOptions): ScoutAgentBacke
       void current?.then((c) => c.socket.destroy(), () => {});
       current = undefined;
     },
-  };
-}
-
-// ---------------------------------------------------------------------------
-// Phase 1 fixture backend
-// ---------------------------------------------------------------------------
-
-export interface FixtureVersionSeed {
-  text: string;
-  state: ResourceVersionState;
-  fetchedAt?: number;
-  /** When the decision was made; ignored for pending versions. */
-  decidedAt?: number;
-}
-
-export interface FixtureResourceSeed {
-  kind: ResourceKind;
-  siteOrigin: string;
-  /** Canonical https URL. */
-  sourceUrl: string;
-  versions: FixtureVersionSeed[];
-}
-
-export interface FixtureSeed {
-  coreInstanceId?: string;
-  /** The token `hello` accepts. */
-  token?: string;
-  /** The connection's browser-context grant. Off unless set, as in the product. */
-  browserContextGranted?: boolean;
-  paused?: boolean;
-  currentSite?: CurrentSiteResult["site"];
-  activity?: ActivityEntry[];
-  siteLinks?: { origin: string; catalogVersion: string; links: SiteLink[] };
-  resources?: FixtureResourceSeed[];
-  now?: () => number;
-}
-
-export interface FixtureBackend extends ScoutAgentBackend {
-  readonly coreInstanceId: string;
-  /** Resource IDs in seed order. */
-  readonly resourceIds: readonly string[];
-  /** Version hashes of one resource, in seed order. */
-  versionHashes(resourceId: string): string[];
-  setBrowserContextGrant(granted: boolean): void;
-  setPaused(paused: boolean): void;
-  setCurrentSite(site: CurrentSiteResult["site"]): void;
-  /** Revoke the resource: it becomes blocked and every approved version revoked. */
-  revoke(resourceId: string): void;
-  /** Simulate the core being down: every call rejects with `unavailable`. */
-  setOnline(online: boolean): void;
-}
-
-interface FixtureVersion {
-  hash: string;
-  bytes: Buffer;
-  state: ResourceVersionState;
-  fetchedAt: number;
-  decidedAt: number;
-}
-
-interface FixtureResource {
-  id: string;
-  kind: ResourceKind;
-  siteOrigin: string;
-  publisherOrigin: string;
-  sourceUrl: string;
-  blocked: boolean;
-  versions: FixtureVersion[];
-}
-
-type CursorState =
-  | { method: "recent_activity"; offset: number; expiresAt: number }
-  | { method: "site_links"; offset: number; expiresAt: number }
-  | { method: "list_resources"; offset: number; origin: string | undefined; expiresAt: number }
-  | { method: "read_resource"; resourceId: string; version: string; offset: number; expiresAt: number };
-
-const MAX_CURSORS = 1000;
-const DEFAULT_PAGE = 20;
-
-/** The end of the longest prefix of `bytes[from..from+max)` that ends on a UTF-8 code point boundary. */
-function utf8Cut(bytes: Buffer, from: number, max: number): number {
-  let end = Math.min(bytes.length, from + max);
-  while (end > from && end < bytes.length && (bytes[end]! & 0xc0) === 0x80) end--;
-  return end;
-}
-
-export async function createFixtureBackend(seed: FixtureSeed = {}): Promise<FixtureBackend> {
-  const now = seed.now ?? (() => Date.now());
-  const coreInstanceId = seed.coreInstanceId ?? randomBytes(8).toString("hex");
-  let granted = seed.browserContextGranted ?? false;
-  let paused = seed.paused ?? false;
-  let online = true;
-  let currentSite = seed.currentSite ?? null;
-  const activity = seed.activity ?? [];
-  const cursors = new Map<string, CursorState>();
-
-  const resources: FixtureResource[] = [];
-  for (const r of seed.resources ?? []) {
-    const id = await deriveResourceId(r.kind, r.sourceUrl);
-    const versions = r.versions.map((v, i): FixtureVersion => {
-      // Fixture-only hash; the store defines the real content-hash input in P2.3.
-      const hash = createHash("sha256").update(`${r.kind}\n${r.sourceUrl}\n${v.text}`).digest("hex");
-      return { hash, bytes: Buffer.from(v.text, "utf8"), state: v.state, fetchedAt: v.fetchedAt ?? i, decidedAt: v.decidedAt ?? i };
-    });
-    const res: FixtureResource = {
-      id, kind: r.kind, siteOrigin: r.siteOrigin, publisherOrigin: new URL(r.sourceUrl).origin, sourceUrl: r.sourceUrl, blocked: false, versions,
-    };
-    // The seed must be a valid stored resource.
-    ResourceSchema.parse(toStored(res));
-    resources.push(res);
-  }
-
-  function toStored(r: FixtureResource) {
-    const def = defaultVersion(r);
-    return {
-      id: r.id, kind: r.kind, siteOrigin: r.siteOrigin, publisherOrigin: r.publisherOrigin, sourceUrl: r.sourceUrl, blocked: r.blocked,
-      ...(def ? { defaultVersion: def.hash } : {}),
-      versions: r.versions.map((v) => ({
-        hash: v.hash, blobRef: createHash("sha256").update(v.bytes).digest("hex"), byteLength: v.bytes.length, fetchedAt: v.fetchedAt, state: v.state,
-        ...(v.state === "pending" ? {} : { decision: { actor: "user" as const, at: v.decidedAt } }),
-      })),
-    };
-  }
-
-  function defaultVersion(r: FixtureResource): FixtureVersion | undefined {
-    if (r.blocked) return undefined;
-    return r.versions.findLast((v) => v.state === "approved");
-  }
-
-  function issueCursor(state: CursorState): string {
-    for (const [k, c] of cursors) if (c.expiresAt <= now()) cursors.delete(k);
-    while (cursors.size >= MAX_CURSORS) cursors.delete(cursors.keys().next().value!);
-    const id = randomBytes(16).toString("base64url");
-    cursors.set(id, state);
-    return id;
-  }
-
-  function takeCursor<K extends CursorState["method"]>(id: string, method: K): Extract<CursorState, { method: K }> | undefined {
-    const c = cursors.get(id);
-    if (!c || c.method !== method || c.expiresAt <= now()) return undefined;
-    return c as Extract<CursorState, { method: K }>;
-  }
-
-  type Answer<M extends AgentMethod> = { ok: AgentResult<M> } | { error: AgentStatusCode };
-  const fail = (error: AgentStatusCode) => ({ error });
-
-  /** Largest page of `items[start..]` (at most `limit`) whose response fits the cap. */
-  function page<T, M extends AgentMethod>(
-    items: readonly T[],
-    start: number,
-    limit: number,
-    build: (slice: T[], nextCursor: (() => string) | undefined) => AgentResult<M>,
-    cursorFor: (offset: number) => CursorState,
-  ): Answer<M> {
-    let n = Math.min(limit, items.length - start);
-    for (; n >= 0; n--) {
-      const end = start + n;
-      const more = end < items.length;
-      const probe = build(items.slice(start, end), more ? () => "x".repeat(22) : undefined);
-      if (byteLength(envelopeOk(probe)) > AGENT_RESPONSE_MAX_BYTES) continue;
-      if (n === 0 && more) return fail("limit_exceeded");
-      return { ok: build(items.slice(start, end), more ? () => issueCursor(cursorFor(end)) : undefined) };
-    }
-    return fail("limit_exceeded");
-  }
-
-  const envelopeOk = (result: unknown) => ({ protocol: AGENT_PROTOCOL_VERSION, requestId: "x".repeat(64), coreInstanceId, status: "ok", result });
-  const expires = () => now() + AGENT_CURSOR_TTL_MS;
-  const withCursor = <T extends object>(o: T, next: (() => string) | undefined) => (next ? { ...o, nextCursor: next() } : o);
-
-  function browserGate(): AgentStatusCode | undefined {
-    if (!granted) return "not_granted";
-    if (paused) return "paused";
-    return undefined;
-  }
-
-  const handlers: { [M in AgentMethod]: (p: AgentParams<M>) => Answer<M> } = {
-    hello: (p) => (seed.token === undefined || p.token === seed.token ? { ok: { role: "interactive" } } : fail("not_granted")),
-
-    current_site: () => {
-      const gate = browserGate();
-      return gate ? fail(gate) : { ok: { site: currentSite } };
-    },
-
-    recent_activity: (p) => {
-      const gate = browserGate();
-      if (gate) return fail(gate);
-      let start = 0;
-      if (p.cursor !== undefined) {
-        const c = takeCursor(p.cursor, "recent_activity");
-        if (!c) return fail("expired_snapshot");
-        start = c.offset;
-      }
-      return page<ActivityEntry, "recent_activity">(
-        activity, start, p.limit ?? RECENT_ACTIVITY_MAX_LIMIT,
-        (entries, next) => withCursor({ entries }, next),
-        (offset) => ({ method: "recent_activity", offset, expiresAt: expires() }),
-      );
-    },
-
-    site_links: (p) => {
-      const gate = browserGate();
-      if (gate) return fail(gate);
-      const links = seed.siteLinks;
-      if (!currentSite || !links || links.origin !== currentSite.origin) return fail("not_found");
-      let start = 0;
-      if (p.cursor !== undefined) {
-        const c = takeCursor(p.cursor, "site_links");
-        if (!c) return fail("expired_snapshot");
-        start = c.offset;
-      }
-      return page<SiteLink, "site_links">(
-        links.links, start, p.limit ?? DEFAULT_PAGE,
-        (slice, next) => withCursor({ origin: links.origin, catalogVersion: links.catalogVersion, total: links.links.length, links: slice }, next),
-        (offset) => ({ method: "site_links", offset, expiresAt: expires() }),
-      );
-    },
-
-    list_resources: (p) => {
-      let start = 0;
-      let origin = p.origin;
-      if (p.cursor !== undefined) {
-        const c = takeCursor(p.cursor, "list_resources");
-        if (!c) return fail("expired_snapshot");
-        start = c.offset;
-        origin = c.origin;
-      }
-      // Only resources with a current approved version: pending, declined and revoked never appear.
-      const listed = resources.filter((r) => defaultVersion(r) && (origin === undefined || r.siteOrigin === origin));
-      return page<FixtureResource, "list_resources">(
-        listed, start, p.limit ?? DEFAULT_PAGE,
-        (slice, next) =>
-          withCursor(
-            {
-              resources: slice.map((r) => {
-                const v = defaultVersion(r)!;
-                return { ...identity(r, v), totalBytes: v.bytes.length, approvedAt: v.decidedAt };
-              }),
-            },
-            next,
-          ),
-        (offset) => ({ method: "list_resources", offset, origin, expiresAt: expires() }),
-      );
-    },
-
-    read_resource: (p) => {
-      let version = p.version;
-      let offset = 0;
-      if (p.cursor !== undefined) {
-        const c = takeCursor(p.cursor, "read_resource");
-        if (!c) return fail("expired_snapshot");
-        if (c.resourceId !== p.resourceId || (version !== undefined && version !== c.version)) return fail("not_found");
-        version = c.version;
-        offset = c.offset;
-      }
-      const r = resources.find((x) => x.id === p.resourceId);
-      if (!r) return fail("not_found");
-      // Checked on every chunk, so a revocation mid-read stops the next chunk.
-      if (r.blocked) return fail("revoked");
-      const v = version === undefined ? defaultVersion(r) : r.versions.find((x) => x.hash === version);
-      if (!v) return fail("not_found");
-      if (v.state === "revoked") return fail("revoked");
-      if (v.state !== "approved" && v.state !== "superseded") return fail("not_found");
-      if (offset > v.bytes.length) return fail("expired_snapshot");
-      // Shrink the chunk until the whole response fits (escaping can grow text up to 6x).
-      let max = RESOURCE_CHUNK_MAX_BYTES;
-      for (;;) {
-        const end = utf8Cut(v.bytes, offset, max);
-        const more = end < v.bytes.length;
-        const result = {
-          ...identity(r, v), offset, totalBytes: v.bytes.length, text: v.bytes.subarray(offset, end).toString("utf8"),
-        };
-        if (byteLength(envelopeOk({ ...result, nextCursor: "x".repeat(22) })) <= AGENT_RESPONSE_MAX_BYTES) {
-          if (!more) return { ok: result };
-          return { ok: { ...result, nextCursor: issueCursor({ method: "read_resource", resourceId: r.id, version: v.hash, offset: end, expiresAt: expires() }) } };
-        }
-        if (end === offset) return fail("limit_exceeded");
-        max = Math.floor((end - offset) / 2);
-      }
-    },
-  };
-
-  function identity(r: FixtureResource, v: FixtureVersion) {
-    return {
-      resourceId: r.id, kind: r.kind, siteOrigin: r.siteOrigin, publisherOrigin: r.publisherOrigin, sourceUrl: r.sourceUrl,
-      version: v.hash, approval: v.state === "superseded" ? ("superseded" as const) : ("approved" as const),
-    };
-  }
-
-  const respond = (requestId: string, a: Answer<AgentMethod>): AgentResponse => {
-    const base = { protocol: AGENT_PROTOCOL_VERSION, requestId, coreInstanceId };
-    if ("error" in a) return { ...base, status: "error", error: { code: a.error, message: a.error } };
-    const res: AgentResponse = { ...base, status: "ok", result: a.ok };
-    return byteLength(res) <= AGENT_RESPONSE_MAX_BYTES ? res : { ...base, status: "error", error: { code: "limit_exceeded", message: "limit_exceeded" } };
-  };
-
-  return {
-    coreInstanceId,
-    resourceIds: resources.map((r) => r.id),
-    versionHashes: (id) => resources.find((r) => r.id === id)?.versions.map((v) => v.hash) ?? [],
-    setBrowserContextGrant: (g) => void (granted = g),
-    setPaused: (p) => void (paused = p),
-    setCurrentSite: (s) => void (currentSite = s),
-    setOnline: (o) => void (online = o),
-    revoke(id) {
-      const r = resources.find((x) => x.id === id);
-      if (!r) return;
-      r.blocked = true;
-      for (const v of r.versions) if (v.state === "approved" || v.state === "superseded") v.state = "revoked";
-    },
-    async call<M extends AgentMethod>(request: AgentRequestOf<M>): Promise<AgentResponse<M>> {
-      if (!online) throw new BackendError("unavailable");
-      const raw: unknown = request;
-      const rid = (raw as { requestId?: unknown })?.requestId;
-      const requestId = AgentRequestIdSchema.safeParse(rid).success ? (rid as string) : "invalid";
-      if (byteLength(raw) > AGENT_REQUEST_MAX_BYTES) return respond(requestId, fail("limit_exceeded")) as AgentResponse<M>;
-      const parsed = AgentRequestSchema.safeParse(raw);
-      if (!parsed.success || parsed.data.protocol !== AGENT_PROTOCOL_VERSION) return respond(requestId, fail("protocol_mismatch")) as AgentResponse<M>;
-      const handler = handlers[parsed.data.method] as (p: unknown) => Answer<AgentMethod>;
-      return respond(requestId, handler(parsed.data.params)) as AgentResponse<M>;
-    },
-    close() {},
   };
 }

@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { afterEach, describe, expect, it } from "vitest";
-import { createFixtureBackend } from "./client.js";
+import { createFixtureBackend } from "./fixture.js";
 import { parseAdapterArgs } from "./main.js";
 import { STATUS_EXPLANATIONS } from "./tools.js";
 import { serveFixture, type FixtureSocket } from "./test-support/fixtureSocket.js";
