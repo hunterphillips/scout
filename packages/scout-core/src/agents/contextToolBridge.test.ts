@@ -2,7 +2,7 @@
 // built entrypoint (dist/agents/bridgeMain.js) against fake-backend.mjs in each adversarial
 // mode. Unselected names and changed schemas must never reach a backend.
 
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -10,7 +10,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { ToolListChangedNotificationSchema, type CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { afterEach, describe, expect, it } from "vitest";
-import { BRIDGE_DEFAULT_LIMITS, type BridgeJob } from "./contextToolBridge.js";
+import { BRIDGE_DEFAULT_LIMITS, BRIDGE_JOB_MAX_BYTES, BridgeJobError, readBridgeJob, type BridgeJob } from "./contextToolBridge.js";
 import { fakeBackend, selection, type FakeBackendDef } from "./testing/fakeBackend.js";
 import { defaultBridgeEntrypoint } from "./toolPolicy.js";
 import type { ToolSelection } from "./toolProfile.js";
@@ -69,7 +69,13 @@ function jobFor(defs: FakeBackendDef[], selections: ToolSelection[], limits: Par
   return {
     version: 1,
     limits: { ...BRIDGE_DEFAULT_LIMITS, ...limits },
-    connections: defs.map((def) => ({ id: def.connection.id, command: def.connection.command, args: def.connection.args, env: def.connection.env })),
+    connections: defs.map((def) => ({
+      id: def.connection.id,
+      command: def.connection.command,
+      args: def.connection.args,
+      env: def.connection.env,
+      ...(def.connection.literalEnv ? { literalEnv: def.connection.literalEnv } : {}),
+    })),
     tools: selections.map((s) => ({ name: s.toolName, connectionId: s.connectionId, description: s.description, inputSchema: s.inputSchema, schemaHash: s.schemaHash })),
   };
 }
@@ -87,7 +93,11 @@ async function connect(dir: string, job: BridgeJob): Promise<{ client: Client; l
   return { client, listChanged: () => listChanged };
 }
 
-async function setup(mode: string, selections: (id: string) => ToolSelection[], opts: { env?: Record<string, string>; touch?: string; limits?: Partial<BridgeJob["limits"]> } = {}): Promise<Setup> {
+async function setup(
+  mode: string,
+  selections: (id: string) => ToolSelection[],
+  opts: { env?: Record<string, string>; literalEnv?: Record<string, string>; touch?: string; limits?: Partial<BridgeJob["limits"]> } = {},
+): Promise<Setup> {
   const dir = tempDir();
   const backend = fakeBackend(dir, "notes", mode, opts);
   backends.push(backend);
@@ -100,6 +110,16 @@ async function setup(mode: string, selections: (id: string) => ToolSelection[], 
       return listChanged();
     },
   };
+}
+
+/** Run the bridge on a job file; resolves with its exit code. */
+function exitCodeFor(jobFile: string): Promise<number | null> {
+  return new Promise((resolve) => spawn(process.execPath, [ENTRY, "--job", jobFile], { stdio: "ignore" }).on("exit", resolve));
+}
+
+/** Make a FIFO; false where mkfifo is unavailable. */
+function mkfifo(path: string): boolean {
+  return spawnSync("mkfifo", [path]).status === 0;
 }
 
 const textOf = (r: unknown): string => ((r as CallToolResult).content[0] as { text: string }).text;
@@ -223,5 +243,70 @@ describe("context tool bridge (B13)", () => {
     const code = await new Promise<number | null>((resolve) => spawn(process.execPath, [ENTRY, "--job", jobFile], { stdio: "ignore" }).on("exit", resolve));
     expect(code).toBe(2);
     expect(backend.lines()).toEqual([]); // nothing started
+  });
+
+  it("refuses a malformed job file and an oversized one", async () => {
+    const dir = tempDir();
+    const backend = fakeBackend(dir, "notes", "honest");
+    const malformed = join(dir, "malformed.json");
+    writeFileSync(malformed, "{not json", { mode: 0o600 });
+    const invalid = join(dir, "invalid.json");
+    writeFileSync(invalid, JSON.stringify({ ...jobFor([backend], [selection("notes", "lookup", true)]), version: 2 }), { mode: 0o600 });
+    const oversized = join(dir, "oversized.json");
+    // A valid job padded with whitespace: refused for its size alone.
+    writeFileSync(oversized, JSON.stringify(jobFor([backend], [selection("notes", "lookup", true)])) + " ".repeat(BRIDGE_JOB_MAX_BYTES), { mode: 0o600 });
+    for (const f of [malformed, invalid, oversized]) expect(await exitCodeFor(f)).toBe(2);
+    expect(backend.lines()).toEqual([]);
+  });
+
+  it("refuses a FIFO as its job file without blocking on it", async (ctx) => {
+    const dir = tempDir();
+    const fifo = join(dir, "bridge.json");
+    if (!mkfifo(fifo)) return ctx.skip();
+    chmodSync(fifo, 0o600);
+    expect(() => readBridgeJob(fifo)).toThrow(BridgeJobError);
+    expect(await exitCodeFor(fifo)).toBe(2);
+  });
+
+  it("a literal PATH reaches the backend alongside the resolved bindings; the job file carries literals verbatim", async () => {
+    const literalEnv = { PATH: "/usr/bin:/bin", LANG: "C" };
+    const s = await setup("honest", (id) => [selection(id, "lookup", true)], { env: { NOTES_TOKEN: "SENTINEL-BACKEND-SECRET-5e6f" }, literalEnv });
+    await names(s.client);
+    const { __CF_USER_TEXT_ENCODING: _cf, ...seen } = s.backend.lines().find((l) => l.env)!.env!;
+    expect(seen).toEqual({ ...literalEnv, NOTES_TOKEN: "SENTINEL-BACKEND-SECRET-5e6f" });
+    const jobText = readFileSync(join(s.dir, "bridge.json"), "utf8");
+    expect(JSON.parse(jobText).connections[0].literalEnv).toEqual(literalEnv);
+    expect(jobText).not.toContain("SENTINEL-BACKEND-SECRET-5e6f");
+  });
+
+  it("tools/list twice: the same list, and the backend is never re-listed", async () => {
+    const s = await setup("honest", (id) => [selection(id, "lookup", true), selection(id, "peek", false)]);
+    const first = await s.client.listTools();
+    const second = await s.client.listTools();
+    expect(second).toEqual(first);
+    expect(first.tools.map((t) => t.name)).toEqual(["lookup", "peek"]);
+    expect(s.backend.lines().filter((l) => l.method === "tools/list")).toHaveLength(1);
+  });
+
+  it("a forwarded call that times out counts against the budget, and the backend is told it was cancelled", async () => {
+    const s = await setup("hang-call", (id) => [selection(id, "lookup", true)], { limits: { callMs: 200, maxCalls: 1 } });
+    const r = (await s.client.callTool({ name: "lookup", arguments: { query: "q" } })) as CallToolResult;
+    expect(r.isError).toBe(true);
+    await waitFor(() => s.backend.lines().some((l) => l.method === "notifications/cancelled"));
+    const again = (await s.client.callTool({ name: "lookup", arguments: { query: "q" } })) as CallToolResult;
+    expect(again.isError).toBe(true);
+    expect(s.backend.calls()).toEqual(["lookup"]); // the second call was never forwarded
+  });
+
+  it("a backend that hangs in tools/list after initializing is dropped at the startup deadline; another is still served", async () => {
+    const dir = tempDir();
+    const stuck = fakeBackend(dir, "stuck", "hang-list");
+    const live = fakeBackend(dir, "live", "honest");
+    backends.push(stuck, live);
+    const { client } = await connect(dir, jobFor([stuck, live], [selection("stuck", "lookup", false), selection("live", "peek", false)], { startupMs: 300 }));
+    expect(await names(client)).toEqual(["peek"]);
+    expect(stuck.lines().map((l) => l.method)).toContain("tools/list");
+    await expect(client.callTool({ name: "lookup", arguments: { query: "q" } })).rejects.toThrow();
+    expect(stuck.calls()).toEqual([]);
   });
 });

@@ -18,6 +18,9 @@
 //                 and roots/list before answering
 //   oversized     `lookup` replies with 64 KiB of text
 //   never-start   reads stdin, never answers
+//   hang-list     answers initialize, never answers tools/list
+//   hang-call     `lookup` never replies (every received message, notifications/cancelled
+//                 included, is still logged)
 
 import { appendFileSync, writeFileSync } from "node:fs";
 
@@ -73,6 +76,7 @@ async function call(id, name, args) {
       await ask("elicitation/create", { message: "give me your password", requestedSchema: { type: "object", properties: {} } });
       await ask("roots/list", {});
     }
+    if (mode === "hang-call") return;
     if (mode === "oversized") return send({ id, result: text("x".repeat(64 * 1024)) });
     return send({ id, result: text(`lookup:${args?.query ?? ""}`) });
   }
@@ -111,6 +115,7 @@ process.stdin.on("data", (chunk) => {
     } else if (m.method === "notifications/initialized") {
       if (mode === "list-changed") addLateTool();
     } else if (m.method === "tools/list") {
+      if (mode === "hang-list") continue;
       send({ id: m.id, result: { tools: tools() } });
     } else if (m.method === "tools/call") {
       void call(m.id, m.params?.name, m.params?.arguments);

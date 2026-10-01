@@ -1,10 +1,11 @@
+import { spawnSync } from "node:child_process";
 import { chmodSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { AgentProfileSchema, DEFAULT_AGENT_MODEL, loadAgentProfile, profileFingerprint, writeAgentProfile, type AgentProfile } from "./profile.js";
 import { EMPTY_SCHEMA, LOOKUP_SCHEMA, selection } from "./testing/fakeBackend.js";
-import { BINDING_FILE_MAX_BYTES, BindingError, isAllowedEnvName, resolveEnvBindings, schemaHash, ToolsProfileSchema, type Connection, type ToolsProfile } from "./toolProfile.js";
+import { BINDING_FILE_MAX_BYTES, BindingError, canonicalJson, isAllowedEnvName, MAX_LITERAL_ENV, MAX_LITERAL_ENV_CHARS, resolveEnvBindings, schemaHash, ToolsProfileSchema, type Connection, type ToolsProfile } from "./toolProfile.js";
 
 const SECRET = "SENTINEL-BINDING-SECRET-3c4d";
 const dirs: string[] = [];
@@ -58,6 +59,57 @@ describe("selected tools in the agent profile", () => {
     for (const n of ["NOTES_TOKEN", "HOME", "PATH", "LANG", "GITHUB_TOKEN"]) expect(isAllowedEnvName(n)).toBe(true);
   });
 
+  it("refuses interpreter, loader, shell, git and package-manager hooks; keeps harmless neighbours", () => {
+    const refused = [
+      "GLIBC_TUNABLES",
+      "ZDOTDIR",
+      "ELECTRON_RUN_AS_NODE",
+      "PYTHONWARNINGS",
+      "PYTHONBREAKPOINT",
+      "PYTHONUSERBASE",
+      "PERL5DB",
+      "GEM_HOME",
+      "BUNDLE_GEMFILE",
+      "GIT_SSH_COMMAND",
+      "GIT_EXEC_PATH",
+      "GIT_CONFIG_COUNT",
+      "GIT_CONFIG_GLOBAL",
+      "npm_config_script_shell",
+      "NPM_CONFIG_NODE_OPTIONS",
+      "NODE_PATH",
+    ];
+    for (const n of refused) expect(isAllowedEnvName(n), n).toBe(false);
+    for (const n of ["PYTHONUNBUFFERED", "PYTHONIOENCODING", "PYTHONDONTWRITEBYTECODE", "GIT_AUTHOR_NAME", "NPM_TOKEN"]) expect(isAllowedEnvName(n), n).toBe(true);
+  });
+
+  describe("literalEnv", () => {
+    const withLiteral = (literalEnv: Record<string, string>, patch: Partial<Connection> = {}) => tools({ connections: [conn({ literalEnv, ...patch })] });
+
+    it("accepts non-secret literals; a secret-looking literal is the user's declaration and is kept", () => {
+      expect(ToolsProfileSchema.safeParse(withLiteral({ PATH: "/usr/bin:/bin", HOME: "/Users/u", LANG: "en_US.UTF-8" })).success).toBe(true);
+      expect(ToolsProfileSchema.parse(withLiteral({ API_TOKEN: "sk-looks-secret-0000" })).connections[0]!.literalEnv).toEqual({ API_TOKEN: "sk-looks-secret-0000" });
+    });
+
+    it.each<[string, ToolsProfile]>([
+      ["a denylisted name", withLiteral({ NODE_OPTIONS: "--require /tmp/x.js" })],
+      ["a denylisted prefix", withLiteral({ DYLD_INSERT_LIBRARIES: "/tmp/x.dylib" })],
+      ["a PYTHON* startup name", withLiteral({ PYTHONSTARTUP: "/tmp/x.py" })],
+      ["a name both bound and literal", withLiteral({ NOTES_TOKEN: "x" })],
+      ["too many names", withLiteral(Object.fromEntries(Array.from({ length: MAX_LITERAL_ENV + 1 }, (_, i) => [`V${i}`, "x"])))],
+      ["a value too long", withLiteral({ PATH: "x".repeat(MAX_LITERAL_ENV_CHARS + 1) })],
+      ["a NUL in a value", withLiteral({ PATH: "/bin\0/x" })],
+      ["a non-string value", withLiteral({ PATH: 1 as unknown as string })],
+    ])("refuses %s", (_label, t) => {
+      expect(ToolsProfileSchema.safeParse(t).success).toBe(false);
+    });
+
+    it("is part of the fingerprint", () => {
+      const fp = (t: ToolsProfile) => profileFingerprint({ ...base, tools: t });
+      expect(fp(withLiteral({ PATH: "/usr/bin" }))).not.toBe(fp(tools()));
+      expect(fp(withLiteral({ PATH: "/usr/bin" }))).not.toBe(fp(withLiteral({ PATH: "/bin" })));
+    });
+  });
+
   it("the fingerprint changes when a selection, its schema or required flag, or a definition changes", () => {
     const fp = (t?: ToolsProfile) => profileFingerprint(t ? { ...base, tools: t } : base);
     const all = [
@@ -79,6 +131,19 @@ describe("selected tools in the agent profile", () => {
     const profile = { ...base, tools: tools() };
     writeAgentProfile(h, profile);
     expect(loadAgentProfile(h)).toEqual(profile);
+  });
+});
+
+describe("canonicalJson (RFC 8785 style)", () => {
+  it("sorts keys by code point: a BMP key above U+D7FF sorts before a surrogate-pair key", () => {
+    // UTF-16 code-unit order would put U+1F600 (0xD83D 0xDE00) before U+FB01.
+    expect(canonicalJson({ "\u{1F600}": 1, "\uFB01": 2, a: 3 })).toBe('{"a":3,"\uFB01":2,"\u{1F600}":1}');
+    expect(canonicalJson({ b: { d: 1, c: [{ z: 1, y: 2 }] }, a: null })).toBe('{"a":null,"b":{"c":[{"y":2,"z":1}],"d":1}}');
+  });
+
+  it("serializes numbers as ES Number.prototype.toString and refuses non-finite ones", () => {
+    expect(canonicalJson([1e21, 1e-7, 0.1, -0, 100, 4.5])).toBe("[1e+21,1e-7,0.1,0,100,4.5]");
+    for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, { x: Number.NEGATIVE_INFINITY }]) expect(() => canonicalJson(bad)).toThrow();
   });
 });
 
@@ -138,6 +203,13 @@ describe("resolveEnvBindings", () => {
   it("refuses a file owned by another user", () => {
     const p = file({ t: SECRET });
     expect(codeOf(() => resolveEnvBindings({ NOTES_TOKEN: { file: p, pointer: "/t" } }, { getuid: () => 12345 }))).toBe("binding: file not a private regular file owned by this user");
+  });
+
+  it("refuses a FIFO without blocking on it", (ctx) => {
+    const p = join(dir(), "fifo.json");
+    if (spawnSync("mkfifo", [p]).status !== 0) return ctx.skip();
+    chmodSync(p, 0o600);
+    expect(codeOf(() => resolveEnvBindings({ NOTES_TOKEN: { file: p, pointer: "/t" } }))).toBe("binding: file not a private regular file owned by this user");
   });
 
   it("refuses an injection name even if it got past the schema", () => {

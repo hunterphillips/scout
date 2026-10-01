@@ -33,9 +33,10 @@ export interface FakeBackendDef {
 
 /**
  * A reviewed stdio definition for fake-backend.mjs: `node fake-backend.mjs --mode <mode>`,
- * with `env` as literal values in a 0600 definition file under `dir`, bound by pointer.
+ * with `env` as literal values in a 0600 definition file under `dir`, bound by pointer, and
+ * `literalEnv` stored in the definition itself.
  */
-export function fakeBackend(dir: string, id: string, mode: string, opts: { env?: Record<string, string>; touch?: string } = {}): FakeBackendDef {
+export function fakeBackend(dir: string, id: string, mode: string, opts: { env?: Record<string, string>; literalEnv?: Record<string, string>; touch?: string } = {}): FakeBackendDef {
   const log = join(dir, `${id}.log`);
   const definitionFile = join(dir, `${id}-definition.json`);
   const env = opts.env ?? {};
@@ -48,6 +49,7 @@ export function fakeBackend(dir: string, id: string, mode: string, opts: { env?:
     args,
     env: Object.fromEntries(Object.keys(env).map((k) => [k, { file: definitionFile, pointer: `/env/${k}` }])),
   };
+  if (opts.literalEnv) connection.literalEnv = opts.literalEnv;
   const lines = (): BackendLogLine[] =>
     existsSync(log)
       ? readFileSync(log, "utf8")
