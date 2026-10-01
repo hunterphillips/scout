@@ -17,8 +17,11 @@ import type {
   ToChromeFrame,
 } from "@scout/contracts";
 import { createActivityForwarder, type ActivityForwarder, type ActivitySend } from "./activityForwarder.js";
+import type { AgentView } from "./agentApi/handlers.js";
+import type { CapabilityStore } from "./capabilities/store.js";
 import type { Clock } from "./clock.js";
 import type { Diagnostics } from "./diagnostics.js";
+import type { OriginFetchSession } from "./fetch/originSession.js";
 import { createResumeCache, type ResumeCache } from "./resumeCache.js";
 import type { SocketClient } from "./socketServer.js";
 import { CHROME_BUNDLE_ID, createVisitTracker, type VisitChange, type VisitTracker, WINDOW_ID_NONE } from "./visitTracker.js";
@@ -39,6 +42,14 @@ export interface CoordinatorOptions {
   sendActivity?: ActivitySend;
   /** Called once when a `shutdown` command stops the coordinator. */
   onShutdownRequested?: () => void;
+  /** For resource discovery on settled visits (P2.1 starts it); held, not used yet. */
+  capabilities?: CoordinatorCapabilities;
+}
+
+export interface CoordinatorCapabilities {
+  store: CapabilityStore;
+  /** One paced session per settled visit; its owner calls `startWindow()` once before discovery. */
+  createFetchSession: (origin: string) => OriginFetchSession;
 }
 
 export interface Coordinator {
@@ -54,6 +65,9 @@ export interface Coordinator {
   readonly forwarder: ActivityForwarder;
   /** Constructed for Phase 2's ranking; not used in Phase 1. */
   readonly resumeCache: ResumeCache<unknown>;
+  readonly capabilities: CoordinatorCapabilities | undefined;
+  /** What agent.sock may see right now: the focused permitted visit and whether Scout is paused. A fresh copy. */
+  agentView(): AgentView;
 }
 
 export function createCoordinator(options: CoordinatorOptions): Coordinator {
@@ -166,6 +180,11 @@ export function createCoordinator(options: CoordinatorOptions): Coordinator {
     tracker,
     forwarder,
     resumeCache,
+    capabilities: options.capabilities,
+    agentView() {
+      const visit = tracker.current();
+      return { currentSite: visit === null ? null : { origin: visit.origin, url: visit.url, visitEpoch: visit.epoch }, paused };
+    },
     get stopped() {
       return stopped;
     },

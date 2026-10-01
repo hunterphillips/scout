@@ -114,6 +114,22 @@ describe("coordinator", () => {
     expect(panel.at(-1)).not.toHaveProperty("detail");
   });
 
+  it("agentView shows the focused permitted visit and the pause state, nothing else", () => {
+    const { coordinator, focus, chrome, connect } = setup();
+    expect(coordinator.agentView()).toEqual({ currentSite: null, paused: false });
+    const c = connect();
+    chrome();
+    c.observe(focus());
+    expect(coordinator.agentView()).toEqual({
+      currentSite: { origin: "https://docs.stripe.com", url: STRIPE, visitEpoch: coordinator.tracker.epoch },
+      paused: false,
+    });
+    coordinator.handleNativeCommand({ type: "pause" });
+    expect(coordinator.agentView().paused).toBe(true);
+    c.observe(focus({ url: ISSUE }));
+    expect(coordinator.agentView().currentSite).toBeNull();
+  });
+
   it("an approved focus while Chrome is frontmost emits idle with the new epoch; a repeat emits nothing", () => {
     const { coordinator, panel, focus, chrome, connect } = setup();
     const c = connect();

@@ -10,7 +10,11 @@ const BUNDLE_ID_PATTERN = /^[A-Za-z0-9.-]+$/;
 
 export class ConfigError extends Error {
   constructor(
-    readonly code: "config-unreadable" | "config-invalid-destinations" | "config-invalid-chrome-bundle-id",
+    readonly code:
+      | "config-unreadable"
+      | "config-invalid-destinations"
+      | "config-invalid-chrome-bundle-id"
+      | "config-invalid-agent-browser-context",
   ) {
     super(code);
     this.name = "ConfigError";
@@ -22,6 +26,11 @@ export interface CoreConfig {
   destinations: readonly string[];
   /** The bundle id treated as "Chrome frontmost", e.g. com.google.chrome.for.testing. */
   chromeBundleId: string;
+  /**
+   * The user's grant letting their agent read browser context (current site, site links,
+   * recent activity) over agent.sock. Off by default.
+   */
+  agentBrowserContext: boolean;
 }
 
 /**
@@ -29,7 +38,7 @@ export interface CoreConfig {
  * default; a present but malformed file or field is an error, not a fallback.
  */
 export function readConfig(home: string): CoreConfig {
-  const defaults: CoreConfig = { destinations: DEFAULT_DESTINATIONS, chromeBundleId: CHROME_BUNDLE_ID };
+  const defaults: CoreConfig = { destinations: DEFAULT_DESTINATIONS, chromeBundleId: CHROME_BUNDLE_ID, agentBrowserContext: false };
   let raw: string;
   try {
     raw = readFileSync(join(home, "config.json"), "utf8");
@@ -59,7 +68,14 @@ export function readConfig(home: string): CoreConfig {
     chromeBundleId = b;
   }
 
-  return { destinations, chromeBundleId };
+  let agentBrowserContext = defaults.agentBrowserContext;
+  if ("agentBrowserContext" in cfg) {
+    const g = (cfg as { agentBrowserContext: unknown }).agentBrowserContext;
+    if (typeof g !== "boolean") throw new ConfigError("config-invalid-agent-browser-context");
+    agentBrowserContext = g;
+  }
+
+  return { destinations, chromeBundleId, agentBrowserContext };
 }
 
 /** The `destinations` field alone; see readConfig. */
