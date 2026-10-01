@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { isHttpsOrigin } from "./capability.js";
 
 /** Caps the content script enforces; re-checked here so a misbehaving extension is dropped, not trusted. */
 export const PAGE_TEXT_TITLE_MAX_CHARS = 300;
@@ -19,6 +20,8 @@ export const FocusObservationSchema = z.object({
   title: z.string().optional(),
   incognito: z.boolean().optional(),
   documentId: z.string().optional(),
+  /** The permissions snapshot revision the extension had last sent when it sent this focus. */
+  permissionsRevision: z.int().nonnegative().optional(),
 });
 
 /** Text read from a supported page (Phase 1: a GitHub issue). */
@@ -37,10 +40,28 @@ export const PageTextObservationSchema = z.object({
   truncated: z.boolean(),
 });
 
-/** Host permissions currently granted to the extension. */
+/**
+ * True when `p` is an exact-host https permission pattern `https://<host>/*`: the host an
+ * RFC 1123 hostname as isHttpsOrigin defines it, with no wildcard and no port.
+ */
+export function isExactOriginPattern(p: string): boolean {
+  if (typeof p !== "string" || !p.endsWith("/*")) return false;
+  const origin = p.slice(0, -2);
+  return isHttpsOrigin(origin) && !/:\d+$/.test(origin);
+}
+
+/**
+ * The extension's full permissions snapshot: every exact origin the user granted, and the
+ * popup's GitHub-capture toggle. `revision` rises with every snapshot an extension worker
+ * sends (seeded from the clock, so a worker restart never goes backwards). A new bridge
+ * connection must send one before the core accepts focus or page text.
+ */
 export const PermissionsObservationSchema = z.object({
   kind: z.literal("permissions"),
-  granted: z.array(z.string()),
+  revision: z.int().nonnegative(),
+  at: z.number(),
+  granted: z.array(z.string().refine(isExactOriginPattern, { message: "not an exact https origin pattern" })),
+  githubCapture: z.boolean(),
 });
 
 /** Extension -> core (via the native host). */
