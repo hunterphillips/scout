@@ -22,6 +22,8 @@
     "test:spikes": "vitest run --root scripts/spikes",
     "test:scripts": "vitest run --root scripts --exclude 'spikes/**'",
     "test:e2e": "vitest run --root test",
+    "test:agent-contract": "vitest run --root packages/scout-core src/agents src/capabilities && vitest run --root packages/scout-mcp && vitest run --root scripts agent-check",
+    "verify:agent": "node scripts/agent-check/run.mjs",
     "test:all": "npm run build && npm test && npm run test:e2e",
     "setup": "node scripts/setup.mjs",
     "doctor": "node scripts/doctor.mjs",
