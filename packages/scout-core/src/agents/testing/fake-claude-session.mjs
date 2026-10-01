@@ -36,6 +36,9 @@
 //   phrase-missing            the read succeeds, the answer omits the phrase
 //   not-listed                the listing says none, but the skill is used anyway
 //   hang-turn2                the second turn never answers
+//   mentions-foreign          like hotload-watch, but every reply also names a skill and an MCP
+//                             server that are not Scout's (FOREIGN_SKILL, FOREIGN_SERVER), and
+//                             the use turn first calls one of that server's tools
 //   mcp-add-fail | mcp-add-hang   `mcp add` writes the entry, then exits 1 | never exits
 //   mcp-get-hang | mcp-get-killed  `mcp get` of an existing entry never exits | is SIGKILLed
 // Turns are recognized by their text: "use it with the Skill tool" first writes a
@@ -57,6 +60,9 @@ const logLine = (obj) => {
   if (process.env.FAKE_LOG) appendFileSync(process.env.FAKE_LOG, JSON.stringify(obj) + "\n");
 };
 const out = (s) => process.stdout.write(s);
+/** Names the mentions-foreign mode puts in model text; a report must never contain them. */
+export const FOREIGN_SKILL = "my-private-skill-q7x";
+export const FOREIGN_SERVER = "someones-private-server";
 
 export async function runExtended({ argv, mode, version }) {
   const has = (n) => argv.includes(n);
@@ -298,15 +304,18 @@ async function session({ argv, has, flag, mode, version }) {
     if (mode === "hang-turn2" && turn === 2) return new Promise(() => {});
     let text;
     const direct = /(mcp__\S+__read_resource)\b[\s\S]*?(res_[0-9a-f]{64})/.exec(prompt);
+    const foreign = mode === "mentions-foreign";
     if (/use it with the Skill tool/.test(prompt)) {
       const names = proofNames();
-      say(listing(mode === "not-listed" ? [] : names));
+      say(listing(mode === "not-listed" ? [] : foreign ? [...names, FOREIGN_SKILL] : names));
+      if (foreign) toolUse(`mcp__${FOREIGN_SERVER}__lookup`, { q: FOREIGN_SKILL }, `Permission to use mcp__${FOREIGN_SERVER}__lookup has been denied`, true);
       text = names.length ? await useSkill(names[0]) : "I see no scout-proof skill.";
     } else if (direct) {
       text = answerFromRead(await callRead(direct[1], direct[2]));
     } else {
-      text = listing(proofNames());
+      text = listing(foreign ? [...proofNames(), FOREIGN_SKILL] : proofNames());
     }
+    if (foreign) text = `${text} (Also available: ${FOREIGN_SKILL} and the ${FOREIGN_SERVER} server.)`;
     say(text);
     emit({
       type: "result",

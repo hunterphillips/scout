@@ -2,7 +2,7 @@ import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { evidenceText, redactReport, redactString, summarizeInit, TEXT_MAX, writeReport } from "./report.mjs";
+import { redactReport, redactString, summarizeInit, writeReport } from "./report.mjs";
 
 const env = { HOME: "/Users/someone" };
 const dirs = [];
@@ -18,11 +18,6 @@ describe("redaction", () => {
     expect(redactString("/Users/someoneelse/x", o)).toBe("/Users/someoneelse/x");
     expect(redactString("a tok-123456 b", o)).toBe("a <redacted> b");
     expect(redactReport({ "/Users/someone/k": ["/Users/someone/a", 3, null, { t: "tok-123456" }] }, o)).toEqual({ "~/k": ["~/a", 3, null, { t: "<redacted>" }] });
-  });
-
-  it("bounds model text", () => {
-    expect(evidenceText("x".repeat(TEXT_MAX + 50), { env })).toHaveLength(TEXT_MAX + 3);
-    expect(evidenceText(undefined, { env })).toBeUndefined();
   });
 
   it("names only Scout's servers, tools and skills from the init event", () => {

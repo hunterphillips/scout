@@ -19,12 +19,22 @@ import { buildJobArgv, createClaudeJobAdapter } from "../../packages/scout-core/
 import { runDirectPreflight } from "../../packages/scout-core/dist/agents/launchProfile.js";
 import { OwnedTree, psSnapshot } from "../../packages/scout-core/dist/agents/processTree.js";
 import { loadAgentProfile, writeAgentProfile } from "../../packages/scout-core/dist/agents/profile.js";
+import { errorCode } from "./classify.mjs";
 import { checkProfile, CHECK_MODEL, jobRequest, makeThrowawayRoot, selectedToolProfile, startJobFixture } from "./fixtures.mjs";
 import { buildReport, shellish, summarizeInit } from "./report.mjs";
 
 export const BACKGROUND_CASES = Object.freeze(["baseline", "selected-tool", "cancel"]);
 export const BACKGROUND_DEFAULTS = Object.freeze({ cancelAfterInitMs: 3000 });
 const BRIDGED_TOOL = "mcp__scout_bridge__lookup";
+
+/** One backend log line, or undefined if it is not JSON (a torn or foreign line). */
+const parseLogLine = (line) => {
+  try {
+    return JSON.parse(line);
+  } catch {
+    return undefined;
+  }
+};
 
 const delay = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -88,6 +98,7 @@ export async function runBackground(caseName, o, deps) {
   const ac = new AbortController();
   // run.mjs's abort (SIGINT/SIGTERM/uncaught error): cancel the job; cleanup below still runs.
   let externalAbort;
+  let cancelTimer;
   const onExternalAbort = () => {
     externalAbort = typeof deps.abortSignal?.reason === "string" ? deps.abortSignal.reason : "signal";
     ac.abort("aborted");
@@ -128,7 +139,8 @@ export async function runBackground(caseName, o, deps) {
   const onInit = (ev) => {
     init = ev;
     if (caseName !== "cancel") return;
-    setTimeout(() => {
+    clearTimeout(cancelTimer);
+    cancelTimer = setTimeout(() => {
       tree?.poll(psSnapshot());
       cancelAt = Date.now() - t0;
       ac.abort("superseded");
@@ -174,7 +186,7 @@ export async function runBackground(caseName, o, deps) {
         if (!usedScout) failures.push("scout_tools_not_used");
         if (caseName === "selected-tool") {
           const backendCalls = existsSync(selected.log)
-            ? readFileSync(selected.log, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l)).filter((l) => l.method === "tools/call" && l.tool === "lookup").length
+            ? readFileSync(selected.log, "utf8").split("\n").filter(Boolean).map(parseLogLine).filter((l) => l?.method === "tools/call" && l.tool === "lookup").length
             : 0;
           selected.evidence = {
             bridgedToolUsed: d.toolUses.includes(BRIDGED_TOOL),
@@ -187,8 +199,9 @@ export async function runBackground(caseName, o, deps) {
       }
     }
   } catch (e) {
-    failures.push(`error_${e?.code ?? e?.name ?? "unknown"}`);
+    failures.push(errorCode(e));
   } finally {
+    clearTimeout(cancelTimer);
     await adapter?.abortAll().catch(() => {});
     clearInterval(treePoller);
     cleanup.jobDirRemoved = !existsSync(jobDir);
@@ -210,7 +223,7 @@ export async function runBackground(caseName, o, deps) {
   }
   if (externalAbort) {
     outcome = "aborted";
-    failures.push(`aborted_${/^[A-Za-z]{1,32}$/.test(externalAbort) ? externalAbort : "signal"}`);
+    failures.push(`aborted_${/^[A-Za-z][A-Za-z0-9_]{0,100}$/.test(externalAbort) ? externalAbort : "signal"}`);
   }
 
   const pass = failures.length === 0 && (caseName === "cancel" ? outcome === "cancelled" : outcome === "ok");

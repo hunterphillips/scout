@@ -17,7 +17,8 @@ Two commands for Phase 1 of the website-agent plan.
 | `--case <c>` | `hotload`, `baseline`, `selected-tool` or `cancel` (required) |
 | `--home <dir>` | Throwaway Scout home, created 0700 if missing (required). The real `~/.scout` is refused. The report goes to `<dir>/agent-check/<case>-<timestamp>.json`. |
 | `--dry-run` | Print the names, paths and argv of the run. Writes, registers and launches nothing, including the preflight. |
-| `--max-inference <n>` | Most inference requests the run may make: default 2, maximum 4. A hotload run whose options need more is refused. |
+| `--max-inference <n>` | Most inference requests the run may make: default 2, maximum 4. Above 2 needs `--acknowledge-budget`. A hotload run whose options need more is refused. |
+| `--acknowledge-budget` | Allow `--max-inference` above 2. Without it such a run exits 2, because the plan allows "at most two inference requests in one authorized check". |
 | `--claude <path>` | Use this `claude` binary instead of the one on `PATH`. |
 | `--authorize-real-root` | hotload: the acceptance run. Adds one `scout-proof-<nonce>` MCP registration at user scope and one `scout-proof-<nonce>` skill directory in the real user skills root (`$CLAUDE_CONFIG_DIR/skills`, else `~/.claude/skills`), and removes both afterwards. |
 | `--preliminary` | hotload: put the skill in the throwaway cwd's `.claude/skills` and load the server with `--mcp-config`. Nothing installed changes; the result does not count for the gate. |
@@ -32,19 +33,26 @@ Exit codes: 0 the check passed (or a dry run), 1 the check failed or stopped, 2 
 
 SIGINT, SIGTERM or SIGHUP during a run stops the session, runs the same cleanup as a normal end
 (once; a second signal is ignored), writes the report with outcome `aborted`, and exits 1.
-An uncaught exception or unhandled rejection is treated the same way.
+An uncaught exception or unhandled rejection is treated the same way, and the report's
+failure code adds the error's name and code (`aborted_uncaughtException_TypeError`). A third
+signal is not handled either. SIGKILL is the only escape, and it skips cleanup.
 
-One inference request is one turn: one message sent to the hotload session, or one
-background job. A turn can make several API calls when the model uses tools; the report
-counts them per turn in `turns[].usage.turns`.
+One inference request is one user turn: one message sent to the hotload session, or one
+background job. Each can make several API calls when the model uses tools, up to
+`--max-turns`; the report counts them per turn in `turns[].usage.turns`. Run revocation
+(`--with-revocation`) and the restart check (`--two-session`) as separate checks rather than
+one acknowledged run of 3 or 4.
+
+During an acceptance run, close other Claude Code sessions if possible: they can write the
+same user config file. The report records whether the registry changed underneath us.
 
 ## Invocations and inference requests
 
 | Command | Requests |
 | --- | --- |
 | `npm run verify:agent -- --case hotload --home <dir> --authorize-real-root` | 2 |
-| `... --case hotload --home <dir> --authorize-real-root --with-revocation --max-inference 3` | 3 |
-| `... --case hotload --home <dir> --authorize-real-root --two-session --max-inference 3` | 2, or 3 if turn 2 fails |
+| `... --case hotload --home <dir> --authorize-real-root --with-revocation --max-inference 3 --acknowledge-budget` | 3 |
+| `... --case hotload --home <dir> --authorize-real-root --two-session --max-inference 3 --acknowledge-budget` | 2, or 3 if turn 2 fails |
 | `... --case baseline --home <dir>` | 1 |
 | `... --case selected-tool --home <dir>` | 1 |
 | `... --case cancel --home <dir>` | 1 |
@@ -91,9 +99,9 @@ Outcomes, each from the session's own events:
 | `read_ok_phrase_missing` | The read succeeded; the final reply has no proof phrase. |
 | `skill_invoked_read_failed` | The Skill tool was called; `read_resource` was not called or returned an error (`readError` holds the code). |
 | `skill_not_invoked` | No Skill call names the proof skill. |
-| `hotload_requires_reload` | `--two-session`: turn 2 did not invoke it; a fresh session did, and read it. |
+| `hotload_requires_reload` | `--two-session`: turn 2 did not invoke it; a fresh session did, and read it. The billing preflight runs again before the fresh session opens; if it fails, no second session starts. |
 | `skill_never_loads` | `--two-session`: neither session invoked and read it. |
-| `mcp_not_loaded` | Turn 1's init showed the proof server `failed` or `absent`, and the check stopped there. Or init showed it `pending` or `connected_without_tools`, the check went on, and turn 2's `read_resource` failed as `tool_unavailable` or `server_not_connected`. `mcpStatusAtInit` holds the init status. |
+| `mcp_not_loaded` | Turn 1's init showed the proof server `failed` or `absent`, and the check stopped there. Or init showed it `pending` or `connected_without_tools`, the check went on, and in turn 2 `read_resource` failed as `tool_unavailable` or `server_not_connected`, or the skill was invoked and no read followed. `mcpStatusAtInit` holds the init status. |
 | `mcp_requires_restart` | `--two-session`: the server was `failed` or `absent` in the first session and connected in a fresh one. |
 | `preflight_failed`, `aborted` | The billing preflight did not return `subscription`; the run stopped (signal, timeout, or error). |
 
@@ -106,6 +114,18 @@ left in place and reported. `get` counts as "absent" only when it exits 1 with t
 alone and reports `unknown_state` with the exit status or signal. A removal that `get`
 cannot confirm is reported as `removal_unverified`. Either way cleanup is marked
 incomplete.
+
+Each cleanup step runs even if an earlier one fails: sessions, skill directory,
+registration, fixture, throwaway dir. A failed step records `error_<code>` (for example
+`error_EACCES`) and the report is still written. A skill directory replaced by a symlink is
+left in place as `left_symlink`.
+
+Before `mcp add`, the check reads the key names of `mcpServers` in the user config
+(`$CLAUDE_CONFIG_DIR/.claude.json`, else `~/.claude.json`); it never reads or keeps the
+values. After cleanup it reads them again and runs `mcp get` once more about 3 seconds
+later. `registry` reports the counts before and after, `foreignChanged` (another writer
+changed other entries), and `reappeared` (our entry came back after removal, which fails the
+check).
 
 **baseline.** One background job through the real job adapter, with Scout context only.
 Passes on `ok` with at least one pick and at least one Scout tool call.
@@ -124,6 +144,7 @@ The JSON report records the CLI version, effective argv, preflight verdict and r
 codes, the env filtering applied (forwarded key names and a count of dropped keys), what
 the init event loaded, the model, the outcome, the structured output, timings, usage
 counts, cleanup evidence, and each inference request. Scout's own servers, tools and
-skills are named. The user's other servers, tools and skills are only counted. Tokens, env
-values and prompts never appear, and paths under `$HOME` are written as `~`. The
-proof phrase is replaced by `<proof phrase>` in quoted model text.
+skills are named. The user's other servers, tools and skills are only counted, and so are
+the user's allow rules (`userAllowRules`). Tokens, env values, prompts and model text never
+appear; each turn keeps only the `scout-proof-*` names the model listed, outcome flags and
+fixed codes. Paths under `$HOME` are written as `~`.

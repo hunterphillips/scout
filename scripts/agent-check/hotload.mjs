@@ -5,7 +5,10 @@
 // resource through Scout. Inference requests: turn 1 and turn 2, plus one each for
 // --with-revocation and --two-session when the budget (--max-inference) allows them. One
 // inference request is one turn (one user message); the API calls inside a turn are
-// recorded per turn in usage.turns.
+// recorded per turn in usage.turns. The default budget is 2; more needs --acknowledge-budget
+// (run.mjs), because the plan allows at most two inference requests per authorized check.
+//
+// Pure turn analysis lives in classify.mjs; the one cleanup in cleanup.mjs.
 //
 // Acceptance mode (--authorize-real-root) uses the real user skills root
 // (`$CLAUDE_CONFIG_DIR/skills`, else `~/.claude/skills`; refused, never created, if missing)
@@ -17,7 +20,7 @@
 //
 // Order: preflight for the exact env/cwd/binary of the session -> register -> start the
 // session (the skills root already exists) -> turn 1 -> write the skill -> turn 2 -> optional
-// restart/revocation -> cleanup -> report. Cleanup runs exactly once, on every path,
+// restart (preflight again first)/revocation -> cleanup -> registry re-check -> report. Cleanup runs exactly once, on every path,
 // including an abort (deps.abortSignal: SIGINT/SIGTERM or an uncaught error in run.mjs),
 // which stops the session first and reports outcome `aborted`.
 //
@@ -51,16 +54,21 @@
 
 import { randomBytes } from "node:crypto";
 import { mkdirSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { REPO_ROOT } from "../lib/paths.mjs";
 import { createLaunchProfile, filterChildEnv, runProfilePreflight } from "../../packages/scout-core/dist/agents/launchProfile.js";
 import { renderSkillWrapper } from "../../packages/scout-core/dist/capabilities/wrapper.js";
+import { analyzeTurn, classifyTurn2, classifyUse, errorCode, proofServerState } from "./classify.mjs";
+import { runCleanup } from "./cleanup.mjs";
 import { CHECK_MODEL, makeThrowawayRoot, SCOUT_MCP_MAIN, startSkillFixture } from "./fixtures.mjs";
-import { mcpAddUser, mcpGet, ownsRegistration, pathExists, removeOwnedRegistration, removeOwnedSkill, writeProofSkill } from "./registration.mjs";
-import { buildReport, evidenceText, shellish, summarizeInit, usageOf } from "./report.mjs";
+import { mcpAddUser, mcpGet, ownsRegistration, pathExists, registryNames, removeOwnedRegistration, removeOwnedSkill, userAllowRuleCounts, writeProofSkill } from "./registration.mjs";
+import { buildReport, shellish, summarizeInit } from "./report.mjs";
 import { startSession } from "./session.mjs";
 
-export const HOTLOAD_DEFAULTS = Object.freeze({ settleMs: 3000, turnTimeoutMs: 180_000 });
+export { analyzeTurn, classifyTurn2, classifyUse, listedSkillNames, NOT_LOADED_READ_ERRORS, proofServerState, readErrorCode } from "./classify.mjs";
+
+export const HOTLOAD_DEFAULTS = Object.freeze({ settleMs: 3000, turnTimeoutMs: 180_000, registryRecheckMs: 3000 });
 export const MAX_TURNS = 8;
 export const SESSION_TOOLS = Object.freeze(["Skill", "ToolSearch"]);
 const NONCE_RE = /^[a-z0-9]{10}$/;
@@ -81,7 +89,8 @@ const ABORT_SETTLE_MS = 2000;
  *   mcp_not_loaded              turn 1's init showed the proof server failed or absent (stops
  *                               there), or it was pending / listed without tools at init and
  *                               turn 2's read_resource failed as tool_unavailable or
- *                               server_not_connected (mcpStatusAtInit holds the init status)
+ *                               server_not_connected, or the skill was invoked and no read
+ *                               was made (mcpStatusAtInit holds the init status)
  *   mcp_requires_restart        --two-session: failed/absent in session 1, connected in a fresh one
  *   preflight_failed, aborted
  */
@@ -116,6 +125,9 @@ export const REPORT_NOTES = Object.freeze([
   "Old conversation text remains in a session after revocation; the check shows only that Scout refuses later reads.",
   "One-time MCP registration (registration.loadedAtStart, mcpStatusAtInit) is recorded separately from per-resource skill hot-load (outcome).",
   "MCP startup is non-blocking in CLI 2.1.286: a proof server `pending` (or listed without tools) at init does not stop the check; turn 2's evidence decides.",
+  "The user's own allow rules (from --setting-sources user) also apply in the session; userAllowRules counts them (and those naming mcp__ tools) from the user settings file at the start of the run.",
+  "Turn records keep no model text: only Scout's names (scout-proof-*, Skill, ToolSearch, the proof server's tools), outcome booleans and fixed codes; other tool uses are counted.",
+  "registry compares the user config's mcpServers key names (counted, never named) before `mcp add` and after cleanup; foreignChanged means another writer changed it during the run, reappeared means our entry came back after removal (also re-checked with `mcp get` a few seconds later).",
 ]);
 
 /** Why a hotload run with these options must not start (nothing changed), or undefined. */
@@ -159,102 +171,6 @@ export function sessionArgs({ model, name, preliminary, mcpConfigFile }) {
     ...(preliminary ? ["--mcp-config", mcpConfigFile] : []),
   ];
 }
-
-const resultText = (content) => (typeof content === "string" ? content : Array.isArray(content) ? content.map((c) => c?.text ?? "").join("\n") : "");
-
-/** A failed read's code: Scout's own (`Scout <code>: ...`), else a coarse CLI-side class. */
-export function readErrorCode(text) {
-  const scout = /^Scout ([a-z_]+):/.exec(text ?? "");
-  if (scout) return scout[1];
-  if (/permission|not allowed|denied/i.test(text ?? "")) return "permission_denied";
-  if (/not connected|still connecting|pending|failed to connect/i.test(text ?? "")) return "server_not_connected";
-  if (/no such tool|not available|unknown tool/i.test(text ?? "")) return "tool_unavailable";
-  return "tool_error";
-}
-
-/** Proof-skill names on the model's own "Skills seen:" line (any assistant text this turn). */
-export function listedSkillNames(text) {
-  const line = /^[^\S\n]*[*_]*Skills seen:[*_]*[^\S\n]*(.*)$/im.exec(text ?? "");
-  return { lineFound: !!line, names: line ? [...new Set(line[1].match(/scout-proof-[a-z0-9]+/g) ?? [])] : [] };
-}
-
-/** What one turn shows: Scout tool uses (others counted), the listing, errors, the proof phrase, usage. */
-export function analyzeTurn(turn, { name, readTool, proofPhrase, opts }) {
-  const uses = [];
-  const results = new Map();
-  const texts = [];
-  for (const ev of turn.events) {
-    const content = ev?.message?.content;
-    if (!Array.isArray(content)) continue;
-    for (const b of content) {
-      if (ev.type === "assistant" && b?.type === "tool_use") uses.push({ id: b.id, name: b.name, skill: b.input?.skill });
-      if (ev.type === "assistant" && b?.type === "text" && typeof b.text === "string") texts.push(b.text);
-      if (ev.type === "user" && b?.type === "tool_result") results.set(b.tool_use_id, { isError: b.is_error === true, text: resultText(b.content) });
-    }
-  }
-  const label = (u) =>
-    u.name === "Skill" ? `Skill(${u.skill === name ? name : "other"})` : u.name === readTool || u.name === `mcp__${name}__list_resources` || u.name === "ToolSearch" ? u.name : "other";
-  const skillUses = uses.filter((u) => u.name === "Skill" && u.skill === name);
-  const reads = uses.filter((u) => u.name === readTool);
-  const readResults = reads.map((u) => results.get(u.id));
-  const readSucceeded = readResults.some((r) => r && !r.isError);
-  let readError;
-  if (!reads.length) readError = "not_called";
-  else if (!readSucceeded) {
-    const last = readResults.findLast(Boolean);
-    readError = last ? readErrorCode(last.text) : "no_result";
-  }
-  const finalText = typeof turn.result?.result === "string" ? turn.result.result : (texts.at(-1) ?? "");
-  const listing = listedSkillNames([...texts, finalText].join("\n"));
-  const redact = (t) => evidenceText(t.split(proofPhrase).join("<proof phrase>"), opts);
-  return {
-    ms: turn.ms,
-    completed: !!turn.result && !turn.timedOut,
-    timedOut: turn.timedOut,
-    sessionExited: turn.exited,
-    resultSubtype: turn.result?.subtype,
-    resultIsError: turn.result?.is_error === true,
-    toolUses: uses.map((u) => ({ name: label(u), error: results.get(u.id)?.isError ?? null })),
-    toolSearchUses: uses.filter((u) => u.name === "ToolSearch").length,
-    listingLineFound: listing.lineFound,
-    listedNames: listing.names,
-    discovery: listing.names.includes(name) ? "listed" : "not_listed",
-    skillInvoked: skillUses.length > 0,
-    skillSucceeded: skillUses.some((u) => results.get(u.id) && !results.get(u.id).isError),
-    readCalled: reads.length > 0,
-    readSucceeded,
-    ...(readError ? { readError } : {}),
-    readRevoked: readResults.some((r) => r?.isError && /\brevoked\b/.test(r.text)),
-    proofPhraseQuoted: finalText.includes(proofPhrase),
-    text: redact(finalText),
-    usage: usageOf(turn.result),
-  };
-}
-
-/** The outcome class of a "use the skill" turn (see OUTCOMES). */
-export function classifyUse(a) {
-  if (!a.skillInvoked) return "skill_not_invoked";
-  if (!a.readSucceeded) return "skill_invoked_read_failed";
-  if (!a.proofPhraseQuoted) return "read_ok_phrase_missing";
-  return a.discovery === "listed" ? "hotload_pass" : "skill_used_not_listed";
-}
-
-/**
- * The proof server's state in an init summary. `atInit` is its status there, or
- * `connected_without_tools`. `proceed`: worth a turn 2 (connected, or still pending, or listed
- * without tools); otherwise (failed, absent, ...) not timing, so the check stops.
- */
-export function proofServerState(initSummary, { name, readTool }) {
-  const server = initSummary?.mcpServers?.find((s) => s.name === name);
-  const status = server?.status ?? "absent";
-  const toolsListed = !!initSummary?.tools?.includes(readTool);
-  const toolSearchOffered = !!initSummary?.tools?.includes("ToolSearch");
-  const atInit = status === "connected" && !toolsListed ? "connected_without_tools" : status;
-  return { status, atInit, toolsListed, toolSearchOffered, usable: status === "connected" && toolsListed, proceed: status === "connected" || status === "pending" };
-}
-
-/** Read errors that mean the proof server's tool never became callable. */
-export const NOT_LOADED_READ_ERRORS = Object.freeze(["tool_unavailable", "server_not_connected"]);
 
 class Aborted extends Error {
   constructor() {
@@ -316,7 +232,8 @@ export async function runHotload(o, deps) {
       "  stand-in: one headless multi-turn `claude -p` stream-json process stands in for an interactive session (not an interactive session)",
       `  loads: every user-scope MCP server and plugin (counted, not named); limits: --tools ${sessionLimits.tools}, hooks disabled, --setting-sources ${sessionLimits.settingSources}, dontAsk with --allowedTools ${sessionLimits.allowedTools.join(",")}, --max-turns ${MAX_TURNS}`,
       `  inference requests: at most ${Math.min(o.maxInference, 4)}, one per turn (turn 1 list skills; turn 2 list then use the skill${o.twoSession ? "; a fresh session if turn 1's MCP load or turn 2's invocation fails" : ""}${o.withRevocation ? "; read after revocation" : ""}); API calls per turn are in turns[].usage.turns`,
-      "  cleanup (also on SIGINT/SIGTERM/SIGHUP): skill dir removed if unchanged; registration removed if `mcp get` shows our command at user scope (even if `mcp add` failed); session, fixture and throwaway dir removed",
+      "  cleanup (also on SIGINT/SIGTERM/SIGHUP; every step runs even if one fails): skill dir removed if unchanged; registration removed if `mcp get` shows our command at user scope (even if `mcp add` failed); session, fixture and throwaway dir removed",
+      ...(label === "preliminary" ? [] : ["  registry: user config mcpServers key names counted before `mcp add` and after cleanup (names never kept); `mcp get` again ~3 s after cleanup"]),
       `  report: ${join(o.home, "agent-check", "hotload-<timestamp>.json")}`,
     ];
     for (const l of lines) out(l);
@@ -351,8 +268,9 @@ export async function runHotload(o, deps) {
   const secrets = [];
   const throwaway = makeThrowawayRoot("scout-hl-");
   const keep = { server: (n) => n === name, tool: (t) => t === "Skill" || t === "ToolSearch" || t.startsWith(`mcp__${name}__`), skill: (s) => s === name || s.startsWith("scout-proof-") };
-  const reportOpts = { env: o.env, secrets };
   let argv = [];
+  let registryBefore;
+  let userAllowRules;
   let cliVersion;
 
   let wakeAbort;
@@ -361,7 +279,7 @@ export async function runHotload(o, deps) {
     if (aborted) return;
     aborted = true;
     const r = deps.abortSignal?.reason;
-    abortReason = typeof r === "string" && /^[A-Za-z]{1,32}$/.test(r) ? r : "signal";
+    abortReason = typeof r === "string" && /^[A-Za-z][A-Za-z0-9_]{0,100}$/.test(r) ? r : "signal";
     session?.terminate();
     wakeAbort();
   };
@@ -375,7 +293,7 @@ export async function runHotload(o, deps) {
   // A close that throws is recorded as unknown, never as zero processes left.
   const closeSession = async (i) => {
     if (sessions[i].close) return;
-    sessions[i].close = await handles[i].close().catch((e) => ({ closeFailed: true, error: e?.code ?? e?.name ?? "unknown", processesRemaining: null }));
+    sessions[i].close = await handles[i].close().catch((e) => ({ closeFailed: true, error: errorCode(e), processesRemaining: null }));
   };
 
   const turnOn = async (s, purpose, text) => {
@@ -387,7 +305,7 @@ export async function runHotload(o, deps) {
     inference.push({ n: inference.length + 1, session: sessions.length, purpose, at: new Date().toISOString() });
     const raw = await s.send(text, { timeoutMs: turnTimeoutMs });
     s.pollTree();
-    const a = analyzeTurn(raw, { name, readTool, proofPhrase: fixture.proofPhrase, opts: reportOpts });
+    const a = analyzeTurn(raw, { name, readTool, proofPhrase: fixture.proofPhrase });
     turns.push({ purpose, session: sessions.length, ...a });
     await deps.hooks?.afterTurn?.(turns.length, { name, skill, raw });
     checkAbort();
@@ -423,6 +341,7 @@ export async function runHotload(o, deps) {
       cwd: "throwaway dir under the system temp dir, outside the workspace",
     };
     cliVersion = pf.cli?.version;
+    userAllowRules = userAllowRuleCounts(profile.env);
     checkAbort();
     if (pf.verdict !== "subscription") {
       outcome = "preflight_failed";
@@ -447,6 +366,10 @@ export async function runHotload(o, deps) {
         return;
       }
       checkAbort();
+      // Key names only, read-only, so the end of the run can tell whether another writer
+      // changed the registry underneath us. A 0600 copy of the names stays in the throwaway dir.
+      registryBefore = registryNames(profile.env);
+      if (registryBefore) writeFileSync(join(throwaway.root, "registry-names-before.json"), JSON.stringify(registryBefore), { mode: 0o600, flag: "wx" });
       addAttempted = true; // from here on, cleanup checks for our entry whatever `add` reports
       const add = mcpAddUser(o.claudePath, name, mcpCommand.command, mcpCommand.args, io);
       registration.add = add;
@@ -474,10 +397,20 @@ export async function runHotload(o, deps) {
       handles.push(s);
       return s;
     };
+    // A fresh session only after the preflight passes again for the same env, cwd and binary.
     const restart = async () => {
       await closeSession(handles.length - 1);
       checkAbort();
+      const again = runProfilePreflight(profile, { parentEnv: o.env, ...(deps.preflightSeams ?? {}) });
+      preflight.beforeRestart = { verdict: again.verdict, reasons: again.reasons };
+      checkAbort();
+      if (again.verdict !== "subscription") {
+        failures.push("preflight_failed_before_restart");
+        afterRestart = "preflight_failed";
+        return false;
+      }
       session = open();
+      return true;
     };
     const initOf = (s) => summarizeInit(s.events.find((e) => e.type === "system" && e.subtype === "init"), keep);
 
@@ -494,8 +427,7 @@ export async function runHotload(o, deps) {
     mcpStatusAtInit = mcp.atInit;
     if (!mcp.proceed) {
       outcome = "mcp_not_loaded";
-      if (o.twoSession) {
-        await restart();
+      if (o.twoSession && (await restart())) {
         const r = await turnOn(session, "list_skills_after_restart", PROMPTS.list());
         if (!r?.a.completed) {
           afterRestart = "incomplete";
@@ -534,10 +466,8 @@ export async function runHotload(o, deps) {
       failures.push("turn2_incomplete");
       return;
     }
-    outcome = classifyUse(t2.a);
-    if (!mcp.usable && t2.a.readCalled && !t2.a.readSucceeded && NOT_LOADED_READ_ERRORS.includes(t2.a.readError)) outcome = "mcp_not_loaded";
-    if (outcome === "skill_not_invoked" && o.twoSession) {
-      await restart();
+    outcome = classifyTurn2(t2.a, mcp);
+    if (outcome === "skill_not_invoked" && o.twoSession && (await restart())) {
       const t3 = await turnOn(session, "use_skill_after_restart", PROMPTS.use());
       if (!t3?.a.completed) {
         afterRestart = "incomplete";
@@ -560,49 +490,71 @@ export async function runHotload(o, deps) {
   };
 
   // Runs once, after main() finished or an abort woke us (whichever is first).
+  const mcpOpts = () => ({ env: profile.env, cwd: profile.cwd, ...(deps.mcpTimeoutMs ? { timeoutMs: deps.mcpTimeoutMs } : {}) });
   let cleanupP;
   const cleanupOnce = () =>
-    (cleanupP ??= (async () => {
-      // Always: session, skill dir, registration, fixture, throwaway dir.
-      for (let i = 0; i < handles.length; i++) await closeSession(i);
-      cleanup.skillDir = skill ? removeOwnedSkill(skill.dir, skill.hash) : "not_created";
-      if (skill?.removedAtRevocation === "removed" && cleanup.skillDir === "absent") cleanup.skillDir = "removed_at_revocation";
-      if (label === "acceptance" && addAttempted) {
-        // Whatever `add` reported: it may have written the entry and then failed or timed out.
-        const rm = removeOwnedRegistration(o.claudePath, name, mcpCommand, { env: profile.env, cwd: profile.cwd, ...(deps.mcpTimeoutMs ? { timeoutMs: deps.mcpTimeoutMs } : {}) });
-        cleanup.registration = rm.state === "absent" && !registered ? "not_registered" : rm.state;
-        if (rm.exit) cleanup.registrationExit = rm.exit;
-      } else cleanup.registration = label === "acceptance" ? "not_registered" : "none (mcp-config file)";
-      const counts = sessions.map((s) => s.close?.processesRemaining);
-      const proc = counts.some((c) => typeof c !== "number") ? null : counts.reduce((a, b) => a + b, 0);
-      if (fixture) {
-        for (let i = 0; i < 20 && fixture.openConnections() > 0; i++) await new Promise((r) => setTimeout(r, 50));
-        cleanup.fixtureConnectionsAtEnd = fixture.openConnections();
-        await fixture.close();
-      }
-      try {
-        profile?.cleanup();
-      } catch {
-        // reported below
-      }
-      throwaway.remove();
-      cleanup.processesRemaining = proc;
-      cleanup.throwawayRemoved = !pathExists(throwaway.root);
-      cleanup.ok =
-        ["removed", "removed_at_revocation", "not_created"].includes(cleanup.skillDir) &&
-        ["removed", "not_registered", "none (mcp-config file)"].includes(cleanup.registration) &&
-        proc === 0 &&
-        cleanup.throwawayRemoved;
-      if (!cleanup.ok) failures.push("cleanup_incomplete");
-    })());
+    (cleanupP ??= runCleanup({
+      // Getters: each step sees the run's state as it is when that step runs.
+      label,
+      sessions,
+      closeSession,
+      get skill() {
+        return skill;
+      },
+      get addAttempted() {
+        return addAttempted;
+      },
+      get registered() {
+        return registered;
+      },
+      removeRegistration: () => removeOwnedRegistration(o.claudePath, name, mcpCommand, mcpOpts()),
+      get fixture() {
+        return fixture;
+      },
+      get profile() {
+        return profile;
+      },
+      throwaway,
+      cleanup,
+      failures,
+    }));
 
   const mainP = main().catch((e) => {
-    if (!(e instanceof Aborted) && !aborted) failures.push(`error_${e?.code ?? e?.name ?? "unknown"}`);
+    if (!(e instanceof Aborted) && !aborted) failures.push(errorCode(e));
   });
   await Promise.race([mainP, abortP]);
   // An abort stopped the session; give the in-flight step a moment to notice before cleaning up.
   if (aborted) await Promise.race([mainP, new Promise((r) => setTimeout(r, ABORT_SETTLE_MS))]);
-  await cleanupOnce();
+  try {
+    await cleanupOnce();
+  } catch (e) {
+    // runCleanup records each step's own error; this is a last resort so the report is written.
+    cleanup.ok = false;
+    failures.push(`cleanup_${errorCode(e)}`);
+  }
+  await deps.hooks?.afterCleanup?.({ name });
+
+  // Did the registry change underneath us, and did our entry come back after removal?
+  let registry;
+  if (label === "acceptance" && addAttempted) {
+    const after = registryNames(profile.env);
+    const others = (names) => names?.filter((n) => n !== name) ?? [];
+    const removedClean = ["removed", "not_registered"].includes(cleanup.registration);
+    let recheck = "not_run";
+    if (removedClean) {
+      await new Promise((r) => setTimeout(r, deps.registryRecheckMs ?? HOTLOAD_DEFAULTS.registryRecheckMs));
+      const got = mcpGet(o.claudePath, name, { env: profile.env, cwd: tmpdir(), ...(deps.mcpTimeoutMs ? { timeoutMs: deps.mcpTimeoutMs } : {}) });
+      recheck = got.exists === true ? "present" : got.exists === false ? "absent" : "unknown";
+    }
+    registry = {
+      before: registryBefore ? registryBefore.length : null,
+      after: after ? after.length : null,
+      reappeared: removedClean && (!!after?.includes(name) || recheck === "present"),
+      foreignChanged: registryBefore && after ? JSON.stringify(others(registryBefore)) !== JSON.stringify(others(after)) : null,
+      recheck,
+    };
+    if (registry.reappeared) failures.push("registration_reappeared");
+  }
   deps.abortSignal?.removeEventListener("abort", onAbort);
   if (aborted) {
     outcome = "aborted";
@@ -643,6 +595,8 @@ export async function runHotload(o, deps) {
     inferenceRequests: inference,
     sessions,
     cleanup,
+    registry,
+    userAllowRules,
     notes: [...REPORT_NOTES],
   });
   return { code: pass ? 0 : 1, report, secrets };

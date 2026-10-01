@@ -3,12 +3,14 @@
 // HOME's (or the temp CLAUDE_CONFIG_DIR's).
 
 import { EventEmitter } from "node:events";
-import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, symlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { analyzeTurn, classifyUse, listedSkillNames, readErrorCode, userSkillsRoot } from "./hotload.mjs";
+import { analyzeTurn, classifyTurn2, classifyUse, listedSkillNames, proofServerState, readErrorCode } from "./classify.mjs";
+import { userSkillsRoot } from "./hotload.mjs";
 import { cleanupWorlds, makeWorld, SENTINELS, snapshotTree } from "./test-support.mjs";
+import { FOREIGN_SERVER, FOREIGN_SKILL } from "../../packages/scout-core/src/agents/testing/fake-claude-session.mjs";
 
 afterEach(cleanupWorlds);
 
@@ -76,8 +78,9 @@ describe("hotload: refusals and dry run", () => {
   it.each([
     [["--with-revocation"]],
     [["--two-session"]],
-    [["--with-revocation", "--two-session", "--max-inference", "3"]],
-  ])("refuses a budget smaller than %j needs", async (extra) => {
+    [["--with-revocation", "--two-session", "--max-inference", "3", "--acknowledge-budget"]],
+    [["--with-revocation", "--max-inference", "3"]],
+  ])("refuses a budget smaller than %j needs, or above 2 without acknowledgment", async (extra) => {
     const w = makeWorld();
     const r = await w.run(["--case", "hotload", "--authorize-real-root", ...extra]);
     expect(r.code).toBe(2);
@@ -99,7 +102,7 @@ describe("hotload: acceptance runs", () => {
     const w = makeWorld("hotload-watch");
     let token;
     const atTurnEnd = [];
-    const r = await w.run(["--case", "hotload", "--authorize-real-root", "--with-revocation", "--max-inference", "3"], {
+    const r = await w.run(["--case", "hotload", "--authorize-real-root", "--with-revocation", "--max-inference", "3", "--acknowledge-budget"], {
       hooks: {
         onStart: (c) => void (token = c.token),
         afterTurn: (n, c) => void atTurnEnd.push({ n, skillDir: existsSync(join(w.skillsRoot, c.name)), registered: Object.hasOwn(w.registry(), c.name) }),
@@ -115,7 +118,8 @@ describe("hotload: acceptance runs", () => {
     expect(rep.init.skills).toEqual([]);
     expect(rep.init.plugins).toBe(1);
     expect(JSON.stringify(rep.init)).not.toContain("someone-elses-plugin");
-    expect(rep.turns[0]).toMatchObject({ text: "Skills seen: none", discovery: "not_listed", listedNames: [] });
+    expect(rep.turns[0]).toMatchObject({ discovery: "not_listed", listedNames: [], otherToolUses: 0 });
+    expect(rep.turns.every((t) => !("text" in t))).toBe(true);
     expect(rep.turns[1]).toMatchObject({ discovery: "listed", listedNames: [rep.name], skillSucceeded: true, readSucceeded: true, proofPhraseQuoted: true });
     expect(rep.turns[1].toolUses.map((t) => t.name)).toEqual([`Skill(${rep.name})`, `mcp__${rep.name}__read_resource`]);
     expect(rep).toMatchObject({ discovery: "listed", listedNames: [rep.name], mcpStatusAtInit: "connected", mcpToolsDeferred: false, toolSearch: { offered: true, uses: 0 } });
@@ -167,7 +171,7 @@ describe("hotload: acceptance runs", () => {
 
   it("--two-session: hotload_requires_reload when a fresh session invokes it", async () => {
     const w = makeWorld("hotload-static");
-    const r = await w.run(["--case", "hotload", "--authorize-real-root", "--two-session", "--max-inference", "3"]);
+    const r = await w.run(["--case", "hotload", "--authorize-real-root", "--two-session", "--max-inference", "3", "--acknowledge-budget"]);
     expect(r.code).toBe(1);
     expect(r.report).toMatchObject({ outcome: "hotload_requires_reload", afterRestart: "hotload_pass" });
     expect(r.report.sessions).toHaveLength(2);
@@ -178,7 +182,7 @@ describe("hotload: acceptance runs", () => {
 
   it("--two-session: skill_never_loads when the fresh session fails too", async () => {
     const w = makeWorld("hotload-never");
-    const r = await w.run(["--case", "hotload", "--authorize-real-root", "--two-session", "--max-inference", "3"]);
+    const r = await w.run(["--case", "hotload", "--authorize-real-root", "--two-session", "--max-inference", "3", "--acknowledge-budget"]);
     expect(r.report).toMatchObject({ outcome: "skill_never_loads", afterRestart: "skill_not_invoked" });
     expect(r.report.cleanup.ok).toBe(true);
   });
@@ -225,13 +229,13 @@ describe("hotload: acceptance runs", () => {
 
   it("--two-session: mcp_requires_restart only when a fresh session shows a failed server connected", async () => {
     const first = makeWorld("mcp-failed-first");
-    const r = await first.run(["--case", "hotload", "--authorize-real-root", "--two-session", "--max-inference", "3"]);
+    const r = await first.run(["--case", "hotload", "--authorize-real-root", "--two-session", "--max-inference", "3", "--acknowledge-budget"]);
     expect(r.report).toMatchObject({ outcome: "mcp_requires_restart", mcpStatusAtInit: "failed", afterRestart: "mcp_connected" });
     expect(r.report.inferenceRequests.map((i) => i.purpose)).toEqual(["list_skills", "list_skills_after_restart"]);
     expect(r.report.cleanup.ok).toBe(true);
 
     const always = makeWorld("mcp-failed");
-    const r2 = await always.run(["--case", "hotload", "--authorize-real-root", "--two-session", "--max-inference", "3"]);
+    const r2 = await always.run(["--case", "hotload", "--authorize-real-root", "--two-session", "--max-inference", "3", "--acknowledge-budget"]);
     expect(r2.report).toMatchObject({ outcome: "mcp_not_loaded", mcpStatusAtInit: "failed", afterRestart: "mcp_failed" });
   });
 
@@ -430,7 +434,7 @@ describe("hotload: abort", () => {
     expect(r.code).toBe(1);
     expect(r.text).toContain("SIGINT again; cleanup is already running");
     expect(r.report).toMatchObject({ outcome: "aborted" });
-    expect(r.report.failures).toContain("aborted_uncaughtException");
+    expect(r.report.failures).toContain("aborted_uncaughtException_Error");
     expect(r.report.failures.filter((f) => f.startsWith("aborted_"))).toHaveLength(1);
     expect(w.lines().filter((l) => l.subcommand?.[1] === "remove")).toHaveLength(1);
     expect(proofDirs(w)).toEqual([]);
@@ -445,7 +449,7 @@ describe("hotload: two-session abort", () => {
     const w = makeWorld("hotload-static");
     const signals = new EventEmitter();
     const r = await w.run(
-      ["--case", "hotload", "--authorize-real-root", "--two-session", "--max-inference", "3"],
+      ["--case", "hotload", "--authorize-real-root", "--two-session", "--max-inference", "3", "--acknowledge-budget"],
       { hooks: { afterTurn: (n) => void (n === 2 && setTimeout(() => signals.emit("SIGINT"), 0)) } },
       signals,
     );
@@ -477,7 +481,6 @@ describe("hotload: preliminary", () => {
 describe("hotload: turn analysis", () => {
   const name = "scout-proof-abcdefghij";
   const readTool = `mcp__${name}__read_resource`;
-  const opts = { env: { HOME: "/nonexistent-home" }, secrets: [] };
   const turn = (blocks, result = "done") => ({
     ms: 1,
     timedOut: false,
@@ -495,12 +498,12 @@ describe("hotload: turn analysis", () => {
         ["assistant", [{ type: "tool_use", id: "2", name: readTool, input: {} }]],
         ["user", [{ type: "tool_result", tool_use_id: "2", content: [{ type: "text", text: "Scout {...}\nProof phrase: P-1" }] }]],
       ], "Proof phrase: P-1"),
-      { name, readTool, proofPhrase: "P-1", opts },
+      { name, readTool, proofPhrase: "P-1" },
     );
     expect(a).toMatchObject({ listingLineFound: true, listedNames: [name, "scout-proof-zzzzzzzzzz"], discovery: "listed", readSucceeded: true, proofPhraseQuoted: true });
     expect(a.readError).toBeUndefined();
     expect(classifyUse(a)).toBe("hotload_pass");
-    expect(a.text).toBe("Proof phrase: <proof phrase>");
+    expect(a).not.toHaveProperty("text");
   });
 
   it("classifies by evidence", () => {
@@ -520,5 +523,165 @@ describe("hotload: turn analysis", () => {
     expect(readErrorCode("boom")).toBe("tool_error");
     expect(listedSkillNames("no listing here")).toEqual({ lineFound: false, names: [] });
     expect(listedSkillNames("Skills seen: none")).toEqual({ lineFound: true, names: [] });
+  });
+});
+
+describe("hotload: report privacy", () => {
+  it("keeps no model text: a foreign skill or server named in replies or tool uses never reaches the report", async () => {
+    const w = makeWorld("mentions-foreign");
+    const r = await w.run(["--case", "hotload", "--authorize-real-root"]);
+    expect(r.code, r.text).toBe(0);
+    expect(r.report.outcome).toBe("hotload_pass");
+    expect(r.reportText).not.toContain(FOREIGN_SKILL);
+    expect(r.reportText).not.toContain(FOREIGN_SERVER);
+    expect(r.report.turns[1].listedNames).toEqual([r.report.name]);
+    expect(r.report.turns[1].otherToolUses).toBe(1);
+    expect(r.report.turns[1].toolUses.map((t) => t.name)).toEqual([`Skill(${r.report.name})`, `mcp__${r.report.name}__read_resource`]);
+    for (const t of r.report.turns) expect(t).not.toHaveProperty("text");
+  });
+
+  it("counts the user's own allow rules, never lists them", async () => {
+    const w = makeWorld();
+    writeFileSync(join(w.home, ".claude", "settings.json"), JSON.stringify({ permissions: { allow: ["Bash(git status)", "mcp__private-thing__x", "Read"] } }));
+    const r = await w.run(["--case", "hotload", "--authorize-real-root"]);
+    expect(r.report.userAllowRules).toEqual({ count: 3, mcpCount: 1 });
+    expect(r.reportText).not.toContain("private-thing");
+    expect(r.reportText).not.toContain("git status");
+    expect(r.report.notes.join("\n")).toMatch(/userAllowRules counts them/);
+  });
+});
+
+describe("hotload: registry changes underneath the run", () => {
+  const theirs = { type: "stdio", command: "/bin/echo", args: ["theirs"], env: {} };
+
+  it("records counts only and no change when nothing else wrote", async () => {
+    const w = makeWorld();
+    writeFileSync(w.registryFile, JSON.stringify({ mcpServers: { "someone-elses-server": theirs } }));
+    const r = await w.run(["--case", "hotload", "--authorize-real-root"]);
+    expect(r.code, r.text).toBe(0);
+    expect(r.report.registry).toEqual({ before: 1, after: 1, reappeared: false, foreignChanged: false, recheck: "absent" });
+    expect(r.reportText).not.toContain("someone-elses-server");
+    expect(w.registry()).toEqual({ "someone-elses-server": theirs });
+  });
+
+  it("foreignChanged when another writer adds a server during the run", async () => {
+    const w = makeWorld();
+    const r = await w.run(["--case", "hotload", "--authorize-real-root"], {
+      hooks: {
+        afterTurn: (n) => {
+          if (n !== 1) return;
+          const cfg = JSON.parse(readFileSync(w.registryFile, "utf8"));
+          cfg.mcpServers["concurrent-session-server"] = theirs;
+          writeFileSync(w.registryFile, JSON.stringify(cfg));
+        },
+      },
+    });
+    expect(r.report.registry).toMatchObject({ before: 0, after: 1, foreignChanged: true, reappeared: false });
+    expect(r.reportText).not.toContain("concurrent-session-server");
+  });
+
+  it("reappeared when our entry comes back after removal: a failure", async () => {
+    const w = makeWorld();
+    let ours;
+    const r = await w.run(["--case", "hotload", "--authorize-real-root"], {
+      hooks: {
+        afterTurn: (n, c) => void (n === 1 && (ours = JSON.parse(readFileSync(w.registryFile, "utf8")).mcpServers[c.name])),
+        afterCleanup: ({ name }) => writeFileSync(w.registryFile, JSON.stringify({ mcpServers: { [name]: ours } })),
+      },
+    });
+    expect(r.code).toBe(1);
+    expect(r.report.cleanup).toMatchObject({ ok: true, registration: "removed" });
+    expect(r.report.registry).toMatchObject({ reappeared: true, recheck: "present", after: 1 });
+    expect(r.report.failures).toContain("registration_reappeared");
+  });
+});
+
+describe("hotload: cleanup step isolation", () => {
+  const isRoot = typeof process.getuid === "function" && process.getuid() === 0;
+
+  it.skipIf(isRoot)("an unreadable proof dir is reported, the registration is still removed, and the report is written", async () => {
+    const w = makeWorld();
+    let dir;
+    try {
+      const r = await w.run(["--case", "hotload", "--authorize-real-root"], {
+        hooks: { afterTurn: (n, c) => void (n === 2 && chmodSync((dir = join(w.skillsRoot, c.name)), 0o000)) },
+      });
+      expect(r.code).toBe(1);
+      expect(r.report.outcome).toBe("hotload_pass");
+      expect(r.report.cleanup).toMatchObject({ ok: false, skillDir: "error_EACCES", registration: "removed", throwawayRemoved: true, processesRemaining: 0 });
+      expect(r.report.failures).toContain("cleanup_incomplete");
+      expect(w.registry()).toEqual({});
+    } finally {
+      if (dir) chmodSync(dir, 0o700);
+    }
+  });
+
+  it("a skill dir swapped for a symlink is left alone (left_symlink); the registration is still removed", async () => {
+    const w = makeWorld();
+    const moved = join(w.root, "moved-skill");
+    let dir;
+    const r = await w.run(["--case", "hotload", "--authorize-real-root"], {
+      hooks: {
+        afterTurn: (n, c) => {
+          if (n !== 2) return;
+          dir = join(w.skillsRoot, c.name);
+          renameSync(dir, moved);
+          symlinkSync(moved, dir);
+        },
+      },
+    });
+    expect(r.code).toBe(1);
+    expect(r.report).toBeDefined();
+    expect(r.report.cleanup).toMatchObject({ ok: false, skillDir: "left_symlink", registration: "removed", throwawayRemoved: true });
+    expect(r.report.failures).toContain("cleanup_incomplete");
+    expect(lstatSync(dir).isSymbolicLink()).toBe(true);
+    expect(readFileSync(join(moved, "SKILL.md"), "utf8")).toContain("scout-proof-");
+    expect(w.registry()).toEqual({});
+  });
+});
+
+describe("hotload: --two-session preflight", () => {
+  it("runs the preflight again before the fresh session and opens none if it fails", async () => {
+    const w = makeWorld("hotload-static");
+    const r = await w.run(["--case", "hotload", "--authorize-real-root", "--two-session", "--max-inference", "3", "--acknowledge-budget"], {
+      hooks: { afterTurn: (n) => void (n === 2 && w.setMode("auth-api-key")) },
+    });
+    expect(r.code).toBe(1);
+    expect(r.report.failures).toContain("preflight_failed_before_restart");
+    expect(r.report.preflight).toMatchObject({ verdict: "subscription", beforeRestart: { verdict: "ambiguous" } });
+    expect(r.report.afterRestart).toBe("preflight_failed");
+    expect(r.report.sessions).toHaveLength(1);
+    expect(sessions(w)).toHaveLength(1);
+    expect(r.report.inferenceRequests).toHaveLength(2);
+    expect(r.report.cleanup.ok).toBe(true);
+  });
+
+  it("records a passing preflight before restart", async () => {
+    const w = makeWorld("hotload-static");
+    const r = await w.run(["--case", "hotload", "--authorize-real-root", "--two-session", "--max-inference", "3", "--acknowledge-budget"]);
+    expect(r.report.preflight.beforeRestart).toMatchObject({ verdict: "subscription" });
+  });
+});
+
+describe("hotload: turn 2 classification against the init state", () => {
+  const usable = { usable: true };
+  const notUsable = { usable: false };
+  const a = (over) => ({ skillInvoked: true, readCalled: true, readSucceeded: false, readError: "tool_error", proofPhraseQuoted: false, discovery: "listed", ...over });
+
+  it("labels mcp_not_loaded only when the server was not usable at init", () => {
+    expect(classifyTurn2(a({ readError: "tool_unavailable" }), notUsable)).toBe("mcp_not_loaded");
+    expect(classifyTurn2(a({ readError: "server_not_connected" }), notUsable)).toBe("mcp_not_loaded");
+    expect(classifyTurn2(a({ readCalled: false, readError: "not_called" }), notUsable)).toBe("mcp_not_loaded");
+    expect(classifyTurn2(a({ readCalled: false, readError: "not_called" }), usable)).toBe("skill_invoked_read_failed");
+    expect(classifyTurn2(a({ readError: "tool_unavailable" }), usable)).toBe("skill_invoked_read_failed");
+    expect(classifyTurn2(a({ readError: "not_found" }), notUsable)).toBe("skill_invoked_read_failed");
+    expect(classifyTurn2(a({ skillInvoked: false, readCalled: false, readError: "not_called" }), notUsable)).toBe("skill_not_invoked");
+  });
+
+  it("proofServerState: pending and connected-without-tools are not usable", () => {
+    const opts = { name: "scout-proof-x", readTool: "mcp__scout-proof-x__read_resource" };
+    expect(proofServerState({ mcpServers: [{ name: "scout-proof-x", status: "pending" }], tools: [] }, opts)).toMatchObject({ usable: false, proceed: true, atInit: "pending" });
+    expect(proofServerState({ mcpServers: [{ name: "scout-proof-x", status: "connected" }], tools: [] }, opts)).toMatchObject({ usable: false, proceed: true, atInit: "connected_without_tools" });
+    expect(proofServerState({ mcpServers: [], tools: [] }, opts)).toMatchObject({ usable: false, proceed: false, atInit: "absent" });
   });
 });

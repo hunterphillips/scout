@@ -19,14 +19,18 @@
 // Removal is attempted whenever `add` was attempted, whatever `add` reported: an `add` that
 // wrote the entry and then failed or timed out must not leak it.
 //
+// `get` output is found by its `<name>:` line wherever it appears (the CLI may print a notice
+// first); the field rows are read from the lines after it.
+//
 // `get` means absent only on exit 1 with the CLI's "No MCP server named ..." message. A
 // timeout, a signal, any other exit, or unparseable output is `unknown`: cleanup then leaves
 // the entry alone and reports `unknown_state` with the exit status/signal only (never the
 // CLI's text). A `remove` whose result `get` cannot confirm is `removal_unverified`.
 
 import { spawnSync } from "node:child_process";
-import { lstatSync, mkdirSync, readdirSync, readFileSync, rmdirSync, unlinkSync, writeFileSync } from "node:fs";
+import { closeSync, constants, fstatSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, rmdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { errorCode } from "./classify.mjs";
 import { ownershipHash } from "../../packages/scout-core/dist/capabilities/identity.js";
 import { WRAPPER_FILE } from "../../packages/scout-core/dist/capabilities/wrapper.js";
 
@@ -53,8 +57,10 @@ const notFound = (name, r) => r.status === 1 && r.signal === null && !r.timedOut
 export function mcpGet(claudePath, name, opts) {
   const r = claudeRun(claudePath, ["mcp", "get", name], opts);
   if (notFound(name, r)) return { exists: false };
-  const rows = r.stdout.split("\n");
-  if (r.status !== 0 || r.signal !== null || rows[0] !== `${name}:`) return { exists: "unknown", exit: exitOf(r) };
+  const all = r.stdout.split("\n");
+  const at = all.indexOf(`${name}:`);
+  if (r.status !== 0 || r.signal !== null || at < 0) return { exists: "unknown", exit: exitOf(r) };
+  const rows = all.slice(at + 1);
   const field = (k) => rows.map((l) => new RegExp(`^\\s+${k}: ?(.*)$`).exec(l)?.[1]).find((v) => v !== undefined);
   return {
     exists: true,
@@ -113,22 +119,99 @@ export function writeProofSkill(root, name, text) {
 }
 
 /**
- * Remove the proof skill dir only if it is a real directory holding exactly our SKILL.md
- * with the recorded hash. Returns `removed` | `absent` | `left_modified`.
+ * Remove the proof skill dir only if it is a real directory (not a symlink) holding exactly
+ * our SKILL.md with the recorded hash. Never throws. Returns `removed` | `absent` |
+ * `left_modified` | `left_symlink` (the dir or its SKILL.md is a symlink) | `error_<code>`
+ * (e.g. `error_EACCES`). An entry that vanishes midway counts as modified.
  */
 export function removeOwnedSkill(dir, hash) {
-  let st;
   try {
-    st = lstatSync(dir);
-  } catch {
-    return "absent";
+    let st;
+    try {
+      st = lstatSync(dir);
+    } catch (e) {
+      return e?.code === "ENOENT" ? "absent" : errorCode(e);
+    }
+    if (st.isSymbolicLink()) return "left_symlink";
+    if (!st.isDirectory()) return "left_modified";
+    const entries = readdirSync(dir);
+    if (entries.length !== 1 || entries[0] !== WRAPPER_FILE) return "left_modified";
+    const file = join(dir, WRAPPER_FILE);
+    let fd;
+    try {
+      fd = openSync(file, constants.O_RDONLY | constants.O_NOFOLLOW);
+    } catch (e) {
+      if (e?.code === "ELOOP") return "left_symlink";
+      return e?.code === "ENOENT" ? "left_modified" : errorCode(e);
+    }
+    let text;
+    try {
+      if (!fstatSync(fd).isFile()) return "left_modified";
+      text = readFileSync(fd, "utf8");
+    } finally {
+      closeSync(fd);
+    }
+    if (ownershipHash({ [WRAPPER_FILE]: text }) !== hash) return "left_modified";
+    // The dir must still be the one we checked: a swap for a symlink is left alone.
+    const again = lstatSync(dir);
+    if (again.isSymbolicLink()) return "left_symlink";
+    if (again.ino !== st.ino || again.dev !== st.dev) return "left_modified";
+    unlinkSync(file);
+    rmdirSync(dir);
+    return "removed";
+  } catch (e) {
+    return e?.code === "ENOENT" ? "left_modified" : errorCode(e);
   }
-  if (!st.isDirectory()) return "left_modified";
-  const entries = readdirSync(dir);
-  const file = join(dir, WRAPPER_FILE);
-  if (entries.length !== 1 || entries[0] !== WRAPPER_FILE || !lstatSync(file).isFile()) return "left_modified";
-  if (ownershipHash({ [WRAPPER_FILE]: readFileSync(file, "utf8") }) !== hash) return "left_modified";
-  unlinkSync(file);
-  rmdirSync(dir);
-  return "removed";
+}
+
+/** The CLI's user config file: `$CLAUDE_CONFIG_DIR/.claude.json`, else `$HOME/.claude.json`. */
+export function userConfigFile(env) {
+  return join(env.CLAUDE_CONFIG_DIR ?? env.HOME, ".claude.json");
+}
+
+/** The user settings file: `$CLAUDE_CONFIG_DIR/settings.json`, else `$HOME/.claude/settings.json`. */
+export function userSettingsFile(env) {
+  return join(env.CLAUDE_CONFIG_DIR ?? join(env.HOME, ".claude"), "settings.json");
+}
+
+/**
+ * The user-scope `mcpServers` key names in the CLI's config file, read-only. Values are never
+ * returned. `undefined` when the file is missing, unreadable or not JSON with an object there
+ * (a missing file is an empty registry: `[]`).
+ */
+export function registryNames(env) {
+  let text;
+  try {
+    text = readFileSync(userConfigFile(env), "utf8");
+  } catch (e) {
+    return e?.code === "ENOENT" ? [] : undefined;
+  }
+  try {
+    const servers = JSON.parse(text)?.mcpServers;
+    if (servers === undefined) return [];
+    return servers && typeof servers === "object" && !Array.isArray(servers) ? Object.keys(servers).sort() : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Counts of the user's own allow rules (`permissions.allow` in the user settings file), read
+ * only to count: `{ count, mcpCount }` (zero when the file is missing), or `undefined` if it
+ * cannot be read or parsed.
+ */
+export function userAllowRuleCounts(env) {
+  let text;
+  try {
+    text = readFileSync(userSettingsFile(env), "utf8");
+  } catch (e) {
+    return e?.code === "ENOENT" ? { count: 0, mcpCount: 0 } : undefined;
+  }
+  try {
+    const allow = JSON.parse(text)?.permissions?.allow;
+    const rules = Array.isArray(allow) ? allow.filter((r) => typeof r === "string") : [];
+    return { count: rules.length, mcpCount: rules.filter((r) => r.startsWith("mcp__")).length };
+  } catch {
+    return undefined;
+  }
 }

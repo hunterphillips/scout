@@ -12,7 +12,7 @@ import { runAgentCheck } from "./run.mjs";
 
 const FAKE = join(REPO_ROOT, "packages", "scout-core", "src", "agents", "testing", "fake-claude.mjs");
 const HARNESS = join(REPO_ROOT, "scripts", "agent-check", "abort-harness.mjs");
-const FAST = { settleMs: 50, turnTimeoutMs: 20_000, killGraceMs: 500, cancelAfterInitMs: 300 };
+const FAST = { settleMs: 50, turnTimeoutMs: 20_000, killGraceMs: 500, cancelAfterInitMs: 300, registryRecheckMs: 50 };
 export const SENTINELS = ["SENTINEL-API-KEY-7f3a", "sentinel-gateway.example.invalid"];
 
 const worlds = [];

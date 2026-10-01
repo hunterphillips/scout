@@ -7,7 +7,7 @@
 // (Scout's servers and tools by name and status; everything else as counts), the model,
 // the outcome class, structured output (synthetic picks), timings, usage counts, cleanup
 // evidence, and each inference request made. What never goes in: tokens, env values, full
-// prompts, the user's other skill/server/tool names, and absolute paths under $HOME (shown
+// prompts, model text, the user's other skill/server/tool names, and absolute paths under $HOME (shown
 // as `~`). redactReport() enforces the last two on the finished object as well, and
 // writeReport() refuses to write if a secret survives.
 
@@ -17,8 +17,6 @@ import { join } from "node:path";
 
 export const REPORT_DIR = "agent-check";
 export const REPORT_SCHEMA = 1;
-/** Longest model text kept per turn. */
-export const TEXT_MAX = 600;
 
 function homes(env) {
   const out = new Set();
@@ -52,13 +50,6 @@ export function redactReport(value, opts) {
     return Object.fromEntries(Object.entries(value).map(([k, v]) => [redactString(k, opts), redactReport(v, opts)]));
   }
   return value;
-}
-
-/** Model text as evidence: bounded, redacted. */
-export function evidenceText(text, opts) {
-  if (typeof text !== "string") return undefined;
-  const t = redactString(text, opts);
-  return t.length > TEXT_MAX ? `${t.slice(0, TEXT_MAX)}...` : t;
 }
 
 /**
