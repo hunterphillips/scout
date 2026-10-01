@@ -1,0 +1,513 @@
+// The capability store: versioned website resources, the user's decisions, and per-origin
+// auto-acquire policies, under `<scoutHome>/capabilities/`:
+//   store.json          the state (decisions.ts), schema-versioned, replaced atomically
+//   blobs/<sha256>.txt  immutable public website text, content-addressed by its bytes
+// Directories are 0700 and files 0600.
+//
+// Mutations run one at a time through a queue. Each computes a new state with the pure
+// functions in decisions.ts, writes any new blobs, replaces store.json (temp + fsync +
+// rename + directory fsync), and only then swaps the in-memory state, so a failed write
+// leaves both the file and the reads unchanged. Blobs the committed state no longer refers
+// to are deleted afterwards, by exact recorded hash only.
+//
+// Opening never resets: a store.json that is unreadable, unsafe, or fails its schema is a
+// StoreCorruptError for the caller to surface. Text comes in only from discovery results;
+// the store never reads approved text from the discovery cache.
+//
+// Revocation, in order: (1) the blocked state is committed; (2) `onRevoked` runs (P2.4
+// invalidates job tokens, P3 cancels jobs); (3) `revoke()` resolves; (4) export cleanup
+// runs (`cleanup` on the result). A cleanup failure is recorded there and never restores
+// access: reads check the committed state.
+
+import { mkdirSync, readdirSync, unlinkSync } from "node:fs";
+import { join } from "node:path";
+import {
+  deriveResourceId,
+  isCanonicalSourceUrl,
+  RESOURCE_MAX_BYTES,
+  SHA256_HEX_PATTERN,
+  type Resource,
+  type ResourceVersion,
+} from "@scout/contracts";
+import { PrivateFileError, readPrivateFile } from "../agents/privateFile.js";
+import type { Clock } from "../clock.js";
+import type { Diagnostics } from "../diagnostics.js";
+import { checkPrivateDir, fsErrorCode } from "../privateCacheFile.js";
+import { fsyncDir, writeFileAtomic } from "./atomicWrite.js";
+import {
+  applyApprove,
+  applyDecline,
+  applyPolicy,
+  applyRevoke,
+  blobBytes,
+  contentHash,
+  type DecisionCommand,
+  emptyState,
+  findResource,
+  type IngestCandidate,
+  type IngestItemResult,
+  ingestCandidates,
+  type OriginPolicy,
+  type PolicyCommand,
+  referencedBlobs,
+  stateInvariantError,
+  type StoredResource,
+  type StoreState,
+  StoreStateSchema,
+  STORE_SCHEMA_VERSION,
+} from "./decisions.js";
+import type { DiscoveryResult } from "./discovery.js";
+import { collect, type PinnedVersions } from "./garbageCollection.js";
+import { sha256Hex } from "./textValidation.js";
+
+/** store.json larger than this is refused unread. 256 resources x 16 versions fit well under it. */
+export const STORE_FILE_MAX_BYTES = 16 * 1024 * 1024;
+
+export type StoreCorruptCode =
+  | "dir_symlink"
+  | "dir_not_directory"
+  | "dir_wrong_owner"
+  | "dir_not_private"
+  | "file_not_regular"
+  | "file_not_private"
+  | "file_too_large"
+  | "unreadable"
+  | "parse"
+  | "schema_version"
+  | "schema"
+  | "resource_id"
+  | "invariant"
+  | "blob_missing"
+  | "blob_hash";
+
+/** The persisted store cannot be trusted. Never silently replaced: the caller surfaces it. */
+export class StoreCorruptError extends Error {
+  constructor(readonly code: StoreCorruptCode) {
+    super(`capability store: ${code}`);
+    this.name = "StoreCorruptError";
+  }
+}
+
+export type ReadResolution =
+  | { ok: true; resource: Resource; version: ResourceVersion; approval: "approved" | "superseded" }
+  | { ok: false; code: "not_found" | "revoked" };
+
+export interface ApprovedListing {
+  resource: Resource;
+  /** The default version reads get. */
+  version: ResourceVersion;
+  /** Older approved versions still readable by explicit version. */
+  superseded: ResourceVersion[];
+}
+
+export interface IngestReport {
+  origin: string;
+  results: IngestItemResult[];
+  /** Found items not ingested: cross-origin, non-canonical, or bytes not matching their hash. */
+  skipped: number;
+}
+
+export interface DecisionResult {
+  changed: boolean;
+  approvalRevision: number;
+  /** The resource's revision after the decision. */
+  revision: number;
+}
+
+export interface RevokeResult extends DecisionResult {
+  /** Versions that were readable before the revocation. */
+  revokedVersions: string[];
+  /** Export cleanup, started after this result resolved. Never rejects. */
+  cleanup: Promise<{ ok: boolean }>;
+}
+
+export interface GcReport {
+  versions: number;
+  resources: number;
+  blobs: number;
+}
+
+export interface CapabilityStoreOptions {
+  scoutHome: string;
+  clock: Clock;
+  diagnostics?: Diagnostics;
+  /** Called after a revocation is committed and before `revoke()` resolves. Errors are recorded, not rethrown. */
+  onRevoked?: (resourceId: string, versions: readonly string[]) => void | Promise<void>;
+  /** Export cleanup after a revocation (normally the skill exporter's sync). */
+  syncExports?: () => Promise<unknown>;
+  /** Test hooks for the caps. */
+  limits?: { maxResources?: number; maxBlobBytes?: number };
+}
+
+export interface CapabilityStore {
+  readonly dir: string;
+  /** Bumped on every approval-affecting change; persisted, so it never goes back. */
+  readonly approvalRevision: number;
+  /** A copy of the whole state. */
+  snapshot(): StoreState;
+  getResource(resourceId: string): StoredResource | undefined;
+  /** The default approved version, or undefined when blocked or never approved. */
+  getApprovedDefault(resourceId: string): ResourceVersion | undefined;
+  /** Any recorded version, in any state; callers check `state`. Use `resolveRead` for agent reads. */
+  getVersion(resourceId: string, version: string): ResourceVersion | undefined;
+  /** What an agent read may see: the default (no version) or an approved/superseded version, never while blocked. */
+  resolveRead(resourceId: string, version?: string): ReadResolution;
+  /** Unblocked resources with a default version, optionally for one site origin. */
+  listApproved(siteOrigin?: string): ApprovedListing[];
+  originPolicy(origin: string): OriginPolicy | undefined;
+  /** The blob's bytes, re-hashed: a mismatch or a missing blob is a StoreCorruptError. */
+  readBlob(blobRef: string): Buffer;
+  /** Keep a readable version from collection while a request uses it. Returns the read check. */
+  pinVersion(requestId: string, resourceId: string, version: string): ReadResolution;
+  releasePins(requestId: string): void;
+  ingest(discovery: DiscoveryResult, context: { chromePermitted: boolean }): Promise<IngestReport>;
+  approve(command: DecisionCommand): Promise<DecisionResult>;
+  decline(command: DecisionCommand): Promise<DecisionResult>;
+  revoke(resourceId: string): Promise<RevokeResult>;
+  setOriginPolicy(command: PolicyCommand): Promise<{ changed: boolean; approvalRevision: number }>;
+  collectGarbage(): Promise<GcReport>;
+}
+
+const BLOB_NAME_RE = /^[0-9a-f]{64}\.txt$/;
+
+function ensurePrivateDir(dir: string): void {
+  try {
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+  } catch (error) {
+    if (fsErrorCode(error) === "not_directory") throw new StoreCorruptError("dir_not_directory");
+    throw error;
+  }
+  const refusal = checkPrivateDir(dir);
+  if (refusal) throw new StoreCorruptError(`dir_${refusal}`);
+}
+
+async function loadState(path: string): Promise<StoreState> {
+  let raw: Buffer;
+  try {
+    raw = readPrivateFile(path, STORE_FILE_MAX_BYTES, { private: true });
+  } catch (error) {
+    if (error instanceof PrivateFileError) {
+      if (error.code === "missing") return emptyState();
+      if (error.code === "not_regular") throw new StoreCorruptError("file_not_regular");
+      if (error.code === "not_private") throw new StoreCorruptError("file_not_private");
+      if (error.code === "too_large") throw new StoreCorruptError("file_too_large");
+    }
+    throw new StoreCorruptError("unreadable");
+  }
+  let json: unknown;
+  try {
+    json = JSON.parse(raw.toString("utf8"));
+  } catch {
+    throw new StoreCorruptError("parse");
+  }
+  if ((json as { schemaVersion?: unknown } | null)?.schemaVersion !== STORE_SCHEMA_VERSION) throw new StoreCorruptError("schema_version");
+  const parsed = StoreStateSchema.safeParse(json);
+  if (!parsed.success) throw new StoreCorruptError("schema");
+  // zod omits absent optional keys, so the parsed value satisfies the exact-optional types.
+  const state = parsed.data as StoreState;
+  if (stateInvariantError(state)) throw new StoreCorruptError("invariant");
+  for (const r of state.resources) {
+    if ((await deriveResourceId(r.resource.kind, r.resource.sourceUrl)) !== r.resource.id) throw new StoreCorruptError("resource_id");
+  }
+  return state;
+}
+
+export async function createCapabilityStore(options: CapabilityStoreOptions): Promise<CapabilityStore> {
+  const { clock, diagnostics } = options;
+  const dir = join(options.scoutHome, "capabilities");
+  const blobDir = join(dir, "blobs");
+  const storePath = join(dir, "store.json");
+
+  let state: StoreState;
+  try {
+    ensurePrivateDir(dir);
+    ensurePrivateDir(blobDir);
+    state = await loadState(storePath);
+  } catch (error) {
+    if (error instanceof StoreCorruptError) diagnostics?.event("capability_store_invalid", { code: error.code });
+    throw error;
+  }
+
+  /** requestId → pinned "resourceId\0version" keys. In memory: requests do not survive a restart. */
+  const pins = new Map<string, Set<string>>();
+  const pinKey = (resourceId: string, version: string) => `${resourceId}\0${version}`;
+  const pinnedVersions = (): PinnedVersions => {
+    const out = new Map<string, Set<string>>();
+    for (const keys of pins.values()) {
+      for (const k of keys) {
+        const [id, v] = k.split("\0") as [string, string];
+        if (!out.has(id)) out.set(id, new Set());
+        out.get(id)!.add(v);
+      }
+    }
+    return out;
+  };
+
+  let tail: Promise<unknown> = Promise.resolve();
+  function serialize<T>(fn: () => Promise<T> | T): Promise<T> {
+    const run = tail.then(fn);
+    tail = run.catch(() => undefined);
+    return run;
+  }
+
+  const blobPath = (ref: string) => join(blobDir, `${ref}.txt`);
+
+  function writeBlob(ref: string, bytes: Uint8Array): void {
+    try {
+      const existing = readPrivateFile(blobPath(ref), RESOURCE_MAX_BYTES, { private: true });
+      if (sha256Hex(existing) === ref) return; // content-addressed: already there
+    } catch {
+      // Missing or unusable: write it.
+    }
+    writeFileAtomic(blobPath(ref), bytes);
+  }
+
+  /** Write new blobs, then replace store.json, then swap; afterwards delete blobs the new state dropped. */
+  function commit(next: StoreState, newBlobs: ReadonlyMap<string, Uint8Array> = new Map()): number {
+    for (const [ref, bytes] of newBlobs) writeBlob(ref, bytes);
+    writeFileAtomic(storePath, JSON.stringify(next));
+    const kept = referencedBlobs(next);
+    const dropped = [...referencedBlobs(state)].filter((ref) => !kept.has(ref));
+    state = next;
+    let deleted = 0;
+    for (const ref of dropped) {
+      try {
+        unlinkSync(blobPath(ref));
+        deleted++;
+      } catch {
+        // Already gone; nothing refers to it.
+      }
+    }
+    if (deleted > 0) fsyncDir(blobDir);
+    return deleted;
+  }
+
+  function resolveRead(resourceId: string, version?: string): ReadResolution {
+    const r = findResource(state, resourceId);
+    if (!r) return { ok: false, code: "not_found" };
+    if (r.resource.blocked) return { ok: false, code: "revoked" };
+    const target = version ?? r.resource.defaultVersion;
+    const v = target === undefined ? undefined : r.resource.versions.find((x) => x.hash === target);
+    if (!v) return { ok: false, code: "not_found" };
+    if (v.state === "revoked") return { ok: false, code: "revoked" };
+    if (v.state !== "approved" && v.state !== "superseded") return { ok: false, code: "not_found" };
+    return { ok: true, resource: structuredClone(r.resource), version: { ...v }, approval: v.state };
+  }
+
+  const resourceRevision = (id: string) => findResource(state, id)?.revision ?? 0;
+  const shortId = (id: string) => id.slice(4, 20);
+
+  async function toCandidates(discovery: DiscoveryResult): Promise<{ candidates: IngestCandidate[]; bytes: Map<string, Uint8Array>; skipped: number }> {
+    const candidates: IngestCandidate[] = [];
+    const bytes = new Map<string, Uint8Array>();
+    let skipped = 0;
+    for (const item of discovery.items) {
+      const res = item.resource;
+      if (item.status !== "found" || !res || item.kind === "skills_index") continue;
+      const body = Buffer.from(res.text, "utf8");
+      if (
+        res.kind !== item.kind ||
+        res.siteOrigin !== discovery.origin ||
+        res.publisherOrigin !== discovery.origin ||
+        !isCanonicalSourceUrl(res.sourceUrl) ||
+        new URL(res.sourceUrl).origin !== discovery.origin ||
+        body.length > RESOURCE_MAX_BYTES ||
+        sha256Hex(body) !== res.sha256 ||
+        (res.kind === "skill") !== (res.skill !== undefined)
+      ) {
+        skipped++;
+        continue;
+      }
+      const meta: IngestCandidate["meta"] = {};
+      if (res.contentType !== undefined) meta.contentType = res.contentType;
+      if (res.skill) {
+        meta.skill = { name: res.skill.name, digest: res.skill.sha256 };
+        if (res.skill.description !== undefined) meta.skill.description = res.skill.description;
+      }
+      candidates.push({
+        resourceId: await deriveResourceId(res.kind, res.sourceUrl),
+        kind: res.kind,
+        siteOrigin: discovery.origin,
+        publisherOrigin: discovery.origin,
+        sourceUrl: res.sourceUrl,
+        hash: contentHash(res.kind, res.sourceUrl, meta, body),
+        blobRef: res.sha256,
+        byteLength: body.length,
+        fetchedAt: res.fetchedAt,
+        meta,
+      });
+      bytes.set(res.sha256, body);
+    }
+    return { candidates, bytes, skipped };
+  }
+
+  return {
+    dir,
+    get approvalRevision() {
+      return state.approvalRevision;
+    },
+    snapshot: () => structuredClone(state),
+    getResource: (id) => {
+      const r = findResource(state, id);
+      return r && structuredClone(r);
+    },
+    getApprovedDefault(id) {
+      const r = findResource(state, id);
+      if (!r || r.resource.blocked || r.resource.defaultVersion === undefined) return undefined;
+      const v = r.resource.versions.find((x) => x.hash === r.resource.defaultVersion);
+      return v && { ...v };
+    },
+    getVersion(id, version) {
+      const v = findResource(state, id)?.resource.versions.find((x) => x.hash === version);
+      return v && { ...v };
+    },
+    resolveRead,
+    listApproved(siteOrigin) {
+      const out: ApprovedListing[] = [];
+      for (const r of state.resources) {
+        if (r.resource.blocked || r.resource.defaultVersion === undefined) continue;
+        if (siteOrigin !== undefined && r.resource.siteOrigin !== siteOrigin) continue;
+        const version = r.resource.versions.find((v) => v.hash === r.resource.defaultVersion)!;
+        out.push({
+          resource: structuredClone(r.resource),
+          version: { ...version },
+          superseded: r.resource.versions.filter((v) => v.state === "superseded").map((v) => ({ ...v })),
+        });
+      }
+      return out;
+    },
+    originPolicy: (origin) => {
+      const p = state.policies.find((x) => x.origin === origin);
+      return p && { ...p };
+    },
+    readBlob(ref) {
+      if (typeof ref !== "string" || !SHA256_HEX_PATTERN.test(ref)) throw new StoreCorruptError("blob_missing");
+      let bytes: Buffer;
+      try {
+        bytes = readPrivateFile(blobPath(ref), RESOURCE_MAX_BYTES, { private: true });
+      } catch (error) {
+        const code = error instanceof PrivateFileError && error.code === "missing" ? "blob_missing" : "blob_hash";
+        diagnostics?.event("capability_store_invalid", { code });
+        throw new StoreCorruptError(code);
+      }
+      if (sha256Hex(bytes) !== ref) {
+        diagnostics?.event("capability_store_invalid", { code: "blob_hash" });
+        throw new StoreCorruptError("blob_hash");
+      }
+      return bytes;
+    },
+    pinVersion(requestId, resourceId, version) {
+      const check = resolveRead(resourceId, version);
+      if (!check.ok) return check;
+      if (!pins.has(requestId)) pins.set(requestId, new Set());
+      pins.get(requestId)!.add(pinKey(resourceId, version));
+      return check;
+    },
+    releasePins: (requestId) => void pins.delete(requestId),
+
+    ingest: (discovery, context) =>
+      serialize(async () => {
+        const { candidates, bytes, skipped } = await toCandidates(discovery);
+        const { state: next, results } = ingestCandidates(state, candidates, {
+          origin: discovery.origin,
+          chromePermitted: context.chromePermitted === true,
+          now: clock.now(),
+          pinned: pinnedVersions(),
+          ...(options.limits?.maxResources !== undefined ? { maxResources: options.limits.maxResources } : {}),
+          ...(options.limits?.maxBlobBytes !== undefined ? { maxBlobBytes: options.limits.maxBlobBytes } : {}),
+        });
+        const known = referencedBlobs(state);
+        const wanted = referencedBlobs(next);
+        const newBlobs = new Map([...bytes].filter(([ref]) => wanted.has(ref) && !known.has(ref)));
+        commit(next, newBlobs);
+        const count = (o: IngestItemResult["outcome"]) => results.filter((r) => r.outcome === o).length;
+        diagnostics?.event("capability_ingest", {
+          origin: discovery.origin,
+          found: candidates.length,
+          skipped,
+          pending: count("new_pending"),
+          autoApproved: count("auto_approved"),
+          unchanged: count("unchanged"),
+          declined: count("declined"),
+          blocked: count("blocked"),
+          limited: count("storage_limit"),
+        });
+        for (const r of results) {
+          if (r.outcome === "storage_limit") diagnostics?.event("capability_store_limit", { origin: discovery.origin, code: r.limit ?? "unknown", bytes: blobBytes(state) });
+        }
+        return { origin: discovery.origin, results, skipped };
+      }),
+
+    approve: (command) =>
+      serialize(() => {
+        const { state: next, changed } = applyApprove(state, command, clock.now());
+        if (changed) commit(next);
+        diagnostics?.event("capability_decision", { resource: shortId(command.resourceId), action: "approve", changed, revision: state.approvalRevision });
+        return { changed, approvalRevision: state.approvalRevision, revision: resourceRevision(command.resourceId) };
+      }),
+
+    decline: (command) =>
+      serialize(() => {
+        const { state: next, changed } = applyDecline(state, command, clock.now());
+        if (changed) commit(next);
+        diagnostics?.event("capability_decision", { resource: shortId(command.resourceId), action: "decline", changed, revision: state.approvalRevision });
+        return { changed, approvalRevision: state.approvalRevision, revision: resourceRevision(command.resourceId) };
+      }),
+
+    revoke: (resourceId) =>
+      serialize(async () => {
+        // (1) Commit the block. Pins on the resource go first so no collection keeps them.
+        const { state: next, changed, revokedVersions } = applyRevoke(state, resourceId, clock.now());
+        for (const keys of pins.values()) for (const k of [...keys]) if (k.startsWith(`${resourceId}\0`)) keys.delete(k);
+        if (changed) commit(next);
+        diagnostics?.event("capability_decision", { resource: shortId(resourceId), action: "revoke", changed, revision: state.approvalRevision });
+        // (2) Invalidate tokens and cancel jobs before answering.
+        try {
+          await options.onRevoked?.(resourceId, revokedVersions);
+        } catch {
+          diagnostics?.event("capability_revoke_hook_failed", { resource: shortId(resourceId) });
+        }
+        // (4) Clean up exports after the caller has its answer.
+        const cleanup = new Promise<{ ok: boolean }>((resolve) => {
+          setImmediate(() => {
+            if (!options.syncExports) return resolve({ ok: true });
+            options.syncExports().then(
+              () => resolve({ ok: true }),
+              () => {
+                diagnostics?.event("capability_export_failed", { resource: shortId(resourceId) });
+                resolve({ ok: false });
+              },
+            );
+          });
+        });
+        return { changed, approvalRevision: state.approvalRevision, revision: resourceRevision(resourceId), revokedVersions, cleanup };
+      }),
+
+    setOriginPolicy: (command) =>
+      serialize(() => {
+        const { state: next, changed } = applyPolicy(state, command, clock.now());
+        if (changed) commit(next);
+        diagnostics?.event("capability_decision", { origin: command.origin, action: command.autoAcquire ? "auto_acquire_on" : "auto_acquire_off", changed, revision: state.approvalRevision });
+        return { changed, approvalRevision: state.approvalRevision };
+      }),
+
+    collectGarbage: () =>
+      serialize(() => {
+        const { state: next, versions, resources } = collect(state, pinnedVersions(), clock.now());
+        const blobs = versions + resources > 0 ? commit(next) : 0;
+        diagnostics?.event("capability_gc", { versions, resources, blobs });
+        return { versions, resources, blobs };
+      }),
+  };
+}
+
+/** Blob file names currently on disk (for tests and diagnostics). */
+export function listBlobFiles(store: CapabilityStore): string[] {
+  try {
+    return readdirSync(join(store.dir, "blobs")).filter((n) => BLOB_NAME_RE.test(n));
+  } catch {
+    return [];
+  }
+}
+
+export type { StoreState, StoredResource, DecisionCommand, PolicyCommand, OriginPolicy };
