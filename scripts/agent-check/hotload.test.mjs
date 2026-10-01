@@ -118,7 +118,7 @@ describe("hotload: acceptance runs", () => {
     expect(rep.turns[0]).toMatchObject({ text: "Skills seen: none", discovery: "not_listed", listedNames: [] });
     expect(rep.turns[1]).toMatchObject({ discovery: "listed", listedNames: [rep.name], skillSucceeded: true, readSucceeded: true, proofPhraseQuoted: true });
     expect(rep.turns[1].toolUses.map((t) => t.name)).toEqual([`Skill(${rep.name})`, `mcp__${rep.name}__read_resource`]);
-    expect(rep).toMatchObject({ discovery: "listed", listedNames: [rep.name], mcpStatusSeen: "connected", mcpToolsDeferred: false, toolSearch: { offered: true, uses: 0 } });
+    expect(rep).toMatchObject({ discovery: "listed", listedNames: [rep.name], mcpStatusAtInit: "connected", mcpToolsDeferred: false, toolSearch: { offered: true, uses: 0 } });
     expect(rep.invocation).toMatchObject({ skillInvoked: true, readSucceeded: true, proofPhraseQuoted: true });
     expect(rep.turns[2]).toMatchObject({ readCalled: true, readSucceeded: false, readRevoked: true, readError: "revoked", proofPhraseQuoted: false });
     expect(rep.registration).toMatchObject({ loadedAtStart: "connected", ownedAfterAdd: true, add: { ok: true, status: 0 } });
@@ -185,13 +185,12 @@ describe("hotload: acceptance runs", () => {
 
   it.each([
     ["mcp-ignore", "absent"],
-    ["mcp-pending", "pending"],
     ["mcp-failed", "failed"],
-  ])("%s: mcp_not_loaded with the status seen, after one request", async (mode, status) => {
+  ])("%s: not timing, so mcp_not_loaded right after turn 1", async (mode, status) => {
     const w = makeWorld(mode);
     const r = await w.run(["--case", "hotload", "--authorize-real-root"]);
     expect(r.code).toBe(1);
-    expect(r.report).toMatchObject({ outcome: "mcp_not_loaded", mcpStatusSeen: status, afterRestart: "not_run" });
+    expect(r.report).toMatchObject({ outcome: "mcp_not_loaded", mcpStatusAtInit: status, afterRestart: "not_run" });
     expect(r.report.registration.loadedAtStart).toBe(status);
     expect(r.report.inferenceRequests).toHaveLength(1);
     expect(r.report.skill).toBeUndefined();
@@ -199,16 +198,41 @@ describe("hotload: acceptance runs", () => {
     expect(w.registry()).toEqual({});
   });
 
-  it("--two-session: mcp_requires_restart only when the fresh session shows it connected", async () => {
-    const late = makeWorld("mcp-late");
-    const r = await late.run(["--case", "hotload", "--authorize-real-root", "--two-session", "--max-inference", "3"]);
-    expect(r.report).toMatchObject({ outcome: "mcp_requires_restart", mcpStatusSeen: "pending", afterRestart: "mcp_connected" });
+  it("pending at init, connected by turn 2: no early stop, no extra wait; turn 2 decides (pass)", async () => {
+    const w = makeWorld("mcp-pending-then-connected");
+    const r = await w.run(["--case", "hotload", "--authorize-real-root"]);
+    expect(r.code, r.text).toBe(0);
+    expect(r.report).toMatchObject({ outcome: "hotload_pass", mcpStatusAtInit: "pending", registration: { loadedAtStart: "pending" } });
+    expect(r.report.mcpToolsDeferred).toBeUndefined();
+    expect(r.report.skill.settleMs).toBe(50);
+    expect(r.report.inferenceRequests.map((i) => i.purpose)).toEqual(["list_skills", "use_skill"]);
+    expect(r.text).toContain("proof MCP server at init: pending");
+    expect(r.report.notes.join("\n")).toMatch(/non-blocking/);
+    expect(r.report.cleanup.ok).toBe(true);
+  });
+
+  it("pending at init and never connected: turn 2's failed read labels it mcp_not_loaded (pending)", async () => {
+    const w = makeWorld("mcp-pending-never");
+    const r = await w.run(["--case", "hotload", "--authorize-real-root"]);
+    expect(r.code).toBe(1);
+    expect(r.report).toMatchObject({ outcome: "mcp_not_loaded", mcpStatusAtInit: "pending" });
+    expect(r.report.turns[1]).toMatchObject({ skillInvoked: true, readCalled: true, readSucceeded: false, readError: "tool_unavailable" });
+    expect(r.report.inferenceRequests).toHaveLength(2);
+    expect(r.report.cleanup.ok).toBe(true);
+    expect(proofDirs(w)).toEqual([]);
+    expect(w.registry()).toEqual({});
+  });
+
+  it("--two-session: mcp_requires_restart only when a fresh session shows a failed server connected", async () => {
+    const first = makeWorld("mcp-failed-first");
+    const r = await first.run(["--case", "hotload", "--authorize-real-root", "--two-session", "--max-inference", "3"]);
+    expect(r.report).toMatchObject({ outcome: "mcp_requires_restart", mcpStatusAtInit: "failed", afterRestart: "mcp_connected" });
     expect(r.report.inferenceRequests.map((i) => i.purpose)).toEqual(["list_skills", "list_skills_after_restart"]);
     expect(r.report.cleanup.ok).toBe(true);
 
-    const never = makeWorld("mcp-pending");
-    const r2 = await never.run(["--case", "hotload", "--authorize-real-root", "--two-session", "--max-inference", "3"]);
-    expect(r2.report).toMatchObject({ outcome: "mcp_not_loaded", mcpStatusSeen: "pending", afterRestart: "mcp_pending" });
+    const always = makeWorld("mcp-failed");
+    const r2 = await always.run(["--case", "hotload", "--authorize-real-root", "--two-session", "--max-inference", "3"]);
+    expect(r2.report).toMatchObject({ outcome: "mcp_not_loaded", mcpStatusAtInit: "failed", afterRestart: "mcp_failed" });
   });
 
   it.each([
@@ -457,6 +481,7 @@ describe("hotload: turn analysis", () => {
     expect(readErrorCode("Scout revoked: the user revoked it")).toBe("revoked");
     expect(readErrorCode("Permission to use mcp__x__read_resource has been denied")).toBe("permission_denied");
     expect(readErrorCode("No such tool available: mcp__x")).toBe("tool_unavailable");
+    expect(readErrorCode("MCP server scout-proof-x is not connected")).toBe("server_not_connected");
     expect(readErrorCode("boom")).toBe("tool_error");
     expect(listedSkillNames("no listing here")).toEqual({ lineFound: false, names: [] });
     expect(listedSkillNames("Skills seen: none")).toEqual({ lineFound: true, names: [] });

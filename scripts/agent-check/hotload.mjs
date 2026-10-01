@@ -44,7 +44,10 @@
 // definitions), the report records whether the proof tools were listed in init
 // (`mcpToolsDeferred` is true when the server is connected but its tools are not) and how
 // often ToolSearch was used. MCP startup is non-blocking by default in 2.1.286, so a server
-// still connecting at init shows `pending`; that is reported as mcp_not_loaded (pending).
+// still connecting at init shows `pending`. That is timing, not failure: the check records
+// mcpStatusAtInit and goes on to turn 2 without polling or extra waiting (turn 2's own
+// latency is the wait); only turn 2's evidence can then say the server never loaded. A
+// `failed` or `absent` server (or any status other than connected/pending) stops after turn 1.
 
 import { randomBytes } from "node:crypto";
 import { mkdirSync, writeFileSync } from "node:fs";
@@ -75,9 +78,11 @@ const ABORT_SETTLE_MS = 2000;
  *   skill_not_invoked           no Skill tool_use naming the proof skill
  *   hotload_requires_reload     --two-session: turn 2 did not invoke it, a fresh session did
  *   skill_never_loads           --two-session: neither session invoked and read it
- *   mcp_not_loaded              turn 1's init did not show the proof server connected with
- *                               usable tools (mcpStatusSeen: pending, failed, absent, ...)
- *   mcp_requires_restart        --two-session: mcp_not_loaded in session 1, connected in a fresh one
+ *   mcp_not_loaded              turn 1's init showed the proof server failed or absent (stops
+ *                               there), or it was pending / listed without tools at init and
+ *                               turn 2's read_resource failed as tool_unavailable or
+ *                               server_not_connected (mcpStatusAtInit holds the init status)
+ *   mcp_requires_restart        --two-session: failed/absent in session 1, connected in a fresh one
  *   preflight_failed, aborted
  */
 export const OUTCOMES = Object.freeze([
@@ -109,7 +114,8 @@ export const REPORT_NOTES = Object.freeze([
   "One inference request is one turn: one user message sent to the session (one job). A turn can make several API calls (tool use); those are counted per turn in turns[].usage.turns.",
   "A missing user skills root is refused (skills_root_missing_not_created), never created.",
   "Old conversation text remains in a session after revocation; the check shows only that Scout refuses later reads.",
-  "One-time MCP registration (registration.loadedAtStart, mcpStatusSeen) is recorded separately from per-resource skill hot-load (outcome).",
+  "One-time MCP registration (registration.loadedAtStart, mcpStatusAtInit) is recorded separately from per-resource skill hot-load (outcome).",
+  "MCP startup is non-blocking in CLI 2.1.286: a proof server `pending` (or listed without tools) at init does not stop the check; turn 2's evidence decides.",
 ]);
 
 /** Why a hotload run with these options must not start (nothing changed), or undefined. */
@@ -161,6 +167,7 @@ export function readErrorCode(text) {
   const scout = /^Scout ([a-z_]+):/.exec(text ?? "");
   if (scout) return scout[1];
   if (/permission|not allowed|denied/i.test(text ?? "")) return "permission_denied";
+  if (/not connected|still connecting|pending|failed to connect/i.test(text ?? "")) return "server_not_connected";
   if (/no such tool|not available|unknown tool/i.test(text ?? "")) return "tool_unavailable";
   return "tool_error";
 }
@@ -232,14 +239,22 @@ export function classifyUse(a) {
   return a.discovery === "listed" ? "hotload_pass" : "skill_used_not_listed";
 }
 
-/** The proof server's state in an init summary: connected with tools, or why not. */
+/**
+ * The proof server's state in an init summary. `atInit` is its status there, or
+ * `connected_without_tools`. `proceed`: worth a turn 2 (connected, or still pending, or listed
+ * without tools); otherwise (failed, absent, ...) not timing, so the check stops.
+ */
 export function proofServerState(initSummary, { name, readTool }) {
   const server = initSummary?.mcpServers?.find((s) => s.name === name);
   const status = server?.status ?? "absent";
   const toolsListed = !!initSummary?.tools?.includes(readTool);
   const toolSearchOffered = !!initSummary?.tools?.includes("ToolSearch");
-  return { status, toolsListed, toolSearchOffered, usable: status === "connected" && (toolsListed || toolSearchOffered) };
+  const atInit = status === "connected" && !toolsListed ? "connected_without_tools" : status;
+  return { status, atInit, toolsListed, toolSearchOffered, usable: status === "connected" && toolsListed, proceed: status === "connected" || status === "pending" };
 }
+
+/** Read errors that mean the proof server's tool never became callable. */
+export const NOT_LOADED_READ_ERRORS = Object.freeze(["tool_unavailable", "server_not_connected"]);
 
 class Aborted extends Error {
   constructor() {
@@ -319,7 +334,7 @@ export async function runHotload(o, deps) {
   let outcome = "aborted";
   let preflight = { verdict: "not run" };
   let initSummary;
-  let mcpStatusSeen;
+  let mcpStatusAtInit;
   let mcpToolsDeferred;
   let revocation = "not_requested";
   let afterRestart = "not_run";
@@ -466,9 +481,9 @@ export async function runHotload(o, deps) {
     }
     const mcp = proofServerState(initSummary, { name, readTool });
     registration.loadedAtStart = mcp.status;
-    if (!mcp.usable) {
+    mcpStatusAtInit = mcp.atInit;
+    if (!mcp.proceed) {
       outcome = "mcp_not_loaded";
-      mcpStatusSeen = mcp.status === "connected" ? "connected_without_tools" : mcp.status;
       if (o.twoSession) {
         await restart();
         const r = await turnOn(session, "list_skills_after_restart", PROMPTS.list());
@@ -478,13 +493,13 @@ export async function runHotload(o, deps) {
           return;
         }
         const again = proofServerState(initOf(session), { name, readTool });
-        afterRestart = again.usable ? "mcp_connected" : `mcp_${again.status === "connected" ? "connected_without_tools" : again.status}`;
-        if (again.usable) outcome = "mcp_requires_restart";
+        afterRestart = again.status === "connected" ? "mcp_connected" : `mcp_${again.status}`;
+        if (again.status === "connected") outcome = "mcp_requires_restart";
       }
       return;
     }
-    mcpStatusSeen = "connected";
-    mcpToolsDeferred = !mcp.toolsListed;
+    // Connected or still pending: go on. No polling and no extra wait; turn 2 decides.
+    mcpToolsDeferred = mcp.status === "connected" ? !mcp.toolsListed : undefined;
     if (!initSummary.tools.includes("Skill")) {
       failures.push("skill_tool_missing");
       return;
@@ -510,6 +525,7 @@ export async function runHotload(o, deps) {
       return;
     }
     outcome = classifyUse(t2.a);
+    if (!mcp.usable && t2.a.readCalled && !t2.a.readSucceeded && NOT_LOADED_READ_ERRORS.includes(t2.a.readError)) outcome = "mcp_not_loaded";
     if (outcome === "skill_not_invoked" && o.twoSession) {
       await restart();
       const t3 = await turnOn(session, "use_skill_after_restart", PROMPTS.use());
@@ -599,7 +615,7 @@ export async function runHotload(o, deps) {
     name,
     skillsRoot: label === "preliminary" ? "<throwaway cwd>/.claude/skills" : realSkillsRoot,
     registration,
-    mcpStatusSeen,
+    mcpStatusAtInit,
     mcpToolsDeferred,
     toolSearch: { offered: !!initSummary?.tools?.includes("ToolSearch"), uses: toolSearchUses },
     discovery: t2?.discovery,

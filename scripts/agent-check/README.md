@@ -22,7 +22,7 @@ Two commands for Phase 1 of the website-agent plan.
 | `--authorize-real-root` | hotload: the acceptance run. Adds one `scout-proof-<nonce>` MCP registration at user scope and one `scout-proof-<nonce>` skill directory in the real user skills root (`$CLAUDE_CONFIG_DIR/skills`, else `~/.claude/skills`), and removes both afterwards. |
 | `--preliminary` | hotload: put the skill in the throwaway cwd's `.claude/skills` and load the server with `--mcp-config`. Nothing installed changes; the result does not count for the gate. |
 | `--with-revocation` | hotload: after the skill works, revoke the resource, remove the skill, and ask for one more read. Needs one more request. |
-| `--two-session` | hotload: if turn 1 does not show the proof server connected, or turn 2 does not invoke the skill, try again in a fresh session, to tell "needs a restart" from "never works". Needs one more request. |
+| `--two-session` | hotload: if turn 1 shows the proof server `failed` or `absent`, or turn 2 does not invoke the skill, try again in a fresh session, to tell "needs a restart" from "never works". Needs one more request. |
 
 A hotload run without `--authorize-real-root` or `--preliminary` exits 2 and changes
 nothing. The hot-load gate then stays unverified. A missing user skills root is refused,
@@ -77,6 +77,11 @@ tool search whenever `ToolSearch` is available. The init event may still list a 
 tool, so the report records `mcpToolsDeferred` (the proof server connected but its tools
 were not listed in init) and `toolSearch.uses`.
 
+MCP startup is also non-blocking in 2.1.286, so a server still starting shows `pending` in
+the init event. The check records `mcpStatusAtInit` and goes on to turn 2 without polling
+or extra waiting; turn 2's latency is the wait, and its evidence decides the outcome. Only
+`failed` and `absent` (and other statuses that are not timing) stop the check after turn 1.
+
 Outcomes, each from the session's own events:
 
 | Outcome | Evidence |
@@ -88,8 +93,8 @@ Outcomes, each from the session's own events:
 | `skill_not_invoked` | No Skill call names the proof skill. |
 | `hotload_requires_reload` | `--two-session`: turn 2 did not invoke it; a fresh session did, and read it. |
 | `skill_never_loads` | `--two-session`: neither session invoked and read it. |
-| `mcp_not_loaded` | Turn 1's init did not show the proof server connected with usable tools. `mcpStatusSeen` is the status seen: `pending`, `failed`, `absent`, or `connected_without_tools`. MCP startup is non-blocking in 2.1.286, so a slow server shows `pending`. |
-| `mcp_requires_restart` | `--two-session`: `mcp_not_loaded` in the first session, connected in a fresh one. |
+| `mcp_not_loaded` | Turn 1's init showed the proof server `failed` or `absent`, and the check stopped there. Or init showed it `pending` or `connected_without_tools`, the check went on, and turn 2's `read_resource` failed as `tool_unavailable` or `server_not_connected`. `mcpStatusAtInit` holds the init status. |
+| `mcp_requires_restart` | `--two-session`: the server was `failed` or `absent` in the first session and connected in a fresh one. |
 | `preflight_failed`, `aborted` | The billing preflight did not return `subscription`; the run stopped (signal, timeout, or error). |
 
 Cleanup always runs. The skill directory is removed only if it still holds exactly the

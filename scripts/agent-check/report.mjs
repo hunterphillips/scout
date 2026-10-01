@@ -134,7 +134,7 @@ export function summaryLines(report, path) {
   if (report.case === "hotload") lines.push("  session: one headless multi-turn `claude -p` stream-json process standing in for an interactive session");
   if (report.cli?.version) lines.push(`  claude ${report.cli.version}; preflight ${report.preflight?.verdict ?? "not run"}`);
   if (Array.isArray(report.inferenceRequests)) lines.push(`  inference requests: ${report.inferenceRequests.length}`);
-  if (report.mcpStatusSeen) lines.push(`  proof MCP server at turn 1: ${report.mcpStatusSeen}${report.mcpToolsDeferred ? " (tools not listed in init; ToolSearch offered)" : ""}`);
+  if (report.mcpStatusAtInit) lines.push(`  proof MCP server at init: ${report.mcpStatusAtInit}${report.mcpToolsDeferred ? " (tools not listed in init; ToolSearch offered)" : ""}`);
   if (report.discovery) lines.push(`  turn 2 listing: ${report.discovery}`);
   if (Array.isArray(report.failures) && report.failures.length) lines.push(`  failures: ${report.failures.join(", ")}`);
   if (report.cleanup) lines.push(`  cleanup: ${report.cleanup.ok ? "complete" : "INCOMPLETE"}`);

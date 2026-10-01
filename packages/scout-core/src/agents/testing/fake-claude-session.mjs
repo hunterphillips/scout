@@ -23,8 +23,11 @@
 //   hotload-static            the skills list is fixed at startup (needs a restart)
 //   hotload-never             no scout-proof-* skill is ever visible, in any session
 //   mcp-ignore                user-scope registrations are not loaded (absent from init)
-//   mcp-pending | mcp-failed  user-scope registrations show that status in init, no tools
-//   mcp-late                  like mcp-pending in the first session only (counted in FAKE_LOG)
+//   mcp-failed                user-scope registrations show `failed` in init, no tools
+//   mcp-failed-first          like mcp-failed in the first session only (counted in FAKE_LOG)
+//   mcp-pending-then-connected  init shows user-scope servers `pending` without tools, but
+//                             they connect during startup and serve calls in later turns
+//   mcp-pending-never         init shows them `pending`; they never connect (calls fail)
 //   deferred                  with ToolSearch in --tools, MCP tools are left out of init and
 //                             loaded with a ToolSearch call before first use (as 2.1.286
 //                             defers MCP tools when tool search is on)
@@ -195,7 +198,9 @@ async function session({ argv, has, flag, mode, version }) {
   const startupSkills = hideProof(scanSkills(roots));
   const sources = (flag("--setting-sources") ?? "user,project,local").split(",");
 
-  const userStatus = mode === "mcp-pending" || (mode === "mcp-late" && earlier === 0) ? "pending" : mode === "mcp-failed" ? "failed" : undefined;
+  const userStatus = mode === "mcp-pending-never" ? "pending" : mode === "mcp-failed" || (mode === "mcp-failed-first" && earlier === 0) ? "failed" : undefined;
+  // Servers that init reports as pending although they connect (non-blocking MCP startup).
+  const pendingAtInit = new Set();
   const configs = [];
   const servers = [];
   if (!has("--strict-mcp-config") && sources.includes("user") && mode !== "mcp-ignore") {
@@ -207,6 +212,7 @@ async function session({ argv, has, flag, mode, version }) {
   const mcpConfig = flag("--mcp-config");
   if (mcpConfig) for (const [name, cfg] of Object.entries(JSON.parse(readFileSync(mcpConfig, "utf8")).mcpServers ?? {})) configs.push([name, cfg]);
   for (const [name, cfg] of configs) servers.push(await connect(name, cfg));
+  if (mode === "mcp-pending-then-connected") for (const s of servers) if (s.status === "connected") pendingAtInit.add(s.name);
 
   const builtins = flag("--tools") === undefined ? ["Bash", "Read", "Edit", "Skill"] : flag("--tools").split(",").filter(Boolean);
   // Tool search is on only when ToolSearch is offered; then MCP tools start deferred.
@@ -270,14 +276,14 @@ async function session({ argv, has, flag, mode, version }) {
     turn++;
     if (turn === 1) {
       const tools = [...builtins];
-      if (!deferred) for (const s of servers) tools.push(...s.tools.map((t) => `mcp__${s.name}__${t}`));
+      if (!deferred) for (const s of servers) if (!pendingAtInit.has(s.name)) tools.push(...s.tools.map((t) => `mcp__${s.name}__${t}`));
       emit({
         type: "system",
         subtype: "init",
         session_id: "fake-session",
         cwd,
         tools,
-        mcp_servers: servers.map((s) => ({ name: s.name, status: s.status })),
+        mcp_servers: servers.map((s) => ({ name: s.name, status: pendingAtInit.has(s.name) ? "pending" : s.status })),
         model: flag("--model") ?? "gateway-default-model",
         permissionMode: flag("--permission-mode") ?? "default",
         skills: [...startupSkills.keys()],
