@@ -40,3 +40,15 @@ it("the service worker turns zod jitless before any Scout module runs; other bun
     rmSync(join(dist, ".."), { recursive: true, force: true });
   }
 }, 30_000);
+
+it("the manifest asks for exact sites one at a time: https://*/* is optional only, activeTab is required, and there is no tabs permission", () => {
+  const root = fileURLToPath(new URL("..", import.meta.url));
+  const m = JSON.parse(readFileSync(join(root, "manifest.json"), "utf8")) as Record<string, unknown>;
+  expect(m["optional_host_permissions"]).toEqual(["https://*/*"]);
+  expect(m["host_permissions"]).toBeUndefined();
+  expect(m["permissions"]).toEqual(expect.arrayContaining(["activeTab", "nativeMessaging", "scripting", "storage"]));
+  expect(m["permissions"]).not.toContain("tabs");
+  expect(m["optional_permissions"]).toBeUndefined();
+  expect(m["content_scripts"]).toBeUndefined(); // registered at runtime, only with the GitHub grant and toggle
+  expect(m["incognito"]).toBe("not_allowed");
+});

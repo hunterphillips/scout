@@ -182,7 +182,7 @@ export interface FakePort {
   disconnected: boolean;
 }
 
-function makePort(name: string): FakePort {
+function makePort(name: string, onPost: (port: FakePort, m: Record<string, unknown>) => void): FakePort {
   const port: FakePort = {
     name,
     posted: [],
@@ -191,7 +191,9 @@ function makePort(name: string): FakePort {
     disconnected: false,
     postMessage(m) {
       if (port.disconnected) throw new Error("Attempting to use a disconnected port object");
-      port.posted.push(JSON.parse(JSON.stringify(m)));
+      const copy = JSON.parse(JSON.stringify(m)) as Record<string, unknown>;
+      port.posted.push(copy);
+      onPost(port, copy);
     },
     disconnect() {
       port.disconnected = true;
@@ -209,31 +211,49 @@ export interface FakeTab {
   incognito: boolean;
 }
 
+/** The core's answer to hello: capture disabled until it has the extension's snapshot. */
+export const DISABLED_POLICY = { type: "capture_policy", revision: 1, paused: false, captureEnabled: false } as const;
+
 /**
  * Fake chrome. `host` decides how a new native port behaves: "ok" (stays
- * open and reports ready), "silent" (stays open, never reports ready) or
- * "missing" (disconnects at once with the host-not-found error).
- * Tab url/title are visible only for hosts in `granted`. Pass the same
- * `session` object to two fakes to model a service-worker restart
+ * open; like the native host with a protocol-2 core, it sends the core's
+ * capture-disabled policy, then ready), "silent" (stays open, says nothing)
+ * or "missing" (disconnects at once with the host-not-found error). With
+ * `autoEnable` (default on), the fake core answers the first permissions
+ * snapshot on a port with an enabling policy. Tab url/title are visible only
+ * for hosts in `granted`, and for the tab holding the temporary activeTab
+ * grant (`state.activeTabGrant`). `local` seeds chrome.storage.local. Pass the
+ * same `session` object to two fakes to model a service-worker restart
  * (chrome.storage.session survives it; everything in memory does not).
  */
 export function makeChrome({
   granted = [] as string[],
   host = "ok" as "ok" | "silent" | "missing",
   session = {} as Record<string, unknown>,
+  local = {} as Record<string, unknown>,
+  autoEnable = true,
 } = {}) {
   const tabs = new Map<number, FakeTab>();
   const windows = new Map<number, { id: number; focused: boolean }>();
   const registered: chrome.scripting.RegisteredContentScript[] = [];
   const executeCalls: unknown[] = [];
   const tabMessages: Array<{ tabId: number; msg: unknown }> = [];
-  const store: Record<string, unknown> = {};
+  const store: Record<string, unknown> = { ...local };
   const ports: FakePort[] = [];
-  const state = { granted: [...granted], host, storageFails: false, lastFocusedWindow: 1 };
+  const state = { granted: [...granted], host, storageFails: false, lastFocusedWindow: 1, autoEnable, activeTabGrant: null as number | null };
   const visible = (u: string) => state.granted.some((p) => u.startsWith(p.replace(/\*$/, "")));
+  const enabledOn = new Set<FakePort>();
+  /** The fake core: answer the first permissions snapshot on a port with an enabling policy. */
+  const onPost = (port: FakePort, m: Record<string, unknown>) => {
+    if (!state.autoEnable || m["kind"] !== "permissions" || enabledOn.has(port)) return;
+    enabledOn.add(port);
+    queueMicrotask(() => {
+      if (!port.disconnected) port.onMessage.emit({ type: "capture_policy", revision: 2, paused: false, captureEnabled: true });
+    });
+  };
   const view = (t: FakeTab) => {
     const o: Record<string, unknown> = { id: t.id, windowId: t.windowId, active: t.active, incognito: t.incognito };
-    if (visible(t.url)) {
+    if (visible(t.url) || state.activeTabGrant === t.id) {
       o["url"] = t.url;
       o["title"] = t.title;
     }
@@ -247,7 +267,7 @@ export function makeChrome({
       onMessage: ev(),
       getURL: (p: string) => `chrome-extension://${EXT_ID}/${p}`,
       connectNative(name: string) {
-        const port = makePort(name);
+        const port = makePort(name, onPost);
         ports.push(port);
         if (state.host === "missing") {
           queueMicrotask(() => {
@@ -258,7 +278,9 @@ export function makeChrome({
           });
         } else if (state.host === "ok") {
           queueMicrotask(() => {
-            if (!port.disconnected) port.onMessage.emit({ type: "ready" });
+            if (port.disconnected) return;
+            port.onMessage.emit({ ...DISABLED_POLICY });
+            port.onMessage.emit({ type: "ready" });
           });
         }
         return port;

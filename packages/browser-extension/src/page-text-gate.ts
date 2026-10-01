@@ -10,6 +10,11 @@
 // - the cancel epoch (shared state), bumped by pause, revoke, tab change,
 //   focus loss and port loss, that approval and forwarding snapshot on entry
 //   and re-check after every await.
+//
+// Capture needs three things, each checked on approval and again before
+// forwarding: Chrome's GitHub grant, the user's GitHub-capture toggle, and a
+// core capture_policy on this port with capture enabled and not paused. The
+// policy can only take capture away; it never stands in for the other two.
 
 import { type PageTextObservation, PageTextObservationSchema } from "@scout/contracts";
 import { GITHUB_PATTERN } from "./hosts.js";
@@ -17,7 +22,7 @@ import type { ApproveRequest, ApproveResponse, BackgroundToContent, DenialCode, 
 import type { Clock } from "./reconnect.js";
 import { type IssueRoute, parseIssueRoute } from "./route.js";
 import { LIMITS } from "./selectors.js";
-import { activeTab, type Counters, post, type SharedState } from "./shared-state.js";
+import { activeTab, type Counters, policyAllowsCapture, post, type SharedState } from "./shared-state.js";
 
 /** An approval older than the content script's longest settle (plus slack) is void. */
 export const APPROVAL_TTL_MS = LIMITS.maxWaitMs + 5_000;
@@ -47,9 +52,11 @@ export interface PageTextGate {
    * be asked to refresh). `stop` also disconnects the script (permission revoked).
    */
   cancelTabs(opts?: { stop?: boolean; except?: number | null }): void;
-  /** Ask the active tab's script for a fresh capture (when not paused and the port is open). */
+  /** Ask the active tab's script for a fresh capture (when capture is on and the port is open). */
   refreshActive(): Promise<void>;
   githubGranted(): Promise<boolean>;
+  /** Chrome's GitHub grant and the user's toggle are both on. */
+  captureAllowed(): Promise<boolean>;
   onTabUpdated(tabId: number, url: string | undefined): void;
   onTabRemoved(tabId: number): void;
 }
@@ -86,7 +93,7 @@ export function createPageTextGate(deps: GateDeps): PageTextGate {
   }
 
   async function refreshActive(): Promise<void> {
-    if (state.paused || !state.port) return;
+    if (state.paused || !state.port || !state.githubCapture || !policyAllowsCapture(state)) return;
     const t = await activeTab(ch).catch(() => null);
     if (!t || t.incognito || t.id === undefined || !tabRoute(t)) return;
     sendToTab(t.id, { type: "refresh" });
@@ -124,6 +131,12 @@ export function createPageTextGate(deps: GateDeps): PageTextGate {
     }
   }
 
+  async function captureAllowed(): Promise<boolean> {
+    if (!state.githubCapture) return false;
+    const granted = await githubGranted();
+    return granted && state.githubCapture; // the toggle may have gone off during the await
+  }
+
   /** The browser's record of `tabId` if it is the active tab of the focused, non-incognito window. */
   async function foregroundTab(tabId: number): Promise<Tab | null> {
     if (!state.browserFocused) return null;
@@ -144,12 +157,17 @@ export function createPageTextGate(deps: GateDeps): PageTextGate {
     const asked = typeof msg.url === "string" ? parseIssueRoute(msg.url) : null;
     if (!route || !asked || route.key !== asked.key || !Number.isSafeInteger(msg.navCounter)) return deny("route");
     if (state.paused) return deny("paused");
+    if (!state.port) {
+      deps.trigger();
+      return deny("bridge-disconnected");
+    }
+    if (!policyAllowsCapture(state)) return deny("policy");
     const epoch = state.cancelEpoch;
-    if (!(await githubGranted())) return deny("permission");
+    if (!(await captureAllowed())) return deny("permission");
     const fg = await foregroundTab(sender.tab.id).catch(() => null);
     if (!fg) return deny("not-foreground");
     if (tabRoute(fg)?.key !== route.key) return deny("route");
-    if (epoch !== state.cancelEpoch || state.paused) return deny("cancelled");
+    if (epoch !== state.cancelEpoch || state.paused || !policyAllowsCapture(state)) return deny("cancelled");
     if (!state.port) {
       deps.trigger();
       return deny("bridge-disconnected");
@@ -174,7 +192,8 @@ export function createPageTextGate(deps: GateDeps): PageTextGate {
     if (!msgRoute || a.navCounter !== msg.navCounter || a.routeKey !== msgRoute.key) return { reason: "stale" };
     if (tabRoute(sender.tab)?.key !== msgRoute.key) return { reason: "url-changed" };
     if (state.paused) return { reason: "paused" };
-    if (!(await githubGranted())) return { reason: "permission" };
+    if (!policyAllowsCapture(state)) return { reason: "policy" };
+    if (!(await captureAllowed())) return { reason: "permission" };
     const fg = await foregroundTab(sender.tab.id).catch(() => null);
     if (!fg) return { reason: "not-foreground" };
     const current = tabRoute(fg);
@@ -191,7 +210,7 @@ export function createPageTextGate(deps: GateDeps): PageTextGate {
     if (!validText(msg)) return drop("payload");
     const c = await checkPageText(msg, sender);
     if ("reason" in c) return drop(c.reason);
-    if (epoch !== state.cancelEpoch || state.paused) return drop("cancelled");
+    if (epoch !== state.cancelEpoch || state.paused || !policyAllowsCapture(state)) return drop("cancelled");
     if (!state.port) return drop("bridge-disconnected");
     const obs: PageTextObservation = {
       kind: "page_text",
@@ -223,6 +242,7 @@ export function createPageTextGate(deps: GateDeps): PageTextGate {
     cancelTabs,
     refreshActive,
     githubGranted,
+    captureAllowed,
     onTabUpdated(tabId, url) {
       const a = approvals.get(tabId);
       if (a && url !== undefined && parseIssueRoute(url)?.key !== a.routeKey) approvals.delete(tabId);
