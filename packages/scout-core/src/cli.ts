@@ -1,6 +1,7 @@
 import { realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import type { Candidate } from "@scout/contracts";
+import { createSiteResourceDiscoverer, type DiscoveryResult } from "./capabilities/discovery.js";
 import type { CatalogCacheResult } from "./catalog/cache.js";
 import type { Sleep } from "./catalog/pacing.js";
 import { type CatalogResolveStats, createCatalogResolver } from "./catalog/resolveCatalog.js";
@@ -18,9 +19,12 @@ import type { GuardedFetchOptions, GuardedFetchResult } from "./fetch/guardedFet
  * - `verify <url>...` runs `verifyTargets` on up to `VERIFY_CLI_MAX_URLS` (10) URLs, all
  *   fetched in parallel; more is a usage error rather than a larger fan-out. The origin is
  *   the first URL's; a URL on any other origin is a usage error.
+ * - `discover <origin> [--refresh] [--json]` runs website resource discovery (`llms.txt`,
+ *   `AGENTS.md`, the skills index and its skills) through the on-disk discovery cache and
+ *   prints one line per probe. Resource text is never printed; `--json` omits it too.
  * - `rank <origin>` is not available until Phase 3.
  *
- * Only `catalog` and `verify` touch the network, and only when invoked. Importing this
+ * Only `catalog`, `discover`, and `verify` touch the network, and only when invoked. Importing this
  * module does nothing; the process entry runs `runCli` only when this file is `argv[1]`.
  */
 
@@ -29,6 +33,7 @@ export const VERIFY_CLI_MAX_URLS = 10;
 
 export const USAGE = `usage:
   cli.js catalog <https-origin> [--refresh] [--json]
+  cli.js discover <https-origin> [--refresh] [--json]
   cli.js verify <url>...            (at most ${VERIFY_CLI_MAX_URLS} URLs, all on one origin)
   cli.js rank <https-origin>        (Phase 3)
 `;
@@ -122,6 +127,12 @@ export async function runCli(argv: readonly string[], io: CliIo): Promise<number
         if (!parsed.ok) return usage(`catalog: ${parsed.reason}`);
         return await catalogCommand(parsed.origin, { refresh: flags.includes("--refresh"), json: flags.includes("--json") }, io);
       }
+      case "discover": {
+        if (positional.length !== 1 || flags.some((f) => f !== "--refresh" && f !== "--json")) return usage();
+        const parsed = parseOrigin(positional[0] as string);
+        if (!parsed.ok) return usage(`discover: ${parsed.reason}`);
+        return await discoverCommand(parsed.origin, { refresh: flags.includes("--refresh"), json: flags.includes("--json") }, io);
+      }
       case "verify": {
         if (positional.length === 0 || flags.length > 0) return usage();
         if (positional.length > VERIFY_CLI_MAX_URLS) return usage(`verify: at most ${VERIFY_CLI_MAX_URLS} URLs`);
@@ -195,6 +206,50 @@ export function formatCatalog(
     lines.push("", `first ${preview.length}:`);
     for (const c of preview) lines.push(`${c.id}  ${c.labelQuality}  ${c.title}  —  ${c.sourceUrl}`);
   }
+  return `${lines.join("\n")}\n`;
+}
+
+async function discoverCommand(origin: string, opts: { refresh: boolean; json: boolean }, io: CliIo): Promise<number> {
+  const deps = io.deps ?? {};
+  const env = io.env ?? process.env;
+  const clock = deps.clock ?? systemClock;
+  const diagnostics = deps.diagnostics ?? createDiagnostics({ path: defaultDiagnosticsPath(env), clock });
+  const discoverer = createSiteResourceDiscoverer({
+    scoutHome: scoutHome(env),
+    clock,
+    diagnostics,
+    ...(deps.guardedFetch ? { guardedFetch: deps.guardedFetch } : {}),
+    ...(deps.sleep ? { sleep: deps.sleep } : {}),
+  });
+  const result = await discoverer.discover(origin, { refresh: opts.refresh });
+  io.stdout(opts.json ? `${JSON.stringify(withoutText(result), null, 2)}\n` : formatDiscovery(result));
+  return EXIT_OK;
+}
+
+/** The result with each resource's text replaced by its length, for printing. */
+function withoutText(result: DiscoveryResult): unknown {
+  return {
+    ...result,
+    items: result.items.map((item) => (item.resource ? { ...item, resource: { ...item.resource, text: undefined } } : item)),
+  };
+}
+
+/** One line per probe: kind, status (and code), where the answer came from, bytes, and the URL. */
+export function formatDiscovery(result: DiscoveryResult): string {
+  const lines = [`origin       ${result.origin}`, `robots       ${result.robots}`];
+  for (const item of result.items) {
+    const label = item.kind === "skill" ? `skill ${item.entry?.name ?? `#${item.entry?.position ?? "?"}`}` : item.kind;
+    const status = item.code ? `${item.status} (${item.code})` : item.status;
+    const bytes = item.resource ? `  ${item.resource.byteLength} B sha256:${item.resource.sha256.slice(0, 12)}` : "";
+    lines.push(`${label.padEnd(24)} ${status.padEnd(28)} ${item.source}${bytes}  ${item.sourceUrl ?? "-"}`);
+  }
+  for (const ref of result.externalReferences) lines.push(`${`skill ${ref.name}`.padEnd(24)} ${"external reference".padEnd(28)} not fetched  ${ref.url}`);
+  if (result.skillsOverCap > 0) lines.push(`skills over the index cap: ${result.skillsOverCap} (not examined)`);
+  lines.push(
+    `accepted     ${result.acceptedBytes} bytes`,
+    `requests     ${result.stats.requests}, refused ${result.stats.refused}`,
+    `time         ${result.stats.ms} ms`,
+  );
   return `${lines.join("\n")}\n`;
 }
 

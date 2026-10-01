@@ -307,4 +307,29 @@ describe("runCli", () => {
     expect(site.requests).toEqual([]);
     expect(readdirSync(home)).toEqual([]);
   });
+
+  it("discover prints one line per probe without resource text and caches under SCOUT_HOME", async () => {
+    const { runCli } = await import("./cli.js");
+    const site = fakeSite({ "/llms.txt": "# Site\n\nSECRET-ISH BODY\n" });
+    const run = io({ guardedFetch: site.guardedFetch });
+
+    expect(await runCli(["discover", ORIGIN], run.io)).toBe(0);
+    expect(run.out()).toMatch(/^llms_txt\s+found\s+network/m);
+    expect(run.out()).toMatch(/^agents_md\s+absent/m);
+    expect(run.out()).not.toContain("SECRET-ISH");
+    expect(existsSync(join(home, "cache", "discovery"))).toBe(true);
+
+    const json = io({ guardedFetch: site.guardedFetch });
+    expect(await runCli(["discover", ORIGIN, "--json"], json.io)).toBe(0);
+    expect(json.out()).not.toContain("SECRET-ISH");
+    expect(JSON.parse(json.out()).items[0]).toMatchObject({ kind: "llms_txt", status: "found", source: "cache" });
+  });
+
+  it("discover refuses a non-origin before fetching anything", async () => {
+    const { runCli } = await import("./cli.js");
+    const site = fakeSite();
+    const run = io({ guardedFetch: site.guardedFetch });
+    expect(await runCli(["discover", `${ORIGIN}/path`], run.io)).toBe(1);
+    expect(site.requests).toEqual([]);
+  });
 });
