@@ -17,7 +17,15 @@
 // Revocation, in order: (1) the blocked state is committed; (2) `onRevoked` runs (P2.4
 // invalidates job tokens, P3 cancels jobs); (3) `revoke()` resolves; (4) export cleanup
 // runs (`cleanup` on the result). A cleanup failure is recorded there and never restores
-// access: reads check the committed state.
+// access: reads check the committed state. A committed approval, and an ingest that
+// auto-approved anything, start the same deferred export sync; its failure never undoes
+// the approval.
+//
+// One writer process at a time: opening takes `capabilities/store.lock` (storeLock.ts) and
+// `close()` releases it. A `readOnly` open takes no lock and refuses every mutation; it
+// reads a consistent store.json because writers replace it by rename. Opening a writable
+// store also deletes blob files no version refers to (left by a crash between a blob write
+// and the store.json replace), by exact name only.
 
 import { mkdirSync, readdirSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
@@ -58,6 +66,7 @@ import {
 } from "./decisions.js";
 import type { DiscoveryResult } from "./discovery.js";
 import { collect, type PinnedVersions } from "./garbageCollection.js";
+import { acquireStoreLock, type StoreLock } from "./storeLock.js";
 import { sha256Hex } from "./textValidation.js";
 
 /** store.json larger than this is refused unread. 256 resources x 16 versions fit well under it. */
@@ -100,11 +109,16 @@ export interface ApprovedListing {
   superseded: ResourceVersion[];
 }
 
+/** The deferred export sync a change started. Never rejects; `ok: false` means the sync failed (recorded). */
+export type ExportSync = Promise<{ ok: boolean }>;
+
 export interface IngestReport {
   origin: string;
   results: IngestItemResult[];
   /** Found items not ingested: cross-origin, non-canonical, or bytes not matching their hash. */
   skipped: number;
+  /** Export sync, started only when something was auto-approved (otherwise resolves `ok` at once). */
+  cleanup: ExportSync;
 }
 
 export interface DecisionResult {
@@ -114,11 +128,28 @@ export interface DecisionResult {
   revision: number;
 }
 
+export interface ApproveResult extends DecisionResult {
+  /** Export sync, started after this result resolved when the approval changed anything. */
+  cleanup: ExportSync;
+}
+
 export interface RevokeResult extends DecisionResult {
   /** Versions that were readable before the revocation. */
   revokedVersions: string[];
-  /** Export cleanup, started after this result resolved. Never rejects. */
-  cleanup: Promise<{ ok: boolean }>;
+  /** `onRevoked` threw: tokens or jobs may not have been invalidated. Reads are blocked regardless. */
+  hookFailed: boolean;
+  hookError?: "on_revoked_failed";
+  /** Export cleanup, started after this result resolved. */
+  cleanup: ExportSync;
+}
+
+/** A mutation on a store opened `readOnly` or already closed. */
+export class StoreReadOnlyError extends Error {
+  readonly code = "read_only";
+  constructor() {
+    super("capability store: read-only");
+    this.name = "StoreReadOnlyError";
+  }
 }
 
 export interface GcReport {
@@ -133,14 +164,19 @@ export interface CapabilityStoreOptions {
   diagnostics?: Diagnostics;
   /** Called after a revocation is committed and before `revoke()` resolves. Errors are recorded, not rethrown. */
   onRevoked?: (resourceId: string, versions: readonly string[]) => void | Promise<void>;
-  /** Export cleanup after a revocation (normally the skill exporter's sync). */
+  /** Export sync after a revocation, an approval, or an auto-approving ingest (normally the skill exporter's sync). */
   syncExports?: () => Promise<unknown>;
+  /** Open without the writer lock; every mutation throws StoreReadOnlyError. */
+  readOnly?: boolean;
   /** Test hooks for the caps. */
   limits?: { maxResources?: number; maxBlobBytes?: number };
 }
 
 export interface CapabilityStore {
   readonly dir: string;
+  readonly readOnly: boolean;
+  /** Release the writer lock; later mutations throw StoreReadOnlyError. Idempotent. */
+  close(): void;
   /** Bumped on every approval-affecting change; persisted, so it never goes back. */
   readonly approvalRevision: number;
   /** A copy of the whole state. */
@@ -161,7 +197,7 @@ export interface CapabilityStore {
   pinVersion(requestId: string, resourceId: string, version: string): ReadResolution;
   releasePins(requestId: string): void;
   ingest(discovery: DiscoveryResult, context: { chromePermitted: boolean }): Promise<IngestReport>;
-  approve(command: DecisionCommand): Promise<DecisionResult>;
+  approve(command: DecisionCommand): Promise<ApproveResult>;
   decline(command: DecisionCommand): Promise<DecisionResult>;
   revoke(resourceId: string): Promise<RevokeResult>;
   setOriginPolicy(command: PolicyCommand): Promise<{ changed: boolean; approvalRevision: number }>;
@@ -218,14 +254,40 @@ export async function createCapabilityStore(options: CapabilityStoreOptions): Pr
   const blobDir = join(dir, "blobs");
   const storePath = join(dir, "store.json");
 
+  const readOnly = options.readOnly === true;
   let state: StoreState;
+  let lock: StoreLock | undefined;
   try {
     ensurePrivateDir(dir);
     ensurePrivateDir(blobDir);
+    if (!readOnly) lock = acquireStoreLock(dir, { now: () => clock.now() });
     state = await loadState(storePath);
   } catch (error) {
+    lock?.release();
     if (error instanceof StoreCorruptError) diagnostics?.event("capability_store_invalid", { code: error.code });
     throw error;
+  }
+  let closed = false;
+  const assertWritable = () => {
+    if (readOnly || closed) throw new StoreReadOnlyError();
+  };
+
+  if (!readOnly) {
+    const referenced = referencedBlobs(state);
+    let orphanBlobs = 0;
+    for (const name of readdirSync(blobDir)) {
+      if (!BLOB_NAME_RE.test(name) || referenced.has(name.slice(0, 64))) continue;
+      try {
+        unlinkSync(join(blobDir, name));
+        orphanBlobs++;
+      } catch {
+        // Gone already.
+      }
+    }
+    if (orphanBlobs > 0) {
+      fsyncDir(blobDir);
+      diagnostics?.event("capability_gc", { orphanBlobs });
+    }
   }
 
   /** requestId → pinned "resourceId\0version" keys. In memory: requests do not survive a restart. */
@@ -295,6 +357,22 @@ export async function createCapabilityStore(options: CapabilityStoreOptions): Pr
   }
 
   const resourceRevision = (id: string) => findResource(state, id)?.revision ?? 0;
+
+  /** Start the export sync after the current mutation has answered. Never rejects. */
+  function scheduleExportSync(reason: string, resourceId?: string): ExportSync {
+    return new Promise((resolve) => {
+      setImmediate(() => {
+        if (!options.syncExports) return resolve({ ok: true });
+        options.syncExports().then(
+          () => resolve({ ok: true }),
+          () => {
+            diagnostics?.event("capability_export_failed", { reason, ...(resourceId ? { resource: shortId(resourceId) } : {}) });
+            resolve({ ok: false });
+          },
+        );
+      });
+    });
+  }
   const shortId = (id: string) => id.slice(4, 20);
 
   async function toCandidates(discovery: DiscoveryResult): Promise<{ candidates: IngestCandidate[]; bytes: Map<string, Uint8Array>; skipped: number }> {
@@ -343,6 +421,11 @@ export async function createCapabilityStore(options: CapabilityStoreOptions): Pr
 
   return {
     dir,
+    readOnly,
+    close() {
+      closed = true;
+      lock?.release();
+    },
     get approvalRevision() {
       return state.approvalRevision;
     },
@@ -407,6 +490,7 @@ export async function createCapabilityStore(options: CapabilityStoreOptions): Pr
 
     ingest: (discovery, context) =>
       serialize(async () => {
+        assertWritable();
         const { candidates, bytes, skipped } = await toCandidates(discovery);
         const { state: next, results } = ingestCandidates(state, candidates, {
           origin: discovery.origin,
@@ -435,19 +519,24 @@ export async function createCapabilityStore(options: CapabilityStoreOptions): Pr
         for (const r of results) {
           if (r.outcome === "storage_limit") diagnostics?.event("capability_store_limit", { origin: discovery.origin, code: r.limit ?? "unknown", bytes: blobBytes(state) });
         }
-        return { origin: discovery.origin, results, skipped };
+        const autoApproved = results.some((r) => r.outcome === "auto_approved");
+        const cleanup: ExportSync = autoApproved ? scheduleExportSync("auto_approve") : Promise.resolve({ ok: true });
+        return { origin: discovery.origin, results, skipped, cleanup };
       }),
 
     approve: (command) =>
       serialize(() => {
+        assertWritable();
         const { state: next, changed } = applyApprove(state, command, clock.now());
         if (changed) commit(next);
         diagnostics?.event("capability_decision", { resource: shortId(command.resourceId), action: "approve", changed, revision: state.approvalRevision });
-        return { changed, approvalRevision: state.approvalRevision, revision: resourceRevision(command.resourceId) };
+        const cleanup: ExportSync = changed ? scheduleExportSync("approve", command.resourceId) : Promise.resolve({ ok: true });
+        return { changed, approvalRevision: state.approvalRevision, revision: resourceRevision(command.resourceId), cleanup };
       }),
 
     decline: (command) =>
       serialize(() => {
+        assertWritable();
         const { state: next, changed } = applyDecline(state, command, clock.now());
         if (changed) commit(next);
         diagnostics?.event("capability_decision", { resource: shortId(command.resourceId), action: "decline", changed, revision: state.approvalRevision });
@@ -456,35 +545,36 @@ export async function createCapabilityStore(options: CapabilityStoreOptions): Pr
 
     revoke: (resourceId) =>
       serialize(async () => {
+        assertWritable();
         // (1) Commit the block. Pins on the resource go first so no collection keeps them.
         const { state: next, changed, revokedVersions } = applyRevoke(state, resourceId, clock.now());
         for (const keys of pins.values()) for (const k of [...keys]) if (k.startsWith(`${resourceId}\0`)) keys.delete(k);
         if (changed) commit(next);
         diagnostics?.event("capability_decision", { resource: shortId(resourceId), action: "revoke", changed, revision: state.approvalRevision });
         // (2) Invalidate tokens and cancel jobs before answering.
+        let hookFailed = false;
         try {
           await options.onRevoked?.(resourceId, revokedVersions);
         } catch {
-          diagnostics?.event("capability_revoke_hook_failed", { resource: shortId(resourceId) });
+          hookFailed = true;
+          diagnostics?.event("capability_revoke_hook_failed", { resource: shortId(resourceId), code: "on_revoked_failed" });
         }
         // (4) Clean up exports after the caller has its answer.
-        const cleanup = new Promise<{ ok: boolean }>((resolve) => {
-          setImmediate(() => {
-            if (!options.syncExports) return resolve({ ok: true });
-            options.syncExports().then(
-              () => resolve({ ok: true }),
-              () => {
-                diagnostics?.event("capability_export_failed", { resource: shortId(resourceId) });
-                resolve({ ok: false });
-              },
-            );
-          });
-        });
-        return { changed, approvalRevision: state.approvalRevision, revision: resourceRevision(resourceId), revokedVersions, cleanup };
+        const cleanup = scheduleExportSync("revoke", resourceId);
+        return {
+          changed,
+          approvalRevision: state.approvalRevision,
+          revision: resourceRevision(resourceId),
+          revokedVersions,
+          hookFailed,
+          ...(hookFailed ? { hookError: "on_revoked_failed" as const } : {}),
+          cleanup,
+        };
       }),
 
     setOriginPolicy: (command) =>
       serialize(() => {
+        assertWritable();
         const { state: next, changed } = applyPolicy(state, command, clock.now());
         if (changed) commit(next);
         diagnostics?.event("capability_decision", { origin: command.origin, action: command.autoAcquire ? "auto_acquire_on" : "auto_acquire_off", changed, revision: state.approvalRevision });
@@ -493,6 +583,7 @@ export async function createCapabilityStore(options: CapabilityStoreOptions): Pr
 
     collectGarbage: () =>
       serialize(() => {
+        assertWritable();
         const { state: next, versions, resources } = collect(state, pinnedVersions(), clock.now());
         const blobs = versions + resources > 0 ? commit(next) : 0;
         diagnostics?.event("capability_gc", { versions, resources, blobs });

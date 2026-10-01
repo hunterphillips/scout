@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
-import { chmodSync, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ResourceKind } from "@scout/contracts";
@@ -8,7 +9,8 @@ import type { DiagnosticFields, Diagnostics } from "../diagnostics.js";
 import { contentHash, DecisionError, StaleApprovalError } from "./decisions.js";
 import type { DiscoveryResult, ProbeItem } from "./discovery.js";
 import { UNUSED_EXPIRY_MS } from "./garbageCollection.js";
-import { type CapabilityStore, type CapabilityStoreOptions, createCapabilityStore, listBlobFiles, StoreCorruptError } from "./store.js";
+import { type CapabilityStore, type CapabilityStoreOptions, createCapabilityStore, listBlobFiles, StoreCorruptError, StoreReadOnlyError } from "./store.js";
+import { acquireStoreLock, LOCK_PARSE_GRACE_MS, StoreLockedError } from "./storeLock.js";
 
 const ORIGIN = "https://s.example";
 const DAY = 24 * 60 * 60 * 1000;
@@ -92,7 +94,7 @@ describe("ingest and exact-preview approval", () => {
     expect(statSync(join(capDir, "store.json")).mode & 0o777).toBe(0o600);
     expect(statSync(join(capDir, "blobs", `${sha("# Site v1\n")}.txt`)).mode & 0o777).toBe(0o600);
 
-    const reopened = await open();
+    const reopened = await open({ readOnly: true });
     expect(reopened.getApprovedDefault(a.id)?.hash).toBe(a.version);
     expect(reopened.approvalRevision).toBe(store.approvalRevision);
   });
@@ -236,7 +238,7 @@ describe("revocation", () => {
       onRevoked: async (id, versions) => {
         order.push("hook");
         expect(store.resolveRead(id)).toEqual({ ok: false, code: "revoked" });
-        const fromDisk = await open();
+        const fromDisk = await open({ readOnly: true });
         expect(fromDisk.getResource(id)!.resource.blocked).toBe(true);
         expect(versions).toHaveLength(1);
       },
@@ -246,9 +248,13 @@ describe("revocation", () => {
       },
     });
     const v1 = await ingestOne(store, "v1");
-    await approve(store, v1.id, v1.version);
+    // The approval's own export sync fails too, and the approval stands.
+    expect(await (await approve(store, v1.id, v1.version)).cleanup).toEqual({ ok: false });
+    expect(store.getApprovedDefault(v1.id)?.hash).toBe(v1.version);
+    order.length = 0;
     expect(store.pinVersion("job", v1.id, v1.version).ok).toBe(true);
     const result = await store.revoke(v1.id);
+    expect(result.hookFailed).toBe(false);
     order.push("answered");
     expect(await result.cleanup).toEqual({ ok: false });
     expect(order).toEqual(["hook", "answered", "cleanup"]);
@@ -339,7 +345,7 @@ describe("serialized mutations", () => {
     ]);
     expect(results.map((x) => x.status)).toEqual(["fulfilled", "rejected", "fulfilled"]);
     expect(store.getApprovedDefault(v1.id)?.hash).toBe(v1.version);
-    const fromDisk = await open();
+    const fromDisk = await open({ readOnly: true });
     expect(fromDisk.snapshot()).toEqual(store.snapshot());
   });
 });
@@ -351,6 +357,7 @@ describe("corruption is an explicit error", () => {
     const store = await open();
     await ingestOne(store, "v1");
     const good = (await import("node:fs")).readFileSync(storeFile(), "utf8");
+    store.close();
 
     for (const [content, code] of [
       ["{nope", "parse"],
@@ -373,6 +380,7 @@ describe("corruption is an explicit error", () => {
   it("refuses a resource whose ID does not match its kind and source URL", async () => {
     const store = await open();
     const v1 = await ingestOne(store, "v1");
+    store.close();
     const fs = await import("node:fs");
     const json = JSON.parse(fs.readFileSync(storeFile(), "utf8"));
     json.resources[0].resource.id = `res_${"a".repeat(64)}`;
@@ -399,3 +407,86 @@ describe("corruption is an explicit error", () => {
     expect(all).not.toContain("/llms.txt");
   });
 });
+
+describe("revocation hook failure", () => {
+  it("reports a failed onRevoked hook on the result and still blocks reads", async () => {
+    const store = await open({
+      onRevoked: () => {
+        throw new Error("token table unavailable");
+      },
+    });
+    const v1 = await ingestOne(store, "v1");
+    await approve(store, v1.id, v1.version);
+    const result = await store.revoke(v1.id);
+    expect(result.hookFailed).toBe(true);
+    expect(result.hookError).toBe("on_revoked_failed");
+    expect(store.resolveRead(v1.id)).toEqual({ ok: false, code: "revoked" });
+  });
+});
+
+describe("writer lock", () => {
+  it("lets one writer hold the store, allows read-only opens, and frees it on close", async () => {
+    const store = await open();
+    expect(statSync(join(home, "capabilities", "store.lock")).mode & 0o777).toBe(0o600);
+    await expect(open()).rejects.toBeInstanceOf(StoreLockedError);
+    const reader = await open({ readOnly: true });
+    await expect(reader.ingest(discovery([{ text: "x" }]), { chromePermitted: false })).rejects.toBeInstanceOf(StoreReadOnlyError);
+    store.close();
+    await expect(store.revoke(`res_${"1".repeat(64)}`)).rejects.toBeInstanceOf(StoreReadOnlyError);
+    const next = await open();
+    next.close();
+    expect(existsSync(join(home, "capabilities", "store.lock"))).toBe(false);
+  });
+
+  it("reclaims a lock left by a process that has exited", async () => {
+    (await open()).close();
+    const dead = spawnSync(process.execPath, ["-e", ""]).pid!;
+    writeFileSync(join(home, "capabilities", "store.lock"), JSON.stringify({ pid: dead, instanceId: "old", startedAt: 1 }), { mode: 0o600 });
+    const store = await open();
+    expect(JSON.parse(readFileSync(join(home, "capabilities", "store.lock"), "utf8")).pid).toBe(process.pid);
+    store.close();
+  });
+
+  it("reclaims a lock whose pid is not ours to signal, refuses a live one, and judges an unparseable one by age", () => {
+    const dir = join(home, "lockdir");
+    mkdirSync(dir);
+    const lockPath = join(dir, "store.lock");
+    const holder = (pid: number) => writeFileSync(lockPath, JSON.stringify({ pid, instanceId: "x", startedAt: 1 }), { mode: 0o600 });
+    const eperm = () => {
+      throw Object.assign(new Error("EPERM"), { code: "EPERM" });
+    };
+
+    holder(4242);
+    expect(() => acquireStoreLock(dir, { now: () => now, probe: () => undefined })).toThrow(StoreLockedError);
+    const reclaimed = acquireStoreLock(dir, { now: () => now, probe: eperm });
+    reclaimed.release();
+    expect(existsSync(lockPath)).toBe(false);
+
+    writeFileSync(lockPath, "", { mode: 0o600 });
+    const mtime = statSync(lockPath).mtimeMs;
+    expect(() => acquireStoreLock(dir, { now: () => mtime + 1000, probe: eperm })).toThrow(StoreLockedError);
+    acquireStoreLock(dir, { now: () => mtime + LOCK_PARSE_GRACE_MS + 1, probe: eperm }).release();
+  });
+});
+
+describe("orphan blob sweep", () => {
+  it("deletes only unreferenced blob-named files when a writer opens", async () => {
+    const store = await open();
+    const v1 = await ingestOne(store, "v1");
+    store.close();
+    const blobs = join(home, "capabilities", "blobs");
+    const orphan = `${sha("orphan")}.txt`;
+    writeFileSync(join(blobs, orphan), "orphan", { mode: 0o600 });
+    writeFileSync(join(blobs, "notes.txt"), "not a blob name", { mode: 0o600 });
+
+    await open({ readOnly: true });
+    expect(readdirSync(blobs)).toContain(orphan);
+
+    const reopened = await open();
+    expect(readdirSync(blobs).sort()).toEqual([`${sha("v1")}.txt`, "notes.txt"].sort());
+    expect(events.some((e) => e.name === "capability_gc" && e.fields.orphanBlobs === 1)).toBe(true);
+    expect(reopened.getVersion(v1.id, v1.version)).toBeDefined();
+    reopened.close();
+  });
+});
+

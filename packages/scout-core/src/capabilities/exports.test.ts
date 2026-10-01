@@ -222,4 +222,37 @@ describe("skill export", () => {
     expect(readdirSync(skillsRoot)).toHaveLength(1);
     expect(readFileSync(join(outside, "keep.txt"), "utf8")).toBe("user file");
   });
+
+  it("syncs exports after a user approval and after an auto-approving ingest; a failed sync keeps the approval", async () => {
+    let exporter!: SkillExporter;
+    let failNext = false;
+    const store = await createCapabilityStore({
+      scoutHome,
+      clock,
+      syncExports: async () => {
+        if (failNext) throw new Error("sync failed");
+        return exporter.sync(store.snapshot());
+      },
+    });
+    exporter = createSkillExporter({ scoutHome, skillsRoot });
+
+    const report = await store.ingest(skillDiscovery([{ name: "pay", text: "v1" }]), { chromePermitted: false });
+    const { resourceId, version } = report.results[0]!;
+    const approved = await store.approve({ resourceId, version, expectedRevision: store.getResource(resourceId)!.revision });
+    expect(await approved.cleanup).toEqual({ ok: true });
+    expect(existsSync(join(skillsRoot, wrapperName("skill", resourceId), "SKILL.md"))).toBe(true);
+
+    await store.setOriginPolicy({ origin: ORIGIN, autoAcquire: true, acknowledgeRisk: true });
+    const auto = await store.ingest(skillDiscovery([{ name: "ship", text: "s1" }]), { chromePermitted: true });
+    expect(auto.results[0]!.outcome).toBe("auto_approved");
+    expect(await auto.cleanup).toEqual({ ok: true });
+    expect(existsSync(join(skillsRoot, wrapperName("skill", auto.results[0]!.resourceId), "SKILL.md"))).toBe(true);
+
+    failNext = true;
+    const again = await store.ingest(skillDiscovery([{ name: "ship", text: "s2" }]), { chromePermitted: true });
+    expect(await again.cleanup).toEqual({ ok: false });
+    expect(store.getApprovedDefault(again.results[0]!.resourceId)?.hash).toBe(again.results[0]!.version);
+    store.close();
+  });
 });
+
