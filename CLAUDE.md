@@ -26,7 +26,7 @@ branch ceremony for the PoC; merge and move on).
 `../thoughts/shared/plans/2026-10-01-scout-website-agent-design.md`). Its "Implementation
 progress" section is the new phase log. **Pivot Phase 1 (prove the agent connection)
 passed its gate the same day**; Phase 2 (website capabilities) is in progress: P2.2, P2.3,
-P2.4, P2.7 done; P2.1 and P2.6 in progress; P2.5 not started. The old
+P2.4, P2.7, P2.1 done; P2.6 in review, P2.5 in progress. The old
 build above is still intact and still not wired into the app; the legacy
 `personal-context-mcp` package stays untouched until pivot Phase 4.
 
@@ -126,22 +126,32 @@ the plan's phase log):
 - `packages/browser-extension` (`@scout/browser-extension`): the MV3 "Scout Sensor".
   `background-core.ts` is wiring; the logic is in `port.ts` (native port + bounded
   reconnect, state persisted in `chrome.storage.session`), `focus-observer.ts`,
-  `page-text-gate.ts` (approval, cancel epoch, paused-from-storage), `reconnect.ts`,
-  `content/capture.ts` (route gate, settle, navCounter), `selectors.ts` and `route.ts`
-  (verbatim from the live-verified Phase 0 spike). `build.mjs` writes `dist/` and
-  preserves the manifest `key` that setup adds. The background bundle includes zod
-  (run jitless for MV3 CSP).
+  `page-text-gate.ts` (approval, cancel epoch, paused-from-storage, capture policy),
+  `reconnect.ts`, `origin.ts` (popup site validation; zod-free), `content/capture.ts`
+  (route gate, settle, navCounter), `selectors.ts` and `route.ts` (verbatim from the
+  live-verified Phase 0 spike). Since pivot P2.1: `https://*/*` is optional-only plus
+  `activeTab`; the popup grants or removes one exact origin and holds the GitHub-capture
+  toggle; nothing is posted until the core's `capture_policy`, then a revisioned
+  permissions snapshot and a focus; url/title only for granted origins; a Chrome all-sites
+  grant counts as not granted. `build.mjs` writes `dist/` and preserves the manifest `key`
+  that setup adds. The background bundle includes zod (run jitless for MV3 CSP).
 - `packages/native-host` (`@scout/native-host`): Chrome native-messaging host. `relay.ts`
-  is the pure relay (origin check, hello, validated re-encoding both ways, latest-per-kind
-  pre-connect buffer flushed permissions → focus → page_text, `ready` to Chrome once the
-  core is up, 2 s × 30 s retry then exit 1); `config.ts` reads `extensionId` and checks
+  is the pure relay (origin check, protocol-2 hello, validated re-encoding both ways;
+  `ready` to Chrome only after the core's first `capture_policy` is forwarded and the
+  pre-connect buffer flushed permissions → focus — buffered page_text is dropped; 5 s
+  policy timeout and 2 s × 30 s retry then exit 1; `upgrade_required` → exit 1 without
+  retry); `config.ts` reads `extensionId` and checks
   the runtime dir/socket ownership and modes; `host.ts` is the entrypoint
   (`dist/host.js`, run through the setup-written wrapper).
 - `packages/scout-core` (`@scout/scout-core`): the coordinator. `main.ts --stdio`
   (JSONL to the Swift app, exits on stdin EOF/signals, `dist/main.js`), `socketServer.ts`
   (0700 run dir, socket published only after chmod 0600, stale-probe), `coordinator.ts`
-  (`chromeBundleId` from config.json, default `com.google.Chrome`),
-  (panel state, live sensor, page_text gate + ack), `visitTracker.ts`, `resumeCache.ts`
+  (`chromeBundleId` from config.json, default `com.google.Chrome`; panel state, live
+  sensor, capture policy, page_text gate + ack, dwell → discovery pass → store ingest),
+  `permissionState.ts` (the live connection's revisioned grants; nothing permitted before
+  the first snapshot), `dwell.ts` (3 s on injected `Timers`), `visitTracker.ts` (visits
+  only for permitted https origins; `config.destinations` is the Phase 3 recommendations
+  list and feeds nothing yet), `resumeCache.ts`
   (keyed map, 30 s TTL; constructed but not read until Phase 4 wires visit → resume
   cache → catalog → rank), `activityForwarder.ts` (Phase 1: counts only),
   `diagnostics.ts` (JSONL, scalar fields, forbidden-name filter), `config.ts`,
@@ -265,7 +275,8 @@ Run from `scout/`:
   smoke test (one call, throwaway home). Never part of `npm test`.
 
 Env overrides for tests only: `SCOUT_HOME`, `PERSONAL_CONTEXT_HOME`, `PCM_PORT`,
-`PCM_SCRATCH_ROOT`, `PCM_WORKSPACE_ROOTS`, `CHROME_NMH_DIR`. The Swift app reads only
+`PCM_SCRATCH_ROOT`, `PCM_WORKSPACE_ROOTS`, `CHROME_NMH_DIR`, `SCOUT_DWELL_MS` (the core's
+dwell; tests that form real visits set it high so nothing settles into real fetches). The Swift app reads only
 `~/.scout`.
 
 Diagnostics events added in Phase 2: `catalog_discover` (counts, ms, robots/llms/
