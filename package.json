@@ -9,6 +9,7 @@
   },
   "workspaces": [
     "packages/contracts",
+    "packages/scout-mcp",
     "packages/personal-context-mcp",
     "packages/scout-core",
     "packages/native-host",
