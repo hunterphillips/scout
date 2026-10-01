@@ -411,6 +411,109 @@ describe("claude job: cancellation", () => {
   });
 });
 
+// ---------- lifecycle edges ----------
+
+/** A spawn whose child never reports its exit: the exit wait can only end at the reap cap. */
+const swallowExit: SpawnFn = (c, a, o) => {
+  const child = nodeSpawn(c, [...a], o);
+  const emit = child.emit.bind(child);
+  child.emit = ((event: string | symbol, ...args: unknown[]) => (event === "exit" ? false : emit(event, ...args))) as typeof child.emit;
+  return child;
+};
+
+describe("claude job: lifecycle edges", () => {
+  it("output past the stdout cap: agent_failed output_too_large, tree killed, job dir removed", async () => {
+    const e = await setup({ mode: "flood", deps: { maxStdoutBytes: 256 * 1024 } });
+    const out = await e.adapter.run(request(e), { toolSurface: surface(e) });
+    expect(out.result).toMatchObject({ status: "error", reason: "agent_failed" });
+    expect(out.details.termination).toBe("output_too_large");
+    await expectAllGoneWithin(e.fake.pids(), 3000);
+    expect(jobsLeft(e)).toEqual([]);
+  });
+
+  it("a final result line without a trailing newline still counts", async () => {
+    const e = await setup({ mode: "no-trailing-newline" });
+    const out = await e.adapter.run(request(e), { toolSurface: surface(e) });
+    expect(out.result).toMatchObject({ status: "ok", items: [{ id: "c1" }] });
+    expect(out.details.termination).toBe("completed");
+  });
+
+  it("stdout lines that are not stream-json objects are ignored", async () => {
+    const e = await setup({ mode: "garbage-lines" });
+    const out = await e.adapter.run(request(e), { toolSurface: surface(e) });
+    expect(out.result).toMatchObject({ status: "ok", items: [{ id: "c1" }, { id: "c2" }] });
+    expect(out.details.termination).toBe("completed");
+  });
+
+  it("a hook event, even with hooks disabled: unsupported_configuration hook_ran", async () => {
+    const e = await setup({ mode: "hook-event" });
+    const out = await e.adapter.run(request(e), { toolSurface: surface(e) });
+    expect(out.result).toMatchObject({ status: "error", reason: "unsupported_configuration" });
+    expect(out.details.detail).toBe("hook_ran");
+    await expectAllGoneWithin(e.fake.pids(), 3000);
+    expect(jobsLeft(e)).toEqual([]);
+  });
+
+  it("a 401 api_retry: unavailable auth_or_quota, without waiting for the deadline", async () => {
+    const e = await setup({ mode: "auth-retry" });
+    const out = await e.adapter.run(request(e), { toolSurface: surface(e) });
+    expect(out.result).toMatchObject({ status: "unavailable", reason: "agent_unavailable" });
+    expect(out.details.termination).toBe("auth_or_quota");
+    await expectAllGoneWithin(e.fake.pids(), 3000);
+  });
+
+  it.each<[string, (path: string) => void]>([
+    ["removed", (p) => rmSync(p)],
+    ["no longer executable", (p) => chmodSync(p, 0o644)],
+  ])("the CLI binary %s after the launch profile was built: unavailable spawn_failed", async (_label, breakIt) => {
+    const e = await setup({
+      deps: {
+        spawn: (c, a, o) => {
+          breakIt(c);
+          return nodeSpawn(c, [...a], o);
+        },
+      },
+    });
+    const out = await e.adapter.run(request(e), { toolSurface: surface(e) });
+    expect(out.result).toMatchObject({ status: "unavailable", reason: "agent_unavailable" });
+    expect(out.details).toMatchObject({ termination: "agent_unavailable", detail: "spawn_failed" });
+    expect(jobsLeft(e)).toEqual([]);
+  });
+
+  it("a spawn that throws: unavailable spawn_failed", async () => {
+    const e = await setup({
+      deps: {
+        spawn: () => {
+          throw new Error("spawn refused");
+        },
+      },
+    });
+    const out = await e.adapter.run(request(e), { toolSurface: surface(e) });
+    expect(out.details).toMatchObject({ termination: "agent_unavailable", detail: "spawn_failed" });
+    expect(jobsLeft(e)).toEqual([]);
+  });
+
+  it("job files that cannot be prepared: agent_failed setup_failed, never spawns", async () => {
+    const e = await setup({ deps: { nodePath: "relative-node" } });
+    const out = await e.adapter.run(request(e), { toolSurface: surface(e) });
+    expect(out.result).toMatchObject({ status: "error", reason: "agent_failed" });
+    expect(out.details).toMatchObject({ termination: "process_error", detail: "setup_failed" });
+    expect(e.spawnCalls).toBe(0);
+    expect(jobsLeft(e)).toEqual([]);
+  });
+
+  it("an exit that is never reported ends at the reap cap: the stop stands, reap_timeout logged, tree gone", async () => {
+    const e = await setup({ mode: "hang", deps: { spawn: swallowExit } });
+    const t0 = Date.now();
+    const out = await e.adapter.run(request(e, { deadlineMs: 1500 }), { toolSurface: surface(e) });
+    expect(out.result).toMatchObject({ status: "error", reason: "timeout" });
+    expect(Date.now() - t0).toBeLessThan(1500 + 500 + 2000 + 3000);
+    expect(diagLines(e).some((l) => l.event === "agent_job_reap_timeout")).toBe(true);
+    await expectAllGoneWithin(e.fake.pids(), 3000);
+    expect(jobsLeft(e)).toEqual([]);
+  });
+});
+
 // ---------- gates before launch ----------
 
 describe("claude job: gates before launch", () => {

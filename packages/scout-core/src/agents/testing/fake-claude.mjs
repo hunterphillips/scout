@@ -312,6 +312,36 @@ switch (mode) {
     emit({ type: "assistant", message: { content: [{ type: "tool_use", id: "x", name: "Bash", input: { command: "true" } }] } });
     hang();
     break;
+  case "flood":
+    // Starts, then writes far more stdout than any job may (about 1 MiB), then hangs.
+    await startAndHang();
+    for (let i = 0; i < 1024; i++) emit({ type: "assistant", message: { content: [{ type: "text", text: "x".repeat(1024) }] } });
+    hang();
+    break;
+  case "no-trailing-newline":
+    // A valid answer whose final result line has no newline before EOF.
+    await initThen(() => process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_error: false, num_turns: 1, structured_output: { status: "ok", items: [item(ids[0])] } })));
+    break;
+  case "garbage-lines":
+    // Lines that are not stream-json objects, before and after init, then a valid answer.
+    process.stdout.write("not json at all\n[1,2,3]\n\"a string\"\n42\nnull\n{broken\n\n");
+    await answer(() => {
+      process.stdout.write("{also broken\ntrue\n");
+      return { status: "ok", items: [item(ids[0]), item(ids[1])] };
+    });
+    break;
+  case "hook-event":
+    // A hook event after init even though hooks are disabled (e.g. a managed-policy hook).
+    await startAndHang();
+    emit({ type: "system", subtype: "hook_started", hook_name: "PreToolUse:managed" });
+    hang();
+    break;
+  case "auth-retry":
+    // A 401 while retrying the API: the login is not usable.
+    await startAndHang();
+    emit({ type: "system", subtype: "api_retry", attempt: 1, max_retries: 10, retry_delay_ms: 5000, error_status: 401, error: "authentication_failed" });
+    hang();
+    break;
   default:
     process.stderr.write("fake: unknown mode\n");
     process.exitCode = 99;
