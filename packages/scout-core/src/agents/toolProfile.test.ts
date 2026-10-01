@@ -135,9 +135,14 @@ describe("selected tools in the agent profile", () => {
 });
 
 describe("canonicalJson (RFC 8785 style)", () => {
-  it("sorts keys by code point: a BMP key above U+D7FF sorts before a surrogate-pair key", () => {
-    // UTF-16 code-unit order would put U+1F600 (0xD83D 0xDE00) before U+FB01.
-    expect(canonicalJson({ "\u{1F600}": 1, "\uFB01": 2, a: 3 })).toBe('{"a":3,"\uFB01":2,"\u{1F600}":1}');
+  it("sorts keys by UTF-16 code unit at every depth (RFC 8785 \u00A73.2.3 example order)", () => {
+    // The RFC's own example: a surrogate-pair key (U+1F600) sorts before U+FB33.
+    const sorted = ["\r", "1", "\u0080", "\u00F6", "\u20AC", "\uD83D\uDE00", "\uFB33"];
+    const shuffled = [...sorted].reverse();
+    const out = canonicalJson(Object.fromEntries(shuffled.map((k, i) => [k, i])));
+    // Compare the serialized text: a re-parsed object would reorder integer-like keys.
+    const expected = `{${sorted.map((k) => `${JSON.stringify(k)}:${shuffled.indexOf(k)}`).join(",")}}`;
+    expect(out).toBe(expected);
     expect(canonicalJson({ b: { d: 1, c: [{ z: 1, y: 2 }] }, a: null })).toBe('{"a":null,"b":{"c":[{"y":2,"z":1}],"d":1}}');
   });
 

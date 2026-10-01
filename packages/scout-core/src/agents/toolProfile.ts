@@ -160,22 +160,10 @@ export const envNamesDisjoint = (c: { env: Record<string, unknown>; literalEnv?:
 export const ConnectionSchema = ConnectionFields.refine(envNamesDisjoint, { message: "env name both bound and literal" });
 export type Connection = z.infer<typeof ConnectionSchema>;
 
-/** Compare two strings by Unicode code point, not UTF-16 code unit. */
-function compareCodePoints(a: string, b: string): number {
-  const ia = a[Symbol.iterator]();
-  const ib = b[Symbol.iterator]();
-  for (;;) {
-    const x = ia.next();
-    const y = ib.next();
-    if (x.done || y.done) return x.done ? (y.done ? 0 : -1) : 1;
-    const d = x.value.codePointAt(0)! - y.value.codePointAt(0)!;
-    if (d !== 0) return d;
-  }
-}
-
 /**
- * Canonical JSON in the style of RFC 8785 (JCS): no whitespace; object keys sorted by Unicode
- * code point at every depth; numbers serialized as ES Number.prototype.toString (JCS's rule,
+ * Canonical JSON in the style of RFC 8785 (JCS): no whitespace; object keys sorted by UTF-16
+ * code unit at every depth (RFC 8785 §3.2.3, which is what the default string sort does);
+ * numbers serialized as ES Number.prototype.toString (JCS's rule,
  * which JSON.stringify applies to finite numbers, -0 included); strings as JSON.stringify
  * escapes them. Non-finite numbers and values JSON cannot represent are refused (throws).
  * Undefined object members are omitted, as JSON.stringify does.
@@ -195,7 +183,7 @@ export function canonicalJson(value: unknown): string {
       const o = value as Record<string, unknown>;
       const keys = Object.keys(o)
         .filter((k) => o[k] !== undefined)
-        .sort(compareCodePoints);
+        .sort();
       return `{${keys.map((k) => `${JSON.stringify(k)}:${canonicalJson(o[k])}`).join(",")}}`;
     }
     default:
