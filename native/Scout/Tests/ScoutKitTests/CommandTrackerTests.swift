@@ -123,4 +123,61 @@ import Testing
         t.chunkArrived(for: p.commandId!)
         #expect(t.record(p.commandId!)?.state == .ok)
     }
+
+    @Test func aChunkNamingANonPreviewCommandSettlesNothing() {
+        var t = CommandTracker(prefix: "p")
+        let a = t.issue(approve)
+        let r = t.issue(.refreshCapabilities)
+        t.apply(.failed(commandId: r.commandId!, code: .unavailable, revision: nil))
+        t.chunkArrived(for: a.commandId!)
+        t.chunkArrived(for: r.commandId!)
+        #expect(t.record(a.commandId!)?.state == .pending && t.record(a.commandId!)?.sent == false)
+        #expect(t.record(r.commandId!)?.state == .failed(.unavailable))
+    }
+
+    @Test func supersededPreviewIsSettledAndNeverResent() {
+        var t = CommandTracker(prefix: "p")
+        let p = t.issue(.preview(resourceId: F.rid, version: F.v1, cursor: nil))
+        t.markSent(p.commandId!, written: false)
+        #expect(t.unsent == [p])
+        t.supersede(p.commandId!)
+        #expect(t.record(p.commandId!)?.state == .superseded)
+        #expect(t.unsent.isEmpty && t.coreRestarted().isEmpty && !t.canRetry(p.commandId!))
+        // A late chunk for it changes nothing, and only previews are superseded.
+        t.chunkArrived(for: p.commandId!)
+        #expect(t.record(p.commandId!)?.state == .superseded)
+        let a = t.issue(approve)
+        t.supersede(a.commandId!)
+        #expect(t.record(a.commandId!)?.state == .pending)
+    }
+
+    @Test func oversizeWriteFailsAsInvalidAndIsNeverResent() {
+        var t = CommandTracker(prefix: "p")
+        let a = t.issue(approve)
+        t.markSent(a.commandId!, .oversize)
+        #expect(t.record(a.commandId!)?.state == .failed(.invalid))
+        #expect(t.unsent.isEmpty && !t.canRetry(a.commandId!) && t.retry(a.commandId!) == nil)
+        #expect(t.coreRestarted().isEmpty)
+        // A write refused for now stays pending and goes again.
+        let b = t.issue(approve)
+        t.markSent(b.commandId!, .retryLater)
+        #expect(t.unsent == [b] && t.canRetry(b.commandId!))
+        t.markSent(b.commandId!, .written)
+        #expect(t.unsent.isEmpty && !t.canRetry(b.commandId!))
+    }
+
+    @Test func canRetryMatchesRetry() {
+        var t = CommandTracker(prefix: "p")
+        let a = t.issue(approve)
+        let grant = t.issue(.setAgentBrowserContext(enabled: true, expectedEnabled: false))
+        let p = t.issue(.preview(resourceId: F.rid, version: F.v1, cursor: nil))
+        t.apply(.failed(commandId: a.commandId!, code: .storeError, revision: nil))
+        t.apply(.failed(commandId: grant.commandId!, code: .unavailable, revision: nil))
+        t.apply(.failed(commandId: p.commandId!, code: .unavailable, revision: nil))
+        #expect(t.canRetry(a.commandId!) && !t.canRetry(grant.commandId!) && !t.canRetry(p.commandId!))
+        #expect(!t.canRetry("nope"))
+        #expect(t.retry(a.commandId!) == a)
+        t.apply(.failed(commandId: a.commandId!, code: .notFound, revision: nil))
+        #expect(!t.canRetry(a.commandId!) && t.retry(a.commandId!) == nil)
+    }
 }

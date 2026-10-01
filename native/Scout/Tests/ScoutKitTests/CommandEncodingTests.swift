@@ -41,14 +41,21 @@ import Testing
         #expect(line == #"{"acknowledgeRisk":false,"commandId":"x","enabled":true,"expectedEnabled":true,"origin":"https://docs.example.com","type":"set_auto_acquire"}"# + "\n")
     }
 
+    /// The longest origin the contract accepts: a 253-byte RFC 1123 hostname and a 5-digit port.
+    static let longestOrigin: String = {
+        let label = String(repeating: "a", count: 63)
+        return "https://\(label).\(label).\(label).\(String(repeating: "a", count: 61)):65535"
+    }()
+
     @Test func largestLegalCommandOfEachTypeFitsOneAtomicWrite() {
+        #expect(PanelLimits.commandMaxBytes == 512 && Int(PIPE_BUF) == PanelLimits.commandMaxBytes)
         let id = String(repeating: "Z", count: 64)
         let cursor = String(repeating: "c", count: 64)
         let rid = "res_" + String(repeating: "f", count: 64)
         let hash = String(repeating: "f", count: 64)
         let rev = PanelLimits.maxRevision
-        let origin = "https://" + String(repeating: "a", count: PanelLimits.urlMaxBytes - 8)
-        #expect(WireFormat.isHttpsURL(origin))
+        let origin = Self.longestOrigin
+        #expect(origin.utf8.count == PanelLimits.originMaxBytes && WireFormat.isHostOrigin(origin))
         let requests: [PanelRequest] = [
             .preview(resourceId: rid, version: hash, cursor: cursor),
             .approve(resourceId: rid, version: hash, expectedRevision: rev),
@@ -64,21 +71,36 @@ import Testing
         }
     }
 
-    @Test func originsAreBoundedInUTF8Bytes() {
-        // 2048 characters but 6136 bytes: refused, so it can never be echoed into a command.
-        let wide = "https://" + String(repeating: "\u{7FFF}", count: PanelLimits.urlMaxBytes - 8)
-        #expect(!WireFormat.isHttpsURL(wide))
-        // The widest origin that passes, multi-byte characters included, still fits one write.
-        let fill = PanelLimits.urlMaxBytes - 8
-        let accepted = "https://" + String(repeating: "\u{7FFF}", count: fill / 3) + String(repeating: "a", count: fill % 3)
-        #expect(accepted.utf8.count == PanelLimits.urlMaxBytes && WireFormat.isHttpsURL(accepted))
-        let size = NativeCommand.panel(commandId: String(repeating: "Z", count: 64),
-            .setAutoAcquire(origin: accepted, enabled: false, acknowledgeRisk: false, expectedEnabled: false)).jsonLine().count
-        #expect(size < PanelLimits.commandMaxBytes)
-        // Characters JSON would escape (and so grow) are refused.
+    @Test func originsAreRFC1123HostOrigins() {
+        for good in ["https://docs.example.com", "https://other.example.org:8443", "https://a-b.c1", Self.longestOrigin] {
+            #expect(WireFormat.isHostOrigin(good), "\(good)")
+        }
+        let label = String(repeating: "a", count: 63)
+        let bad = [
+            "http://docs.example.com", "https://", "https://Docs.example.com", "https://docs.example.com/",
+            "https://docs.example.com:443", "https://docs.example.com:0", "https://docs.example.com:065",
+            "https://docs.example.com:65536", "https://docs.example.com:", "https://-a.example", "https://a-.example",
+            "https://a..example", "https://.example", "https://1.2.3.4", "https://user@example.com",
+            "https://[::1]", "https://" + String(repeating: "a", count: 64) + ".example",
+            // A 254-byte hostname.
+            "https://a\(label).\(label).\(label).\(String(repeating: "a", count: 61))",
+            "https://exa\u{7FFF}mple.com", "https://a\"b.example", "https://a\\b.example",
+        ]
+        for origin in bad {
+            #expect(!WireFormat.isHostOrigin(origin), "\(origin)")
+        }
+        // A long source URL is fine as a URL, never as an origin.
+        let url = "https://docs.example.com/" + String(repeating: "p", count: 1000)
+        #expect(WireFormat.isHttpsURL(url) && !WireFormat.isHostOrigin(url))
+        // Characters JSON would escape (and so grow) are refused in URLs too.
         for bad in ["\"", "\\", "\u{01}", "\n"] {
             #expect(!WireFormat.isHttpsURL("https://a" + bad + "b.example"), "\(bad.unicodeScalars.map(\.value))")
         }
+    }
+
+    @Test func originSettingWithANonHostOriginDropsTheFrame() throws {
+        let line = #"{"type":"capabilities","coreInstanceId":"c","revision":1,"approvalRevision":0,"truncated":false,"offers":[],"library":[],"conflicts":[],"origins":[{"origin":"https://docs.example.com/path","autoAcquire":false,"permitted":true}]}"#
+        #expect(PanelState.decode(line: Data(line.utf8)) == nil)
     }
 
     @Test func noCommandCarriesPreviewText() throws {

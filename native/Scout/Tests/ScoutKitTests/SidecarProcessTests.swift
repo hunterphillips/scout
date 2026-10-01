@@ -180,12 +180,18 @@ import Testing
         await waitUntil { !lines(pidFile).isEmpty }
         let pid = try #require(lines(pidFile).first.flatMap { pid_t($0) })
 
+        // Too long for one atomic write: refused for good, before the pipe is touched.
+        #expect(sidecar.send(.frontmost(bundleId: String(repeating: "x", count: PanelLimits.commandMaxBytes), at: 0)) == .oversize)
+        #expect(sidecar.droppedCommandCount == 1)
+
         // A pipe holds 16-64 KiB; this is far more.
         let began = Date()
-        for i in 0..<10_000 where sidecar.droppedCommandCount == 0 {
-            sidecar.send(.frontmost(bundleId: "com.example.app\(i)", at: Int64(i)))
+        var last = SendOutcome.written
+        for i in 0..<10_000 where last == .written {
+            last = sidecar.send(.frontmost(bundleId: "com.example.app\(i)", at: Int64(i)))
         }
-        #expect(sidecar.droppedCommandCount > 0)
+        #expect(last == .retryLater)
+        #expect(sidecar.droppedCommandCount > 1)
         sidecar.shutdown()
         #expect(Date().timeIntervalSince(began) < 3)
         #expect(kill(pid, 0) != 0)

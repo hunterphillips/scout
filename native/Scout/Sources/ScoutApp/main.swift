@@ -32,7 +32,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         frontmost.onChange = { [weak self] bundleId in
             self?.sidecar.send(.frontmost(bundleId: bundleId, date: Date()))
         }
-        // Window commands the pipe refused are re-sent with their own IDs.
+        // Window commands the pipe refused for now are re-sent with their own IDs.
         resendTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated {
                 guard let self, self.sidecar.status == .running else { return }
@@ -51,6 +51,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         sidecar.shutdown()
     }
 
+    /// The close button quits Scout. Escape never reaches here: ScoutWindow turns it into a collapse.
     func windowWillClose(_ notification: Notification) {
         NSApp.terminate(nil)
     }
@@ -93,7 +94,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     private func send(_ commands: [NativeCommand]) {
         for command in commands {
-            model.markSent(command, written: sidecar.send(command))
+            model.markSent(command, sidecar.send(command))
         }
         render()
     }

@@ -103,7 +103,7 @@ public struct PanelModel: Sendable, Equatable {
             if capabilities.apply(frame) {
                 decidedSinceFrame = []
                 revokedSinceFrame = []
-                settleMootToggles()
+                settleMoot()
                 // Another core answered without the app seeing a restart: treat it as one.
                 if let previous, previous != frame.coreInstanceId { return coreRestarted() }
             }
@@ -122,8 +122,8 @@ public struct PanelModel: Sendable, Equatable {
                 decidedSinceFrame.insert(PreviewKey(resourceId: rid, version: version))
             case let (.revoke(rid, _), .ok):
                 revokedSinceFrame.insert(rid)
-            case (_, .failed(_, .staleRevision, _)) where record.request.isToggle:
-                settleMootToggles()
+            case (_, .failed(_, .staleRevision, _)) where record.request.isToggle || record.request.isDecision:
+                settleMoot()
             default:
                 break
             }
@@ -131,16 +131,27 @@ public struct PanelModel: Sendable, Equatable {
             capabilities.applyAudit(entries)
         case let .grant(enabled):
             capabilities.applyGrant(enabled)
-            settleMootToggles()
+            settleMoot()
         }
         return []
     }
 
-    /// A toggle refused as stale whose target the latest frame already shows did what the user
-    /// wanted: settle it as ok so it is not a problem.
-    private mutating func settleMootToggles() {
+    /// A toggle or decision refused as stale whose target the latest frame already shows did what
+    /// the user wanted (often a decision the old core applied before a restart, re-sent to the new
+    /// one): settle it as ok so it is not a problem.
+    private mutating func settleMoot() {
         for record in commands.records where record.state == .failed(.staleRevision) {
             switch record.request {
+            case let .approve(rid, version, _):
+                if let entry = capabilities.libraryEntry(rid), entry.state == .approved, entry.defaultVersion == version {
+                    commands.settle(record.id)
+                }
+            case let .decline(rid, version, _):
+                if capabilities.libraryEntry(rid)?.versions.contains(where: { $0.hash == version && $0.state == .declined }) == true {
+                    commands.settle(record.id)
+                }
+            case let .revoke(rid, _):
+                if capabilities.libraryEntry(rid)?.state == .blocked { commands.settle(record.id) }
             case let .setAutoAcquire(origin, enabled, _, _):
                 if capabilities.originSetting(origin)?.autoAcquire == enabled { commands.settle(record.id) }
             case let .setAgentBrowserContext(enabled, _):
@@ -175,7 +186,8 @@ public struct PanelModel: Sendable, Equatable {
         self.section = section
     }
 
-    /// Shows `key` in the Preview section, loading it unless it is loaded or loading.
+    /// Shows `key` in the Preview section, loading it unless it is loaded or loading. While the core
+    /// is not running nothing is sent; the load starts when it is.
     public mutating func showPreview(_ key: PreviewKey) -> NativeCommand? {
         shownPreview = key
         select(.preview)
@@ -235,20 +247,33 @@ public struct PanelModel: Sendable, Equatable {
         return commands.issue(.revoke(resourceId: resourceId, expectedRevision: entry.resourceRevision))
     }
 
-    /// Turning auto-acquire on requires the user to have confirmed the risk. The command carries
-    /// the value the latest frame shows, so a change made meanwhile is refused, not overwritten.
+    /// Whether the auto-acquire checkbox for `origin` takes a click: the frame lists the origin, no
+    /// toggle of it is pending, and it is on or Chrome permits the site (only then can it go on).
+    public func canToggleAutoAcquire(_ origin: String) -> Bool {
+        guard sidecar == .running, autoAcquireRecord(origin)?.state != .pending,
+              let setting = capabilities.originSetting(origin) else { return false }
+        return setting.autoAcquire || setting.permitted
+    }
+
+    /// Turning auto-acquire on requires a site Chrome permits and the user's confirmation of the
+    /// risk. The command carries the value the latest frame shows, so a change made meanwhile is
+    /// refused, not overwritten.
     public mutating func setAutoAcquire(origin: String, enabled: Bool, acknowledgeRisk: Bool) -> NativeCommand? {
-        guard sidecar == .running, !enabled || acknowledgeRisk, autoAcquireRecord(origin)?.state != .pending,
-              let setting = capabilities.originSetting(origin), setting.autoAcquire != enabled else {
+        guard canToggleAutoAcquire(origin), let setting = capabilities.originSetting(origin),
+              setting.autoAcquire != enabled, !enabled || (acknowledgeRisk && setting.permitted) else {
             return nil
         }
         return commands.issue(.setAutoAcquire(
             origin: origin, enabled: enabled, acknowledgeRisk: enabled && acknowledgeRisk, expectedEnabled: setting.autoAcquire))
     }
 
+    /// Whether the browser-context checkbox takes a click: a `grant` frame arrived and no toggle is pending.
+    public var canToggleGrant: Bool {
+        sidecar == .running && capabilities.agentBrowserContext != nil && grantRecord?.state != .pending
+    }
+
     public mutating func setAgentBrowserContext(_ enabled: Bool) -> NativeCommand? {
-        guard sidecar == .running, grantRecord?.state != .pending,
-              let current = capabilities.agentBrowserContext, current != enabled else { return nil }
+        guard canToggleGrant, let current = capabilities.agentBrowserContext, current != enabled else { return nil }
         return commands.issue(.setAgentBrowserContext(enabled: enabled, expectedEnabled: current))
     }
 
@@ -266,6 +291,9 @@ public struct PanelModel: Sendable, Equatable {
         }
     }
 
+    /// Whether `retry(commandId)` would send something.
+    public func canRetry(_ commandId: String) -> Bool { commands.canRetry(commandId) }
+
     /// Re-sends a failed or unsent decision or refresh with its own ID. Toggles are not retried.
     public mutating func retry(_ commandId: String) -> NativeCommand? {
         guard let command = commands.retry(commandId) else { return nil }
@@ -282,8 +310,20 @@ public struct PanelModel: Sendable, Equatable {
     }
 
     public mutating func markSent(_ command: NativeCommand, written: Bool) {
-        guard case let .panel(id, _) = command else { return }
-        commands.markSent(id, written: written)
+        markSent(command, written ? .written : .retryLater)
+    }
+
+    /// Records what became of a write. An oversize command fails as `invalid` and is never re-sent;
+    /// a preview it was loading fails with it.
+    public mutating func markSent(_ command: NativeCommand, _ outcome: SendOutcome) {
+        guard case let .panel(id, request) = command else { return }
+        commands.markSent(id, outcome)
+        guard outcome == .oversize, case let .preview(rid, version, _) = request else { return }
+        let key = PreviewKey(resourceId: rid, version: version)
+        if awaiting[key] == id {
+            awaiting[key] = nil
+            previews[key]?.refused(.invalid)
+        }
     }
 
     // MARK: Command state lookups
@@ -366,8 +406,8 @@ public struct PanelModel: Sendable, Equatable {
         return out
     }
 
-    /// One line for the compact panel: status, current host, offer count.
-    public var compactLine: String {
+    /// Status and current host: the compact panel's text beside its offer badge.
+    public var statusLine: String {
         switch sidecar {
         case .starting: return "Starting…"
         case .setupNeeded: return "Setup needed"
@@ -376,44 +416,14 @@ public struct PanelModel: Sendable, Equatable {
         }
         var parts = [core.map { $0.rawValue.capitalized } ?? "Connected"]
         if let host = currentHost ?? detail, !host.isEmpty { parts.append(host) }
-        let count = currentOffers.count
-        if count > 0 { parts.append(count == 1 ? "1 offer" : "\(count) offers") }
         return parts.joined(separator: " · ")
     }
 
-    public var text: String {
-        switch sidecar {
-        case .starting:
-            return "Starting…"
-        case let .setupNeeded(reason):
-            return "Setup needed\n\(reason)"
-        case .stopped:
-            return "Stopped\n" + Self.stoppedText
-        case .running:
-            break
-        }
-        var lines = [core.map { $0.rawValue.capitalized } ?? "Connected"]
-        if let detail, !detail.isEmpty { lines.append(detail) }
-        if case let .offers(count, host) = indicator {
-            lines.append(count == 1 ? "1 offer for \(host)" : "\(count) offers for \(host)")
-        }
-        switch results {
-        case nil:
-            break
-        case let .ok(items):
-            lines.append("")
-            lines.append(contentsOf: items.map { "• \($0.title)" })
-        case .empty:
-            lines.append("")
-            lines.append("No results")
-        case let .unavailable(reason):
-            lines.append("")
-            lines.append("Results unavailable: \(reason)")
-        case let .error(reason):
-            lines.append("")
-            lines.append("Results error: \(reason)")
-        }
-        return lines.joined(separator: "\n")
+    /// One line for the compact panel: status, current host, offer count.
+    public var compactLine: String {
+        let count = currentOffers.count
+        guard count > 0 else { return statusLine }
+        return statusLine + " · " + (count == 1 ? "1 offer" : "\(count) offers")
     }
 
     static var stoppedText: String {
@@ -430,20 +440,24 @@ public struct PanelModel: Sendable, Equatable {
 
     // MARK: Previews
 
+    /// Starts `key` over from its first chunk; the request it waited on, if any, is superseded.
+    /// While the core is not running the preview waits, loading, for `coreRestarted` to send it.
     private mutating func startPreview(_ key: PreviewKey) -> NativeCommand? {
         let assembler = PreviewAssembler(key: key)
         guard let request = assembler.requestNext() else { return nil }
-        let command = commands.issue(request)
+        if let old = awaiting.removeValue(forKey: key) { commands.supersede(old) }
         previews[key] = assembler
         previewOrder.removeAll { $0 == key }
         previewOrder.append(key)
-        awaiting[key] = command.commandId
         while previewOrder.count > Self.previewCapacity,
               let evict = previewOrder.first(where: { $0 != shownPreview }) {
             previewOrder.removeAll { $0 == evict }
             previews[evict] = nil
-            awaiting[evict] = nil
+            if let old = awaiting.removeValue(forKey: evict) { commands.supersede(old) }
         }
+        guard sidecar == .running, previews[key] != nil else { return nil }
+        let command = commands.issue(request)
+        awaiting[key] = command.commandId
         return command
     }
 }

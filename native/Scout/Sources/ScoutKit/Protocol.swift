@@ -32,8 +32,9 @@ public enum ResultsOutcome: Sendable, Equatable {
 
 /// Bounds from packages/contracts (panel.ts, capability.ts).
 public enum PanelLimits {
-    /// PIPE_BUF: one command line, newline included, must be shorter than this.
-    public static let commandMaxBytes = 4096
+    /// macOS `PIPE_BUF` (`sys/syslimits.h`), the largest write a pipe takes whole or not at all:
+    /// one command line, newline included, must be shorter than this.
+    public static let commandMaxBytes = 512
     public static let previewChunkMaxBytes = 16 * 1024
     /// RESOURCE_MAX_BYTES: the largest resource the core stores, so the largest preview.
     public static let resourceMaxBytes = 128 * 1024
@@ -43,8 +44,13 @@ public enum PanelLimits {
     public static let conflictsMax = 50
     public static let libraryVersionsMax = 6
     public static let auditMax = 200
-    /// Counted in UTF-8 bytes, so an origin echoed in a command keeps the line under `commandMaxBytes`.
+    /// Source URLs, counted in UTF-8 bytes. Never echoed in a command.
     public static let urlMaxBytes = 2048
+    /// RFC 1123 hostname length.
+    public static let hostnameMaxBytes = 253
+    /// `https://` + a hostname of at most `hostnameMaxBytes` + `:65535` (HOST_ORIGIN_MAX_CHARS),
+    /// so an origin echoed in a command keeps the line under `commandMaxBytes`.
+    public static let originMaxBytes = 267
     /// zod `z.int()`: a safe integer.
     public static let maxRevision = 9_007_199_254_740_991
 }
@@ -74,6 +80,31 @@ public enum WireFormat {
         let bytes = s.utf8
         return s.hasPrefix("https://") && bytes.count > 8 && bytes.count <= PanelLimits.urlMaxBytes
             && bytes.allSatisfy { $0 >= 0x20 && $0 != 0x22 && $0 != 0x5C }
+    }
+
+    /// `https://host[:port]` as the contract's `isHttpsOrigin` accepts it: an RFC 1123 hostname
+    /// (lowercase letters, digits, inner hyphens; labels of at most 63, at most `hostnameMaxBytes`
+    /// in all; the last label not all digits) and a port 1-65535 without leading zeros other than
+    /// 443. ASCII only, so at most `originMaxBytes` and nothing JSON escapes.
+    public static func isHostOrigin(_ s: String) -> Bool {
+        let scheme = "https://"
+        guard s.hasPrefix(scheme), s.utf8.count <= PanelLimits.originMaxBytes else { return false }
+        let rest = Substring(s.dropFirst(scheme.count))
+        let parts = rest.split(separator: ":", maxSplits: 1, omittingEmptySubsequences: false)
+        let host = parts[0]
+        if parts.count == 2 {
+            let port = parts[1]
+            guard (1...5).contains(port.utf8.count), port.utf8.allSatisfy({ (0x30...0x39).contains($0) }),
+                  port.first != "0", let n = Int(port), n <= 65535, n != 443 else { return false }
+        }
+        guard (1...PanelLimits.hostnameMaxBytes).contains(host.utf8.count) else { return false }
+        let labels = host.split(separator: ".", omittingEmptySubsequences: false)
+        for label in labels {
+            let bytes = Array(label.utf8)
+            guard (1...63).contains(bytes.count), bytes.first != 0x2D, bytes.last != 0x2D,
+                  bytes.allSatisfy({ (0x61...0x7A).contains($0) || (0x30...0x39).contains($0) || $0 == 0x2D }) else { return false }
+        }
+        return !labels.last!.utf8.allSatisfy { (0x30...0x39).contains($0) }
     }
 
     static func isRevision(_ n: Int) -> Bool { n >= 0 && n <= PanelLimits.maxRevision }
@@ -130,7 +161,7 @@ public struct CapabilityOffer: Sendable, Equatable, Decodable {
         resourceRevision = try c.decode(Int.self, forKey: .resourceRevision)
         skill = try c.decodeIfPresent(SkillDescriptor.self, forKey: .skill)
         try check(WireFormat.isResourceId(resourceId) && WireFormat.isHash(version))
-        try check(WireFormat.isHttpsURL(siteOrigin) && WireFormat.isHttpsURL(sourceUrl))
+        try check(WireFormat.isHostOrigin(siteOrigin) && WireFormat.isHttpsURL(sourceUrl))
         try check(byteLength >= 0 && WireFormat.isRevision(resourceRevision))
     }
 
@@ -185,7 +216,7 @@ public struct LibraryEntry: Sendable, Equatable, Decodable {
         versions = try c.decode([LibraryVersion].self, forKey: .versions)
         resourceRevision = try c.decode(Int.self, forKey: .resourceRevision)
         try check(WireFormat.isResourceId(resourceId))
-        try check(WireFormat.isHttpsURL(siteOrigin) && WireFormat.isHttpsURL(sourceUrl))
+        try check(WireFormat.isHostOrigin(siteOrigin) && WireFormat.isHttpsURL(sourceUrl))
         try check(defaultVersion.map(WireFormat.isHash) ?? true)
         try check(versions.count <= PanelLimits.libraryVersionsMax && WireFormat.isRevision(resourceRevision))
     }
@@ -234,7 +265,7 @@ public struct OriginSetting: Sendable, Equatable, Decodable {
         autoAcquire = try c.decode(Bool.self, forKey: .autoAcquire)
         acknowledgedAt = try c.decodeIfPresent(Double.self, forKey: .acknowledgedAt)
         permitted = try c.decode(Bool.self, forKey: .permitted)
-        try check(WireFormat.isHttpsURL(origin))
+        try check(WireFormat.isHostOrigin(origin))
     }
 
     private enum CodingKeys: String, CodingKey { case origin, autoAcquire, acknowledgedAt, permitted }
@@ -298,7 +329,7 @@ public struct PreviewDescriptor: Sendable, Equatable, Decodable {
         sourceUrl = try c.decode(String.self, forKey: .sourceUrl)
         contentType = try c.decodeIfPresent(String.self, forKey: .contentType)
         skill = try c.decodeIfPresent(SkillDescriptor.self, forKey: .skill)
-        try check(WireFormat.isHttpsURL(siteOrigin) && WireFormat.isHttpsURL(sourceUrl))
+        try check(WireFormat.isHostOrigin(siteOrigin) && WireFormat.isHttpsURL(sourceUrl))
     }
 
     private enum CodingKeys: String, CodingKey { case kind, siteOrigin, sourceUrl, contentType, skill }

@@ -29,10 +29,11 @@ final class ScoutPanel: NSObject {
     static let libraryPageSize = 25
     static let autoAcquireRisk = "Auto-acquire approves every new guide or skill this site publishes without asking you, "
         + "and your agent can use it right away. Turn it on only for sites you trust."
+    static let truncatedNote = "Some items are not shown."
     static let browserContextExplainer = "Lets your interactive Claude agent ask Scout which permitted site you are on, "
         + "that site's links, and your recent activity there. Background jobs never get it. Each read is listed under Activity."
 
-    let window: NSPanel
+    let window: ScoutWindow
     private let onAction: (PanelAction) -> Void
 
     private let disclosure = NSButton()
@@ -61,7 +62,7 @@ final class ScoutPanel: NSObject {
 
     init(onAction: @escaping (PanelAction) -> Void) {
         self.onAction = onAction
-        window = NSPanel(
+        window = ScoutWindow(
             contentRect: NSRect(x: 0, y: 0, width: 380, height: 52),
             styleMask: [.titled, .closable, .utilityWindow, .nonactivatingPanel],
             backing: .buffered,
@@ -76,6 +77,11 @@ final class ScoutPanel: NSObject {
         window.becomesKeyOnlyIfNeeded = true
         window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         window.autorecalculatesKeyViewLoop = true
+        window.onCancel = { [weak self] in
+            // Escape collapses the details; it never closes the window (closing quits Scout).
+            guard let self, self.lastExpanded else { return }
+            self.onAction(.toggleExpanded)
+        }
         build()
     }
 
@@ -232,16 +238,8 @@ final class ScoutPanel: NSObject {
     }
 
     private func renderHeader(_ model: PanelModel) {
-        var parts: [String]
-        switch model.sidecar {
-        case .starting: parts = ["Starting…"]
-        case .setupNeeded: parts = ["Setup needed"]
-        case .stopped: parts = ["Stopped"]
-        case .running:
-            parts = [model.core.map { $0.rawValue.capitalized } ?? "Connected"]
-            if let host = model.currentHost ?? model.detail, !host.isEmpty { parts.append(host) }
-        }
-        statusLabel.stringValue = parts.joined(separator: " · ")
+        // The offer count is the badge, so the label shows the compact line without it.
+        statusLabel.stringValue = model.statusLine
         let count = model.currentOffers.count
         badge.isHidden = count == 0
         badge.stringValue = " \(count) "
@@ -298,10 +296,11 @@ final class ScoutPanel: NSObject {
             return "offers|\(running)|\(model.currentHost ?? "")|\(caps.offers)|\(caps.capabilities?.truncated ?? false)|"
                 + keys.map { "\(String(describing: model.decisionRecord($0)))\(model.canDecline($0))" }.joined()
         case .library:
-            return "library|\(running)|\(libraryPage)|\(caps.library)|\(caps.origins)|"
+            return "library|\(running)|\(libraryPage)|\(caps.library)|\(caps.origins)|\(caps.capabilities?.truncated ?? false)|"
                 + caps.library.map { "\(String(describing: model.revokeRecord($0.resourceId)))\(model.canRevoke($0.resourceId))" }.joined()
         case .settings:
             return "settings|\(running)|\(String(describing: model.core))|\(String(describing: caps.agentBrowserContext))|\(caps.origins)|"
+                + "\(caps.capabilities?.truncated ?? false)|"
                 + "\(String(describing: model.grantRecord))"
                 + caps.origins.map { String(describing: model.autoAcquireRecord($0.origin)) }.joined()
         case .activity:
@@ -323,7 +322,7 @@ final class ScoutPanel: NSObject {
             (CapabilityModel.host(of: a.siteOrigin) == host ? 0 : 1) < (CapabilityModel.host(of: b.siteOrigin) == host ? 0 : 1)
         }
         var rows: [NSView] = []
-        if caps.capabilities?.truncated == true { rows.append(note("Some items are not shown; Scout lists at most \(PanelLimits.offersMax) offers.")) }
+        if caps.capabilities?.truncated == true { rows.append(note(Self.truncatedNote)) }
         for offer in offers {
             let key = PreviewKey(resourceId: offer.resourceId, version: offer.version)
             let name = Self.resourceName(offer.kind, skill: offer.skill)
@@ -338,7 +337,7 @@ final class ScoutPanel: NSObject {
                                  label: "Decline \(name) from \(site)") { [onAction] in onAction(.decline(key)) }
             decline.isEnabled = model.canDecline(key)
             var controls: [NSView] = [preview, decline]
-            controls += commandStatus(model.decisionRecord(key), what: "decision on \(name)")
+            controls += commandStatus(model.decisionRecord(key), what: "decision on \(name)", model)
             rows.append(row(lines + [hstack(controls)], summary: "\(name) from \(site), \(Self.bytes(offer.byteLength))"))
         }
         return rows
@@ -350,9 +349,7 @@ final class ScoutPanel: NSObject {
         let pages = max(1, (library.count + Self.libraryPageSize - 1) / Self.libraryPageSize)
         libraryPage = min(libraryPage, pages - 1)
         var rows: [NSView] = []
-        if model.capabilities.capabilities?.truncated == true {
-            rows.append(note("Some items are not shown; Scout lists at most \(PanelLimits.libraryMax) resources."))
-        }
+        if model.capabilities.capabilities?.truncated == true { rows.append(note(Self.truncatedNote)) }
         let start = libraryPage * Self.libraryPageSize
         for entry in library[start..<min(start + Self.libraryPageSize, library.count)] {
             let name = Self.resourceName(entry.kind, skill: nil)
@@ -380,7 +377,7 @@ final class ScoutPanel: NSObject {
                                 label: "Revoke \(name) from \(site)") { [onAction] in onAction(.revoke(entry.resourceId)) }
             revoke.isEnabled = model.canRevoke(entry.resourceId)
             controls.append(revoke)
-            controls += commandStatus(model.revokeRecord(entry.resourceId), what: "revoking \(name)")
+            controls += commandStatus(model.revokeRecord(entry.resourceId), what: "revoking \(name)", model)
             rows.append(row(lines + [hstack(controls)], summary: "\(name) from \(site), \(state)"))
         }
         if pages > 1 {
@@ -414,14 +411,14 @@ final class ScoutPanel: NSObject {
         let granted = model.capabilities.agentBrowserContext ?? false
         let grant = checkbox("Let my Claude agent read browser context", id: "settings.browserContext",
                              on: granted) { [onAction] in onAction(.setBrowserContext(!granted)) }
-        grant.isEnabled = model.sidecar == .running && model.capabilities.agentBrowserContext != nil
-            && model.grantRecord?.state != .pending
-        rows.append(row([hstack([grant] + commandStatus(model.grantRecord, what: "browser-context setting")),
+        grant.isEnabled = model.canToggleGrant
+        rows.append(row([hstack([grant] + commandStatus(model.grantRecord, what: "browser-context setting", model)),
                          Self.secondary(Self.browserContextExplainer)], summary: "Browser context for your agent"))
 
         let origins = model.capabilities.origins
         rows.append(Self.title("Auto-acquire"))
         rows.append(Self.secondary(Self.autoAcquireRisk))
+        if model.capabilities.capabilities?.truncated == true { rows.append(note(Self.truncatedNote)) }
         if origins.isEmpty { rows.append(note("No sites yet.")) }
         for setting in origins {
             let site = CapabilityModel.host(of: setting.origin) ?? setting.origin
@@ -429,8 +426,8 @@ final class ScoutPanel: NSObject {
             let box = checkbox("Auto-acquire for \(site)", id: "settings.auto.\(setting.origin)", on: setting.autoAcquire) { [weak self] in
                 self?.confirmAutoAcquire(origin: setting.origin, site: site, enable: !setting.autoAcquire)
             }
-            box.isEnabled = model.sidecar == .running && record?.state != .pending && (setting.autoAcquire || setting.permitted)
-            var views: [NSView] = [hstack([box] + commandStatus(record, what: "auto-acquire for \(site)"))]
+            box.isEnabled = model.canToggleAutoAcquire(setting.origin)
+            var views: [NSView] = [hstack([box] + commandStatus(record, what: "auto-acquire for \(site)", model))]
             if !setting.permitted { views.append(Self.secondary("Chrome does not give Scout access to \(site) right now.")) }
             rows.append(row(views, summary: "Auto-acquire for \(site)"))
         }
@@ -468,7 +465,7 @@ final class ScoutPanel: NSObject {
                 guard case let .failed(code) = record.state else { return row([], summary: what) }
                 let text = "\(what) failed: \(code.rawValue)"
                 var controls: [NSView] = []
-                if code.isRetryable, !record.request.isToggle {
+                if model.canRetry(record.id) {
                     controls.append(button("Retry", id: "problem.\(record.id).retry", label: "Retry \(what)") { [onAction] in
                         onAction(.retry(record.id))
                     })
@@ -559,7 +556,7 @@ final class ScoutPanel: NSObject {
                 onAction(.preview(key))
             })
         }
-        for view in commandStatus(model.decisionRecord(key), what: "decision on \(name)", into: &previewHandlers) {
+        for view in commandStatus(model.decisionRecord(key), what: "decision on \(name)", model, into: &previewHandlers) {
             previewButtons.addArrangedSubview(view)
         }
         if let reason = model.approveBlocker(key) {
@@ -655,15 +652,17 @@ final class ScoutPanel: NSObject {
         return box
     }
 
-    private func commandStatus(_ record: CommandTracker.Record?, what: String) -> [NSView] {
-        commandStatus(record, what: what, into: &handlers)
+    private func commandStatus(_ record: CommandTracker.Record?, what: String, _ model: PanelModel) -> [NSView] {
+        commandStatus(record, what: what, model, into: &handlers)
     }
 
     /// A spinner while a command waits for its ack; the failure code and a Retry (same ID) after it fails.
-    private func commandStatus(_ record: CommandTracker.Record?, what: String, into store: inout [ActionTarget]) -> [NSView] {
+    private func commandStatus(
+        _ record: CommandTracker.Record?, what: String, _ model: PanelModel, into store: inout [ActionTarget]
+    ) -> [NSView] {
         guard let record else { return [] }
         switch record.state {
-        case .ok, .unknown:
+        case .ok, .unknown, .superseded:
             return []
         case .pending:
             let spinner = NSProgressIndicator()
@@ -676,7 +675,7 @@ final class ScoutPanel: NSObject {
             let label = Self.secondary("Failed: \(code.rawValue)")
             label.textColor = .systemRed
             label.setAccessibilityLabel("\(what) failed: \(code.rawValue)")
-            guard record.request.isMutation, !record.request.isToggle, code.isRetryable else { return [label] }
+            guard model.canRetry(record.id) else { return [label] }
             let onAction = self.onAction
             let retry = button("Retry", id: "retry.\(record.id)", label: "Retry \(what)", into: &store) { onAction(.retry(record.id)) }
             return [label, retry]
@@ -779,6 +778,16 @@ private final class ActionTarget: NSObject {
     private let action: () -> Void
     init(_ action: @escaping () -> Void) { self.action = action }
     @objc func fire() { action() }
+}
+
+/// Scout's panel. Escape (`cancelOperation`) would close an `NSPanel`, and closing quits the app,
+/// so it goes to `onCancel` instead; only the close button closes the window.
+final class ScoutWindow: NSPanel {
+    var onCancel: (() -> Void)?
+
+    override func cancelOperation(_ sender: Any?) {
+        onCancel?()
+    }
 }
 
 private final class FlippedView: NSView {

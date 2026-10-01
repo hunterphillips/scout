@@ -3,13 +3,15 @@ import Foundation
 /// Issues command IDs for Scout's window and follows each command to its ack.
 ///
 /// A command is `pending` from the moment it is issued until an ack (or, for `preview`, its
-/// chunk) arrives. A write the pipe refused leaves it pending and `unsent`; within one core
-/// instance the app re-sends unsent commands with the same ID. When the core restarts, only
+/// chunk) arrives. A write the pipe refused for now leaves it pending and `unsent`; within one
+/// core instance the app re-sends unsent commands with the same ID. A line too long for one
+/// atomic write fails at once as `invalid` and is never sent. When the core restarts, only
 /// pending decisions (approve, decline, revoke) are re-sent with the same ID: the new core
 /// re-checks each against the store, and the `expectedRevision` inside keeps a stale change from
 /// applying. Pending toggles and refreshes become `unknown` (settled, not failed); the window
 /// re-renders them from the new core's next `capabilities` or `grant` frame. Pending previews
-/// fail as `unavailable` (their cursors died with the old core); the user restarts them.
+/// fail as `unavailable` (their cursors died with the old core); the user restarts them. A
+/// preview the window stopped waiting for (restarted or evicted) settles as `superseded`.
 /// A retry never draws a new ID, so one decision can never become two commands. Toggles are
 /// never retried: the user toggles again, under a new ID with a fresh `expectedEnabled`.
 public struct CommandTracker: Sendable, Equatable {
@@ -21,6 +23,8 @@ public struct CommandTracker: Sendable, Equatable {
         case failed(AckFailureCode)
         /// The core restarted before answering; the next frame shows what took effect.
         case unknown
+        /// A preview request the window no longer waits for; never sent again.
+        case superseded
     }
 
     public struct Record: Sendable, Equatable {
@@ -69,8 +73,17 @@ public struct CommandTracker: Sendable, Equatable {
 
     /// Whether the write of `id` went through.
     public mutating func markSent(_ id: String, written: Bool) {
+        markSent(id, written ? .written : .retryLater)
+    }
+
+    /// Records what became of a write of `id`: an oversize line fails as `invalid`, for good.
+    public mutating func markSent(_ id: String, _ outcome: SendOutcome) {
         guard let i = index(id), records[i].state == .pending else { return }
-        records[i].sent = records[i].sent || written
+        switch outcome {
+        case .written: records[i].sent = true
+        case .retryLater: break
+        case .oversize: records[i].state = .failed(.invalid)
+        }
     }
 
     /// Applies an ack. Repeated identical acks change nothing; an ack for an unknown ID is ignored.
@@ -87,11 +100,18 @@ public struct CommandTracker: Sendable, Equatable {
         return records[i]
     }
 
-    /// A preview chunk answered `id`.
+    /// A preview chunk answered `id`. Settles only a pending `preview`: a chunk naming any other
+    /// command changes nothing.
     public mutating func chunkArrived(for id: String) {
-        guard let i = index(id) else { return }
+        guard let i = index(id), case .preview = records[i].request, records[i].state == .pending else { return }
         records[i].sent = true
         records[i].state = .ok
+    }
+
+    /// The window no longer waits for preview `id`: settle it so it is never sent again.
+    public mutating func supersede(_ id: String) {
+        guard let i = index(id), case .preview = records[i].request, records[i].state == .pending else { return }
+        records[i].state = .superseded
     }
 
     /// Pending commands whose write was refused, to send again with the same ID.
@@ -126,16 +146,21 @@ public struct CommandTracker: Sendable, Equatable {
     /// or whose write was refused, with its own ID. Previews restart from their first chunk through
     /// a new command instead, and toggles are toggled again, so neither is retried here.
     public mutating func retry(_ id: String) -> NativeCommand? {
-        guard let i = index(id), records[i].request.isMutation, !records[i].request.isToggle else { return nil }
-        switch records[i].state {
-        case let .failed(code) where code.isRetryable:
+        guard canRetry(id), let i = index(id) else { return nil }
+        if case .failed = records[i].state {
             records[i].state = .pending
             records[i].sent = false
-            return records[i].command
-        case .pending where !records[i].sent:
-            return records[i].command
-        default:
-            return nil
+        }
+        return records[i].command
+    }
+
+    /// Whether `retry(id)` would send something.
+    public func canRetry(_ id: String) -> Bool {
+        guard let record = record(id), record.request.isMutation, !record.request.isToggle else { return false }
+        switch record.state {
+        case let .failed(code): return code.isRetryable
+        case .pending: return !record.sent
+        case .ok, .unknown, .superseded: return false
         }
     }
 

@@ -3,14 +3,16 @@ import Testing
 @testable import ScoutKit
 
 @Suite struct PanelModelTests {
-    @Test func sidecarStatusesRenderAsText() {
+    @Test func sidecarStatusesShowInTheCompactLineAndProblems() {
         var model = PanelModel()
-        #expect(model.text == "Starting…")
+        #expect(model.compactLine == "Starting…" && model.problems.isEmpty)
         _ = model.apply(.setupNeeded("nodePath is missing"))
-        #expect(model.text.hasPrefix("Setup needed\nnodePath is missing"))
+        #expect(model.compactLine == "Setup needed")
+        #expect(model.problems == [.sidecar("Setup needed: nodePath is missing")])
         _ = model.apply(.stopped)
-        #expect(model.text.hasPrefix("Stopped"))
-        #expect(model.text.contains("after \(RestartPolicy.defaultMaxRestarts) restarts in a minute"))
+        #expect(model.compactLine == "Stopped")
+        guard case let .sidecar(text)? = model.problems.first else { Issue.record("no sidecar problem"); return }
+        #expect(text.contains("after \(RestartPolicy.defaultMaxRestarts) restarts in a minute"))
     }
 
     @Test func describesRestartWindows() {
@@ -23,15 +25,17 @@ import Testing
         var model = PanelModel()
         _ = model.apply(.running)
         _ = model.apply(.state(status: .working, visitEpoch: 1, detail: "ranking"))
-        #expect(model.text == "Working\nranking")
-        _ = model.apply(.results(visitEpoch: 1, outcome: .ok([
+        #expect(model.compactLine == "Working · ranking")
+        let items = [
             ResultItem(candidateId: "c1", title: "Webhooks", href: "https://a", reason: "r"),
             ResultItem(candidateId: "c2", title: "Testing", href: "https://b", reason: "r"),
-        ])))
+        ]
+        _ = model.apply(.results(visitEpoch: 1, outcome: .ok(items)))
         _ = model.apply(.state(status: .idle, visitEpoch: 1, detail: nil))
-        #expect(model.text == "Idle\n\n• Webhooks\n• Testing")
+        #expect(model.compactLine == "Idle" && model.results == .ok(items))
+        #expect(model.indicator == .results(count: 2))
         _ = model.apply(.results(visitEpoch: 2, outcome: .unavailable("service down")))
-        #expect(model.text == "Idle\n\nResults unavailable: service down")
+        #expect(model.indicator == .error("service down"))
     }
 
     @Test func idleVisitShowsTheHostnameAndLeavingClearsIt() throws {
@@ -42,9 +46,9 @@ import Testing
         let states = parser.append(Data(line.utf8))
         try #require(states.count == 1)
         _ = model.apply(states[0])
-        #expect(model.text == "Idle\ndocs.stripe.com")
+        #expect(model.compactLine == "Idle · docs.stripe.com")
         _ = model.apply(.state(status: .idle, visitEpoch: 3, detail: nil))
-        #expect(model.text == "Idle")
+        #expect(model.compactLine == "Idle")
     }
 
     @Test func restartClearsCoreState() {
@@ -54,7 +58,7 @@ import Testing
         _ = model.apply(.results(visitEpoch: 1, outcome: .empty))
         _ = model.apply(.starting)
         _ = model.apply(.running)
-        #expect(model.text == "Connected")
+        #expect(model.compactLine == "Connected" && model.results == nil)
     }
 }
 
@@ -84,7 +88,7 @@ import Testing
         model = try onSite()
         #expect(model.indicator == .offers(count: 1, host: "docs.example.com"))
         #expect(model.compactLine == "Idle · docs.example.com · 1 offer")
-        #expect(model.text == "Idle\ndocs.example.com\n1 offer for docs.example.com")
+        #expect(model.statusLine == "Idle · docs.example.com")
         // Another site: its offers are not this site's.
         _ = model.apply(.state(status: .idle, visitEpoch: 2, detail: "other.example.org", permitted: true))
         #expect(model.indicator == .nothing)
@@ -423,6 +427,144 @@ import Testing
         #expect(model.retry(approve.commandId!) == approve)
         _ = model.apply(.ack(.failed(commandId: approve.commandId!, code: .storeError, revision: nil)))
         #expect(model.problems.count == 3)
+    }
+
+    @Test func staleDecisionsAfterARestartSettleWhenTheFrameShowsTheirTarget() throws {
+        let rid3 = "res_" + String(repeating: "c", count: 64)
+        var model = try onSite(offers: [TestFrames.offer(), TestFrames.offer(rid: F.rid2, version: F.v2)])
+        _ = model.apply(.capabilities(try TestFrames.capabilities(revision: 2,
+            offers: [TestFrames.offer(), TestFrames.offer(rid: F.rid2, version: F.v2)],
+            library: [TestFrames.entry(rid: rid3, state: "approved", defaultVersion: F.v3, versions: [(F.v3, "approved")])],
+            origins: [TestFrames.origin()])))
+        loaded(&model, key)
+        let approveSent = model.approve(key)
+        let approve = try #require(approveSent)
+        let declineSent = model.decline(PreviewKey(resourceId: F.rid2, version: F.v2))
+        let decline = try #require(declineSent)
+        let revokeSent = model.revoke(rid3)
+        let revoke = try #require(revokeSent)
+        for c in [approve, decline, revoke] { model.markSent(c, written: true) }
+        // The old core applied all three, then died; the new one refuses the re-sent commands as stale.
+        _ = model.apply(.starting)
+        #expect(model.apply(.running) == [approve, decline, revoke])
+        for c in [approve, decline, revoke] {
+            _ = model.apply(.ack(.failed(commandId: c.commandId!, code: .staleRevision, revision: 9)))
+        }
+        #expect(model.problems.count == 3)
+        _ = model.apply(.capabilities(try TestFrames.capabilities(instance: "core-2", revision: 1, library: [
+            TestFrames.entry(defaultVersion: F.v1, versions: [(F.v1, "approved")], revision: 9),
+            TestFrames.entry(rid: F.rid2, state: "no_default", defaultVersion: nil, versions: [(F.v2, "declined")], revision: 9),
+            TestFrames.entry(rid: rid3, state: "blocked", defaultVersion: nil, versions: [(F.v3, "revoked")], revision: 9),
+        ], origins: [TestFrames.origin()])))
+        for c in [approve, decline, revoke] {
+            #expect(model.commands.record(c.commandId!)?.state == .ok)
+        }
+        #expect(model.problems.isEmpty)
+    }
+
+    @Test func staleDecisionWhoseTargetTheFrameDoesNotShowStaysAProblem() throws {
+        var model = try onSite()
+        loaded(&model, key)
+        let approveSent = model.approve(key)
+        let approve = try #require(approveSent)
+        // Someone declined it meanwhile: the approval did not take effect.
+        _ = model.apply(.capabilities(try TestFrames.capabilities(revision: 2, library: [
+            TestFrames.entry(state: "no_default", defaultVersion: nil, versions: [(F.v1, "declined")], revision: 2)])))
+        _ = model.apply(.ack(.failed(commandId: approve.commandId!, code: .staleRevision, revision: 2)))
+        #expect(model.commands.record(approve.commandId!)?.state == .failed(.staleRevision))
+        #expect(model.problems.count == 1)
+    }
+
+    @Test func restartingOrEvictingAPreviewSupersedesItsRequest() throws {
+        var model = try onSite()
+        let firstSent = model.showPreview(key)
+        let first = try #require(firstSent)
+        model.markSent(first, written: false)
+        let againSent = model.restartPreview(key)
+        let again = try #require(againSent)
+        #expect(model.commands.record(first.commandId!)?.state == .superseded)
+        #expect(model.commands.unsent == [again])
+        // Fill past capacity: the oldest loading preview is evicted and its request superseded.
+        var requests: [NativeCommand] = [again]
+        for i in 0..<PanelModel.previewCapacity {
+            let other = PreviewKey(resourceId: F.rid2, version: String(format: "%064x", i + 1))
+            let sent = model.showPreview(other)
+            requests.append(try #require(sent))
+        }
+        #expect(model.preview(key) == nil)
+        #expect(model.commands.record(again.commandId!)?.state == .superseded)
+        #expect(requests.dropFirst().allSatisfy { model.commands.record($0.commandId!)?.state == .pending })
+    }
+
+    @Test func completeShownPreviewSurvivesARestartAndWaitsForAFrame() throws {
+        var model = try onSite()
+        loaded(&model, key)
+        #expect(model.canApprove(key))
+        _ = model.apply(.starting)
+        #expect(model.apply(.running).isEmpty)  // complete: nothing to reload
+        #expect(model.shownPreview == key && model.preview(key)?.isComplete == true)
+        // No frame from the new core yet: nothing says the version is still offered.
+        #expect(!model.canApprove(key) && model.approve(key) == nil)
+        _ = model.apply(.capabilities(try TestFrames.capabilities(instance: "core-2", offers: [TestFrames.offer()], origins: [TestFrames.origin()])))
+        #expect(model.canApprove(key))
+    }
+
+    @Test func showPreviewWhileStartingSendsNothingUntilTheCoreRuns() throws {
+        var model = PanelModel(commands: CommandTracker(prefix: "t"))
+        #expect(model.sidecar == .starting)
+        #expect(model.showPreview(key) == nil)
+        #expect(model.shownPreview == key && model.preview(key)?.phase == .loading)
+        #expect(model.commands.records.isEmpty)
+        let started = model.apply(.running)
+        guard case let .panel(_, request)? = started.first, started.count == 1 else { Issue.record("no load"); return }
+        #expect(request == .preview(resourceId: F.rid, version: F.v1, cursor: nil))
+    }
+
+    @Test func grantFrameWhileAToggleIsPendingLeavesItPending() throws {
+        var model = try onSite()
+        _ = model.apply(.grant(agentBrowserContext: false))
+        let grantSent = model.setAgentBrowserContext(true)
+        _ = try #require(grantSent)
+        _ = model.apply(.grant(agentBrowserContext: true))
+        #expect(model.grantRecord?.state == .pending && !model.canToggleGrant)
+    }
+
+    @Test func ackForAnUnknownCommandIsIgnored() throws {
+        var model = try onSite()
+        loaded(&model, key)
+        let before = model
+        #expect(model.apply(.ack(.ok(commandId: "nope", revision: 1, approvalRevision: 1))).isEmpty)
+        #expect(model.apply(.ack(.failed(commandId: "nope", code: .staleRevision, revision: 1))).isEmpty)
+        #expect(model == before)
+    }
+
+    @Test func togglePredicatesFollowTheModel() throws {
+        var model = try onSite()
+        let blocked = "https://other.example.org"
+        _ = model.apply(.capabilities(try TestFrames.capabilities(revision: 2,
+            origins: [TestFrames.origin(), TestFrames.origin(blocked, permitted: false)])))
+        #expect(model.canToggleAutoAcquire(F.origin) && !model.canToggleAutoAcquire(blocked))
+        #expect(!model.canToggleAutoAcquire("https://unknown.example"))
+        // Turning auto-acquire on for a site Chrome does not permit is refused by the model itself.
+        #expect(model.setAutoAcquire(origin: blocked, enabled: true, acknowledgeRisk: true) == nil)
+        #expect(!model.canToggleGrant)
+        _ = model.apply(.grant(agentBrowserContext: false))
+        #expect(model.canToggleGrant)
+        let autoSent = model.setAutoAcquire(origin: F.origin, enabled: true, acknowledgeRisk: true)
+        _ = try #require(autoSent)
+        #expect(!model.canToggleAutoAcquire(F.origin))
+        _ = model.apply(.stopped)
+        #expect(!model.canToggleGrant)
+    }
+
+    @Test func oversizePreviewRequestFailsThePreview() throws {
+        var model = try onSite()
+        let firstSent = model.showPreview(key)
+        let first = try #require(firstSent)
+        model.markSent(first, .oversize)
+        #expect(model.commands.record(first.commandId!)?.state == .failed(.invalid))
+        #expect(model.preview(key)?.phase == .failed(.refused(.invalid)))
+        #expect(model.commands.unsent.isEmpty)
     }
 
     @Test func approveOfAnUnknownVersionIsAProblemWithoutRetry() throws {
