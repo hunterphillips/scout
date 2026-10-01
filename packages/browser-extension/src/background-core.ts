@@ -176,11 +176,25 @@ export function createBackground(ch: typeof chrome, deps: BackgroundDeps = {}): 
     return chain;
   }
 
-  /** Persist first; memory changes only once storage has the new value (a failed write changes nothing). */
+  /**
+   * Turning on persists first and changes memory only once storage has it (a
+   * failed write leaves capture off and throws). Turning off (by the user, or
+   * by reconcile when the GitHub grant is lost) takes effect in memory at once
+   * and never throws; the write is best effort. Limitation: if that write
+   * fails, a later worker restart reloads `true` from storage. Acceptable:
+   * storage is already failing, and a failed read starts paused.
+   */
   async function setGithubCapture(next: boolean): Promise<void> {
-    await ch.storage.local.set({ githubCapture: next });
-    state.githubCapture = next;
-    if (!next) gate.cancelTabs({ stop: true });
+    if (!next) {
+      state.githubCapture = false;
+      gate.cancelTabs({ stop: true });
+      await Promise.resolve()
+        .then(() => ch.storage.local.set({ githubCapture: false }))
+        .catch(() => {});
+      return;
+    }
+    await ch.storage.local.set({ githubCapture: true });
+    state.githubCapture = true;
   }
 
   /**

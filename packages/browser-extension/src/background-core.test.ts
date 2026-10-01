@@ -205,7 +205,7 @@ describe("granted list: the one source of truth", () => {
     expect(await approve(bg, f)).toEqual({ approved: false, reason: "permission" });
   });
 
-  it("the toggle persists before it changes: a failed write leaves it as it was", async () => {
+  it("turning the toggle on persists first (a failed write leaves it off); turning it off takes effect even when the write fails", async () => {
     const { f, bg } = await setup({ granted: [GITHUB_PATTERN] });
     f._.state.storageSetFails = true;
     await expect(bg.handleMessage({ type: "popup-github-capture", enabled: true }, popupSender())).rejects.toThrow();
@@ -216,10 +216,31 @@ describe("granted list: the one source of truth", () => {
     await bg.handleMessage({ type: "popup-github-capture", enabled: true }, popupSender());
     expect(f._.store["githubCapture"]).toBe(true);
     expect(bg.snapshot().githubCapture).toBe(true);
+    expect(f._.registered).toHaveLength(1);
     f._.state.storageSetFails = true;
-    await expect(bg.handleMessage({ type: "popup-github-capture", enabled: false }, popupSender())).rejects.toThrow();
-    expect(f._.store["githubCapture"]).toBe(true);
-    expect(bg.snapshot().githubCapture).toBe(true);
+    const s = (await bg.handleMessage({ type: "popup-github-capture", enabled: false }, popupSender())) as StatusSnapshot;
+    expect(s.githubCapture).toBe(false);
+    expect(bg.snapshot().githubCapture).toBe(false);
+    expect(await approve(bg, f)).toEqual({ approved: false, reason: "permission" });
+    expect(f._.registered).toEqual([]);
+    expect(f._.store["githubCapture"]).toBe(true); // the known limitation: a restart would reload it
+  });
+
+  it("losing the GitHub grant switches capture off in memory even when the write fails; a later grant does not bring it back", async () => {
+    const { f, clock, bg } = await setup();
+    f._.state.storageSetFails = true;
+    f._.state.granted = [];
+    await Promise.all(f.permissions.onRemoved.emit({ origins: [GITHUB_PATTERN] } as never));
+    await clock.advance(0);
+    expect(bg.snapshot().githubCapture).toBe(false);
+    expect(f._.registered).toEqual([]);
+    f._.state.granted = [GITHUB_PATTERN];
+    await Promise.all(f.permissions.onAdded.emit({ origins: [GITHUB_PATTERN] } as never));
+    await clock.advance(0);
+    expect(bg.snapshot()).toMatchObject({ granted: [GITHUB_PATTERN], githubCapture: false });
+    expect(f._.registered).toEqual([]);
+    expect(observations(f, "permissions").at(-1)).toMatchObject({ granted: [GITHUB_PATTERN], githubCapture: false });
+    expect(await approve(bg, f)).toEqual({ approved: false, reason: "permission" });
   });
 });
 
