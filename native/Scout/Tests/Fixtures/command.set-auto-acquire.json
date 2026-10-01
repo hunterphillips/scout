@@ -3,5 +3,6 @@
   "commandId": "app-8",
   "origin": "https://docs.example.com",
   "enabled": true,
-  "acknowledgeRisk": true
+  "acknowledgeRisk": true,
+  "expectedEnabled": false
 }

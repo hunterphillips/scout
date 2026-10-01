@@ -1,0 +1,7 @@
+{
+  "type": "ack",
+  "commandId": "app-3",
+  "ok": false,
+  "code": "not_found",
+  "revision": 1
+}

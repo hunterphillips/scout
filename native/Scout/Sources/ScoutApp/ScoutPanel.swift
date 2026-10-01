@@ -469,11 +469,12 @@ final class ScoutPanel: NSObject {
                 return row([Self.secondary(text)], summary: text)
             case let .command(record):
                 let what = describe(record.request, model)
-                let code: String = { if case let .failed(c) = record.state { return c.rawValue } else { return "" } }()
+                guard case let .failed(code) = record.state else { return row([], summary: what) }
+                let text = "\(what) failed: \(code.rawValue)"
+                guard code.isRetryable else { return row([Self.secondary(text)], summary: text) }
                 let retry = button("Retry", id: "problem.\(record.id).retry", label: "Retry \(what)") { [onAction] in
                     onAction(.retry(record.id))
                 }
-                let text = "\(what) failed: \(code)"
                 return row([Self.secondary(text), retry], summary: text)
             case let .preview(key, failure):
                 let text = "Preview of version \(key.version.prefix(12)) failed: \(Self.describe(failure))"
@@ -667,7 +668,7 @@ final class ScoutPanel: NSObject {
             let label = Self.secondary("Failed: \(code.rawValue)")
             label.textColor = .systemRed
             label.setAccessibilityLabel("\(what) failed: \(code.rawValue)")
-            guard record.request.isMutation else { return [label] }
+            guard record.request.isMutation, code.isRetryable else { return [label] }
             let onAction = self.onAction
             let retry = button("Retry", id: "retry.\(record.id)", label: "Retry \(what)", into: &store) { onAction(.retry(record.id)) }
             return [label, retry]
@@ -733,9 +734,9 @@ final class ScoutPanel: NSObject {
         case let .approve(rid, _, _): return "Approve \(name(rid))"
         case let .decline(rid, _, _): return "Decline \(name(rid))"
         case let .revoke(rid, _): return "Revoke \(name(rid))"
-        case let .setAutoAcquire(origin, enabled, _):
+        case let .setAutoAcquire(origin, enabled, _, _):
             return "\(enabled ? "Turning on" : "Turning off") auto-acquire for \(CapabilityModel.host(of: origin) ?? origin)"
-        case let .setAgentBrowserContext(enabled): return "\(enabled ? "Allowing" : "Stopping") browser-context reads"
+        case let .setAgentBrowserContext(enabled, _): return "\(enabled ? "Allowing" : "Stopping") browser-context reads"
         case .refreshCapabilities: return "Refresh"
         }
     }

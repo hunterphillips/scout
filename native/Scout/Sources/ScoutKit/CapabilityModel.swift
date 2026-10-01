@@ -1,9 +1,9 @@
 import Foundation
 
 /// The core's latest capability view, browser-context grant, and context-read audit, plus the
-/// lookups the window needs. `capabilities` frames replace each other whole; a frame with a
-/// lower `revision` than the one held is stale and dropped. Revisions restart with each core
-/// process, so `reset()` on a restart.
+/// lookups the window needs. `capabilities` frames replace each other whole; a frame from the
+/// same core instance with a lower `revision` than the one held is stale and dropped. A frame
+/// from another `coreInstanceId` starts a new revision sequence.
 public struct CapabilityModel: Sendable, Equatable {
     public private(set) var capabilities: Capabilities?
     /// What the latest `grant` frame said; nil until one arrives.
@@ -16,7 +16,9 @@ public struct CapabilityModel: Sendable, Equatable {
     /// Returns false for a stale frame.
     @discardableResult
     public mutating func apply(_ frame: Capabilities) -> Bool {
-        if let held = capabilities, frame.revision < held.revision { return false }
+        if let held = capabilities, held.coreInstanceId == frame.coreInstanceId, frame.revision < held.revision {
+            return false
+        }
         capabilities = frame
         return true
     }

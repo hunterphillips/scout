@@ -109,12 +109,13 @@ public struct CommandTracker: Sendable, Equatable {
         return resend
     }
 
-    /// Re-sends a failed mutation with its own ID. Previews restart from their first chunk
-    /// through a new command instead, so they are not retried here.
+    /// Re-sends a mutation that failed for a passing reason (`AckFailureCode.isRetryable`) or
+    /// whose write was refused, with its own ID. Previews restart from their first chunk through
+    /// a new command instead, so they are not retried here.
     public mutating func retry(_ id: String) -> NativeCommand? {
         guard let i = index(id), records[i].request.isMutation else { return nil }
         switch records[i].state {
-        case .failed:
+        case let .failed(code) where code.isRetryable:
             records[i].state = .pending
             records[i].sent = false
             return records[i].command

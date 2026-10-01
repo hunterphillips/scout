@@ -73,6 +73,11 @@ public struct PanelModel: Sendable, Equatable {
             return []
         }
         guard !wasRunning else { return [] }
+        return coreRestarted()
+    }
+
+    /// A new core process: re-send pending mutations under their IDs and reload loading previews.
+    private mutating func coreRestarted() -> [NativeCommand] {
         var out = commands.coreRestarted()
         for key in previewOrder where previews[key]?.phase == .loading {
             out += startPreview(key).map { [$0] } ?? []
@@ -90,9 +95,12 @@ public struct PanelModel: Sendable, Equatable {
         case let .results(_, outcome):
             results = outcome
         case let .capabilities(frame):
+            let previous = capabilities.capabilities?.coreInstanceId
             if capabilities.apply(frame) {
                 decidedSinceFrame = []
                 revokedSinceFrame = []
+                // Another core answered without the app seeing a restart: treat it as one.
+                if let previous, previous != frame.coreInstanceId { return coreRestarted() }
             }
         case let .preview(chunk):
             return receive(chunk)
@@ -204,17 +212,21 @@ public struct PanelModel: Sendable, Equatable {
         return commands.issue(.revoke(resourceId: resourceId, expectedRevision: entry.resourceRevision))
     }
 
-    /// Turning auto-acquire on requires the user to have confirmed the risk.
+    /// Turning auto-acquire on requires the user to have confirmed the risk. The command carries
+    /// the value the latest frame shows, so a change made meanwhile is refused, not overwritten.
     public mutating func setAutoAcquire(origin: String, enabled: Bool, acknowledgeRisk: Bool) -> NativeCommand? {
-        guard sidecar == .running, !enabled || acknowledgeRisk, autoAcquireRecord(origin)?.state != .pending else {
+        guard sidecar == .running, !enabled || acknowledgeRisk, autoAcquireRecord(origin)?.state != .pending,
+              let setting = capabilities.originSetting(origin), setting.autoAcquire != enabled else {
             return nil
         }
-        return commands.issue(.setAutoAcquire(origin: origin, enabled: enabled, acknowledgeRisk: enabled && acknowledgeRisk))
+        return commands.issue(.setAutoAcquire(
+            origin: origin, enabled: enabled, acknowledgeRisk: enabled && acknowledgeRisk, expectedEnabled: setting.autoAcquire))
     }
 
     public mutating func setAgentBrowserContext(_ enabled: Bool) -> NativeCommand? {
-        guard sidecar == .running, grantRecord?.state != .pending else { return nil }
-        return commands.issue(.setAgentBrowserContext(enabled: enabled))
+        guard sidecar == .running, grantRecord?.state != .pending,
+              let current = capabilities.agentBrowserContext, current != enabled else { return nil }
+        return commands.issue(.setAgentBrowserContext(enabled: enabled, expectedEnabled: current))
     }
 
     public mutating func refreshCapabilities() -> NativeCommand? {
@@ -260,7 +272,7 @@ public struct PanelModel: Sendable, Equatable {
     }
 
     public func autoAcquireRecord(_ origin: String) -> CommandTracker.Record? {
-        commands.latest { if case let .setAutoAcquire(o, _, _) = $0 { return o == origin } else { return false } }
+        commands.latest { if case let .setAutoAcquire(o, _, _, _) = $0 { return o == origin } else { return false } }
     }
 
     public var grantRecord: CommandTracker.Record? {

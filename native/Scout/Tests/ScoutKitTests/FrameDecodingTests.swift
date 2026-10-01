@@ -27,6 +27,7 @@ import Testing
         guard case let .capabilities(caps) = try F.frame("frame.capabilities.minimal.json") else {
             Issue.record("not capabilities"); return
         }
+        #expect(caps.coreInstanceId == "core-7f3a9c")
         #expect(caps.revision == 1 && caps.approvalRevision == 0 && !caps.truncated)
         let offer = try #require(caps.offers.first)
         #expect(offer.skill == nil && offer.kind == .llmsTxt && offer.resourceRevision == 1)
@@ -71,6 +72,8 @@ import Testing
         #expect(try F.frame("frame.ack.ok-nonresource.json") == .ack(.ok(commandId: "app-4", revision: 0, approvalRevision: 5)))
         #expect(try F.frame("frame.ack.failed.json") == .ack(.failed(commandId: "app-3", code: .staleRevision, revision: 4)))
         #expect(try F.frame("frame.ack.failed-norevision.json") == .ack(.failed(commandId: "app-5", code: .notPermitted, revision: nil)))
+        #expect(try F.frame("frame.ack.failed-invalid.json") == .ack(.failed(commandId: "app-10", code: .invalid, revision: nil)))
+        #expect(try F.frame("frame.ack.failed-not-found.json") == .ack(.failed(commandId: "app-3", code: .notFound, revision: 1)))
     }
 
     @Test func auditAndGrant() throws {
@@ -101,6 +104,7 @@ import Testing
         #expect(try refused("frame.preview.first.json") { $0["text"] = String(repeating: "é", count: 8193) })
         #expect(try refused("frame.preview.first.json") { $0["resourceId"] = "res_123" })
         #expect(try refused("frame.capabilities.minimal.json") { $0.removeObject(forKey: "truncated") })
+        #expect(try refused("frame.capabilities.minimal.json") { $0.removeObject(forKey: "coreInstanceId") })
         #expect(try refused("frame.capabilities.minimal.json") {
             let offers = ($0["offers"] as! NSArray)
             $0["offers"] = Array(repeating: offers[0], count: PanelLimits.offersMax + 1)
@@ -136,7 +140,7 @@ import Testing
              "skill": ["name": "n\(i)", "description": String(repeating: "d", count: 200)]]
         }
         let frame: [String: Any] = [
-            "type": "capabilities", "revision": 9, "approvalRevision": 3, "truncated": true,
+            "type": "capabilities", "coreInstanceId": "core-big", "revision": 9, "approvalRevision": 3, "truncated": true,
             "offers": offers, "library": library, "conflicts": [], "origins": [],
         ]
         var line = try JSONSerialization.data(withJSONObject: frame, options: [.withoutEscapingSlashes])

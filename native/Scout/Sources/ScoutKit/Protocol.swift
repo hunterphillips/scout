@@ -238,6 +238,8 @@ public struct OriginSetting: Sendable, Equatable, Decodable {
 
 /// The whole capability view; the core re-sends it on every change.
 public struct Capabilities: Sendable, Equatable, Decodable {
+    /// Names the core process that sent the frame; `revision` is monotonic only within one.
+    public let coreInstanceId: String
     /// Increases with every frame one core process sends.
     public let revision: Int
     public let approvalRevision: Int
@@ -250,6 +252,7 @@ public struct Capabilities: Sendable, Equatable, Decodable {
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
+        coreInstanceId = try c.decode(String.self, forKey: .coreInstanceId)
         revision = try c.decode(Int.self, forKey: .revision)
         approvalRevision = try c.decode(Int.self, forKey: .approvalRevision)
         offers = try c.decode([CapabilityOffer].self, forKey: .offers)
@@ -257,13 +260,14 @@ public struct Capabilities: Sendable, Equatable, Decodable {
         conflicts = try c.decode([CapabilityConflict].self, forKey: .conflicts)
         origins = try c.decode([OriginSetting].self, forKey: .origins)
         truncated = try c.decode(Bool.self, forKey: .truncated)
+        try check(!coreInstanceId.isEmpty && coreInstanceId.utf8.count <= 128)
         try check(WireFormat.isRevision(revision) && WireFormat.isRevision(approvalRevision))
         try check(offers.count <= PanelLimits.offersMax && library.count <= PanelLimits.libraryMax)
         try check(conflicts.count <= PanelLimits.conflictsMax && origins.count <= PanelLimits.originsMax)
     }
 
     private enum CodingKeys: String, CodingKey {
-        case revision, approvalRevision, offers, library, conflicts, origins, truncated
+        case coreInstanceId, revision, approvalRevision, offers, library, conflicts, origins, truncated
     }
 }
 
@@ -359,6 +363,10 @@ public enum AckFailureCode: String, Sendable, Equatable, Decodable, CaseIterable
     case storeError = "store_error"
     case notPermitted = "not_permitted"
     case unavailable
+
+    /// Whether sending the same command again can succeed: the store or core was briefly
+    /// unavailable. The others need the user to act on fresh state, under a new command.
+    public var isRetryable: Bool { self == .unavailable || self == .storeError }
 }
 
 public enum Ack: Sendable, Equatable {
@@ -502,8 +510,9 @@ public enum PanelRequest: Sendable, Equatable, Hashable {
     case approve(resourceId: String, version: String, expectedRevision: Int)
     case decline(resourceId: String, version: String, expectedRevision: Int)
     case revoke(resourceId: String, expectedRevision: Int)
-    case setAutoAcquire(origin: String, enabled: Bool, acknowledgeRisk: Bool)
-    case setAgentBrowserContext(enabled: Bool)
+    /// `expectedEnabled` is the value the user saw when toggling; the core refuses a stale one.
+    case setAutoAcquire(origin: String, enabled: Bool, acknowledgeRisk: Bool, expectedEnabled: Bool)
+    case setAgentBrowserContext(enabled: Bool, expectedEnabled: Bool)
     case refreshCapabilities
 
     /// Everything except `preview` changes stored state or settings.
@@ -557,10 +566,11 @@ public enum NativeCommand: Sendable, Equatable {
             return ["type": "decline", "resourceId": resourceId, "version": version, "expectedRevision": expectedRevision]
         case let .revoke(resourceId, expectedRevision):
             return ["type": "revoke", "resourceId": resourceId, "expectedRevision": expectedRevision]
-        case let .setAutoAcquire(origin, enabled, acknowledgeRisk):
-            return ["type": "set_auto_acquire", "origin": origin, "enabled": enabled, "acknowledgeRisk": acknowledgeRisk]
-        case let .setAgentBrowserContext(enabled):
-            return ["type": "set_agent_browser_context", "enabled": enabled]
+        case let .setAutoAcquire(origin, enabled, acknowledgeRisk, expectedEnabled):
+            return ["type": "set_auto_acquire", "origin": origin, "enabled": enabled, "acknowledgeRisk": acknowledgeRisk,
+                    "expectedEnabled": expectedEnabled]
+        case let .setAgentBrowserContext(enabled, expectedEnabled):
+            return ["type": "set_agent_browser_context", "enabled": enabled, "expectedEnabled": expectedEnabled]
         case .refreshCapabilities:
             return ["type": "refresh_capabilities"]
         }

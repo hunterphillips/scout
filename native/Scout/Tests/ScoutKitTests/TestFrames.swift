@@ -31,11 +31,11 @@ enum TestFrames {
     }
 
     static func capabilities(
-        revision: Int = 1, offers: [[String: Any]] = [], library: [[String: Any]] = [],
+        instance: String = "core-1", revision: Int = 1, offers: [[String: Any]] = [], library: [[String: Any]] = [],
         origins: [[String: Any]] = [], conflicts: [[String: Any]] = []
     ) throws -> Capabilities {
         let frame: [String: Any] = [
-            "type": "capabilities", "revision": revision, "approvalRevision": 0, "truncated": false,
+            "type": "capabilities", "coreInstanceId": instance, "revision": revision, "approvalRevision": 0, "truncated": false,
             "offers": offers, "library": library, "conflicts": conflicts, "origins": origins,
         ]
         return try JSONDecoder().decode(Capabilities.self, from: JSONSerialization.data(withJSONObject: frame))

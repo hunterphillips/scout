@@ -25,8 +25,8 @@ import Testing
             ("command.approve.json", .panel(commandId: "app-3", .approve(resourceId: F.rid, version: F.v1, expectedRevision: 1))),
             ("command.decline.json", .panel(commandId: "app-6", .decline(resourceId: F.rid, version: F.v1, expectedRevision: 1))),
             ("command.revoke.json", .panel(commandId: "app-7", .revoke(resourceId: F.rid, expectedRevision: 5))),
-            ("command.set-auto-acquire.json", .panel(commandId: "app-8", .setAutoAcquire(origin: F.origin, enabled: true, acknowledgeRisk: true))),
-            ("command.set-agent-browser-context.json", .panel(commandId: "app-10", .setAgentBrowserContext(enabled: false))),
+            ("command.set-auto-acquire.json", .panel(commandId: "app-8", .setAutoAcquire(origin: F.origin, enabled: true, acknowledgeRisk: true, expectedEnabled: false))),
+            ("command.set-agent-browser-context.json", .panel(commandId: "app-10", .setAgentBrowserContext(enabled: false, expectedEnabled: true))),
             ("command.refresh-capabilities.json", .panel(commandId: "app-11", .refreshCapabilities)),
         ]
         #expect(Set(cases.map(\.0)) == Set(try F.names(prefix: "command.")))
@@ -37,8 +37,8 @@ import Testing
 
     @Test func booleansEncodeAsJSONBooleans() {
         let line = String(decoding: NativeCommand.panel(commandId: "x",
-            .setAutoAcquire(origin: F.origin, enabled: true, acknowledgeRisk: false)).jsonLine(), as: UTF8.self)
-        #expect(line == #"{"acknowledgeRisk":false,"commandId":"x","enabled":true,"origin":"https://docs.example.com","type":"set_auto_acquire"}"# + "\n")
+            .setAutoAcquire(origin: F.origin, enabled: true, acknowledgeRisk: false, expectedEnabled: true)).jsonLine(), as: UTF8.self)
+        #expect(line == #"{"acknowledgeRisk":false,"commandId":"x","enabled":true,"expectedEnabled":true,"origin":"https://docs.example.com","type":"set_auto_acquire"}"# + "\n")
     }
 
     @Test func largestLegalCommandOfEachTypeFitsOneAtomicWrite() {
@@ -53,8 +53,8 @@ import Testing
             .approve(resourceId: rid, version: hash, expectedRevision: rev),
             .decline(resourceId: rid, version: hash, expectedRevision: rev),
             .revoke(resourceId: rid, expectedRevision: rev),
-            .setAutoAcquire(origin: origin, enabled: false, acknowledgeRisk: false),
-            .setAgentBrowserContext(enabled: false),
+            .setAutoAcquire(origin: origin, enabled: false, acknowledgeRisk: false, expectedEnabled: false),
+            .setAgentBrowserContext(enabled: false, expectedEnabled: false),
             .refreshCapabilities,
         ]
         for request in requests {
@@ -69,7 +69,8 @@ import Testing
         let text = String(repeating: marker + "\n", count: 30)
         var model = PanelModel(commands: CommandTracker(prefix: "t"))
         var sent: [NativeCommand] = model.apply(.running)
-        _ = model.apply(.capabilities(try TestFrames.capabilities(offers: [TestFrames.offer()])))
+        _ = model.apply(.capabilities(try TestFrames.capabilities(offers: [TestFrames.offer()], origins: [TestFrames.origin()])))
+        _ = model.apply(.grant(agentBrowserContext: false))
         let key = PreviewKey(resourceId: F.rid, version: F.v1)
         let requestSent = model.showPreview(key)
         let request = try #require(requestSent)

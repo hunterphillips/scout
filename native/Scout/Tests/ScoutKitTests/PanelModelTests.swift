@@ -253,21 +253,32 @@ import Testing
         guard case let .panel(id, on)? = model.setAutoAcquire(origin: F.origin, enabled: true, acknowledgeRisk: true) else {
             Issue.record("no command"); return
         }
-        #expect(on == .setAutoAcquire(origin: F.origin, enabled: true, acknowledgeRisk: true))
+        #expect(on == .setAutoAcquire(origin: F.origin, enabled: true, acknowledgeRisk: true, expectedEnabled: false))
         #expect(model.setAutoAcquire(origin: F.origin, enabled: false, acknowledgeRisk: false) == nil)  // pending
         _ = model.apply(.ack(.ok(commandId: id, revision: 0, approvalRevision: 0)))
+        _ = model.apply(.capabilities(try TestFrames.capabilities(revision: 2, origins: [TestFrames.origin(autoAcquire: true)])))
         guard case let .panel(_, off)? = model.setAutoAcquire(origin: F.origin, enabled: false, acknowledgeRisk: true) else {
             Issue.record("no command"); return
         }
-        #expect(off == .setAutoAcquire(origin: F.origin, enabled: false, acknowledgeRisk: false))
+        #expect(off == .setAutoAcquire(origin: F.origin, enabled: false, acknowledgeRisk: false, expectedEnabled: true))
+        // No origin setting in the frame: nothing to compare against, so no command.
+        #expect(model.setAutoAcquire(origin: "https://unknown.example", enabled: true, acknowledgeRisk: true) == nil)
 
-        // The grant shows what the core reports, not what was asked.
+        // The grant toggles from what the latest frame shows and renders what the core reports.
+        #expect(model.setAgentBrowserContext(true) == nil)  // no grant frame yet
+        _ = model.apply(.grant(agentBrowserContext: false))
         let grantSent = model.setAgentBrowserContext(true)
         let grant = try #require(grantSent)
-        #expect(model.setAgentBrowserContext(true) == nil)
-        _ = model.apply(.ack(.ok(commandId: grant.commandId!, revision: 0, approvalRevision: 0)))
+        guard case let .panel(_, grantRequest) = grant else { Issue.record("not a panel command"); return }
+        #expect(grantRequest == .setAgentBrowserContext(enabled: true, expectedEnabled: false))
+        #expect(model.setAgentBrowserContext(true) == nil)  // pending
+        // Enabling it read back off: the core acks invalid and the frame keeps it off.
+        _ = model.apply(.ack(.failed(commandId: grant.commandId!, code: .invalid, revision: nil)))
         _ = model.apply(.grant(agentBrowserContext: false))
         #expect(model.capabilities.agentBrowserContext == false)
+        #expect(model.grantRecord?.state == .failed(.invalid))
+        #expect(model.retry(grant.commandId!) == nil)  // not a passing failure: toggle again instead
+        #expect(model.setAgentBrowserContext(true) != nil)
 
         #expect(model.pauseCommand() == .pause)
         _ = model.apply(.state(status: .paused, visitEpoch: nil, detail: nil))
@@ -293,4 +304,32 @@ import Testing
         guard case let .sidecar(text)? = model.problems.first else { Issue.record("no sidecar problem"); return }
         #expect(text.hasPrefix("Scout core kept exiting"))
     }
+
+    @Test func aNewCoreInstanceRestartsRevisionsAndResendsPendingCommands() throws {
+        var model = try onSite()
+        _ = model.apply(.capabilities(try TestFrames.capabilities(revision: 9, offers: [TestFrames.offer()], origins: [TestFrames.origin()])))
+        loaded(&model, key)
+        let approveSent = model.approve(key)
+        let approve = try #require(approveSent)
+        model.markSent(approve, written: true)
+        // Same instance, lower revision: stale.
+        _ = model.apply(.capabilities(try TestFrames.capabilities(revision: 3, offers: [])))
+        #expect(model.capabilities.offers.count == 1)
+        // Another instance: accepted at any revision, and the pending approval goes again under its ID.
+        let resent = model.apply(.capabilities(try TestFrames.capabilities(instance: "core-2", revision: 0, offers: [TestFrames.offer()])))
+        #expect(resent == [approve])
+        #expect(model.capabilities.capabilities?.coreInstanceId == "core-2")
+    }
+
+    @Test func approveOfAnUnknownVersionIsAProblemWithoutRetry() throws {
+        var model = try onSite()
+        loaded(&model, key)
+        let approveSent = model.approve(key)
+        let approve = try #require(approveSent)
+        _ = model.apply(.ack(.failed(commandId: approve.commandId!, code: .notFound, revision: 1)))
+        guard case let .command(record)? = model.problems.first else { Issue.record("no problem"); return }
+        #expect(record.state == .failed(.notFound))
+        #expect(model.retry(approve.commandId!) == nil)
+    }
 }
+
