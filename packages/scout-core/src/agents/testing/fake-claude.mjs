@@ -220,6 +220,10 @@ switch (mode) {
       return { status: "ok", items: [first, item(ids[1])] };
     });
     break;
+  case "marker-only":
+    // The first reason is the visible marker and nothing else.
+    await answer(() => ({ status: "ok", items: [item(ids[0], (probe ? visibleMarker() : undefined) ?? "no marker"), item(ids[1])] }));
+    break;
   case "empty":
     await answer(() => ({ status: "empty" }));
     break;

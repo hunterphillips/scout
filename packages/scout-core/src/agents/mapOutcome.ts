@@ -2,6 +2,8 @@
 // (cancel, timeout, a failed check: a stop always wins over output); then no init; then the
 // result event (none, max turns, error, non-success, no structured output); then the
 // structured output through validateJobOutput. Only `completed` can be `ok` or `empty`.
+// With an instruction marker, the first pick's reason loses the marker; a pick whose reason
+// was only the marker is dropped like any other pick without a reason.
 // Usage counts are copied from the result event whatever the outcome.
 
 import type { JobRequest } from "@scout/contracts";
@@ -67,7 +69,13 @@ export function mapOutcome(run: CliRun, req: Pick<JobRequest, "candidates" | "ma
     const first = items[0]!;
     const taken = takeInstructionMarker(first.reason, instructionMarker);
     details.instructionMarker = taken.reached ? "reached" : "missing";
-    if (taken.reason !== "") first.reason = taken.reason;
+    first.reason = taken.reason;
+    if (first.reason === "") {
+      // The marker was the whole reason: a pick with no reason is dropped, never shown with the marker.
+      items.shift();
+      details.droppedPicks++;
+      if (items.length === 0) return { result: { status: "error", reason: "invalid_output" }, termination: "invalid_output" };
+    }
   }
   return { result: { status: "ok", items }, termination: "completed" };
 }

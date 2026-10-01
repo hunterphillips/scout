@@ -86,7 +86,7 @@ export interface JobOutcome {
 export interface AgentJobAdapter {
   readonly id: string;
   run(request: JobRequest, options: JobRunOptions): Promise<JobOutcome>;
-  /** Cancel every running job (reason `shutdown`) and wait for cleanup. */
+  /** Close the adapter: cancel every running job (reason `shutdown`) and wait for cleanup. A later `run` is `unavailable`. */
   abortAll(): Promise<void>;
 }
 

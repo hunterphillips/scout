@@ -11,11 +11,13 @@
 // checks each event as it arrives (init, tools, hooks, auth); childSupervisor.ts spawns,
 // terminates and reaps the process tree; mapOutcome.ts turns the finished run into an
 // outcome; jobStop.ts holds the one stop decision. This file wires them per job and owns the
-// adapter: gates, job files, the deadline and cancellation. Differences from the legacy runner: no personal sources, evidence IDs or audit map; one
+// adapter: gates, job files, the deadline and cancellation.
+// Differences from the legacy runner: no personal sources, evidence IDs or audit map; one
 // job at a time (a second is `unavailable: busy`; the coordinator runs one job anyway); the
 // instructions are appended to the default system prompt, not a replacement; settings come
 // from the user scope only, with hooks disabled; termination reasons map onto the fixed
-// HostJobResult codes plus a finer `termination` in job details.
+// HostJobResult codes plus a finer `termination` in job details; abortAll() closes the
+// adapter, so a later job is `unavailable: agent_unavailable`.
 //
 // Billing gate: refreshPreflight() runs the direct preflight (blocking; call it when the
 // agent profile is loaded or edited, never on the job path) and caches the verdict with the
@@ -45,7 +47,7 @@ import type { ExpectedInit } from "./initCheck.js";
 import { buildJobSurface, defaultScoutMcpEntrypoint, scoutOnlySurface, type JobSurface } from "./jobSurface.js";
 import { JobStop, type Ending, type Out } from "./jobStop.js";
 import { createJsonLineStream } from "./jsonLineStream.js";
-import { createLaunchProfile, runDirectPreflight, type DirectPreflightOptions, type LaunchProfile } from "./launchProfile.js";
+import { createLaunchProfile, LaunchProfileError, runDirectPreflight, type DirectPreflightOptions, type LaunchProfile } from "./launchProfile.js";
 import { mapOutcome, recordUsage } from "./mapOutcome.js";
 import { MODEL_RE, profileFingerprint, type AgentProfile } from "./profile.js";
 import { buildJobInstructions, buildJobPrompt } from "./prompt.js";
@@ -192,6 +194,28 @@ export function redactReason(reason: string): string {
   return reason.replace(/^(\w+ settings) .*?(: [^:]*)$/u, "$1$2").replace(/(?:^|(?<=\s))\/\S+/gu, "<path>");
 }
 
+/**
+ * A launch-profile failure by cause: the CLI binary missing or not executable is
+ * `agent_unavailable`; the job dir or jobs root unusable (an existing dir, EACCES, wrong
+ * mode) is `agent_failed`; a profile or environment Scout cannot run with is
+ * `unsupported_configuration`.
+ */
+export function launchProfileFailure(e: unknown): Out {
+  const detail = "launch_profile";
+  const code = e instanceof LaunchProfileError ? e.code : undefined;
+  switch (code) {
+    case "profile: claude path is not an absolute executable file":
+      return { result: { status: "unavailable", reason: "agent_unavailable" }, termination: "agent_unavailable", detail };
+    case "profile: jobs root is not a private directory owned by this user":
+    case "profile: job dir could not be created":
+    case "profile: job dir is not private and owned":
+    case undefined:
+      return { result: { status: "error", reason: "agent_failed" }, termination: "process_error", detail };
+    default:
+      return { result: { status: "error", reason: "unsupported_configuration" }, termination: "unsupported_configuration", detail };
+  }
+}
+
 // ---------- the adapter ----------
 
 export function createClaudeJobAdapter(deps: ClaudeJobDeps): ClaudeJobAdapter {
@@ -205,6 +229,8 @@ export function createClaudeJobAdapter(deps: ClaudeJobDeps): ClaudeJobAdapter {
   const fingerprint = profileFingerprint(profile);
   let preflight: PreflightState = { verdict: "unchecked", reasons: [] };
   let current: { stop: JobStop; done: Promise<unknown> } | undefined;
+  /** Set by abortAll: the adapter runs no further jobs. */
+  let closed = false;
 
   function refreshPreflight(): PreflightState {
     const clock = deps.clock ?? systemClock;
@@ -250,6 +276,7 @@ export function createClaudeJobAdapter(deps: ClaudeJobDeps): ClaudeJobAdapter {
       return { result, details };
     };
 
+    if (closed) return finish({ status: "unavailable", reason: "agent_unavailable" }, "agent_unavailable", "closed");
     if (current) return finish({ status: "unavailable", reason: "busy" }, "busy");
     if (preflight.verdict !== "subscription") return finish({ status: "error", reason: "preflight_failed" }, "preflight_failed", "unverified");
     if (req.profileFingerprint !== fingerprint) return finish({ status: "error", reason: "unsupported_configuration" }, "unsupported_configuration", "profile_mismatch");
@@ -290,8 +317,8 @@ export function createClaudeJobAdapter(deps: ClaudeJobDeps): ClaudeJobAdapter {
     try {
       const o = { parentEnv: deps.parentEnv, claudePath: profile.claudePath, model: profile.model, jobsRoot, jobId: req.requestId };
       launch = createLaunchProfile(deps.workspaceRoots ? { ...o, workspaceRoots: deps.workspaceRoots } : o);
-    } catch {
-      return { result: { status: "error", reason: "unsupported_configuration" }, termination: "unsupported_configuration", detail: "launch_profile" };
+    } catch (e) {
+      return launchProfileFailure(e);
     }
     const jobDir = launch.cwd;
     try {
@@ -435,6 +462,7 @@ export function createClaudeJobAdapter(deps: ClaudeJobDeps): ClaudeJobAdapter {
     },
     run,
     async abortAll() {
+      closed = true;
       const c = current;
       if (!c) return;
       c.stop.external({ result: { status: "cancelled", reason: "shutdown" }, termination: "cancelled" });

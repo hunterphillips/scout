@@ -490,6 +490,60 @@ describe("claude job: gates before launch", () => {
     expect(existsSync(join(e.scoutHome, "escape"))).toBe(false);
   });
 
+  it("after abortAll the adapter is closed: a new job is unavailable and never spawns", async () => {
+    const e = await setup();
+    await e.adapter.abortAll();
+    const out = await e.adapter.run(request(e), { toolSurface: surface(e) });
+    expect(out.result).toMatchObject({ status: "unavailable", reason: "agent_unavailable" });
+    expect(e.spawnCalls).toBe(0);
+  });
+});
+
+describe("claude job: launch-profile failures by cause", () => {
+  it("the CLI binary is gone: unavailable agent_unavailable, never spawns", async () => {
+    const e = await setup({ deps: { profile: { schemaVersion: 1, adapter: "claude-code", claudePath: "/nonexistent-scout-test/claude", model: DEFAULT_AGENT_MODEL } } });
+    const out = await e.adapter.run(request(e), { toolSurface: surface(e) });
+    expect(out.result).toMatchObject({ status: "unavailable", reason: "agent_unavailable" });
+    expect(out.details).toMatchObject({ termination: "agent_unavailable", detail: "launch_profile" });
+    expect(e.spawnCalls).toBe(0);
+  });
+
+  it("an existing run/jobs/<request-id> is never reused or removed: agent_failed", async () => {
+    const e = await setup();
+    const dir = join(e.scoutHome, "run", "jobs", "job-1");
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    writeFileSync(join(dir, "keep"), "x");
+    const out = await e.adapter.run(request(e), { toolSurface: surface(e) });
+    expect(out.result).toMatchObject({ status: "error", reason: "agent_failed" });
+    expect(out.details.detail).toBe("launch_profile");
+    expect(readFileSync(join(dir, "keep"), "utf8")).toBe("x");
+    expect(e.spawnCalls).toBe(0);
+  });
+
+  it.skipIf(process.getuid?.() === 0)("a run dir that cannot be written (EACCES): agent_failed", async () => {
+    const e = await setup();
+    const run = join(e.scoutHome, "run");
+    mkdirSync(run, { mode: 0o500 });
+    try {
+      const out = await e.adapter.run(request(e), { toolSurface: surface(e) });
+      expect(out.result).toMatchObject({ status: "error", reason: "agent_failed" });
+      expect(out.details.detail).toBe("launch_profile");
+      expect(e.spawnCalls).toBe(0);
+    } finally {
+      chmodSync(run, 0o700);
+    }
+  });
+
+  it("an environment the launch profile refuses (relative HOME): unsupported_configuration", async () => {
+    const e = await setup({ deps: { parentEnv: { PATH: "/usr/bin:/bin", HOME: "relative/home" } } });
+    const out = await e.adapter.run(request(e), { toolSurface: surface(e) });
+    expect(out.result).toMatchObject({ status: "error", reason: "unsupported_configuration" });
+    expect(out.details.detail).toBe("launch_profile");
+    expect(e.spawnCalls).toBe(0);
+  });
+});
+
+describe("claude job: tool surface", () => {
   it("a bad tool surface is unsupported_configuration", async () => {
     const e = await setup();
     const out = await e.adapter.run(request(e), { toolSurface: { scout: { socketPath: "relative.sock", token: e.core.token } } });
@@ -518,6 +572,16 @@ describe("claude job: the synthetic instruction marker", () => {
     writeFileSync(join(e.userHome, ".claude", "CLAUDE.md"), markerInstructionText(marker));
     const out = await e.adapter.run(request(e), { toolSurface: surface(e), instructionMarker: marker });
     expect(out.details.instructionMarker).toBe("missing");
+  });
+
+  it("a first reason that was only the marker drops that pick instead of returning the marker", async () => {
+    const e = await setup({ mode: "marker-only" });
+    const marker = newInstructionMarker();
+    writeFileSync(join(e.userHome, ".claude", "CLAUDE.md"), markerInstructionText(marker));
+    const out = await e.adapter.run(request(e), { toolSurface: surface(e), instructionMarker: marker });
+    expect(out.details).toMatchObject({ instructionMarker: "reached", droppedPicks: 1 });
+    expect(out.result).toMatchObject({ status: "ok", items: [{ id: "c2" }] });
+    expect(JSON.stringify(out.result)).not.toContain(marker);
   });
 
   it("is reported missing when no user instructions define it", async () => {
