@@ -1,7 +1,12 @@
-// Provenance: copied verbatim from packages/personal-context-mcp/src/processTree.ts
-// (itself lifted from scripts/spikes/process-tree.mjs). Temporary duplicate until Phase 4
-// removes the legacy service. Differences: none in behaviour; only this header.
-// processTree.test.ts includes a parity check against the legacy copy.
+// Provenance: copied from packages/personal-context-mcp/src/processTree.ts (itself lifted
+// from scripts/spikes/process-tree.mjs). Temporary duplicate until Phase 4 removes the
+// legacy service. OwnedTree's tracking and signalling rules are unchanged, and
+// processTree.test.ts checks them against the legacy copy. Differences, all additive:
+//   - psSnapshotAsync(): the same ps query through execFile, so the job runtime never
+//     blocks the coordinator's event loop on ps. psSnapshot() is kept for OwnedTree's
+//     default and the tests; both parse through parsePsOutput().
+//   - signalAll() takes an optional snapshot, as poll() and alive() already did, so a caller
+//     holding a fresh async snapshot never falls back to the blocking default.
 //
 // Track and clean up the process tree one spawned `claude` owns.
 //
@@ -11,7 +16,7 @@
 // Identities are pid + start time, so a reused pid is never signalled. ps is asked for
 // pid/ppid/pgid/state/start only, never command lines or environments.
 
-import { spawnSync } from "node:child_process";
+import { execFile, spawnSync } from "node:child_process";
 
 export interface PsEntry {
   pid: number;
@@ -30,15 +35,28 @@ export interface ProcessIdentity {
   start: string;
 }
 
+const PS_ARGS = ["-A", "-o", "pid=,ppid=,pgid=,stat=,lstart="];
+const PS_OPTS = { encoding: "utf8", env: { PATH: "/bin:/usr/bin", LC_ALL: "C" }, timeout: 5000 } as const;
+
+/** Blocking: ~20 ms per call. Not for the job runtime's hot path; see psSnapshotAsync. */
 export function psSnapshot(): PsSnapshot {
-  const r = spawnSync("/bin/ps", ["-A", "-o", "pid=,ppid=,pgid=,stat=,lstart="], {
-    encoding: "utf8",
-    env: { PATH: "/bin:/usr/bin", LC_ALL: "C" },
-    timeout: 5000,
+  const r = spawnSync("/bin/ps", PS_ARGS, PS_OPTS);
+  if (r.status !== 0 || typeof r.stdout !== "string") return new Map();
+  return parsePsOutput(r.stdout);
+}
+
+/** The same query without blocking; an empty map when ps fails, as psSnapshot. */
+export function psSnapshotAsync(): Promise<PsSnapshot> {
+  return new Promise((resolve) => {
+    execFile("/bin/ps", PS_ARGS, { ...PS_OPTS, maxBuffer: 16 * 1024 * 1024 }, (err, stdout) => {
+      resolve(err || typeof stdout !== "string" ? new Map() : parsePsOutput(stdout));
+    });
   });
+}
+
+export function parsePsOutput(stdout: string): PsSnapshot {
   const out: PsSnapshot = new Map();
-  if (r.status !== 0 || typeof r.stdout !== "string") return out;
-  for (const line of r.stdout.split("\n")) {
+  for (const line of stdout.split("\n")) {
     const m = line.trim().match(/^(\d+)\s+(\d+)\s+(\d+)\s+(\S+)\s+(.+)$/);
     if (!m) continue;
     const pid = Number(m[1]);
@@ -107,8 +125,7 @@ export class OwnedTree {
    * identity still in it; then each live owned process outside the group individually.
    * An empty or reused group id is never signalled, and there is never a broad kill.
    */
-  signalAll(signal: NodeJS.Signals): { groupSignalled: boolean; escapedSignalled: number } {
-    const snap = this.snapshot();
+  signalAll(signal: NodeJS.Signals, snap: PsSnapshot = this.snapshot()): { groupSignalled: boolean; escapedSignalled: number } {
     const live = this.alive(snap);
     const inGroup = live.filter((i) => snap.get(i.pid)?.pgid === this.pgid);
     let groupSignalled = false;

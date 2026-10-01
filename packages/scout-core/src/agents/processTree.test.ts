@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { OwnedTree as LegacyOwnedTree } from "personal-context-mcp";
 import { afterEach, describe, expect, it } from "vitest";
-import { OwnedTree, psSnapshot, type PsEntry, type PsSnapshot } from "./processTree.js";
+import { OwnedTree, parsePsOutput, psSnapshot, psSnapshotAsync, type PsEntry, type PsSnapshot } from "./processTree.js";
 
 const cleanup: number[] = [];
 afterEach(() => {
@@ -76,5 +76,33 @@ describe("OwnedTree", () => {
     }
     expect(ours.alive(steps[2]!).map((i) => i.pid).sort()).toEqual([102, 103]);
     expect(psSnapshot().get(process.pid)).toMatchObject({ pid: process.pid });
+  });
+
+  it("the async query sees the same processes as the blocking one", async () => {
+    const snap = await psSnapshotAsync();
+    const pick = (e: PsEntry | undefined) => e && { pid: e.pid, ppid: e.ppid, pgid: e.pgid, start: e.start };
+    expect(pick(snap.get(process.pid))).toEqual(pick(psSnapshot().get(process.pid)));
+    expect(snap.get(process.pid)).toBeDefined();
+  });
+
+  it("signalAll with a given snapshot never takes its own", async () => {
+    const { leader } = await startFamily();
+    let own = 0;
+    const tree = new OwnedTree(leader, () => {
+      own++;
+      return new Map();
+    });
+    const snap = await psSnapshotAsync();
+    tree.poll(snap);
+    expect(tree.signalAll("SIGKILL", snap)).toEqual({ groupSignalled: true, escapedSignalled: 1 });
+    expect(own).toBe(0);
+    await sleep(300);
+    expect(tree.alive(await psSnapshotAsync()).map((i) => i.pid)).toEqual([]);
+  });
+
+  it("parses ps output and skips lines it cannot read", () => {
+    const snap = parsePsOutput("  12   1  12 Ss   Mon Sep 30 10:00:00 2026\ngarbage\n\n 13 12 12 Z+ Mon Sep 30 10:00:01 2026\n");
+    expect([...snap.keys()]).toEqual([12, 13]);
+    expect(snap.get(13)).toEqual({ pid: 13, ppid: 12, pgid: 12, state: "Z+", start: "Mon Sep 30 10:00:01 2026" });
   });
 });
