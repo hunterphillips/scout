@@ -1,6 +1,7 @@
 // The capability store's advisory cross-process lock: `capabilities/store.lock`, created with
 // O_CREAT | O_EXCL (0600) and holding `{pid, instanceId, startedAt}`. One writer at a time:
 // the running core holds it, so the dev CLI cannot change decisions behind the core's back.
+// The agent profile reuses it as `<SCOUT_HOME>/agent-profile.lock` (`options.file`).
 //
 // A lock is stale, and reclaimed, when its process is gone (`kill(pid, 0)` → ESRCH) or is not
 // ours to signal (EPERM: another user's process reusing the pid). A file that does not parse
@@ -39,6 +40,8 @@ export interface StoreLock {
 
 export interface LockOptions {
   now: () => number;
+  /** The lock file's name in `dir`; LOCK_FILE by default. The agent profile uses `agent-profile.lock`. */
+  file?: string;
   pid?: number;
   /** Test seam: `process.kill(pid, 0)`. */
   probe?: (pid: number) => void;
@@ -79,7 +82,7 @@ function alive(pid: number, probe: (pid: number) => void): boolean {
 
 /** Take the lock in `dir`, reclaiming a stale one once. Throws StoreLockedError when a live holder has it. */
 export function acquireStoreLock(dir: string, options: LockOptions): StoreLock {
-  const path = join(dir, LOCK_FILE);
+  const path = join(dir, options.file ?? LOCK_FILE);
   const pid = options.pid ?? process.pid;
   const probe = options.probe ?? ((p: number) => void process.kill(p, 0));
   const record: LockRecord = { pid, instanceId: randomBytes(16).toString("hex"), startedAt: options.now() };

@@ -131,6 +131,7 @@ export function planJobTools(o: ToolPlanOptions): ToolPlan {
           resolve(c.env); // dry run: the values are discarded here
           entry = { id: c.id, command: c.command, args: [...c.args], env: Object.fromEntries(Object.entries(c.env).map(([k, b]) => [k, { file: b.file, pointer: b.pointer }])) };
           if (c.literalEnv) entry.literalEnv = { ...c.literalEnv }; // non-secret, carried verbatim
+          if (c.cwd !== undefined) entry.cwd = c.cwd;
         }
       } catch {
         entry = undefined; // a binding that does not resolve: the codes stay out of the plan

@@ -26,7 +26,7 @@ export const AGENT_PROFILE_SCHEMA_VERSION = 1;
 /** Hunter's 2026-09-30 choice for the initial Claude profile. Editable in the profile file. */
 export const DEFAULT_AGENT_MODEL = "claude-sonnet-5-5";
 /** Room for the selected tools' frozen input schemas. */
-const PROFILE_MAX_BYTES = 512 * 1024;
+export const PROFILE_MAX_BYTES = 512 * 1024;
 
 /** Only a plain alias or model name; never anything that parses as a flag. Same rule as the legacy service's MODEL_RE. */
 export const MODEL_RE = /^[A-Za-z0-9][A-Za-z0-9._\-[\]]{0,63}$/;

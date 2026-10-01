@@ -11,7 +11,8 @@
 //
 // Behaviour:
 //   - Each connection used by a selected tool is started once, as a child of the bridge
-//     (same process group, so the job's process-tree kill covers it), argv-only, cwd `/`,
+//     (same process group, so the job's process-tree kill covers it), argv-only, cwd `/`
+//     unless the definition names one,
 //     with exactly its literal and bound environment: nothing from the bridge's, the
 //     core's or the CLI's environment. The bridge resolves the bindings in memory (resolveEnvBindings)
 //     immediately before the spawn and writes the values nowhere. A connection whose
@@ -100,11 +101,28 @@ export function readBridgeJob(path: string): BridgeJob {
 
 // ---------- the bridge ----------
 
+/** Why a selected tool is not offered. */
+export type BridgeDropCode = "connection_unavailable" | "tool_missing" | "schema_changed";
+
+/**
+ * Whether a selected tool can be offered, given what its connection listed (`undefined`
+ * when the connection did not start or its bindings did not resolve). The first listed
+ * tool of that name decides; a listing without an input schema counts as changed. Pure:
+ * the bridge applies it to the live listing, the setup CLI's `status` to the last inspection.
+ */
+export function selectedToolDropReason(selected: { name: string; schemaHash: string }, listed: readonly { name: string; inputSchema?: unknown }[] | undefined): BridgeDropCode | undefined {
+  if (listed === undefined) return "connection_unavailable";
+  const live = listed.find((x) => x.name === selected.name);
+  if (!live) return "tool_missing";
+  if (live.inputSchema === undefined || schemaHash(live.inputSchema) !== selected.schemaHash) return "schema_changed";
+  return undefined;
+}
+
 export interface BridgeStats {
   /** Selected tools the bridge advertises. */
   advertised: string[];
   /** Selected tools dropped at startup, with a fixed code. */
-  dropped: { tool: string; code: "connection_unavailable" | "tool_missing" | "schema_changed" }[];
+  dropped: { tool: string; code: BridgeDropCode }[];
   forwardedCalls: number;
   refusedCalls: number;
   /** Requests a backend made of the bridge (sampling, elicitation, ...), all refused. */
@@ -164,11 +182,11 @@ export function createContextToolBridge(
       env = resolve(conn.env); // in memory, just before the spawn; never written anywhere
     } catch {
       onCode("binding-unresolved");
-      for (const t of selected) stats.dropped.push({ tool: t.name, code: "connection_unavailable" });
+      for (const t of selected) stats.dropped.push({ tool: t.name, code: selectedToolDropReason(t, undefined)! });
       return;
     }
     // Literal (non-secret) values first; the schema keeps the names disjoint from the bindings.
-    const transport = new ExactEnvStdioTransport(conn.command, conn.args, { ...conn.literalEnv, ...env });
+    const transport = new ExactEnvStdioTransport(conn.command, conn.args, { ...conn.literalEnv, ...env }, conn.cwd ?? "/");
     transports.push(transport);
     const client = new Client({ name: "scout-bridge", version: "0" }, { capabilities: {} });
     // Every request a backend makes of us is refused; every notification (list_changed included) is ignored.
@@ -190,14 +208,13 @@ export function createContextToolBridge(
     } catch {
       onCode("backend-unavailable");
       void transport.close();
-      for (const t of selected) stats.dropped.push({ tool: t.name, code: "connection_unavailable" });
+      for (const t of selected) stats.dropped.push({ tool: t.name, code: selectedToolDropReason(t, undefined)! });
       return;
     }
     backends.set(conn.id, { transport, client });
     for (const t of selected) {
-      const live = tools.find((x) => x.name === t.name);
-      if (!live) stats.dropped.push({ tool: t.name, code: "tool_missing" });
-      else if (schemaHash(live.inputSchema) !== t.schemaHash) stats.dropped.push({ tool: t.name, code: "schema_changed" });
+      const code = selectedToolDropReason(t, tools);
+      if (code) stats.dropped.push({ tool: t.name, code });
       else available.set(t.name, t);
     }
   }
