@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
+  HOST_ORIGIN_MAX_CHARS,
+  HostOriginSchema,
   NATIVE_COMMAND_MAX_BYTES,
   NativeCommandSchema,
   PanelStateSchema,
@@ -160,14 +162,20 @@ describe("native commands (app -> core)", () => {
       { type: "set_agent_browser_context", commandId: longest, enabled: false, expectedEnabled: false },
       { type: "refresh_capabilities", commandId: longest },
     ];
+    expect(origin.length).toBe(HOST_ORIGIN_MAX_CHARS);
     for (const c of largest) {
       expect(NativeCommandSchema.safeParse(c).success).toBe(true);
       expect(Buffer.byteLength(`${JSON.stringify(c)}\n`, "utf8")).toBeLessThan(NATIVE_COMMAND_MAX_BYTES);
     }
-    expect(NATIVE_COMMAND_MAX_BYTES).toBe(4096);
+    // macOS PIPE_BUF (sys/syslimits.h).
+    expect(NATIVE_COMMAND_MAX_BYTES).toBe(512);
+    expect(HOST_ORIGIN_MAX_CHARS).toBe(267);
     expect(PREVIEW_CHUNK_MAX_BYTES).toBe(16 * 1024);
     // A 254-character host is not an origin, so nothing longer gets through.
     expect(NativeCommandSchema.safeParse({ ...largest[4], origin: `https://a${host}` }).success).toBe(false);
+    // Nor is a long URL that is not a bare host origin.
+    expect(HostOriginSchema.safeParse(`https://docs.example.com/${"p".repeat(400)}`).success).toBe(false);
+    expect(HostOriginSchema.safeParse("https://docs.example.com:8443").success).toBe(true);
   });
 });
 

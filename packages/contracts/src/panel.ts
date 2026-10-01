@@ -6,7 +6,8 @@
 //
 // App -> core commands must each fit in one atomic pipe write (NATIVE_COMMAND_MAX_BYTES, the
 // platform's PIPE_BUF): the app drops a larger write rather than splitting it. So commands
-// carry IDs, hashes, revisions, and cursors only; never resource text or tool configuration.
+// carry IDs, hashes, revisions, cursors, and host origins only; never resource text or tool
+// configuration.
 // Every new command carries a `commandId`; the core answers each one with exactly one `ack`
 // (a successful `preview` answers with a `preview` chunk instead). A retried `commandId`
 // whose effect already applied gets the same `ok: true` ack and changes nothing.
@@ -15,15 +16,22 @@ import { z } from "zod";
 import { AGENT_METHODS, AGENT_STATUS_CODES, CoreInstanceIdSchema } from "./agent.js";
 import {
   ContentHashSchema,
+  HOSTNAME_MAX_CHARS,
   HttpsOriginSchema,
   ResourceIdSchema,
   ResourceKindSchema,
   ResourceVersionStateSchema,
   SourceUrlSchema,
+  isHttpsOrigin,
 } from "./capability.js";
 
-/** PIPE_BUF on macOS: one JSONL command line, newline included, must be shorter than this. */
-export const NATIVE_COMMAND_MAX_BYTES = 4096;
+/**
+ * PIPE_BUF on macOS (`sys/syslimits.h`), the largest write a pipe takes whole or not at all:
+ * one JSONL command line, newline included, must be shorter than this.
+ */
+export const NATIVE_COMMAND_MAX_BYTES = 512;
+/** `https://` + an RFC 1123 hostname of at most HOSTNAME_MAX_CHARS + `:65535`. */
+export const HOST_ORIGIN_MAX_CHARS = "https://".length + HOSTNAME_MAX_CHARS + ":65535".length;
 /** Text bytes in one `preview` chunk; chunks never split a UTF-8 code point. */
 export const PREVIEW_CHUNK_MAX_BYTES = 16 * 1024;
 /** How long a preview cursor stays usable. */
@@ -47,6 +55,12 @@ export const CommandIdSchema = z.string().regex(COMMAND_ID_RE);
 /** Opaque, issued by the core. */
 export const PreviewCursorSchema = z.string().regex(/^[A-Za-z0-9_-]{1,64}$/);
 const Revision = z.int().nonnegative();
+/**
+ * An origin a command may carry: exactly what isHttpsOrigin accepts (the same check the core
+ * applies to every visit, permission, and setting origin), so at most HOST_ORIGIN_MAX_CHARS
+ * ASCII characters and the command stays under NATIVE_COMMAND_MAX_BYTES.
+ */
+export const HostOriginSchema = z.string().max(HOST_ORIGIN_MAX_CHARS).refine(isHttpsOrigin, { message: "not an https host origin" });
 
 // --- Core -> native app ---
 
@@ -128,7 +142,8 @@ export const CapabilityConflictSchema = z.object({
 });
 
 export const OriginSettingSchema = z.object({
-  origin: HttpsOriginSchema,
+  /** Echoed back in `set_auto_acquire`. */
+  origin: HostOriginSchema,
   autoAcquire: z.boolean(),
   /** When the user acknowledged the auto-acquire risk; present only while auto-acquire is on. */
   acknowledgedAt: z.number().optional(),
@@ -255,7 +270,7 @@ export const RevokeCommandSchema = cmd("revoke", { resourceId: ResourceIdSchema,
  * answers a retry, and the app never retries a toggle across a core restart (new
  * `coreInstanceId`); it sends a new command from the state it then shows.
  */
-export const SetAutoAcquireCommandSchema = cmd("set_auto_acquire", { origin: HttpsOriginSchema, enabled: z.boolean(), expectedEnabled: z.boolean(), acknowledgeRisk: z.boolean() });
+export const SetAutoAcquireCommandSchema = cmd("set_auto_acquire", { origin: HostOriginSchema, enabled: z.boolean(), expectedEnabled: z.boolean(), acknowledgeRisk: z.boolean() });
 /**
  * The user's agent may read browser context; compare-and-set on `expectedEnabled` exactly like
  * `set_auto_acquire`, with the same retry rule: no retry across a core restart. An enable the

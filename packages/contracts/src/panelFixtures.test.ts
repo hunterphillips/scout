@@ -2,11 +2,12 @@ import { readdirSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import type { z } from "zod";
-import { NATIVE_COMMAND_MAX_BYTES, NativeCommandSchema, PanelStateSchema } from "./index.js";
+import { HOST_ORIGIN_MAX_CHARS, NATIVE_COMMAND_MAX_BYTES, NativeCommandSchema, PanelStateSchema } from "./index.js";
 
 // The Swift app's test fixtures must stay valid under this contract. Every file in the
 // directory is checked, so a new fixture is covered without editing this test.
 const FIXTURES_DIR = fileURLToPath(new URL("../../../native/Scout/Tests/Fixtures/", import.meta.url));
+const SWIFT_PROTOCOL = fileURLToPath(new URL("../../../native/Scout/Sources/ScoutKit/Protocol.swift", import.meta.url));
 
 type Fixture = { file: string; value: unknown };
 
@@ -66,6 +67,13 @@ describe("Swift panel fixtures", () => {
     expect(result.success, result.error?.message).toBe(true);
     const line = `${JSON.stringify(value)}\n`;
     expect(Buffer.byteLength(line, "utf8")).toBeLessThan(NATIVE_COMMAND_MAX_BYTES);
+  });
+
+  it("the app's command limits are the contract's", () => {
+    const swift = readFileSync(SWIFT_PROTOCOL, "utf8");
+    const limit = (name: string): number => Number(new RegExp(`static let ${name} = (\\d+)`).exec(swift)?.[1]);
+    expect(limit("commandMaxBytes")).toBe(NATIVE_COMMAND_MAX_BYTES);
+    expect(limit("originMaxBytes")).toBe(HOST_ORIGIN_MAX_CHARS);
   });
 
   it("every PanelState member has a fixture", () => {
