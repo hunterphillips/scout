@@ -14,7 +14,8 @@ import type { Timers } from "./clock.js";
 import { type CoordinatorCapabilities, type CoordinatorOptions, createCoordinator } from "./coordinator.js";
 import type { DiagnosticFields, Diagnostics } from "./diagnostics.js";
 import { DWELL_MS } from "./dwell.js";
-import type { OriginFetchSession } from "./fetch/originSession.js";
+import type { GuardedFetchResult } from "./fetch/guardedFetch.js";
+import { createOriginFetchSession, type OriginFetchSession } from "./fetch/originSession.js";
 import type { SocketClient } from "./socketServer.js";
 
 const STRIPE = "https://docs.stripe.com/payments/checkout";
@@ -58,6 +59,11 @@ function deferred<T>() {
   return { promise, resolve, reject };
 }
 
+/** Let queued promise callbacks and pending I/O callbacks run. */
+const flushMacro = async (): Promise<void> => {
+  for (let i = 0; i < 5; i++) await new Promise<void>((resolve) => setImmediate(resolve));
+};
+
 /** Let queued promise callbacks run. */
 const flush = async (): Promise<void> => {
   for (let i = 0; i < 10; i++) await Promise.resolve();
@@ -77,7 +83,7 @@ const discoveryFor = (origin: string): DiscoveryResult => ({
 /** Fake discovery wiring: each pass waits on a deferred the test resolves. */
 function fakeCapabilities() {
   const passes: Array<{ origin: string; discover: ReturnType<typeof deferred<DiscoveryResult>> }> = [];
-  const sessions: Array<{ origin: string; windows: number }> = [];
+  const sessions: Array<{ origin: string; windows: number; cancels: number }> = [];
   const catalogCalls: Array<{ origin: string; session: OriginFetchSession }> = [];
   const ingests: Array<{ origin: string; chromePermitted: boolean }> = [];
   const capabilities: CoordinatorCapabilities = {
@@ -88,12 +94,13 @@ function fakeCapabilities() {
       },
     },
     createFetchSession: (origin) => {
-      const rec = { origin, windows: 0 };
+      const rec = { origin, windows: 0, cancels: 0 };
       sessions.push(rec);
       return {
         origin,
         fetch: undefined as unknown as OriginFetchSession["fetch"],
         startWindow: () => void (rec.windows += 1),
+        cancel: () => void (rec.cancels += 1),
         stats: () => ({ requests: 0, refused: 0, bytesReceived: 0 }),
       };
     },
@@ -196,7 +203,7 @@ function setup(extra: Partial<CoordinatorOptions> = {}) {
   };
   const acks = (c: ReturnType<typeof attach>) => c.sent.filter((f) => f.type === "ack");
   const policies = (c: ReturnType<typeof attach>) => c.sent.filter((f) => f.type === "capture_policy");
-  return { coordinator, panel, events, focus, pageText, chrome, attach, grant, connect, acks, policies, advance: timers.advance };
+  return { coordinator, clock, panel, events, focus, pageText, chrome, attach, grant, connect, acks, policies, timers: timers.timers, advance: timers.advance };
 }
 
 describe("coordinator", () => {
@@ -589,6 +596,21 @@ describe("coordinator capture policy and permissions", () => {
     expect(coordinator.tracker.current()).not.toBeNull();
   });
 
+  it("drops a focus stamped ahead of the current snapshot until that snapshot arrives", () => {
+    const { coordinator, events, focus, chrome, attach } = setup();
+    const c = attach();
+    chrome();
+    c.observe({ kind: "permissions", revision: 10, at: 1, granted: ["https://docs.stripe.com/*"], githubCapture: false });
+    // Snapshot 11 revoked Stripe but was lost on the way; the focus sent under it must not use grant 10.
+    c.observe(focus({ permissionsRevision: 11 }));
+    expect(coordinator.tracker.current()).toBeNull();
+    expect(events.at(-1)).toMatchObject({ name: "focus_dropped", fields: { reason: "permissions_ahead" } });
+    c.observe({ kind: "permissions", revision: 11, at: 1, granted: ["https://docs.stripe.com/*"], githubCapture: false });
+    expect(coordinator.tracker.current()).toBeNull();
+    c.observe(focus({ permissionsRevision: 11 }));
+    expect(coordinator.tracker.current()).toMatchObject({ origin: "https://docs.stripe.com" });
+  });
+
   it("drops a snapshot older than the current one", () => {
     const { coordinator, focus, chrome, attach } = setup();
     const c = attach();
@@ -644,7 +666,7 @@ describe("coordinator dwell and discovery", () => {
     s.advance(DWELL_MS - 1);
     expect(s.passes).toHaveLength(0);
     s.advance(1);
-    expect(s.sessions).toEqual([{ origin: "https://docs.stripe.com", windows: 1 }]);
+    expect(s.sessions).toEqual([{ origin: "https://docs.stripe.com", windows: 1, cancels: 0 }]);
     expect(s.catalogCalls.map((c) => c.origin)).toEqual(["https://docs.stripe.com"]);
     expect(s.passes.map((p) => p.origin)).toEqual(["https://docs.stripe.com"]);
     s.passes[0]!.discover.resolve(discoveryFor("https://docs.stripe.com"));
@@ -694,6 +716,16 @@ describe("coordinator dwell and discovery", () => {
     ["the origin loses its grant", (s) => s.grant(s.c, ["https://github.com/*"]), "permission_lost"],
     ["Scout is paused", (s) => s.coordinator.handleNativeCommand({ type: "pause" }), "paused"],
     ["the coordinator stops", (s) => s.coordinator.stop(), "stopped"],
+    ["the connection closes", (s) => s.c.disconnect(), "disconnected"],
+    [
+      "a new connection attaches, re-grants, and refocuses the same URL",
+      (s) => {
+        const next = s.connect(2);
+        next.observe(s.focus());
+        expect(s.coordinator.tracker.current()).toMatchObject({ origin: "https://docs.stripe.com" });
+      },
+      "disconnected",
+    ],
   ])("a pass whose result arrives after %s is discarded", async (_name, act, reason) => {
     const s = visiting();
     s.advance(DWELL_MS);
@@ -702,6 +734,69 @@ describe("coordinator dwell and discovery", () => {
     await flush();
     expect(s.ingests).toEqual([]);
     expect(s.events.find((e) => e.name === "discovery_discarded")?.fields).toMatchObject({ reason });
+  });
+
+  it.each<[string, (s: ReturnType<typeof visiting>) => void]>([
+    ["the visit changes", (s) => s.c.observe(s.focus({ url: "https://docs.stripe.com/billing" }))],
+    ["another origin loses its grant", (s) => s.grant(s.c, ["https://docs.stripe.com/*"])],
+  ])("the running pass keeps its session when %s", (_name, act) => {
+    const s = visiting();
+    s.advance(DWELL_MS);
+    act(s);
+    expect(s.sessions[0]!.cancels).toBe(0);
+  });
+
+  it.each<[string, (s: ReturnType<typeof setup>, c: ReturnType<ReturnType<typeof setup>["connect"]>) => void, string]>([
+    ["pause", (s) => s.coordinator.handleNativeCommand({ type: "pause" }), "paused"],
+    ["permission loss", (s, c) => s.grant(c, ["https://github.com/*"]), "permission_lost"],
+    ["disconnect", (_s, c) => c.disconnect(), "disconnected"],
+    ["a new sensor", (s) => void s.connect(2), "disconnected"],
+    ["stop", (s) => s.coordinator.stop(), "stopped"],
+  ])("%s cancels the running pass's session: no further fetches, then discovery_discarded", async (_name, act, reason) => {
+    const fetched: string[] = [];
+    const settled = { fetches: 0 };
+    let s!: ReturnType<typeof setup>;
+    const capabilities: CoordinatorCapabilities = {
+      store: { ingest: async () => expect.unreachable("a cancelled pass must not ingest") },
+      createFetchSession: (origin) =>
+        createOriginFetchSession({
+          origin,
+          clock: { now: () => s.clock.t },
+          // The crawl-delay wait runs on the test's fake timers.
+          sleep: (ms) => new Promise<void>((resolve) => void s.timers.setTimeout(resolve, ms)),
+          guardedFetch: async (url): Promise<GuardedFetchResult> => {
+            fetched.push(new URL(url).pathname);
+            return { kind: "absent", status: 404 };
+          },
+        }),
+      resolveCatalog: async () => ({ result: { ok: false }, stats: { requests: 0, refused: 0, bytesReceived: 0, ms: 0 } }) as unknown as CatalogResolution,
+      discover: async (origin, session) => {
+        session.fetch.setCrawlDelay(1_000);
+        for (const path of ["/robots.txt", "/llms.txt", "/AGENTS.md", "/.well-known/agent-skills/index.json"]) {
+          await session.fetch(`${origin}${path}`);
+          settled.fetches += 1;
+        }
+        return discoveryFor(origin);
+      },
+    };
+    s = setup({ capabilities });
+    const c = s.connect();
+    s.chrome();
+    c.observe(s.focus());
+    s.advance(DWELL_MS);
+    await flushMacro();
+    expect(fetched).toEqual(["/robots.txt"]);
+    s.advance(1_000);
+    await flushMacro();
+    expect(fetched).toEqual(["/robots.txt", "/llms.txt"]);
+
+    act(s, c);
+    s.advance(10_000);
+    await flushMacro();
+    expect(fetched).toEqual(["/robots.txt", "/llms.txt"]);
+    expect(settled.fetches).toBe(4);
+    expect(s.events.filter((e) => e.name === "discovery_discarded").map((e) => e.fields.reason)).toEqual([reason]);
+    expect(s.events.some((e) => e.name === "discovery_ingested")).toBe(false);
   });
 
   it("a pass paused and resumed before it finishes never ingests; the re-armed dwell runs a fresh pass", async () => {

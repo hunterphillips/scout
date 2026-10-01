@@ -27,8 +27,11 @@
 // pass for its origin: one paced fetch session with one window, the catalog and resource
 // discovery sharing it, then a store ingest only if the visit is still current and the
 // origin still permitted. One pass runs at a time; settles meanwhile queue, latest wins.
-// Pausing discards the running pass for good: resuming before it finishes does not let it
-// ingest; the dwell re-armed on resume produces a fresh pass instead.
+// Pause, loss of the pass origin's grant, disconnect (or a new sensor replacing the live
+// one), and stop cancel the running pass: its fetch session refuses every further request
+// (the one in flight finishes), and the pass is discarded for good. Resuming or
+// re-granting before it finishes does not let it ingest; the next settle (the dwell
+// re-armed on resume, or a new visit) produces a fresh pass instead.
 //
 // The final check and the `store.ingest` call have no await between them, so the store
 // is called with the permission state that check saw. A permission loss, pause, or
@@ -106,6 +109,14 @@ export interface Coordinator {
   agentView(): AgentView;
 }
 
+/** A discovery pass in progress; `cancelled` is set when it must never ingest, whatever happens next. */
+interface RunningPass {
+  visit: ActiveVisit;
+  cancelled: string | null;
+  /** Null until the pass has created its fetch session. */
+  session: OriginFetchSession | null;
+}
+
 export function createCoordinator(options: CoordinatorOptions): Coordinator {
   const { clock, diagnostics } = options;
   const chromeBundleId = options.config.chromeBundleId ?? CHROME_BUNDLE_ID;
@@ -163,8 +174,8 @@ export function createCoordinator(options: CoordinatorOptions): Coordinator {
 
   // --- Discovery on settled visits ---
 
-  /** The running pass; `cancelled` is set when it must never ingest, whatever happens next. */
-  let runningPass: { visit: ActiveVisit; cancelled: string | null } | null = null;
+  /** The running pass, if any. */
+  let runningPass: RunningPass | null = null;
   let pendingSettle: ActiveVisit | null = null;
 
   /** Why a pass for `visit` must not run or ingest now, or null if it may. */
@@ -176,16 +187,24 @@ export function createCoordinator(options: CoordinatorOptions): Coordinator {
     return null;
   };
 
+  /** Stop the running pass's fetches and mark it never to ingest. The first reason wins. */
+  const cancelRunningPass = (reason: string): void => {
+    if (runningPass === null) return;
+    runningPass.cancelled ??= reason;
+    runningPass.session?.cancel();
+  };
+
   const discarded = (visit: ActiveVisit, reason: string): void =>
     diagnostics.event("discovery_discarded", { origin: visit.origin, epoch: visit.epoch, reason });
 
   const runPass = async (visit: ActiveVisit, c: CoordinatorCapabilities): Promise<void> => {
-    const pass: { visit: ActiveVisit; cancelled: string | null } = { visit, cancelled: null };
+    const pass: RunningPass = { visit, cancelled: null, session: null };
     runningPass = pass;
     const { origin, epoch } = visit;
     const started = clock.now();
     try {
       const session = c.createFetchSession(origin);
+      pass.session = session;
       session.startWindow();
       diagnostics.event("discovery_start", { origin, epoch });
       const [catalog, discovery] = await Promise.allSettled([c.resolveCatalog(origin, session), c.discover(origin, session)]);
@@ -299,6 +318,7 @@ export function createCoordinator(options: CoordinatorOptions): Coordinator {
       diagnostics.event("permission_lost", { origin: before.origin, epoch: before.epoch });
     }
     if (pendingSettle !== null && !permissions.isPermitted(pendingSettle.origin)) dropPendingSettle("permission_lost");
+    if (runningPass !== null && !permissions.isPermitted(runningPass.visit.origin)) cancelRunningPass("permission_lost");
     tracker.recompute();
     syncPolicy();
   };
@@ -337,6 +357,7 @@ export function createCoordinator(options: CoordinatorOptions): Coordinator {
   const dropConnectionState = (): void => {
     dwell.cancel("disconnected");
     dropPendingSettle("disconnected");
+    cancelRunningPass("disconnected");
     permissions.clear();
     lastPolicy = null;
   };
@@ -373,7 +394,7 @@ export function createCoordinator(options: CoordinatorOptions): Coordinator {
           paused = true;
           dwell.cancel("paused");
           dropPendingSettle("paused");
-          if (runningPass !== null) runningPass.cancelled = "paused";
+          cancelRunningPass("paused");
           diagnostics.event("paused", {});
           syncPolicy();
           emitCurrent();
@@ -425,6 +446,7 @@ export function createCoordinator(options: CoordinatorOptions): Coordinator {
       stopped = true;
       dwell.stop();
       dropPendingSettle("stopped");
+      cancelRunningPass("stopped");
       diagnostics.event("coordinator_stopped", { pending: forwarder.pendingCount });
     },
   };

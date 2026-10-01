@@ -79,8 +79,17 @@ describe("permissionState", () => {
     expect(state.acceptsFocus(focus(6))).toBe(false);
     expect(events.at(-1)).toEqual({ name: "focus_dropped", fields: { reason: "stale_permissions_revision", revision: 6 } });
     expect(state.acceptsFocus(focus(7))).toBe(true);
-    expect(state.acceptsFocus(focus(8))).toBe(true);
     expect(state.acceptsFocus(focus())).toBe(true);
+  });
+
+  it("drops a focus stamped ahead of the current snapshot until that snapshot arrives", () => {
+    const { state, events } = setup();
+    state.applySnapshot(snapshot(7, ["https://a.example/*"]));
+    // Snapshot 8 (which revoked a.example, say) was lost on the way: fail closed.
+    expect(state.acceptsFocus(focus(8))).toBe(false);
+    expect(events.at(-1)).toEqual({ name: "focus_dropped", fields: { reason: "permissions_ahead", revision: 8 } });
+    state.applySnapshot(snapshot(8, []));
+    expect(state.acceptsFocus(focus(8))).toBe(true);
   });
 
   it("clear forgets the snapshot and its revision", () => {

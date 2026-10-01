@@ -12,9 +12,12 @@
 // - A snapshot whose revision is lower than the current one is dropped
 //   (`stale_permissions_revision`); an equal or higher one replaces the state.
 // - A focus stamped with a `permissionsRevision` lower than the current revision was sent
-//   under a superseded snapshot and is dropped (`stale_permissions_revision`). A focus
-//   without one, or with a higher one, is accepted; the visit tracker still checks its
-//   origin against the current grants.
+//   under a superseded snapshot and is dropped (`stale_permissions_revision`). One stamped
+//   higher than the current revision means the newer snapshot never arrived (dropped by
+//   the relay or rejected by the schema), so the grants here may include an origin the
+//   user has since revoked: it is dropped too (`permissions_ahead`), failing closed until
+//   that snapshot arrives. A focus without a revision is accepted; the visit tracker still
+//   checks its origin against the current grants.
 // - Granted patterns (`https://<host>/*`, validated by the contract) are kept as origins.
 
 import type { FocusObservation, PermissionsObservation } from "@scout/contracts";
@@ -25,7 +28,7 @@ export const GITHUB_ORIGIN = "https://github.com";
 export interface PermissionState {
   /** Replace the state with `snapshot`, or drop it if older. True when applied. */
   applySnapshot(snapshot: PermissionsObservation): boolean;
-  /** False (and logged) when the focus was sent under an older snapshot than the current one. */
+  /** False (and logged) when the focus was sent under a different snapshot than the current one. */
   acceptsFocus(focus: FocusObservation): boolean;
   /** True when the current snapshot grants exactly this origin (`https://host`). */
   isPermitted(origin: string): boolean;
@@ -79,8 +82,13 @@ export function createPermissionState(options: { diagnostics?: Diagnostics } = {
       return true;
     },
     acceptsFocus(focus) {
-      if (current !== null && focus.permissionsRevision !== undefined && focus.permissionsRevision < current.revision) {
+      if (current === null || focus.permissionsRevision === undefined) return true;
+      if (focus.permissionsRevision < current.revision) {
         diagnostics?.event("focus_dropped", { reason: "stale_permissions_revision", revision: focus.permissionsRevision });
+        return false;
+      }
+      if (focus.permissionsRevision > current.revision) {
+        diagnostics?.event("focus_dropped", { reason: "permissions_ahead", revision: focus.permissionsRevision });
         return false;
       }
       return true;
