@@ -248,11 +248,20 @@ export const ApproveCommandSchema = cmd("approve", { resourceId: ResourceIdSchem
 export const DeclineCommandSchema = cmd("decline", { resourceId: ResourceIdSchema, version: ContentHashSchema, expectedRevision: Revision });
 export const RevokeCommandSchema = cmd("revoke", { resourceId: ResourceIdSchema, expectedRevision: Revision });
 /**
- * The two consent toggles are compare-and-set: `expectedEnabled` is the value the user saw.
+ * Auto-acquire for one origin; compare-and-set on `expectedEnabled`, the value the user saw.
  * When the current value differs the ack is `stale_revision` (no `revision`) and nothing
- * changes, so a delayed or retried toggle never undoes a later one.
+ * changes. A boolean compare cannot tell a retry from a new command after an intervening
+ * toggle (enable, disable, retried enable would apply): within one core the commandId cache
+ * answers a retry, and the app never retries a toggle across a core restart (new
+ * `coreInstanceId`); it sends a new command from the state it then shows.
  */
 export const SetAutoAcquireCommandSchema = cmd("set_auto_acquire", { origin: HttpsOriginSchema, enabled: z.boolean(), expectedEnabled: z.boolean(), acknowledgeRisk: z.boolean() });
+/**
+ * The user's agent may read browser context; compare-and-set on `expectedEnabled` exactly like
+ * `set_auto_acquire`, with the same retry rule: no retry across a core restart. An enable the
+ * core does not read back as on (another invalid key in config.json) leaves config.json as it
+ * was and acks `invalid`.
+ */
 export const SetAgentBrowserContextCommandSchema = cmd("set_agent_browser_context", { enabled: z.boolean(), expectedEnabled: z.boolean() });
 export const RefreshCapabilitiesCommandSchema = cmd("refresh_capabilities", {});
 

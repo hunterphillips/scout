@@ -10,6 +10,7 @@
 // toggles it. A `preview` command answers with a chunk, or with a failure ack.
 
 import type { PanelAck, PanelCommand, PanelState } from "@scout/contracts";
+import type { GrantWrite } from "./agentApi/grants.js";
 import type { ReadAuditEntry } from "./agentApi/readAudit.js";
 import type { StoreState } from "./capabilities/decisions.js";
 import type { ExportConflict } from "./capabilities/exports.js";
@@ -31,7 +32,7 @@ export interface PanelChannelOptions {
   /** The exporter's last recorded conflicts; empty when there is no exporter. */
   exportConflicts: () => readonly ExportConflict[];
   readBrowserContextGrant: () => boolean;
-  writeBrowserContextGrant: (enabled: boolean) => void;
+  writeBrowserContextGrant: (enabled: boolean) => GrantWrite;
   getAudit: () => readonly ReadAuditEntry[];
   isPermitted: (origin: string) => boolean;
   currentOrigin: () => string | null;

@@ -241,13 +241,17 @@ describe("native commands", () => {
 
   it("an enable the agent API does not read back acks invalid and announces what it reads", async () => {
     // Another invalid key makes the agent API treat the whole file as not granted.
-    writeFileSync(join(home, "config.json"), JSON.stringify({ chromeBundleId: 7 }));
+    const before = `{"chromeBundleId": 7,\n  "future":{"x":1}}`;
+    writeFileSync(join(home, "config.json"), before);
     const s = setup();
     await s.commands.handle({ type: "set_agent_browser_context", commandId: "g1", enabled: true, expectedEnabled: false });
     expect(s.acks[0]).toEqual({ type: "ack", commandId: "g1", ok: false, code: "invalid" });
-    expect(JSON.parse(readFileSync(join(home, "config.json"), "utf8"))).toEqual({ chromeBundleId: 7, agentBrowserContext: true });
+    // The previous file is back byte for byte, so repairing the broken key grants nothing.
+    expect(readFileSync(join(home, "config.json"), "utf8")).toBe(before);
     expect(readBrowserContextGrant(home)).toBe(false);
     expect(s.grants).toEqual([false]);
+    writeFileSync(join(home, "config.json"), JSON.stringify({ chromeBundleId: "com.google.Chrome", future: { x: 1 } }));
+    expect(readBrowserContextGrant(home)).toBe(false);
   });
 
   it("a malformed config.json is left alone and the grant command fails", async () => {

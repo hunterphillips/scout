@@ -64,7 +64,7 @@ function setup(overrides: { store?: PanelStore; isPermitted?: (origin: string) =
       throw new Error("manifest unreadable");
     },
     readBrowserContextGrant: () => true,
-    writeBrowserContextGrant: () => {},
+    writeBrowserContextGrant: () => ({ restore: () => {} }),
     getAudit: () => audit,
     isPermitted: overrides.isPermitted ?? (() => false),
     currentOrigin: () => null,

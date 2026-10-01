@@ -32,10 +32,15 @@
 //   Turning it on also needs `acknowledgeRisk: true` (`invalid` otherwise) and the origin
 //   Chrome-permitted now (`not_permitted`). set_agent_browser_context compares with the grant
 //   as the agent API reads it; an enable that the agent API does not read back as on (another
-//   invalid key in config.json) acks `invalid`.
+//   invalid key in config.json) puts the previous config.json back and acks `invalid`, so a
+//   later repair of that key cannot turn the grant on without the user.
+//   Toggles carry no revision, so a boolean compare cannot tell a retried enable from a new one
+//   after an intervening disable (enable, disable, retried enable). Within one core the ID cache
+//   answers the retry; the app never retries a toggle across a core restart.
 // Acks for commands not about one resource carry `revision: 0`.
 
 import type { MutationCommand, PanelAck } from "@scout/contracts";
+import type { GrantWrite } from "./agentApi/grants.js";
 import { DecisionError, StaleApprovalError } from "./capabilities/decisions.js";
 import { type CapabilityStore, type ExportSync, StoreReadOnlyError } from "./capabilities/store.js";
 import type { Diagnostics } from "./diagnostics.js";
@@ -47,8 +52,8 @@ export type CommandStore = Pick<CapabilityStore, "getResource" | "originPolicy" 
 export interface NativeCommandsOptions {
   store: CommandStore;
   isPermitted: (origin: string) => boolean;
-  /** Persist the browser-context grant; throws when it could not. */
-  writeBrowserContextGrant: (enabled: boolean) => void;
+  /** Persist the browser-context grant; throws when it could not. The result undoes the write. */
+  writeBrowserContextGrant: (enabled: boolean) => GrantWrite;
   /** The grant as the agent API reads it from disk (readBrowserContextGrant). */
   readBrowserContextGrant: () => boolean;
   emitAck: (ack: PanelAck) => void;
@@ -147,16 +152,25 @@ export function createNativeCommands(options: NativeCommandsOptions): NativeComm
       case "set_agent_browser_context": {
         // Read and write are synchronous, so no other command runs between the compare and the set.
         if (options.readBrowserContextGrant() !== cmd.expectedEnabled) return { ack: failed(id, "stale_revision") };
+        let written: GrantWrite;
         try {
-          options.writeBrowserContextGrant(cmd.enabled);
+          written = options.writeBrowserContextGrant(cmd.enabled);
         } catch {
           return { ack: failed(id, "store_error") };
         }
-        // Announce what the agent API will read, not what was asked: another invalid key in
-        // config.json makes the whole file count as not granted.
-        const now = options.readBrowserContextGrant();
-        options.onGrantChanged(now);
-        return { ack: now === cmd.enabled ? ok(id, 0) : failed(id, "invalid") };
+        // Another invalid key in config.json makes the whole file count as not granted. Leaving
+        // the write in place would let a later repair of that key grant access unasked.
+        if (options.readBrowserContextGrant() !== cmd.enabled) {
+          try {
+            written.restore();
+          } catch {
+            return { ack: failed(id, "store_error") };
+          }
+          options.onGrantChanged(options.readBrowserContextGrant());
+          return { ack: failed(id, "invalid") };
+        }
+        options.onGrantChanged(cmd.enabled);
+        return { ack: ok(id, 0) };
       }
       case "refresh_capabilities":
         options.refreshCapabilities();
