@@ -37,7 +37,7 @@ export const isIntegrationEntry = (f) => INTEGRATION_KINDS.includes(f?.kind);
 export const INTEGRATION_EXPLANATION = [
   "The `scout` MCP connection is registered at user scope: it is available in all of your Claude Code sessions, in every project.",
   "It exposes only website resources you approved in Scout (AGENTS.md, llms.txt, skills), read on demand.",
-  "Browser context (the current site and recent pages) is a separate opt-in, off by default: today it is `agentBrowserContext` in ~/.scout/config.json; with P2.5 it becomes a toggle in the Scout app.",
+  "Browser context (the current site and recent pages) is a separate opt-in, off by default: today it is `agentBrowserContext` in ~/.scout/config.json; a Scout app toggle is coming.",
   "Remove it with `npm run uninstall -- --agent-integration`.",
 ];
 
