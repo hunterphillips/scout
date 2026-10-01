@@ -18,6 +18,7 @@ import {
   EXIT_OK,
   EXIT_REFUSED,
   type HostDeps,
+  POLICY_TIMEOUT_MS,
   RETRY_INTERVAL_MS,
   RETRY_WINDOW_MS,
 } from "./relay.js";
@@ -373,6 +374,61 @@ describe("protocol-2 handshake", () => {
     expect(h.host.drops().fromChrome.noCore).toBe(1);
   });
 
+  it("a core that connects but never sends a policy: given up after the policy timeout, retried, then exit 1", async () => {
+    const h = harness();
+    h.stdin.write(encodeFrame(permissions));
+    await settle();
+    h.last().succeed();
+    h.timers.advance(POLICY_TIMEOUT_MS - 1);
+    await settle();
+    expect(h.last().destroyed).toBe(false);
+    expect(h.toChrome()).toEqual([]);
+    h.timers.advance(1);
+    await settle();
+    expect(h.last().destroyed).toBe(true);
+    expect(h.last().frames()).toEqual([HELLO]);
+    expect(h.toChrome()).toEqual([UNREACHABLE]);
+    expect(h.timers.pending).toBe(1); // the retry, inside the usual window
+
+    // Every retry connects and stays silent: the bounded retry window still ends in exit 1.
+    for (let t = 0; t < RETRY_WINDOW_MS; t += RETRY_INTERVAL_MS) {
+      h.timers.advance(RETRY_INTERVAL_MS);
+      h.last().succeed();
+      h.timers.advance(POLICY_TIMEOUT_MS);
+    }
+    await settle();
+    expect(h.sockets).toHaveLength(16);
+    expect(h.sockets.every((s) => s.destroyed)).toBe(true);
+    expect(h.exits).toEqual([EXIT_CORE_UNAVAILABLE]);
+    expect(h.toChrome()).toEqual([UNREACHABLE]);
+    expect(h.timers.pending).toBe(0);
+    expect(h.logs.join("\n")).toContain("no-policy");
+    expect(h.host.drops().fromChrome.noCore).toBe(1);
+  });
+
+  it("a policy and an ack in one chunk are forwarded in order", async () => {
+    const h = harness();
+    h.last().succeed();
+    h.last().emit("data", Buffer.concat([encodeFrame(POLICY), encodeFrame({ type: "ack", seq: 1 })]));
+    await settle();
+    expect(h.toChrome()).toEqual([POLICY, { type: "ready" }, { type: "ack", seq: 1 }]);
+    expect(h.timers.pending).toBe(0); // the policy timer is gone
+  });
+
+  it("upgrade_required followed by more bytes in the same chunk: nothing after it is processed", async () => {
+    const h = harness();
+    h.last().succeed();
+    h.last().emit(
+      "data",
+      Buffer.concat([encodeFrame({ type: "upgrade_required", protocol: 3 }), encodeFrame(POLICY), encodeFrame({ type: "ack", seq: 1 })]),
+    );
+    await settle();
+    expect(h.toChrome()).toEqual([{ type: "core_unavailable", reason: "upgrade_required" }]);
+    expect(h.exits).toEqual([EXIT_CORE_UNAVAILABLE]);
+    expect(h.host.drops().fromCore).toEqual({ forwarded: 0, invalid: 0 });
+    expect(h.timers.pending).toBe(0);
+  });
+
   it("an old core that closes right after hello: unreachable, then a retry that can still succeed", async () => {
     const h = harness();
     h.stdin.write(encodeFrame(permissions));
@@ -641,14 +697,25 @@ describe("mixed bridge versions fail closed", () => {
 
   it("this relay against a protocol-1 core that just closes: unreachable, then the retry window and exit 1", async () => {
     const { path, core } = await start({ protocol: 1, oldCore: true });
-    const h = harness({ socketPath: path, connect: (p) => netConnect({ path: p }) });
-    await waitFor(() => h.timers.pending === 1);
+    let connects = 0;
+    let closes = 0;
+    const h = harness({
+      socketPath: path,
+      connect: (p) => {
+        connects++;
+        const s = netConnect({ path: p });
+        s.on("close", () => closes++);
+        return s;
+      },
+    });
+    // Between connect and close the policy timer is pending too: wait for each close.
+    await waitFor(() => closes === 1 && h.timers.pending === 1);
     expect(h.toChrome()).toEqual([UNREACHABLE]);
     h.stdin.write(encodeFrame({ ...focus, seq: 9 }));
     await settle();
     for (let t = 0; t < RETRY_WINDOW_MS; t += RETRY_INTERVAL_MS) {
       h.timers.advance(RETRY_INTERVAL_MS);
-      await waitFor(() => h.timers.pending === 1 || h.exits.length === 1);
+      await waitFor(() => (closes === connects && h.timers.pending === 1) || h.exits.length === 1);
     }
     expect(h.exits).toEqual([EXIT_CORE_UNAVAILABLE]);
     expect(h.toChrome()).toEqual([UNREACHABLE]);

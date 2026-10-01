@@ -15,7 +15,8 @@
 //   - a core that answers upgrade_required (protocol mismatch) is reported as
 //     core_unavailable{reason:"upgrade_required"} and the relay exits 1 without
 //     retrying: mixed versions fail closed. A core that closes before any policy (an
-//     old core) is treated as unreachable: the normal retry window, then exit 1;
+//     old core), or stays silent for POLICY_TIMEOUT_MS after connect, is treated as
+//     unreachable: the normal retry window, then exit 1;
 //   - relays Chrome -> core: each frame validated as a BrowserObservation and
 //     re-encoded as {type:"observation", observation}. Frames that arrive before the
 //     handshake is done wait in a small buffer holding only the latest permissions
@@ -53,6 +54,8 @@ import type { RuntimeCheck } from "./config.js";
 
 export const RETRY_INTERVAL_MS = 2_000;
 export const RETRY_WINDOW_MS = 30_000;
+/** How long a connected core has to send its first capture_policy before the attempt counts as failed. */
+export const POLICY_TIMEOUT_MS = 5_000;
 /** Upper bound on waiting for stdout to flush before exiting anyway. */
 export const EXIT_FLUSH_TIMEOUT_MS = 500;
 /** Observations are dropped, not queued, while the core socket buffers more than this. */
@@ -152,6 +155,7 @@ export function createHost(deps: HostDeps): Host {
   /** The core answered hello with a capture_policy, and ready was sent. */
   let ready = false;
   let retryTimer: unknown = null;
+  let policyTimer: unknown = null;
   let flushTimer: unknown = null;
   let retriesLeft = Math.floor(RETRY_WINDOW_MS / RETRY_INTERVAL_MS);
   let reportedUnavailable: CoreUnavailableReason | null = null;
@@ -166,12 +170,18 @@ export function createHost(deps: HostDeps): Host {
     deps.exit(exitCode);
   };
 
+  const clearPolicyTimer = () => {
+    if (policyTimer !== null) timers.clearTimeout(policyTimer);
+    policyTimer = null;
+  };
+
   const finish = (code: number, reason: string) => {
     if (finished) return;
     finished = true;
     exitCode = code;
     if (retryTimer !== null) timers.clearTimeout(retryTimer);
     retryTimer = null;
+    clearPolicyTimer();
     fromChrome.noCore += preConnect.size;
     preConnect.clear();
     const s = socket;
@@ -221,6 +231,7 @@ export function createHost(deps: HostDeps): Host {
 
   /** The core accepted hello: forward its policy, flush the buffer, then announce ready. */
   const completeHandshake = (s: CoreSocket, policy: ToChromeFrame) => {
+    clearPolicyTimer();
     fromCore.forwarded += 1;
     sendToChrome(policy);
     for (const kind of PRE_CONNECT_FLUSH_ORDER) {
@@ -320,7 +331,17 @@ export function createHost(deps: HostDeps): Host {
       if (socket !== s) return;
       const hello: Hello = { type: "hello", protocol: BRIDGE_PROTOCOL };
       s.write(encodeFrame(hello, MAX_FRAME_FROM_CHROME));
-      // ready waits for the core's capture_policy (completeHandshake).
+      // ready waits for the core's capture_policy (completeHandshake). A core that
+      // never sends one is given up on like a close, inside the same retry budget.
+      clearPolicyTimer();
+      policyTimer = timers.setTimeout(() => {
+        policyTimer = null;
+        if (socket !== s || ready) return;
+        socket = null; // our own close: the close handler ignores it
+        s.destroy();
+        coreDecoder.end(); // a partial frame must not leak into the next connection
+        scheduleRetry("no-policy");
+      }, POLICY_TIMEOUT_MS);
     });
     s.on("data", (chunk) => {
       if (socket !== s) return;
@@ -335,6 +356,7 @@ export function createHost(deps: HostDeps): Host {
     s.on("close", () => {
       if (socket !== s) return; // we closed it
       socket = null;
+      clearPolicyTimer();
       coreDecoder.end();
       if (ready) {
         // A close after the handshake is the core going away: exit so Chrome
