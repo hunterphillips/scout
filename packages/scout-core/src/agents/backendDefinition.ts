@@ -21,8 +21,15 @@
 // `startupMs`) and `tools/list` (within `overallMs` from the start); then stops it
 // (stdin closed and SIGTERM; the transport sends SIGKILL after 1 s, and this module again if
 // it is still there after `stopGraceMs`). Only the backend process itself is signalled, not
-// processes it started (a wrapper should exec its server). Requests the backend makes (sampling, elicitation,
-// roots: an auth or login prompt included) are refused and counted, never answered.
+// processes it started (a wrapper should exec its server).
+//
+// Decision (P2.7, plan: "an auth prompt produces an unavailable connection; do not open a
+// hidden login flow"): any request the backend makes of Scout during inspection (sampling,
+// elicitation, roots, or any other server-to-client request) fails the whole inspection
+// with the fixed code `auth_prompt`. The request is answered with an MCP error, never
+// with data, the backend is stopped at once, and no tool it listed is returned: a backend
+// that wants input to finish starting is not usable unattended, and its tool list cannot
+// be trusted as the one it would serve after a login.
 // Listed tools are kept as inspected-only records: names and descriptions with control
 // characters are sanitized or skipped, and only a tool whose name and input schema fit the
 // selection rules keeps its schema (and so can be selected later).
@@ -242,10 +249,11 @@ export type InspectOutcome =
       skipped: number;
       /** Descriptions cut to MAX_DESCRIPTION_CHARS. */
       truncated: number;
-      /** Requests the backend made of Scout (sampling, elicitation, roots, ...), all refused. */
-      refusedRequests: number;
     }
-  | { ok: false; reason: "did_not_start" | "timed_out" | "list_failed"; refusedRequests: number };
+  /** `auth_prompt`: the backend made a request of Scout (sampling, elicitation, roots, ...). */
+  | { ok: false; reason: InspectFailure };
+
+export type InspectFailure = "did_not_start" | "timed_out" | "list_failed" | "auth_prompt";
 
 /** Control characters out (newlines and tabs kept), for a stored description. */
 const stripControls = (s: string): string => s.replace(/[^\P{Cc}\n\t]/gu, "");
@@ -283,32 +291,38 @@ async function waitUntil(cond: () => boolean, ms: number): Promise<boolean> {
 export async function inspectBackend(launch: Pick<Connection, "command" | "args" | "cwd">, env: Readonly<Record<string, string>>, limits: InspectLimits = INSPECT_DEFAULT_LIMITS): Promise<InspectOutcome> {
   const transport = new ExactEnvStdioTransport(launch.command, launch.args, env, launch.cwd ?? "/");
   const client = new Client({ name: "scout-setup", version: "0" }, { capabilities: {} });
-  let refusedRequests = 0;
+  // The first backend request fails the inspection (see the header): `prompted` rejects,
+  // which ends whichever stage is waiting, and the request itself gets an error reply.
+  let promptedReject: (e: Error) => void = () => {};
+  const prompted = new Promise<never>((_, reject) => (promptedReject = reject));
+  prompted.catch(() => {});
+  let askedForInput = false;
   client.fallbackRequestHandler = async () => {
-    refusedRequests++;
+    askedForInput = true;
+    promptedReject(new Error("auth_prompt"));
     throw new McpError(ErrorCode.MethodNotFound, "refused by Scout setup");
   };
+  const unlessPrompted = <T>(p: Promise<T>): Promise<T> => Promise.race([p, prompted]);
   client.fallbackNotificationHandler = async () => {};
   client.onerror = () => {};
   const started = Date.now();
   let stage: "did_not_start" | "list_failed" = "did_not_start";
   try {
-    await withTimeout(client.connect(transport), limits.startupMs);
+    await withTimeout(unlessPrompted(client.connect(transport)), limits.startupMs);
     stage = "list_failed";
-    const listed = await withTimeout(
-      (async () => {
-        const out: Tool[] = [];
-        let cursor: string | undefined;
-        for (let page = 0; page < MAX_LISTED_PAGES; page++) {
-          const r = await client.listTools(cursor === undefined ? {} : { cursor });
-          out.push(...r.tools);
-          cursor = r.nextCursor;
-          if (cursor === undefined) break;
-        }
-        return out;
-      })(),
-      limits.overallMs - (Date.now() - started),
-    );
+    const listAll = async (): Promise<Tool[]> => {
+      const out: Tool[] = [];
+      let cursor: string | undefined;
+      for (let page = 0; page < MAX_LISTED_PAGES; page++) {
+        const r = await client.listTools(cursor === undefined ? {} : { cursor });
+        out.push(...r.tools);
+        cursor = r.nextCursor;
+        if (cursor === undefined) break;
+      }
+      return out;
+    };
+    const listed = await withTimeout(unlessPrompted(listAll()), limits.overallMs - (Date.now() - started));
+    if (askedForInput) return { ok: false, reason: "auth_prompt" };
     const tools: InspectedTool[] = [];
     let skipped = 0;
     let truncated = 0;
@@ -321,9 +335,10 @@ export async function inspectBackend(launch: Pick<Connection, "command" | "args"
       tools.push(r.tool);
       if (r.truncated) truncated++;
     }
-    return { ok: true, tools, skipped, truncated, refusedRequests };
+    return { ok: true, tools, skipped, truncated };
   } catch (e) {
-    return { ok: false, reason: e instanceof Error && e.message === "timeout" ? "timed_out" : stage, refusedRequests };
+    if (askedForInput) return { ok: false, reason: "auth_prompt" };
+    return { ok: false, reason: e instanceof Error && e.message === "timeout" ? "timed_out" : stage };
   } finally {
     await stopBackend(transport, client, limits.stopGraceMs);
   }

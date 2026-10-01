@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { runCli } from "../cli.js";
-import { AGENT_PROFILE_LOCK_FILE, type AgentStatus } from "./profileCli.js";
+import { AGENT_PROFILE_LOCK_FILE, AGENT_UNAVAILABLE_FILE, type AgentStatus } from "./profileCli.js";
 import { agentProfilePath, DEFAULT_AGENT_MODEL, loadAgentProfile, writeAgentProfile } from "./profile.js";
 import { FAKE_BACKEND, LOOKUP_SCHEMA, type BackendLogLine } from "./testing/fakeBackend.js";
 import { schemaHash } from "./toolProfile.js";
@@ -190,6 +190,23 @@ describe("agent inspect", () => {
     expect(envB).toMatchObject({ NOTES_TOKEN: DEF_SECRET, NOTES_API: CFG_SECRET, LANG: "C" });
   });
 
+  it("a backend that asks for input while starting is unavailable (auth_prompt): exit 1 and nothing stored", async () => {
+    const f = fixture();
+    writeFileSync(f.modeFile, "elicit-init");
+    const before = profileText(f);
+    const r = await f.run(["inspect", f.def, "--allow-start"]);
+    expect(r.code).toBe(1);
+    expect(r.err).toContain("auth_prompt");
+    expect(r.err).toContain("never answers");
+    expect(r.out).not.toContain("listed");
+    expect(profileText(f)).toBe(before);
+    expect(toolsOf(f)).toBeUndefined();
+    expect(existsSync(join(f.home, AGENT_UNAVAILABLE_FILE))).toBe(false);
+    expect(f.logLines().some((l) => l.method === "tools/list")).toBe(false);
+    expect(() => process.kill(f.logLines()[0]!.pid!, 0)).toThrow();
+    expect((await f.status()).connections).toEqual([]);
+  });
+
   it("refuses a definition owned by another user", async () => {
     const f = fixture();
     const r = await f.run(["inspect", f.def], { getuid: () => (process.getuid?.() ?? 0) + 1 });
@@ -282,6 +299,49 @@ describe("agent refresh", () => {
     expect(r.code).toBe(0);
     expect(r.out).toMatch(/deselected lookup: definition_changed/);
     expect(toolsOf(f)!.selections).toEqual([]);
+  });
+
+  it("an auth prompt keeps the last inspection, deselects every tool, and status shows the reason until a refresh succeeds", async () => {
+    const f = fixture();
+    await f.run(["inspect", f.def, "--allow-start"]);
+    await f.run(["enable", "notes", "lookup", "--unattended-read", "--required"]);
+    await f.run(["enable", "notes", "peek", "--unattended-read"]);
+    const before = toolsOf(f)!;
+    const conn0 = before.connections[0]!;
+
+    writeFileSync(f.modeFile, "sample-list");
+    const r = await f.run(["refresh", "notes", "--allow-start"]);
+    expect(r.code).toBe(1);
+    expect(r.err).toContain("auth_prompt");
+    expect(r.err).toMatch(/deselected lookup/);
+    expect(r.err).toMatch(/deselected peek/);
+    const tools = toolsOf(f)!;
+    expect(tools.selections).toEqual([]);
+    expect(tools.revision).toBe(before.revision! + 1);
+    const conn = tools.connections[0]!;
+    expect(conn.revision).toBe(conn0.revision! + 1);
+    expect(conn.inspectedAt).toBe(conn0.inspectedAt);
+    expect(conn.inspectedTools).toEqual(conn0.inspectedTools);
+
+    const c = (await f.status()).connections[0]!;
+    expect(c).toMatchObject({ id: "notes", available: false, unavailableReason: "auth_prompt", selected: [] });
+    expect((await f.run(["status"])).out).toContain("UNAVAILABLE: auth_prompt");
+    // Nothing can be selected from the kept inspection meanwhile.
+    const en = await f.run(["enable", "notes", "lookup", "--unattended-read"]);
+    expect(en.code).toBe(1);
+    expect(en.err).toContain("auth_prompt");
+    expect(toolsOf(f)!.selections).toEqual([]);
+
+    // Re-inspecting the known id with a prompt keeps it unavailable; a clean refresh clears it.
+    writeFileSync(f.modeFile, "elicit-init");
+    expect((await f.run(["inspect", f.def, "--allow-start"])).code).toBe(1);
+    expect((await f.status()).connections[0]!.unavailableReason).toBe("auth_prompt");
+    writeFileSync(f.modeFile, "honest");
+    expect((await f.run(["refresh", "notes", "--allow-start"])).code).toBe(0);
+    const ok = (await f.status()).connections[0]!;
+    expect(ok.available).toBe(true);
+    expect(ok.unavailableReason).toBeUndefined();
+    expect((await f.run(["enable", "notes", "lookup", "--unattended-read"])).code).toBe(0);
   });
 
   it("a rotated credential at the same binding keeps the selection", async () => {

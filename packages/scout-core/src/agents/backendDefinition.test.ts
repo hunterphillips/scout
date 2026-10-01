@@ -1,12 +1,13 @@
 // The definition file's validation, the command drift record, and how listed tools become
-// inspected-only records. The live inspection is covered end to end in profileCli.test.ts.
+// inspected-only records. The live inspection is covered end to end in profileCli.test.ts;
+// here only its auth-prompt rule, against fake-backend.mjs.
 
-import { chmodSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { commandDrift, loadBackendDefinition, resolveCommand, toInspectedTool } from "./backendDefinition.js";
-import { LOOKUP_SCHEMA } from "./testing/fakeBackend.js";
+import { commandDrift, inspectBackend, loadBackendDefinition, resolveCommand, toInspectedTool } from "./backendDefinition.js";
+import { FAKE_BACKEND, LOOKUP_SCHEMA, type BackendLogLine } from "./testing/fakeBackend.js";
 import { MAX_DESCRIPTION_CHARS, schemaHash } from "./toolProfile.js";
 
 const SECRET = "SENTINEL-DEFINITION-91ab";
@@ -121,5 +122,35 @@ describe("toInspectedTool", () => {
     expect(long?.truncated).toBe(true);
     expect(long?.tool.description).toHaveLength(MAX_DESCRIPTION_CHARS);
     expect(toInspectedTool({ name: "bad\u001bname", inputSchema: { type: "object" } })).toBeUndefined();
+  });
+});
+
+describe("inspectBackend", () => {
+  const limits = { startupMs: 5000, overallMs: 10_000, stopGraceMs: 2000 };
+  const run = async (mode: string) => {
+    const log = join(dir(), "backend.log");
+    const outcome = await inspectBackend({ command: process.execPath, args: [FAKE_BACKEND, "--mode", mode, "--log", log] }, {}, limits);
+    const lines = existsSync(log)
+      ? readFileSync(log, "utf8")
+          .split("\n")
+          .filter(Boolean)
+          .map((l) => JSON.parse(l) as BackendLogLine)
+      : [];
+    return { outcome, lines };
+  };
+
+  it("lists the tools of a backend that asks for nothing", async () => {
+    const { outcome } = await run("honest");
+    expect(outcome.ok && outcome.tools.map((t) => t.name)).toEqual(["lookup", "secret_tool", "peek"]);
+  });
+
+  it("fails with auth_prompt, returning no tools, when the backend asks for input during initialize or tools/list", async () => {
+    for (const mode of ["elicit-init", "sample-list"]) {
+      const { outcome, lines } = await run(mode);
+      expect(outcome).toEqual({ ok: false, reason: "auth_prompt" });
+      const pid = lines[0]!.pid!;
+      expect(() => process.kill(pid, 0)).toThrow();
+      if (mode === "elicit-init") expect(lines.some((l) => l.method === "tools/list")).toBe(false);
+    }
   });
 });
