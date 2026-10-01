@@ -42,7 +42,7 @@ import { InstalledRecordError, readInstalledRecord } from "./installedRecord.js"
 import { createSocketServer, SocketServerError } from "./socketServer.js";
 
 /** Hard cap on shutdown: exit anyway if closing takes longer. */
-export const SHUTDOWN_DEADLINE_MS = 500;
+export const SHUTDOWN_DEADLINE_MS = 2000;
 /** How often the capability store collects garbage while the core runs (also once at start). */
 export const GC_INTERVAL_MS = 60 * 60 * 1000;
 

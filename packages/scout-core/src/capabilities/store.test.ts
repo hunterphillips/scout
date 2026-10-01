@@ -338,6 +338,33 @@ describe("revocation", () => {
     expect(store.resolveRead(v1.id)).toEqual({ ok: false, code: "revoked" });
     expect(store.pinVersion("job2", v1.id, v1.version).ok).toBe(false);
   });
+
+  it("a failed export sync with a throwing diagnostics sink resolves { ok: false } and leaves no unhandled rejection", async () => {
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => void unhandled.push(reason);
+    process.on("unhandledRejection", onUnhandled);
+    try {
+      const store = await open({
+        diagnostics: {
+          event: (name) => {
+            if (name === "capability_export_failed") throw new Error("sink broken");
+          },
+          failures: 0,
+        },
+        syncExports: async () => {
+          throw new Error("export failed");
+        },
+      });
+      const v1 = await ingestOne(store, "v1");
+      expect(await (await approve(store, v1.id, v1.version)).cleanup).toEqual({ ok: false });
+      await store.close();
+      // Let any rejection surface before checking.
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+    }
+  });
 });
 
 describe("storage limits", () => {

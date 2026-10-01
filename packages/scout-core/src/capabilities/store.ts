@@ -401,7 +401,12 @@ export async function createCapabilityStore(options: CapabilityStoreOptions): Pr
             () => {
               // Settle first: a throwing diagnostics sink must not leave close() waiting on this sync.
               resolve({ ok: false });
-              diagnostics?.event("capability_export_failed", { reason, ...(resourceId ? { resource: shortId(resourceId) } : {}) });
+              // Nothing awaits this chain, so a throw here would be an unhandled rejection.
+              try {
+                diagnostics?.event("capability_export_failed", { reason, ...(resourceId ? { resource: shortId(resourceId) } : {}) });
+              } catch {
+                // A broken diagnostics sink loses the event, nothing else.
+              }
             },
           );
       });
