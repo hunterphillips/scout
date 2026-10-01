@@ -96,10 +96,10 @@ export function cacheFileName(origin: string): string {
   return `${name.slice(0, FILE_PREFIX_MAX)}-${hash}.json`;
 }
 
-type DirRefusal = "symlink" | "not_directory" | "wrong_owner" | "not_private";
+export type DirRefusal = "symlink" | "not_directory" | "wrong_owner" | "not_private";
 
 /** Why `dir` is unsafe to use for the cache, or null if it is a private directory we own. Mirrors `ensurePrivateRunDir`. Throws if lstat fails. */
-function checkPrivateDir(dir: string, uid: number = process.getuid?.() ?? -1): DirRefusal | null {
+export function checkPrivateDir(dir: string, uid: number = process.getuid?.() ?? -1): DirRefusal | null {
   const st = lstatSync(dir);
   if (st.isSymbolicLink()) return "symlink";
   if (!st.isDirectory()) return "not_directory";
@@ -109,7 +109,7 @@ function checkPrivateDir(dir: string, uid: number = process.getuid?.() ?? -1): D
 }
 
 /** A short code for a file-system error, safe for diagnostics. */
-function fsErrorCode(error: unknown): string {
+export function fsErrorCode(error: unknown): string {
   switch ((error as NodeJS.ErrnoException | null)?.code) {
     case "ENOTDIR":
       return "enotdir";

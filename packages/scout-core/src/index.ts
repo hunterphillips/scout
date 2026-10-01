@@ -178,6 +178,10 @@ export {
 } from "./catalog/cache.js";
 export {
   createCatalogResolver,
+  createOriginFetchSession,
+  type OriginFetchSession,
+  type OriginFetchSessionOptions,
+  type OriginFetchStats,
   type CatalogResolution,
   type CatalogResolveStats,
   type CatalogResolver,
