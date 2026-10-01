@@ -221,6 +221,12 @@ export interface CapabilityStore {
   readBlob(blobRef: string): Buffer;
   /** Keep a readable version from collection while a request uses it. Returns the read check. */
   pinVersion(requestId: string, resourceId: string, version: string): ReadResolution;
+  /**
+   * Keep any recorded, non-revoked version of an unblocked resource (pending included) from
+   * collection while Scout's window previews it. False (nothing pinned) otherwise. Released by
+   * `releasePins`, and by a revocation like every pin.
+   */
+  pinForPreview(requestId: string, resourceId: string, version: string): boolean;
   releasePins(requestId: string): void;
   ingest(discovery: DiscoveryResult, context: { chromePermitted: boolean }): Promise<IngestReport>;
   approve(command: DecisionCommand): Promise<ApproveResult>;
@@ -553,6 +559,14 @@ export async function createCapabilityStore(options: CapabilityStoreOptions): Pr
       if (!pins.has(requestId)) pins.set(requestId, new Set());
       pins.get(requestId)!.add(pinKey(resourceId, version));
       return check;
+    },
+    pinForPreview(requestId, resourceId, version) {
+      const r = findResource(state, resourceId);
+      const v = r?.resource.versions.find((x) => x.hash === version);
+      if (!r || r.resource.blocked || !v || v.state === "revoked") return false;
+      if (!pins.has(requestId)) pins.set(requestId, new Set());
+      pins.get(requestId)!.add(pinKey(resourceId, version));
+      return true;
     },
     releasePins: (requestId) => void pins.delete(requestId),
 
