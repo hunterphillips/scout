@@ -102,7 +102,8 @@ describe.skipIf(!BUILT)("host <-> core end to end", () => {
     expect(toChrome.some((f) => f.type === "ready")).toBe(false);
 
     // 2. The core starts; the app tells it Chrome is frontmost.
-    const core = spawn(process.execPath, [CORE, "--stdio"], { env, cwd: ROOT, stdio: ["pipe", "pipe", "pipe"] });
+    // A 10-minute dwell: no visit here settles into real fetches.
+    const core = spawn(process.execPath, [CORE, "--stdio"], { env: { ...env, SCOUT_DWELL_MS: "600000" }, cwd: ROOT, stdio: ["pipe", "pipe", "pipe"] });
     children.push(core);
     let coreOut = "";
     let coreErr = "";
@@ -181,7 +182,8 @@ describe.skipIf(!BUILT)("host <-> core end to end", () => {
   it("the core answers a protocol-1 hello with upgrade_required and closes", async () => {
     home = mkdtempSync(join(tmpdir(), "scout-e2e-"));
     const env = { ...process.env, SCOUT_HOME: home };
-    const core = spawn(process.execPath, [CORE, "--stdio"], { env, cwd: ROOT, stdio: ["pipe", "pipe", "pipe"] });
+    // A 10-minute dwell: no visit here settles into real fetches.
+    const core = spawn(process.execPath, [CORE, "--stdio"], { env: { ...env, SCOUT_DWELL_MS: "600000" }, cwd: ROOT, stdio: ["pipe", "pipe", "pipe"] });
     children.push(core);
     let coreErr = "";
     core.stderr.on("data", (c) => (coreErr += c));

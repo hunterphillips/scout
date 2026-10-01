@@ -704,6 +704,46 @@ describe("coordinator dwell and discovery", () => {
     expect(s.events.find((e) => e.name === "discovery_discarded")?.fields).toMatchObject({ reason });
   });
 
+  it("a pass paused and resumed before it finishes never ingests; the re-armed dwell runs a fresh pass", async () => {
+    const s = visiting();
+    s.advance(DWELL_MS);
+    expect(s.passes).toHaveLength(1);
+    s.coordinator.handleNativeCommand({ type: "pause" });
+    s.coordinator.handleNativeCommand({ type: "resume" });
+    s.passes[0]!.discover.resolve(discoveryFor("https://docs.stripe.com"));
+    await flush();
+    expect(s.ingests).toEqual([]);
+    expect(s.events.find((e) => e.name === "discovery_discarded")?.fields).toMatchObject({ reason: "paused" });
+    s.advance(DWELL_MS);
+    expect(s.passes).toHaveLength(2);
+    s.passes[1]!.discover.resolve(discoveryFor("https://docs.stripe.com"));
+    await flush();
+    expect(s.ingests).toEqual([{ origin: "https://docs.stripe.com", chromePermitted: true }]);
+  });
+
+  it("a fresh settle while the paused pass is still running queues and runs after it", async () => {
+    const s = visiting();
+    s.advance(DWELL_MS);
+    s.coordinator.handleNativeCommand({ type: "pause" });
+    s.coordinator.handleNativeCommand({ type: "resume" });
+    s.advance(DWELL_MS);
+    expect(s.passes).toHaveLength(1);
+    s.passes[0]!.discover.resolve(discoveryFor("https://docs.stripe.com"));
+    await flush();
+    expect(s.passes).toHaveLength(2);
+    s.passes[1]!.discover.resolve(discoveryFor("https://docs.stripe.com"));
+    await flush();
+    expect(s.ingests).toHaveLength(1);
+  });
+
+  it("honors a configured dwellMs", () => {
+    const s = visiting({ dwellMs: 50 });
+    s.advance(49);
+    expect(s.passes).toHaveLength(0);
+    s.advance(1);
+    expect(s.passes).toHaveLength(1);
+  });
+
   it("runs one pass at a time; settles meanwhile queue with the latest winning", async () => {
     const s = visiting();
     s.advance(DWELL_MS);

@@ -27,6 +27,13 @@
 // pass for its origin: one paced fetch session with one window, the catalog and resource
 // discovery sharing it, then a store ingest only if the visit is still current and the
 // origin still permitted. One pass runs at a time; settles meanwhile queue, latest wins.
+// Pausing discards the running pass for good: resuming before it finishes does not let it
+// ingest; the dwell re-armed on resume produces a fresh pass instead.
+//
+// The final check and the `store.ingest` call have no await between them, so the store
+// is called with the permission state that check saw. A permission loss, pause, or
+// navigation while the store's own ingest is in flight is not caught: that ingest commits
+// with `chromePermitted: true`. The window is the store's write, and is accepted.
 
 import type {
   ActiveVisit,
@@ -64,6 +71,8 @@ export interface CoordinatorOptions {
   emitPanel: (state: PanelState) => void;
   /** Phase 3 passes the real observe_activity client. */
   sendActivity?: ActivitySend;
+  /** How long a visit must stay unchanged before discovery; defaults to DWELL_MS. */
+  dwellMs?: number;
   /** Called once when a `shutdown` command stops the coordinator. */
   onShutdownRequested?: () => void;
   /** Resource discovery on settled visits. Without it a settle is only logged. */
@@ -154,7 +163,8 @@ export function createCoordinator(options: CoordinatorOptions): Coordinator {
 
   // --- Discovery on settled visits ---
 
-  let passRunning = false;
+  /** The running pass; `cancelled` is set when it must never ingest, whatever happens next. */
+  let runningPass: { visit: ActiveVisit; cancelled: string | null } | null = null;
   let pendingSettle: ActiveVisit | null = null;
 
   /** Why a pass for `visit` must not run or ingest now, or null if it may. */
@@ -170,7 +180,8 @@ export function createCoordinator(options: CoordinatorOptions): Coordinator {
     diagnostics.event("discovery_discarded", { origin: visit.origin, epoch: visit.epoch, reason });
 
   const runPass = async (visit: ActiveVisit, c: CoordinatorCapabilities): Promise<void> => {
-    passRunning = true;
+    const pass: { visit: ActiveVisit; cancelled: string | null } = { visit, cancelled: null };
+    runningPass = pass;
     const { origin, epoch } = visit;
     const started = clock.now();
     try {
@@ -183,12 +194,14 @@ export function createCoordinator(options: CoordinatorOptions): Coordinator {
         diagnostics.event("discovery_failed", { origin, epoch, code: errorCode(discovery.reason) });
         return;
       }
-      const blocked = discoveryBlocker(visit);
+      // No await from here to the ingest call: the store sees the state this check saw.
+      const blocked = pass.cancelled ?? discoveryBlocker(visit);
       if (blocked !== null) {
         discarded(visit, blocked);
         return;
       }
-      const report = await c.store.ingest(discovery.value, { chromePermitted: permissions.isPermitted(origin) });
+      const chromePermitted = permissions.isPermitted(origin);
+      const report = await c.store.ingest(discovery.value, { chromePermitted });
       void report.cleanup.catch(() => {});
       diagnostics.event("discovery_ingested", {
         origin,
@@ -200,7 +213,7 @@ export function createCoordinator(options: CoordinatorOptions): Coordinator {
     } catch (e) {
       diagnostics.event("discovery_failed", { origin, epoch, code: errorCode(e) });
     } finally {
-      passRunning = false;
+      runningPass = null;
       const next = pendingSettle;
       pendingSettle = null;
       if (next !== null) startPass(next);
@@ -217,7 +230,7 @@ export function createCoordinator(options: CoordinatorOptions): Coordinator {
       diagnostics.event("discovery_skipped", { origin: visit.origin, epoch: visit.epoch, reason: "not_wired" });
       return;
     }
-    if (passRunning) {
+    if (runningPass !== null) {
       if (pendingSettle !== null) discarded(pendingSettle, "superseded");
       pendingSettle = visit;
       diagnostics.event("discovery_queued", { origin: visit.origin, epoch: visit.epoch });
@@ -236,6 +249,7 @@ export function createCoordinator(options: CoordinatorOptions): Coordinator {
     onSettled: startPass,
     diagnostics,
     ...(options.timers ? { timers: options.timers } : {}),
+    ...(options.dwellMs !== undefined ? { dwellMs: options.dwellMs } : {}),
   });
 
   // --- Visits ---
@@ -359,6 +373,7 @@ export function createCoordinator(options: CoordinatorOptions): Coordinator {
           paused = true;
           dwell.cancel("paused");
           dropPendingSettle("paused");
+          if (runningPass !== null) runningPass.cancelled = "paused";
           diagnostics.event("paused", {});
           syncPolicy();
           emitCurrent();

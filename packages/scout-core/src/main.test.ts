@@ -12,7 +12,8 @@ import { createSocketBackend } from "@scout/scout-mcp/client";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { DEFAULT_DESTINATIONS, readConfig, readDestinations } from "./config.js";
 import type { Diagnostics } from "./diagnostics.js";
-import { runStdio } from "./main.js";
+import { DWELL_MS } from "./dwell.js";
+import { dwellMsFromEnv, runStdio } from "./main.js";
 
 const pkgDir = join(dirname(fileURLToPath(import.meta.url)), "..");
 const mainJs = join(pkgDir, "dist", "main.js");
@@ -32,7 +33,8 @@ interface Core {
 }
 
 function spawnCore(home: string): Core {
-  const child = spawn(process.execPath, [mainJs, "--stdio"], { env: { ...process.env, SCOUT_HOME: home } });
+  // A 10-minute dwell: the real visits these tests form never settle into real fetches.
+  const child = spawn(process.execPath, [mainJs, "--stdio"], { env: { ...process.env, SCOUT_HOME: home, SCOUT_DWELL_MS: "600000" } });
   const lines: unknown[] = [];
   let out = "";
   let err = "";
@@ -58,6 +60,20 @@ const until = async (cond: () => boolean, ms = 5_000): Promise<void> => {
     await new Promise((r) => setTimeout(r, 10));
   }
 };
+
+describe("dwellMsFromEnv", () => {
+  it("honors a positive integer SCOUT_DWELL_MS", () => {
+    expect(dwellMsFromEnv({ SCOUT_DWELL_MS: "600000" })).toBe(600_000);
+    expect(dwellMsFromEnv({ SCOUT_DWELL_MS: "1" })).toBe(1);
+  });
+
+  it.each([undefined, "", "0", "-5", "1.5", "1e3", " 50", "abc", "2147483648", "99999999999999999999"])(
+    "falls back to DWELL_MS for %j",
+    (raw) => {
+      expect(dwellMsFromEnv(raw === undefined ? {} : { SCOUT_DWELL_MS: raw })).toBe(DWELL_MS);
+    },
+  );
+});
 
 describe("main --stdio", () => {
   let home: string;
