@@ -2,9 +2,13 @@
 // browser-context grant exists: `agentBrowserContext` in config.json, set by the user (P2.5
 // adds the toggle). It is read on every call and never cached per connection, so turning it
 // off reaches connections that are already open, and reconnecting cannot bring it back.
-// A job connection never carries it in Phase 2.
+// A job connection never carries it in Phase 2. Scout's window turns it on or off through
+// `writeBrowserContextGrant`, which rewrites config.json atomically and keeps every other key.
 
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import type { AgentStatusCode } from "@scout/contracts";
+import { writeFileAtomic } from "../capabilities/atomicWrite.js";
 import { readConfig } from "../config.js";
 import type { AgentPrincipal } from "./auth.js";
 
@@ -25,4 +29,27 @@ export function browserContextGate(principal: AgentPrincipal, granted: boolean, 
   if (principal.role !== "interactive" || !granted) return "not_granted";
   if (paused) return "paused";
   return undefined;
+}
+
+/**
+ * Set `agentBrowserContext` in config.json, keeping every other key as it is. A missing file
+ * becomes one holding only the grant. Throws (writing nothing) when the existing file is
+ * unreadable or not a JSON object.
+ */
+export function writeBrowserContextGrant(home: string, enabled: boolean): void {
+  const path = join(home, "config.json");
+  let config: Record<string, unknown> = {};
+  let raw: string | null = null;
+  try {
+    raw = readFileSync(path, "utf8");
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
+  }
+  if (raw !== null) {
+    const parsed: unknown = JSON.parse(raw);
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) throw new TypeError("config.json is not an object");
+    config = parsed as Record<string, unknown>;
+  }
+  config.agentBrowserContext = enabled;
+  writeFileAtomic(path, `${JSON.stringify(config, null, 2)}\n`);
 }
