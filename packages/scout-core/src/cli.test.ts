@@ -368,4 +368,18 @@ describe("runCli", () => {
     expect(await runCli(["capability", "policy", ORIGIN, "--auto-acquire", "on"], io().io)).toBe(1);
     expect(await runCli(["capability", "policy", ORIGIN, "--auto-acquire", "on", "--ack"], io().io)).toBe(0);
   });
+
+  it("capability commands refuse with exit 2 while another process holds the store; list still reads", async () => {
+    const { runCli } = await import("./cli.js");
+    const { createCapabilityStore } = await import("./capabilities/store.js");
+    const core = await createCapabilityStore({ scoutHome: home, clock: { now: () => 1 }, diagnostics });
+    try {
+      const run = io();
+      expect(await runCli(["capability", "policy", ORIGIN, "--auto-acquire", "off"], run.io)).toBe(2);
+      expect(run.err()).toContain("the Scout core holds the capability store");
+      expect(await runCli(["capability", "list"], io().io)).toBe(0);
+    } finally {
+      core.close();
+    }
+  });
 });

@@ -299,6 +299,9 @@ export function createSkillExporter(options: SkillExporterOptions): SkillExporte
     if (ins.state === "absent") return "absent";
     if (ins.state === "left_modified" || ins.state === "left_symlink" || ins.state === "io_error") return ins.state;
     if (!sameDir(dir, ins.ino, ins.dev)) return "left_modified";
+    // Known window: between this inode recheck and the unlinks below, the directory could be
+    // swapped for a symlink. Node has no unlinkat/openat to unlink relative to a held
+    // directory handle, so the recheck narrows the race but cannot close it.
     try {
       if (ins.state === "match") for (const f of entry.files) unlinkSync(join(dir, f));
       rmdirSync(dir);
