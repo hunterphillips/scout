@@ -15,8 +15,14 @@ export const RETAINED_VERSIONS = 5;
 /** resourceId → version hashes pinned by active requests. */
 export type PinnedVersions = ReadonlyMap<string, ReadonlySet<string>>;
 
-/** Drop expired and surplus versions of one resource in place. Returns how many were dropped. */
-export function pruneResource(r: StoredResource, pinned: ReadonlySet<string>, now: number): number {
+export interface PruneResult {
+  dropped: number;
+  /** A dropped version was approved or superseded: what agents may read changed. */
+  readableDropped: boolean;
+}
+
+/** Drop expired and surplus versions of one resource in place. */
+export function pruneResource(r: StoredResource, pinned: ReadonlySet<string>, now: number): PruneResult {
   const keep = (hash: string) => hash === r.resource.defaultVersion || pinned.has(hash);
   const before = r.resource.versions.length;
   let versions = r.resource.versions.filter((v) => {
@@ -31,28 +37,37 @@ export function pruneResource(r: StoredResource, pinned: ReadonlySet<string>, no
     .sort((a, b) => b.v.fetchedAt - a.v.fetchedAt || b.i - a.i);
   const retained = new Set(ranked.slice(0, RETAINED_VERSIONS).map(({ v }) => v.hash));
   versions = versions.filter((v) => keep(v.hash) || retained.has(v.hash));
-  for (const v of r.resource.versions) if (!versions.includes(v)) delete r.meta[v.hash];
+  let readableDropped = false;
+  for (const v of r.resource.versions) {
+    if (versions.includes(v)) continue;
+    delete r.meta[v.hash];
+    if (v.state === "approved" || v.state === "superseded") readableDropped = true;
+  }
   r.resource.versions = versions;
-  return before - versions.length;
+  return { dropped: before - versions.length, readableDropped };
 }
 
 export interface CollectionResult {
   state: StoreState;
   versions: number;
   resources: number;
+  /** An approved or superseded version was dropped; store.ts bumps `approvalRevision` on commit. */
+  readableDropped: boolean;
 }
 
 /** Collect across the whole store (input is not modified). An unblocked resource left with no versions is removed. */
 export function collect(input: StoreState, pinned: PinnedVersions, now: number): CollectionResult {
   const state = structuredClone(input);
   let versions = 0;
+  let readableDropped = false;
   for (const r of state.resources) {
-    const n = pruneResource(r, pinned.get(r.resource.id) ?? new Set(), now);
-    if (n > 0) r.revision++;
-    versions += n;
+    const pruned = pruneResource(r, pinned.get(r.resource.id) ?? new Set(), now);
+    if (pruned.dropped > 0) r.revision++;
+    versions += pruned.dropped;
+    if (pruned.readableDropped) readableDropped = true;
   }
   const kept = state.resources.filter((r) => r.resource.blocked || r.resource.versions.length > 0);
   const resources = state.resources.length - kept.length;
   state.resources = kept;
-  return { state, versions, resources };
+  return { state, versions, resources, readableDropped };
 }

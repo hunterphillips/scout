@@ -154,6 +154,39 @@ describe("skill export", () => {
     expect(store.resolveRead(s.id)).toEqual({ ok: false, code: "revoked" });
   });
 
+  it("sweeps an atomic-write leftover from an owned wrapper but still reports a foreign file as a conflict", async () => {
+    const { store, exporter } = await setup();
+    const s = await approvedSkill(store, "pay", "v1");
+    await exporter.sync(store.snapshot());
+    const dir = join(skillsRoot, s.name);
+    writeFileSync(join(dir, ".scout-tmp-SKILL.md.0123456789ab"), "half-written", { mode: 0o600 });
+    expect(await exporter.sync(store.snapshot())).toMatchObject({ unchanged: 1, conflicts: [] });
+    expect(readdirSync(dir)).toEqual(["SKILL.md"]);
+
+    writeFileSync(join(dir, "notes.md"), "the user's file");
+    expect((await exporter.sync(store.snapshot())).conflicts.map((c) => c.code)).toEqual(["left_modified"]);
+    expect(readdirSync(dir).sort()).toEqual(["SKILL.md", "notes.md"]);
+  });
+
+  it("removes a wrapper on the next writable open after another process revoked its resource", async () => {
+    const { store, exporter } = await setup();
+    const s = await approvedSkill(store, "pay", "v1");
+    await exporter.sync(store.snapshot());
+    await store.close();
+
+    // The dev CLI path: a store with no exporter commits the revocation.
+    const cli = await createCapabilityStore({ scoutHome, clock });
+    await cli.revoke(s.id);
+    await cli.close();
+    expect(existsSync(join(skillsRoot, s.name))).toBe(true);
+
+    const next = await setup();
+    expect(await next.store.startupExportSync).toEqual({ ok: true });
+    expect(existsSync(join(skillsRoot, s.name))).toBe(false);
+    expect(next.exporter.manifest().entries).toEqual([]);
+    await next.store.close();
+  });
+
   it("refuses to follow a wrapper directory swapped for a symlink", async () => {
     const { store, exporter } = await setup();
     const s = await approvedSkill(store, "pay", "v1");
@@ -252,7 +285,7 @@ describe("skill export", () => {
     const again = await store.ingest(skillDiscovery([{ name: "ship", text: "s2" }]), { chromePermitted: true });
     expect(await again.cleanup).toEqual({ ok: false });
     expect(store.getApprovedDefault(again.results[0]!.resourceId)?.hash).toBe(again.results[0]!.version);
-    store.close();
+    await store.close();
   });
 });
 

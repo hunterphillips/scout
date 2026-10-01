@@ -12,6 +12,11 @@ import { basename, dirname, join } from "node:path";
 /** Temp files start with this, so a reader never mistakes one for a target. */
 export const TEMP_PREFIX = ".scout-tmp-";
 
+/** The temp names writeFileAtomic creates for targets matching `target` (a regex source), for crash-leftover sweeps. */
+export function tempNamePattern(target: string): RegExp {
+  return new RegExp(`^${TEMP_PREFIX.replaceAll(".", "\\.")}(?:${target})\\.[0-9a-f]{12}$`);
+}
+
 /** Fsync a directory so a rename or unlink in it is durable. Best effort: some file systems refuse. */
 export function fsyncDir(dir: string): void {
   let fd: number | null = null;

@@ -379,7 +379,7 @@ describe("runCli", () => {
       expect(run.err()).toContain("the Scout core holds the capability store");
       expect(await runCli(["capability", "list"], io().io)).toBe(0);
     } finally {
-      core.close();
+      await core.close();
     }
   });
 });

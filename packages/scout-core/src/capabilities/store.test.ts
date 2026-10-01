@@ -125,6 +125,15 @@ describe("ingest and exact-preview approval", () => {
     expect(listBlobFiles(store)).toEqual([`${sha(body)}.txt`]);
   });
 
+  it("ignores content-type case and parameters: one version for the same bytes", async () => {
+    const store = await open();
+    const a = await ingestOne(store, "# Doc\n", { contentType: "text/markdown" });
+    const b = await ingestOne(store, "# Doc\n", { contentType: "Text/Markdown; charset=UTF-8" });
+    expect(b.version).toBe(a.version);
+    expect(b.outcome).toBe("unchanged");
+    expect(store.getResource(a.id)!.resource.versions).toHaveLength(1);
+  });
+
   it("skips found items whose bytes do not match their hash or that come from another origin", async () => {
     const store = await open();
     const d = discovery([{ text: "ok" }, { text: "x", path: "/AGENTS.md", kind: "agents_md" }]);
@@ -206,6 +215,35 @@ describe("manual and auto updates", () => {
     await store.collectGarbage();
     expect(store.getVersion(v1.id, v1.version)).toBeUndefined();
     expect(listBlobFiles(store)).not.toContain(`${sha("v1")}.txt`);
+  });
+});
+
+describe("version retention", () => {
+  it("keeps a pinned old version through trimming and bumps approvalRevision only when a readable version is dropped", async () => {
+    const store = await open();
+    const v1 = await ingestOne(store, "v1");
+    await approve(store, v1.id, v1.version);
+    now += 1000;
+    const v2 = await ingestOne(store, "v2");
+    await approve(store, v1.id, v2.version);
+    expect(store.pinVersion("req", v1.id, v1.version).ok).toBe(true);
+
+    // Six pending versions: the oldest pending one is trimmed, the pinned superseded one stays.
+    const before = store.approvalRevision;
+    const pending = [];
+    for (let i = 1; i <= 6; i++) {
+      now += 1000;
+      pending.push(await ingestOne(store, `p${i}`));
+    }
+    expect(store.getVersion(v1.id, pending[0]!.version)).toBeUndefined();
+    expect(store.getVersion(v1.id, v1.version)?.state).toBe("superseded");
+    expect(store.approvalRevision).toBe(before);
+
+    store.releasePins("req");
+    expect((await store.collectGarbage()).versions).toBe(1);
+    expect(store.getVersion(v1.id, v1.version)).toBeUndefined();
+    expect(store.approvalRevision).toBe(before + 1);
+    expect(store.getApprovedDefault(v1.id)?.hash).toBe(v2.version);
   });
 });
 
@@ -333,6 +371,37 @@ describe("garbage collection", () => {
 });
 
 describe("serialized mutations", () => {
+  it("an approval queued behind a revocation of the same resource is refused and reads stay revoked", async () => {
+    const store = await open();
+    const v1 = await ingestOne(store, "v1");
+    await approve(store, v1.id, v1.version);
+    const v2 = await ingestOne(store, "v2");
+    const [revoked, approved] = await Promise.allSettled([store.revoke(v1.id), approve(store, v1.id, v2.version)]);
+    expect(revoked.status).toBe("fulfilled");
+    expect(approved.status).toBe("rejected");
+    expect(store.resolveRead(v1.id)).toEqual({ ok: false, code: "revoked" });
+    expect(store.resolveRead(v1.id, v2.version)).toEqual({ ok: false, code: "revoked" });
+  });
+
+  it("a failed store.json write leaves the file and the reads unchanged", async () => {
+    const store = await open();
+    const v1 = await ingestOne(store, "v1");
+    const capDir = join(home, "capabilities");
+    const onDisk = readFileSync(join(capDir, "store.json"));
+    chmodSync(capDir, 0o500);
+    try {
+      await expect(approve(store, v1.id, v1.version)).rejects.toThrow();
+    } finally {
+      chmodSync(capDir, 0o700);
+    }
+    expect(readFileSync(join(capDir, "store.json"))).toEqual(onDisk);
+    expect(store.getApprovedDefault(v1.id)).toBeUndefined();
+    expect(store.getVersion(v1.id, v1.version)?.state).toBe("pending");
+    // The store is still usable once the directory is writable again.
+    expect((await approve(store, v1.id, v1.version)).changed).toBe(true);
+  });
+
+
   it("applies concurrent commands one at a time: of two approvals at one revision exactly one wins", async () => {
     const store = await open();
     const v1 = await ingestOne(store, "v1");
@@ -357,7 +426,7 @@ describe("corruption is an explicit error", () => {
     const store = await open();
     await ingestOne(store, "v1");
     const good = (await import("node:fs")).readFileSync(storeFile(), "utf8");
-    store.close();
+    await store.close();
 
     for (const [content, code] of [
       ["{nope", "parse"],
@@ -380,7 +449,7 @@ describe("corruption is an explicit error", () => {
   it("refuses a resource whose ID does not match its kind and source URL", async () => {
     const store = await open();
     const v1 = await ingestOne(store, "v1");
-    store.close();
+    await store.close();
     const fs = await import("node:fs");
     const json = JSON.parse(fs.readFileSync(storeFile(), "utf8"));
     json.resources[0].resource.id = `res_${"a".repeat(64)}`;
@@ -424,6 +493,36 @@ describe("revocation hook failure", () => {
   });
 });
 
+describe("close", () => {
+  it("refuses a mutation that reaches its commit after close(), then releases the lock with store.json intact", async () => {
+    const store = await open();
+    const v0 = await ingestOne(store, "v0");
+    const storeFile = join(home, "capabilities", "store.json");
+    const onDisk = readFileSync(storeFile);
+
+    // close() is called while the ingest is past its own writable check.
+    const d = discovery([{ text: "v1" }]);
+    const items = d.items;
+    let closing: Promise<void> | undefined;
+    Object.defineProperty(d, "items", {
+      get: () => {
+        closing ??= store.close();
+        return items;
+      },
+    });
+    await expect(store.ingest(d, { chromePermitted: false })).rejects.toBeInstanceOf(StoreReadOnlyError);
+    await closing;
+
+    expect(existsSync(join(home, "capabilities", "store.lock"))).toBe(false);
+    expect(readFileSync(storeFile)).toEqual(onDisk);
+    expect(listBlobFiles(store)).toEqual([`${sha("v0")}.txt`]);
+    await expect(store.ingest(discovery([{ text: "v2" }]), { chromePermitted: false })).rejects.toBeInstanceOf(StoreReadOnlyError);
+    const reopened = await open();
+    expect(reopened.getResource(v0.id)!.resource.versions).toHaveLength(1);
+    await reopened.close();
+  });
+});
+
 describe("writer lock", () => {
   it("lets one writer hold the store, allows read-only opens, and frees it on close", async () => {
     const store = await open();
@@ -431,20 +530,20 @@ describe("writer lock", () => {
     await expect(open()).rejects.toBeInstanceOf(StoreLockedError);
     const reader = await open({ readOnly: true });
     await expect(reader.ingest(discovery([{ text: "x" }]), { chromePermitted: false })).rejects.toBeInstanceOf(StoreReadOnlyError);
-    store.close();
+    await store.close();
     await expect(store.revoke(`res_${"1".repeat(64)}`)).rejects.toBeInstanceOf(StoreReadOnlyError);
     const next = await open();
-    next.close();
+    await next.close();
     expect(existsSync(join(home, "capabilities", "store.lock"))).toBe(false);
   });
 
   it("reclaims a lock left by a process that has exited", async () => {
-    (await open()).close();
+    await (await open()).close();
     const dead = spawnSync(process.execPath, ["-e", ""]).pid!;
     writeFileSync(join(home, "capabilities", "store.lock"), JSON.stringify({ pid: dead, instanceId: "old", startedAt: 1 }), { mode: 0o600 });
     const store = await open();
     expect(JSON.parse(readFileSync(join(home, "capabilities", "store.lock"), "utf8")).pid).toBe(process.pid);
-    store.close();
+    await store.close();
   });
 
   it("reclaims a lock whose pid is not ours to signal, refuses a live one, and judges an unparseable one by age", () => {
@@ -469,24 +568,29 @@ describe("writer lock", () => {
   });
 });
 
-describe("orphan blob sweep", () => {
-  it("deletes only unreferenced blob-named files when a writer opens", async () => {
+describe("orphan blob and temp file sweep", () => {
+  it("deletes only unreferenced blob-named files and atomic-write leftovers when a writer opens", async () => {
     const store = await open();
     const v1 = await ingestOne(store, "v1");
-    store.close();
-    const blobs = join(home, "capabilities", "blobs");
+    await store.close();
+    const capDir = join(home, "capabilities");
+    const blobs = join(capDir, "blobs");
     const orphan = `${sha("orphan")}.txt`;
     writeFileSync(join(blobs, orphan), "orphan", { mode: 0o600 });
     writeFileSync(join(blobs, "notes.txt"), "not a blob name", { mode: 0o600 });
+    writeFileSync(join(blobs, `.scout-tmp-${sha("half")}.txt.0123456789ab`), "half", { mode: 0o600 });
+    writeFileSync(join(capDir, ".scout-tmp-store.json.0123456789ab"), "{", { mode: 0o600 });
+    writeFileSync(join(capDir, ".scout-tmp-mine"), "not a temp name", { mode: 0o600 });
 
     await open({ readOnly: true });
     expect(readdirSync(blobs)).toContain(orphan);
 
     const reopened = await open();
     expect(readdirSync(blobs).sort()).toEqual([`${sha("v1")}.txt`, "notes.txt"].sort());
+    expect(readdirSync(capDir).filter((n) => n.startsWith(".scout-tmp-"))).toEqual([".scout-tmp-mine"]);
     expect(events.some((e) => e.name === "capability_gc" && e.fields.orphanBlobs === 1)).toBe(true);
     expect(reopened.getVersion(v1.id, v1.version)).toBeDefined();
-    reopened.close();
+    await reopened.close();
   });
 });
 

@@ -14,18 +14,24 @@
 // StoreCorruptError for the caller to surface. Text comes in only from discovery results;
 // the store never reads approved text from the discovery cache.
 //
-// Revocation, in order: (1) the blocked state is committed; (2) `onRevoked` runs (P2.4
-// invalidates job tokens, P3 cancels jobs); (3) `revoke()` resolves; (4) export cleanup
-// runs (`cleanup` on the result). A cleanup failure is recorded there and never restores
-// access: reads check the committed state. A committed approval, and an ingest that
-// auto-approved anything, start the same deferred export sync; its failure never undoes
-// the approval.
+// Revocation, in order: (1) the blocked state is committed, then the resource's pins are
+// dropped; (2) `onRevoked` runs (P2.4 invalidates job tokens, P3 cancels jobs), bounded by
+// ON_REVOKED_TIMEOUT_MS; (3) `revoke()` resolves; (4) export cleanup runs (`cleanup` on the
+// result). A cleanup failure is recorded there and never restores access: reads check the
+// committed state. A committed approval, and an ingest that auto-approved anything, start
+// the same deferred export sync; its failure never undoes the approval.
 //
 // One writer process at a time: opening takes `capabilities/store.lock` (storeLock.ts) and
-// `close()` releases it. A `readOnly` open takes no lock and refuses every mutation; it
-// reads a consistent store.json because writers replace it by rename. Opening a writable
-// store also deletes blob files no version refers to (left by a crash between a blob write
-// and the store.json replace), by exact name only.
+// `close()` releases it after the queued mutations have settled; a mutation that reaches
+// its commit after `close()` is refused, and an export sync scheduled to start after it is
+// skipped (resolves `ok: false`). A `readOnly` open takes no lock and refuses every
+// mutation; it reads a consistent store.json because writers replace it by rename.
+//
+// Opening a writable store also repairs what a crash can leave: it deletes blob files no
+// version refers to (a crash between a blob write and the store.json replace) and
+// atomicWrite temp files in `capabilities/` and `blobs/`, by exact name pattern only, and
+// it starts an export sync (`startupExportSync`) so a revocation committed by another
+// process (the dev CLI) still removes its wrapper.
 
 import { mkdirSync, readdirSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
@@ -41,7 +47,7 @@ import { PrivateFileError, readPrivateFile } from "../agents/privateFile.js";
 import type { Clock } from "../clock.js";
 import type { Diagnostics } from "../diagnostics.js";
 import { checkPrivateDir, fsErrorCode } from "../privateCacheFile.js";
-import { fsyncDir, writeFileAtomic } from "./atomicWrite.js";
+import { fsyncDir, tempNamePattern, writeFileAtomic } from "./atomicWrite.js";
 import {
   applyApprove,
   applyDecline,
@@ -71,6 +77,8 @@ import { sha256Hex } from "./textValidation.js";
 
 /** store.json larger than this is refused unread. 256 resources x 16 versions fit well under it. */
 export const STORE_FILE_MAX_BYTES = 16 * 1024 * 1024;
+/** `onRevoked` running longer than this counts as a failed hook; reads are blocked regardless. */
+export const ON_REVOKED_TIMEOUT_MS = 5000;
 
 export type StoreCorruptCode =
   | "dir_symlink"
@@ -109,7 +117,11 @@ export interface ApprovedListing {
   superseded: ResourceVersion[];
 }
 
-/** The deferred export sync a change started. Never rejects; `ok: false` means the sync failed (recorded). */
+/**
+ * The deferred export sync a change started. Never rejects. `ok: false` means the sync failed
+ * (recorded) or was skipped because the store closed before it started; the next writable
+ * open's startup sync reconciles the wrappers.
+ */
 export type ExportSync = Promise<{ ok: boolean }>;
 
 export interface IngestReport {
@@ -136,9 +148,9 @@ export interface ApproveResult extends DecisionResult {
 export interface RevokeResult extends DecisionResult {
   /** Versions that were readable before the revocation. */
   revokedVersions: string[];
-  /** `onRevoked` threw: tokens or jobs may not have been invalidated. Reads are blocked regardless. */
+  /** `onRevoked` threw or timed out: tokens or jobs may not have been invalidated. Reads are blocked regardless. */
   hookFailed: boolean;
-  hookError?: "on_revoked_failed";
+  hookError?: "on_revoked_failed" | "on_revoked_timeout";
   /** Export cleanup, started after this result resolved. */
   cleanup: ExportSync;
 }
@@ -175,8 +187,13 @@ export interface CapabilityStoreOptions {
 export interface CapabilityStore {
   readonly dir: string;
   readonly readOnly: boolean;
-  /** Release the writer lock; later mutations throw StoreReadOnlyError. Idempotent. */
-  close(): void;
+  /**
+   * Refuse new mutations, wait for queued ones to settle (any that reaches its commit is
+   * refused), then release the writer lock. Idempotent.
+   */
+  close(): Promise<void>;
+  /** The export sync a writable open started (resolves `ok` at once when read-only or without `syncExports`). */
+  readonly startupExportSync: ExportSync;
   /** Bumped on every approval-affecting change; persisted, so it never goes back. */
   readonly approvalRevision: number;
   /** A copy of the whole state. */
@@ -191,7 +208,7 @@ export interface CapabilityStore {
   /** Unblocked resources with a default version, optionally for one site origin. */
   listApproved(siteOrigin?: string): ApprovedListing[];
   originPolicy(origin: string): OriginPolicy | undefined;
-  /** The blob's bytes, re-hashed: a mismatch or a missing blob is a StoreCorruptError. */
+  /** The blob's bytes, re-hashed: a missing (`blob_missing`), mismatched (`blob_hash`), or unusable (`unreadable`) blob is a StoreCorruptError. */
   readBlob(blobRef: string): Buffer;
   /** Keep a readable version from collection while a request uses it. Returns the read check. */
   pinVersion(requestId: string, resourceId: string, version: string): ReadResolution;
@@ -205,6 +222,25 @@ export interface CapabilityStore {
 }
 
 const BLOB_NAME_RE = /^[0-9a-f]{64}\.txt$/;
+/** writeFileAtomic leftovers: store.json and exports.json temps beside them, blob temps in blobs/. */
+const CAP_TEMP_RE = tempNamePattern("store\\.json|exports\\.json");
+const BLOB_TEMP_RE = tempNamePattern("[0-9a-f]{64}\\.txt");
+
+/** Unlink the entries of `dir` whose names `match` accepts. Returns how many were removed. */
+function sweep(dir: string, match: (name: string) => boolean): number {
+  let removed = 0;
+  for (const name of readdirSync(dir)) {
+    if (!match(name)) continue;
+    try {
+      unlinkSync(join(dir, name));
+      removed++;
+    } catch {
+      // Gone already.
+    }
+  }
+  if (removed > 0) fsyncDir(dir);
+  return removed;
+}
 
 function ensurePrivateDir(dir: string): void {
   try {
@@ -274,20 +310,9 @@ export async function createCapabilityStore(options: CapabilityStoreOptions): Pr
 
   if (!readOnly) {
     const referenced = referencedBlobs(state);
-    let orphanBlobs = 0;
-    for (const name of readdirSync(blobDir)) {
-      if (!BLOB_NAME_RE.test(name) || referenced.has(name.slice(0, 64))) continue;
-      try {
-        unlinkSync(join(blobDir, name));
-        orphanBlobs++;
-      } catch {
-        // Gone already.
-      }
-    }
-    if (orphanBlobs > 0) {
-      fsyncDir(blobDir);
-      diagnostics?.event("capability_gc", { orphanBlobs });
-    }
+    const orphanBlobs = sweep(blobDir, (name) => BLOB_NAME_RE.test(name) && !referenced.has(name.slice(0, 64)));
+    const tempFiles = sweep(dir, (name) => CAP_TEMP_RE.test(name)) + sweep(blobDir, (name) => BLOB_TEMP_RE.test(name));
+    if (orphanBlobs > 0 || tempFiles > 0) diagnostics?.event("capability_gc", { orphanBlobs, tempFiles });
   }
 
   /** requestId → pinned "resourceId\0version" keys. In memory: requests do not survive a restart. */
@@ -326,6 +351,8 @@ export async function createCapabilityStore(options: CapabilityStoreOptions): Pr
 
   /** Write new blobs, then replace store.json, then swap; afterwards delete blobs the new state dropped. */
   function commit(next: StoreState, newBlobs: ReadonlyMap<string, Uint8Array> = new Map()): number {
+    // A mutation already past its own check when close() ran must not write after it.
+    if (closed) throw new StoreReadOnlyError();
     for (const [ref, bytes] of newBlobs) writeBlob(ref, bytes);
     writeFileAtomic(storePath, JSON.stringify(next));
     const kept = referencedBlobs(next);
@@ -353,7 +380,7 @@ export async function createCapabilityStore(options: CapabilityStoreOptions): Pr
     if (!v) return { ok: false, code: "not_found" };
     if (v.state === "revoked") return { ok: false, code: "revoked" };
     if (v.state !== "approved" && v.state !== "superseded") return { ok: false, code: "not_found" };
-    return { ok: true, resource: structuredClone(r.resource), version: { ...v }, approval: v.state };
+    return { ok: true, resource: structuredClone(r.resource), version: structuredClone(v), approval: v.state };
   }
 
   const resourceRevision = (id: string) => findResource(state, id)?.revision ?? 0;
@@ -363,6 +390,7 @@ export async function createCapabilityStore(options: CapabilityStoreOptions): Pr
     return new Promise((resolve) => {
       setImmediate(() => {
         if (!options.syncExports) return resolve({ ok: true });
+        if (closed) return resolve({ ok: false });
         options.syncExports().then(
           () => resolve({ ok: true }),
           () => {
@@ -374,6 +402,26 @@ export async function createCapabilityStore(options: CapabilityStoreOptions): Pr
     });
   }
   const shortId = (id: string) => id.slice(4, 20);
+
+  /** Run `onRevoked`, bounded by ON_REVOKED_TIMEOUT_MS. Never rejects. */
+  async function runOnRevoked(resourceId: string, versions: readonly string[]): Promise<"ok" | "on_revoked_failed" | "on_revoked_timeout"> {
+    if (!options.onRevoked) return "ok";
+    let timer: NodeJS.Timeout | undefined;
+    const timeout = new Promise<"on_revoked_timeout">((resolve) => {
+      timer = setTimeout(() => resolve("on_revoked_timeout"), ON_REVOKED_TIMEOUT_MS);
+    });
+    try {
+      const hook = Promise.resolve()
+        .then(() => options.onRevoked!(resourceId, versions))
+        .then(
+          () => "ok" as const,
+          () => "on_revoked_failed" as const,
+        );
+      return await Promise.race([hook, timeout]);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
 
   async function toCandidates(discovery: DiscoveryResult): Promise<{ candidates: IngestCandidate[]; bytes: Map<string, Uint8Array>; skipped: number }> {
     const candidates: IngestCandidate[] = [];
@@ -419,13 +467,17 @@ export async function createCapabilityStore(options: CapabilityStoreOptions): Pr
     return { candidates, bytes, skipped };
   }
 
+  const startupExportSync: ExportSync = readOnly ? Promise.resolve({ ok: true }) : scheduleExportSync("startup");
+
   return {
     dir,
     readOnly,
-    close() {
+    async close() {
       closed = true;
+      await tail;
       lock?.release();
     },
+    startupExportSync,
     get approvalRevision() {
       return state.approvalRevision;
     },
@@ -438,11 +490,11 @@ export async function createCapabilityStore(options: CapabilityStoreOptions): Pr
       const r = findResource(state, id);
       if (!r || r.resource.blocked || r.resource.defaultVersion === undefined) return undefined;
       const v = r.resource.versions.find((x) => x.hash === r.resource.defaultVersion);
-      return v && { ...v };
+      return v && structuredClone(v);
     },
     getVersion(id, version) {
       const v = findResource(state, id)?.resource.versions.find((x) => x.hash === version);
-      return v && { ...v };
+      return v && structuredClone(v);
     },
     resolveRead,
     listApproved(siteOrigin) {
@@ -453,15 +505,15 @@ export async function createCapabilityStore(options: CapabilityStoreOptions): Pr
         const version = r.resource.versions.find((v) => v.hash === r.resource.defaultVersion)!;
         out.push({
           resource: structuredClone(r.resource),
-          version: { ...version },
-          superseded: r.resource.versions.filter((v) => v.state === "superseded").map((v) => ({ ...v })),
+          version: structuredClone(version),
+          superseded: structuredClone(r.resource.versions.filter((v) => v.state === "superseded")),
         });
       }
       return out;
     },
     originPolicy: (origin) => {
       const p = state.policies.find((x) => x.origin === origin);
-      return p && { ...p };
+      return p && structuredClone(p);
     },
     readBlob(ref) {
       if (typeof ref !== "string" || !SHA256_HEX_PATTERN.test(ref)) throw new StoreCorruptError("blob_missing");
@@ -469,7 +521,7 @@ export async function createCapabilityStore(options: CapabilityStoreOptions): Pr
       try {
         bytes = readPrivateFile(blobPath(ref), RESOURCE_MAX_BYTES, { private: true });
       } catch (error) {
-        const code = error instanceof PrivateFileError && error.code === "missing" ? "blob_missing" : "blob_hash";
+        const code = error instanceof PrivateFileError && error.code === "missing" ? "blob_missing" : "unreadable";
         diagnostics?.event("capability_store_invalid", { code });
         throw new StoreCorruptError(code);
       }
@@ -546,19 +598,16 @@ export async function createCapabilityStore(options: CapabilityStoreOptions): Pr
     revoke: (resourceId) =>
       serialize(async () => {
         assertWritable();
-        // (1) Commit the block. Pins on the resource go first so no collection keeps them.
+        // (1) Commit the block, then drop the resource's pins so no later collection keeps them.
+        // A failed commit throws before the pins are touched.
         const { state: next, changed, revokedVersions } = applyRevoke(state, resourceId, clock.now());
-        for (const keys of pins.values()) for (const k of [...keys]) if (k.startsWith(`${resourceId}\0`)) keys.delete(k);
         if (changed) commit(next);
+        for (const keys of pins.values()) for (const k of [...keys]) if (k.startsWith(`${resourceId}\0`)) keys.delete(k);
         diagnostics?.event("capability_decision", { resource: shortId(resourceId), action: "revoke", changed, revision: state.approvalRevision });
         // (2) Invalidate tokens and cancel jobs before answering.
-        let hookFailed = false;
-        try {
-          await options.onRevoked?.(resourceId, revokedVersions);
-        } catch {
-          hookFailed = true;
-          diagnostics?.event("capability_revoke_hook_failed", { resource: shortId(resourceId), code: "on_revoked_failed" });
-        }
+        const hook = await runOnRevoked(resourceId, revokedVersions);
+        const hookFailed = hook !== "ok";
+        if (hookFailed) diagnostics?.event("capability_revoke_hook_failed", { resource: shortId(resourceId), code: hook });
         // (4) Clean up exports after the caller has its answer.
         const cleanup = scheduleExportSync("revoke", resourceId);
         return {
@@ -567,7 +616,7 @@ export async function createCapabilityStore(options: CapabilityStoreOptions): Pr
           revision: resourceRevision(resourceId),
           revokedVersions,
           hookFailed,
-          ...(hookFailed ? { hookError: "on_revoked_failed" as const } : {}),
+          ...(hook !== "ok" ? { hookError: hook } : {}),
           cleanup,
         };
       }),
@@ -584,7 +633,8 @@ export async function createCapabilityStore(options: CapabilityStoreOptions): Pr
     collectGarbage: () =>
       serialize(() => {
         assertWritable();
-        const { state: next, versions, resources } = collect(state, pinnedVersions(), clock.now());
+        const { state: next, versions, resources, readableDropped } = collect(state, pinnedVersions(), clock.now());
+        if (readableDropped) next.approvalRevision++;
         const blobs = versions + resources > 0 ? commit(next) : 0;
         diagnostics?.event("capability_gc", { versions, resources, blobs });
         return { versions, resources, blobs };

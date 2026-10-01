@@ -9,6 +9,9 @@
 //   {"kind", "sourceUrl", "contentType"?, "skill"?: {"name", "description"?, "digest"}}
 // The descriptor is what the preview shows beside the text (a skill's index name and
 // description end up in its exported wrapper), so changing any of it is a new version.
+// `contentType` enters it normalized (normalizeContentType): parameters dropped, type/subtype
+// lowercased, so a charset or case flip by the publisher is not a new version. The stored
+// `meta.contentType` keeps the value as served.
 //
 // Approval is per resource revision: every change to a resource (a new version, any decision)
 // bumps its `revision`, and approve/decline must name the revision the user saw. A click on a
@@ -64,7 +67,7 @@ export interface OriginPolicy {
 
 export interface StoreState {
   schemaVersion: typeof STORE_SCHEMA_VERSION;
-  /** Bumped by every approve, decline, revoke, auto-acceptance and policy change. Cache keys use it. */
+  /** Bumped by every approve, decline, revoke, auto-acceptance, policy change, and collection of a readable version. Cache keys use it. */
   approvalRevision: number;
   resources: StoredResource[];
   policies: OriginPolicy[];
@@ -110,10 +113,15 @@ export function stateInvariantError(state: StoreState): string | null {
   return null;
 }
 
+/** A media type as the content hash sees it: `Text/Markdown; charset=UTF-8` -> `text/markdown`. */
+export function normalizeContentType(contentType: string): string {
+  return contentType.split(";")[0]!.trim().toLowerCase();
+}
+
 /** The content hash defined at the top of this file. */
 export function contentHash(kind: ResourceKind, sourceUrl: string, meta: Omit<VersionMeta, "lastSeenAt">, bytes: Uint8Array): string {
   const descriptor: Record<string, unknown> = { kind, sourceUrl };
-  if (meta.contentType !== undefined) descriptor.contentType = meta.contentType;
+  if (meta.contentType !== undefined) descriptor.contentType = normalizeContentType(meta.contentType);
   if (meta.skill !== undefined) {
     const skill: Record<string, string> = { name: meta.skill.name };
     if (meta.skill.description !== undefined) skill.description = meta.skill.description;
@@ -241,6 +249,7 @@ export function ingestCandidates(input: StoreState, candidates: readonly IngestC
   const auto = autoAcquireAllowed(state, ctx.origin, ctx.chromePermitted);
   const results: IngestItemResult[] = [];
   let autoChanged = false;
+  let readableDropped = false;
 
   for (const c of candidates) {
     const before = state;
@@ -281,7 +290,7 @@ export function ingestCandidates(input: StoreState, candidates: readonly IngestC
       outcome = "auto_approved";
     } else outcome = "new_pending";
 
-    pruneResource(r, ctx.pinned.get(r.resource.id) ?? new Set(), ctx.now);
+    const pruned = pruneResource(r, ctx.pinned.get(r.resource.id) ?? new Set(), ctx.now);
     let limit: IngestItemResult["limit"];
     if (created && state.resources.length > maxResources) limit = "resources";
     else if (r.resource.versions.length > RESOURCE_MAX_VERSIONS || !r.resource.versions.includes(version)) limit = "versions";
@@ -292,9 +301,11 @@ export function ingestCandidates(input: StoreState, candidates: readonly IngestC
       continue;
     }
     if (outcome === "auto_approved") autoChanged = true;
+    if (pruned.readableDropped) readableDropped = true;
     results.push({ resourceId: c.resourceId, version: c.hash, outcome });
   }
-  if (autoChanged) state.approvalRevision++;
+  // Trimming a superseded version changes what agents may read, like an approval does.
+  if (autoChanged || readableDropped) state.approvalRevision++;
   return { state, results };
 }
 

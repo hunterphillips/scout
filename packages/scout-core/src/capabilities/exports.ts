@@ -20,7 +20,9 @@
 //   io_error           the file system refused an operation
 //
 // Crash safety: the manifest entry (or its `pendingHash`) is written before the file, so an
-// interrupted write is still recognized as Scout's on the next sync.
+// interrupted write is still recognized as Scout's on the next sync. Before inspecting a
+// manifest-owned wrapper, the sync deletes atomicWrite temp files (`.scout-tmp-SKILL.md.<hex>`)
+// a crash left in it, so they never become a permanent `left_modified`. Nothing else is swept.
 
 import { closeSync, constants as fsc, fstatSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, rmdirSync, unlinkSync } from "node:fs";
 import { homedir } from "node:os";
@@ -30,7 +32,7 @@ import { z } from "zod";
 import { PrivateFileError, readPrivateFile } from "../agents/privateFile.js";
 import type { Diagnostics } from "../diagnostics.js";
 import { checkPrivateDir } from "../privateCacheFile.js";
-import { fsyncDir, writeFileAtomic } from "./atomicWrite.js";
+import { fsyncDir, tempNamePattern, writeFileAtomic } from "./atomicWrite.js";
 import type { StoreState } from "./decisions.js";
 import { ownershipHash, wrapperName } from "./identity.js";
 import { DEFAULT_SERVER_NAME, renderSkillWrapper, WRAPPER_FILE } from "./wrapper.js";
@@ -169,6 +171,31 @@ type Inspection =
   | { state: "left_symlink" }
   | { state: "io_error" };
 
+const WRAPPER_TEMP_RE = tempNamePattern(WRAPPER_FILE.replaceAll(".", "\\."));
+
+/** Delete writeFileAtomic leftovers inside a manifest-owned wrapper directory; never inside a symlink. */
+function sweepWrapperTemps(dir: string): void {
+  let names: string[];
+  try {
+    const st = lstatSync(dir);
+    if (st.isSymbolicLink() || !st.isDirectory()) return;
+    names = readdirSync(dir);
+  } catch {
+    return; // Absent or unreadable: the inspection reports it.
+  }
+  let removed = 0;
+  for (const name of names) {
+    if (!WRAPPER_TEMP_RE.test(name)) continue;
+    try {
+      unlinkSync(join(dir, name));
+      removed++;
+    } catch {
+      // Gone, or not a file: the inspection reports what is left.
+    }
+  }
+  if (removed > 0) fsyncDir(dir);
+}
+
 /** Port of agent-check's removeOwnedSkill checks, generalized to a file list. */
 function inspectOwned(dir: string, files: readonly string[], accepted: readonly string[]): Inspection {
   let st;
@@ -295,6 +322,7 @@ export function createSkillExporter(options: SkillExporterOptions): SkillExporte
 
   function remove(dir: string, entry: ManifestEntry): "removed" | "absent" | ConflictCode {
     const accepted = [entry.ownershipHash, ...(entry.pendingHash ? [entry.pendingHash] : [])];
+    sweepWrapperTemps(dir);
     const ins = inspectOwned(dir, entry.files, accepted);
     if (ins.state === "absent") return "absent";
     if (ins.state === "left_modified" || ins.state === "left_symlink" || ins.state === "io_error") return ins.state;
@@ -381,6 +409,7 @@ export function createSkillExporter(options: SkillExporterOptions): SkillExporte
           }
         }
         const accepted = [entry.ownershipHash, ...(entry.pendingHash ? [entry.pendingHash] : [])];
+        sweepWrapperTemps(dir);
         const ins = inspectOwned(dir, entry.files, accepted);
         if (ins.state === "left_modified" || ins.state === "left_symlink" || ins.state === "io_error") {
           conflicts.push({ name, resourceId: d.resourceId, code: ins.state });

@@ -79,7 +79,7 @@ export async function capabilityCommand(args: readonly string[], io: CapabilityC
   try {
     return await run(store, sub, positional, options, io, usage);
   } finally {
-    store.close();
+    await store.close();
   }
 }
 
