@@ -1,7 +1,7 @@
 // setup / uninstall / doctor with --agent-integration, against a temp home, a temp skills
 // root and the shared fake `claude` (its user MCP registry is <temp home>/.claude.json).
 
-import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { runSetup } from "./setup.mjs";
@@ -10,6 +10,7 @@ import { runChecks } from "./doctor.mjs";
 import { layout } from "./lib/paths.mjs";
 import { listTree, makeFakeClaude, makeFixture } from "./lib/test-fixture.mjs";
 import { SKILL_TEMPLATE, sha256 } from "./lib/integration-skill.mjs";
+import { readInstalled } from "./lib/installed.mjs";
 import { readInstalledRecord } from "../packages/scout-core/dist/installedRecord.js";
 
 const mode = (p) => statSync(p).mode & 0o777;
@@ -51,6 +52,11 @@ const uninstall = async (args = ["--yes"], e = env, extra = {}) => {
 };
 const doctor = (e = env, extra = {}) => runChecks(e, { claudeFallbacks: [], ...extra });
 const integrationChecks = (results) => results.filter((r) => /agent integration|skillsRoot|integration skill|MCP/.test(r.label));
+const GET_NOTE = "`claude mcp get scout` runs read-only; the Claude CLI health-checks (starts) whatever is registered under that name";
+const writeExports = (root, names) => {
+  mkdirSync(join(L.scoutHome, "capabilities"), { recursive: true });
+  writeFileSync(L.exportsManifest, JSON.stringify({ schemaVersion: 1, skillsRoot: root, entries: names.map((name) => ({ name })), conflicts: [] }));
+};
 
 describe("setup without --agent-integration", () => {
   it("never runs claude mcp or touches the skills root, and says how to add the integration", () => {
@@ -74,6 +80,7 @@ describe("setup --agent-integration --dry-run", () => {
     expect(r.text()).toMatch(/all of your Claude Code sessions/);
     expect(listTree(fx.root).filter((f) => !f.startsWith("fake-bin/"))).toEqual(before);
     expect(fake.calls().map((c) => c[1])).toEqual(["get"]);
+    expect(r.text()).toContain(GET_NOTE);
   });
 });
 
@@ -99,7 +106,8 @@ describe("setup --agent-integration", () => {
     // The core's reader accepts what setup wrote.
     expect(readInstalledRecord(L.scoutHome)).toEqual({ skillsRoot });
     expect(r.text()).toMatch(/all of your Claude Code sessions/);
-    expect(r.text()).toMatch(/Browser context .* separate opt-in/);
+    expect(r.text()).toMatch(/Browser context .* separate opt-in, off by default: today it is `agentBrowserContext` in ~\/\.scout\/config\.json; with P2\.5 it becomes a toggle in the Scout app/);
+    expect(template()).toMatch(/`agentBrowserContext` in ~\/\.scout\/config\.json/);
 
     const checks = integrationChecks(doctor());
     expect(checks.length).toBe(3);
@@ -140,6 +148,8 @@ describe("setup --agent-integration", () => {
       const r = setup(args);
       expect(r.code).toBe(1);
       expect(r.text()).toMatch(/already registered/);
+      expect(r.text()).toMatch(/scope: User config.*command differs from this install's \(sha256 [0-9a-f]{12}\)/);
+      expect(r.text()).not.toContain("someone-else");
     }
     expect(listTree(fx.root).filter((f) => !f.startsWith("fake-bin/"))).toEqual(before);
     expect(registry()).toEqual(foreign);
@@ -205,6 +215,107 @@ describe("setup --agent-integration", () => {
     expect(fake.calls()).toEqual([]);
   });
 
+  it("records skillsRootCreated only when setup created the skills root", async () => {
+    let r = setup(["--agent-integration"]);
+    expect(r.code, r.text()).toBe(0);
+    expect(r.text()).toContain(`created skills root ${skillsRoot}`);
+    expect(json(L.installed).skillsRootCreated).toBe(true);
+    expect(readInstalledRecord(L.scoutHome)).toEqual({ skillsRoot });
+    // A re-run keeps the flag.
+    expect(setup(["--agent-integration"]).code).toBe(0);
+    expect(json(L.installed).skillsRootCreated).toBe(true);
+    r = await uninstall(["--yes", "--agent-integration"]);
+    expect(r.code, r.text()).toBe(0);
+    expect(r.text()).toContain(`left skills root ${skillsRoot} in place: setup created it, but Claude Code shares it`);
+    expect(existsSync(skillsRoot)).toBe(true);
+    expect("skillsRootCreated" in json(L.installed)).toBe(false);
+    expect("skillsRoot" in json(L.installed)).toBe(false);
+  });
+
+  it("does not record skillsRootCreated when the skills root already existed", async () => {
+    mkdirSync(skillsRoot, { recursive: true });
+    const r = setup(["--agent-integration"]);
+    expect(r.code, r.text()).toBe(0);
+    expect(r.text()).not.toMatch(/created skills root/);
+    expect("skillsRootCreated" in json(L.installed)).toBe(false);
+    const u = await uninstall(["--yes", "--agent-integration"]);
+    expect(u.code, u.text()).toBe(0);
+    expect(u.text()).not.toMatch(/setup created it/);
+  });
+
+  it("readInstalled rejects a non-boolean skillsRootCreated", () => {
+    expect(setup(["--agent-integration"]).code).toBe(0);
+    writeFileSync(L.installed, JSON.stringify({ ...json(L.installed), skillsRootCreated: "yes" }));
+    expect(() => readInstalled(L.installed)).toThrow(/skillsRootCreated/);
+  });
+
+  it("upgrades an installed skill with an older recorded hash in place", () => {
+    expect(setup(["--agent-integration"]).code).toBe(0);
+    const old = "---\nname: scout-integration\ndescription: an older template\n---\n";
+    writeFileSync(skillPath(), old);
+    const rec = json(L.installed);
+    rec.files = rec.files.map((f) => (f.kind === "skill" ? { ...f, sha256: sha256(old) } : f));
+    writeFileSync(L.installed, JSON.stringify(rec));
+    const r = setup(["--agent-integration"]);
+    expect(r.code, r.text()).toBe(0);
+    expect(r.text()).toContain(`wrote ${skillPath()} (0600)`);
+    expect(readFileSync(skillPath(), "utf8")).toBe(template());
+    expect(json(L.installed).files.find((f) => f.kind === "skill").sha256).toBe(sha256(template()));
+  });
+
+  it("reports the kept skill's actual mode", () => {
+    expect(setup(["--agent-integration"]).code).toBe(0);
+    let r = setup(["--agent-integration"]);
+    expect(r.text()).toContain(`kept  ${skillPath()} (0600)`);
+    chmodSync(skillPath(), 0o644);
+    r = setup(["--agent-integration"]);
+    expect(r.code, r.text()).toBe(0);
+    expect(r.text()).toContain(`kept  ${skillPath()} (0644)`);
+  });
+
+  it("refuses SCOUT_SKILLS_ROOT or SCOUT_CLAUDE_BIN on the real ~/.scout", () => {
+    for (const e of [env, { ...env, SCOUT_CLAUDE_BIN: undefined }, { ...env, SCOUT_SKILLS_ROOT: undefined }]) {
+      for (const args of [["--agent-integration"], ["--agent-integration", "--dry-run"]]) {
+        const r = setup(args, e, { realHome: fx.home });
+        expect(r.code).toBe(1);
+        expect(r.text()).toMatch(/for test installs only and refused with the real ~\/\.scout/);
+      }
+    }
+    expect(fake.calls()).toEqual([]);
+    expect(existsSync(L.installed)).toBe(false);
+    expect(existsSync(skillsRoot)).toBe(false);
+  });
+
+  it("refuses a different skills root while the Scout app has wrappers exported under another", () => {
+    const other = join(fx.root, "other-skills");
+    writeExports(other, ["scout-llms-0123456789abcdef"]);
+    for (const args of [["--agent-integration"], ["--agent-integration", "--dry-run"]]) {
+      const r = setup(args);
+      expect(r.code).toBe(1);
+      expect(r.text()).toContain(`has 1 skill wrapper(s) exported under ${other}, not ${skillsRoot}`);
+    }
+    expect(existsSync(L.installed)).toBe(false);
+    expect(fake.calls()).toEqual([]);
+    // No wrappers listed: the other root does not matter.
+    writeExports(other, []);
+    expect(setup(["--agent-integration"]).code).toBe(0);
+  });
+
+  it("a failed `claude mcp add` that still wrote the entry fails setup, stays recorded, and uninstall removes it", async () => {
+    fake.setMode("mcp-add-fail");
+    const r = setup(["--agent-integration"]);
+    expect(r.code).toBe(1);
+    expect(r.text()).toMatch(/claude mcp add` failed/);
+    expect(registry()).toEqual({ scout: ours() });
+    expect(json(L.installed).files.filter((f) => f.kind === "mcp-registration")).toEqual([
+      { path: `${process.execPath} ${L.mcpMain}`, kind: "mcp-registration", name: "scout", scope: "user" },
+    ]);
+    fake.setMode("");
+    const u = await uninstall(["--yes", "--agent-integration"]);
+    expect(u.code, u.text()).toBe(0);
+    expect(registry()).toEqual({});
+  });
+
   it("each override moves only its own location", () => {
     expect(setup(["--agent-integration"]).code).toBe(0);
     expect(existsSync(L.nmhManifest)).toBe(true);
@@ -237,6 +348,7 @@ describe("uninstall and the agent integration", () => {
     expect(existsSync(join(skillsRoot, "someone-skill", "SKILL.md"))).toBe(true);
     expect(existsSync(join(skillsRoot, wrapperName, "SKILL.md"))).toBe(true);
     expect(r.text()).toMatch(/wrappers remaining in .*: 1/);
+    expect(r.text()).toMatch(/revoke those capabilities in Scout \(which removes their wrappers\) before uninstalling/);
     const record = json(L.installed);
     expect(record.skillsRoot).toBeUndefined();
     expect(record.files.map((f) => f.kind).sort()).toEqual(["config", "config-merged", "extension-manifest-key", "key", "nmh-manifest", "wrapper"]);
@@ -251,6 +363,7 @@ describe("uninstall and the agent integration", () => {
     const r = await uninstall(["--dry-run", "--agent-integration"]);
     expect(r.code, r.text()).toBe(0);
     expect(r.text()).toMatch(/would remove MCP server "scout"/);
+    expect(r.text()).toContain(GET_NOTE);
     expect(listTree(fx.root).filter((f) => !f.startsWith("fake-bin/"))).toEqual(before);
     expect(registry()).toEqual(reg);
   });
@@ -321,6 +434,34 @@ describe("uninstall and the agent integration", () => {
     expect(registry()).toEqual({ scout: ours() });
   });
 
+  it("leaves the skill when the skills root became a symlink", async () => {
+    expect(setup(["--agent-integration"]).code).toBe(0);
+    const moved = join(fx.root, "moved-skills");
+    renameSync(skillsRoot, moved);
+    symlinkSync(moved, skillsRoot);
+    for (const args of [["--dry-run", "--agent-integration"], ["--yes", "--agent-integration"]]) {
+      const r = await uninstall(args);
+      expect(r.code).toBe(2);
+      expect(r.text()).toMatch(/SKIP .*scout-integration \(skills root check failed: skills root .* is a symlink; not touching\)/);
+    }
+    expect(readFileSync(join(moved, "scout-integration", "SKILL.md"), "utf8")).toBe(template());
+    expect(json(L.installed).skillsRoot).toBe(skillsRoot);
+  });
+
+  it("refuses test overrides on the real ~/.scout and changes nothing", async () => {
+    expect(setup(["--agent-integration"]).code).toBe(0);
+    const before = listTree(fx.root).filter((f) => !f.startsWith("fake-bin/"));
+    const calls = fake.calls().length;
+    for (const args of [["--yes"], ["--yes", "--agent-integration"], ["--dry-run", "--agent-integration"]]) {
+      const r = await uninstall(args, env, { realHome: fx.home });
+      expect(r.code).toBe(1);
+      expect(r.text()).toMatch(/for test installs only and refused with the real ~\/\.scout/);
+    }
+    expect(listTree(fx.root).filter((f) => !f.startsWith("fake-bin/"))).toEqual(before);
+    expect(registry()).toEqual({ scout: ours() });
+    expect(fake.calls().length).toBe(calls);
+  });
+
   it("says so when no integration is recorded", async () => {
     expect(setup().code).toBe(0);
     const r = await uninstall(["--yes", "--agent-integration"]);
@@ -346,15 +487,38 @@ describe("doctor and the agent integration", () => {
 
   it("reports the registration as ours, absent, foreign or unknown", () => {
     expect(setup(["--agent-integration"]).code).toBe(0);
-    expect(status('MCP server "scout"').status).toBe("OK");
+    expect(status('MCP server "scout"')).toMatchObject({ status: "OK", detail: expect.stringContaining(GET_NOTE) });
     setRegistry({});
     expect(status('MCP server "scout"')).toMatchObject({ status: "FAIL", detail: expect.stringMatching(/absent/) });
-    setRegistry({ scout: { type: "stdio", command: "/bin/other", args: [], env: {} } });
-    expect(status('MCP server "scout"')).toMatchObject({ status: "FAIL", detail: expect.stringMatching(/foreign/) });
+    setRegistry({ scout: { type: "stdio", command: "/bin/other-cmd", args: ["--secret-arg"], env: {} } });
+    const foreign = status('MCP server "scout"');
+    expect(foreign).toMatchObject({ status: "FAIL", detail: expect.stringMatching(/foreign: scope: User config.*command differs from this install's/) });
+    expect(foreign.detail).not.toMatch(/other-cmd|secret-arg/);
     fake.setMode("mcp-get-killed");
     expect(status('MCP server "scout"').status).toBe("WARN");
     const noBin = integrationChecks(doctor({ ...env, SCOUT_CLAUDE_BIN: undefined })).find((r) => r.label.includes("MCP registration"));
     expect(noBin.status).toBe("WARN");
+  });
+
+  it("fails a tampered mcp-registration entry without running claude", () => {
+    expect(setup(["--agent-integration"]).code).toBe(0);
+    const rec = json(L.installed);
+    rec.files = rec.files.map((f) => (f.kind === "mcp-registration" ? { ...f, path: "/bin/sh -c" } : f));
+    writeFileSync(L.installed, JSON.stringify(rec));
+    const calls = fake.calls().length;
+    const results = doctor();
+    expect(results.find((r) => r.label === "MCP registration")).toMatchObject({ status: "FAIL", detail: expect.stringMatching(/not one setup makes/) });
+    expect(results.find((r) => r.label === "install record lists only paths setup writes").status).toBe("FAIL");
+    expect(fake.calls().length).toBe(calls);
+  });
+
+  it("fails when test overrides are set on the real ~/.scout, without running claude", () => {
+    expect(setup(["--agent-integration"]).code).toBe(0);
+    const calls = fake.calls().length;
+    const checks = integrationChecks(doctor(env, { realHome: fx.home }));
+    expect(checks.find((r) => r.label.includes("test overrides"))).toMatchObject({ status: "FAIL", detail: expect.stringMatching(/SCOUT_SKILLS_ROOT and SCOUT_CLAUDE_BIN are for test installs only/) });
+    expect(checks.find((r) => r.label === "MCP registration not checked").status).toBe("WARN");
+    expect(fake.calls().length).toBe(calls);
   });
 
   it("fails when the recorded skillsRoot is not a real directory", () => {

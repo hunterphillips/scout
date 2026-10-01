@@ -99,10 +99,16 @@ export function inspectSkill(dir) {
   }
 }
 
-/** Create the skills root (0700 when created) and write SKILL.md (0600) in a 0700 dir. The caller has checked ownership. */
+/**
+ * Create the skills root (0700 when created) and write SKILL.md (0600) in a 0700 dir. The
+ * caller has checked ownership. Returns { rootCreated }: true only when this call created the
+ * skills root itself (mkdirSync reported a created path).
+ */
 export function writeSkill(skillsRoot, text) {
   const { exists } = checkSkillsRoot(skillsRoot);
-  if (!exists) mkdirSync(skillsRoot, { recursive: true, mode: 0o700 });
+  // With `recursive`, mkdirSync returns the first directory it created, or undefined when the
+  // leaf already existed (a racing creator); any created path means the leaf was created too.
+  const rootCreated = !exists && mkdirSync(skillsRoot, { recursive: true, mode: 0o700 }) !== undefined;
   checkSkillsRoot(skillsRoot);
   const dir = skillDir(skillsRoot);
   try {
@@ -114,6 +120,7 @@ export function writeSkill(skillsRoot, text) {
   if (st.isSymbolicLink() || !st.isDirectory()) throw new Error(`${dir} is not a directory`);
   chmodSync(dir, 0o700);
   writeFileMode(join(dir, SKILL_FILE), text, 0o600);
+  return { rootCreated };
 }
 
 /**
@@ -138,6 +145,23 @@ export function removeSkill(skillsRoot, expected) {
   } catch (e) {
     return e?.code === "ENOENT" || e?.code === "ENOTEMPTY" ? "left_modified" : errorCode(e);
   }
+}
+
+/**
+ * The skills root and wrapper count scout-core's exports manifest records (shape in
+ * packages/scout-core/src/capabilities/exports.ts). Read-only; returns null when the manifest
+ * does not exist and throws when it exists but cannot be read or has no skillsRoot / entries.
+ */
+export function readExportsManifest(exportsManifest) {
+  let data;
+  try {
+    data = JSON.parse(readFileSync(exportsManifest, "utf8"));
+  } catch (e) {
+    if (e?.code === "ENOENT") return null;
+    throw new Error(`${exportsManifest} is unreadable`);
+  }
+  if (typeof data?.skillsRoot !== "string" || !Array.isArray(data.entries)) throw new Error(`${exportsManifest} has no skillsRoot or entries`);
+  return { skillsRoot: data.skillsRoot, wrappers: data.entries.length };
 }
 
 /**

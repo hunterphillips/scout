@@ -13,13 +13,20 @@
 // args (the adapter defaults to ~/.scout/run). `get` joins args by spaces, so paths with
 // whitespace are refused. When the Scout home is not the real ~/.scout (a test install),
 // SCOUT_CLAUDE_BIN and SCOUT_SKILLS_ROOT must both be given, so a test can never reach the
-// real Claude Code configuration.
+// real Claude Code configuration. On the real ~/.scout both are refused (setup, uninstall and
+// doctor), so a test override can never be applied to a real install. `realHome` (tests only)
+// replaces the account home isRealScoutHome compares against.
+//
+// A foreign registration's command and args are never printed: only its scope and a short
+// hash of the command text.
 
+import { createHash } from "node:crypto";
+import { lstatSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { isExecutableFile, resolveClaude, defaultClaudeFallbacks } from "./executables.mjs";
 import { mcpAddUser, mcpGet, ownsRegistration, removeOwnedRegistration } from "./claude-mcp.mjs";
 import { INTEGRATION_SERVER_NAME, allowedPath, integrationSkillPath, parseRegistrationCommand, upsertEntry } from "./installed.mjs";
-import { checkSkillsRoot, countRuntimeWrappers, inspectSkill, removeSkill, skillDir, skillTemplate, writeSkill } from "./integration-skill.mjs";
+import { checkSkillsRoot, countRuntimeWrappers, inspectSkill, readExportsManifest, removeSkill, skillDir, skillTemplate, writeSkill } from "./integration-skill.mjs";
 import { isRealScoutHome, skillsRootFor } from "./paths.mjs";
 import { exists } from "./files.mjs";
 
@@ -30,19 +37,38 @@ export const isIntegrationEntry = (f) => INTEGRATION_KINDS.includes(f?.kind);
 export const INTEGRATION_EXPLANATION = [
   "The `scout` MCP connection is registered at user scope: it is available in all of your Claude Code sessions, in every project.",
   "It exposes only website resources you approved in Scout (AGENTS.md, llms.txt, skills), read on demand.",
-  "Browser context (the current site and recent pages) is a separate opt-in in the Scout app; it stays off until you grant it there.",
+  "Browser context (the current site and recent pages) is a separate opt-in, off by default: today it is `agentBrowserContext` in ~/.scout/config.json; with P2.5 it becomes a toggle in the Scout app.",
   "Remove it with `npm run uninstall -- --agent-integration`.",
 ];
 
+/** Said wherever `claude mcp get` runs (setup dry run, uninstall dry run, doctor). */
+export const GET_NOTE = `\`claude mcp get ${INTEGRATION_SERVER_NAME}\` runs read-only; the Claude CLI health-checks (starts) whatever is registered under that name`;
+
+/** The refusal when test overrides are set on the real ~/.scout, or null. */
+export function overrideRefusal(env, realHome) {
+  if (!isRealScoutHome(env, realHome)) return null;
+  const set = ["SCOUT_SKILLS_ROOT", "SCOUT_CLAUDE_BIN"].filter((k) => env[k]);
+  return set.length ? `${set.join(" and ")} ${set.length > 1 ? "are" : "is"} for test installs only and refused with the real ~/.scout; unset ${set.length > 1 ? "them" : "it"} and re-run` : null;
+}
+
+/** A foreign registration, described without its command or args. */
+function describeForeign(get) {
+  const digest = createHash("sha256").update(`${get.command ?? ""} ${get.args ?? ""}`, "utf8").digest("hex").slice(0, 12);
+  return `scope: ${get.scope ?? "?"}; command differs from this install's (sha256 ${digest})`;
+}
+
 /**
  * The `claude` to run, or { error }. SCOUT_CLAUDE_BIN wins; otherwise PATH and the usual
- * fallbacks. A test install (Scout home not the real ~/.scout) requires SCOUT_CLAUDE_BIN.
+ * fallbacks. A test install (Scout home not the real ~/.scout) requires SCOUT_CLAUDE_BIN; the
+ * real ~/.scout refuses it (and SCOUT_SKILLS_ROOT).
  */
-export function integrationClaude(env, claudeFallbacks) {
+export function integrationClaude(env, claudeFallbacks, realHome) {
+  const refusal = overrideRefusal(env, realHome);
+  if (refusal) return { error: refusal };
   if (env.SCOUT_CLAUDE_BIN) {
     return isExecutableFile(env.SCOUT_CLAUDE_BIN) ? { path: env.SCOUT_CLAUDE_BIN } : { error: `SCOUT_CLAUDE_BIN is not an absolute path to an executable: ${env.SCOUT_CLAUDE_BIN}` };
   }
-  if (!isRealScoutHome(env)) return { error: "the Scout home is not the real ~/.scout, so SCOUT_CLAUDE_BIN must name the claude to run" };
+  if (!isRealScoutHome(env, realHome)) return { error: "the Scout home is not the real ~/.scout, so SCOUT_CLAUDE_BIN must name the claude to run" };
   const path = resolveClaude({ pathVar: env.PATH ?? "", fallbacks: claudeFallbacks ?? defaultClaudeFallbacks(env) });
   return path ? { path } : { error: "claude not found on PATH, ~/.local/bin, or /opt/homebrew/bin" };
 }
@@ -62,16 +88,14 @@ export function recordedIntegration(record) {
  * Returns { skillsRoot, claudePath, expected, commandText, registration, skill, template, warnings }
  * where registration.action is add | keep | replace and skill.action is write | keep.
  */
-export function planIntegration({ env, L, nodePath, record, claudeFallbacks, mcpTimeoutMs }) {
+export function planIntegration({ env, L, nodePath, record, claudeFallbacks, mcpTimeoutMs, realHome }) {
   const warnings = [];
-  if (!isRealScoutHome(env) && (!env.SCOUT_SKILLS_ROOT || !env.SCOUT_CLAUDE_BIN)) {
+  if (!isRealScoutHome(env, realHome) && (!env.SCOUT_SKILLS_ROOT || !env.SCOUT_CLAUDE_BIN)) {
     throw new Error("--agent-integration with a Scout home that is not the real ~/.scout needs both SCOUT_SKILLS_ROOT and SCOUT_CLAUDE_BIN, so a test install cannot touch the real Claude Code configuration");
   }
-  if (isRealScoutHome(env)) {
-    if (env.SCOUT_SKILLS_ROOT) warnings.push(`SCOUT_SKILLS_ROOT is set; the integration skill goes to ${skillsRootFor(env)}`);
-    if (env.SCOUT_CLAUDE_BIN) warnings.push(`SCOUT_CLAUDE_BIN is set; registering through ${env.SCOUT_CLAUDE_BIN}`);
-  }
-  const claude = integrationClaude(env, claudeFallbacks);
+  const refusal = overrideRefusal(env, realHome);
+  if (refusal) throw new Error(`agent integration: ${refusal}`);
+  const claude = integrationClaude(env, claudeFallbacks, realHome);
   if (claude.error) throw new Error(`agent integration: ${claude.error}`);
 
   const commandText = `${nodePath} ${L.mcpMain}`;
@@ -84,6 +108,20 @@ export function planIntegration({ env, L, nodePath, record, claudeFallbacks, mcp
   const skillsRoot = skillsRootFor(env);
   if (record?.skillsRoot && record.skillsRoot !== skillsRoot) {
     throw new Error(`agent integration: already installed with skills root ${record.skillsRoot}; run \`npm run uninstall -- --agent-integration\` before using ${skillsRoot}`);
+  }
+  // The Scout app's runtime wrappers live under the root its exports manifest names; a new
+  // root here would point the core at another root while those wrappers stay behind.
+  let exported;
+  try {
+    exported = readExportsManifest(L.exportsManifest);
+  } catch (e) {
+    throw new Error(`agent integration: cannot tell where the Scout app's skill wrappers are (${e.message}); nothing was changed`);
+  }
+  if (exported && exported.wrappers > 0 && exported.skillsRoot !== skillsRoot) {
+    throw new Error(
+      `agent integration: the Scout app has ${exported.wrappers} skill wrapper(s) exported under ${exported.skillsRoot}, not ${skillsRoot}.\n` +
+        `Nothing was changed. Revoke those capabilities in Scout (which removes their wrappers), or re-run with the skills root ${exported.skillsRoot}.`,
+    );
   }
   const root = checkSkillsRoot(skillsRoot);
   const recorded = recordedIntegration(record);
@@ -101,7 +139,7 @@ export function planIntegration({ env, L, nodePath, record, claudeFallbacks, mcp
     if (previous && ownsRegistration(get, previous)) registration = { action: "replace", previous };
     else {
       throw new Error(
-        `agent integration: an MCP server named "${INTEGRATION_SERVER_NAME}" is already registered and is not this install's (command: ${get.command ?? "?"} ${get.args ?? ""}, scope: ${get.scope ?? "?"}).\n` +
+        `agent integration: an MCP server named "${INTEGRATION_SERVER_NAME}" is already registered and is not this install's (${describeForeign(get)}).\n` +
           `Nothing was changed. Remove or rename that registration yourself (\`claude mcp remove ${INTEGRATION_SERVER_NAME}\`) and re-run.`,
       );
     }
@@ -131,7 +169,8 @@ export function describeIntegration(p) {
   const path = integrationSkillPath(p.skillsRoot);
   return [
     p.skillsRootExists ? `would keep skills root ${p.skillsRoot}` : `would create skills root ${p.skillsRoot} (0700)`,
-    p.skill.action === "keep" ? `would keep ${path} (0600; already the current skill)` : `would write ${path} (0600) in a 0700 dir`,
+    p.skill.action === "keep" ? `would keep ${path} (already the current skill)` : `would write ${path} (0600) in a 0700 dir`,
+    GET_NOTE,
     reg,
     `would record skillsRoot=${p.skillsRoot} and the two entries in installed.json`,
   ];
@@ -147,13 +186,23 @@ export function applyIntegration(p, record, { env, save, out, mcpTimeoutMs }) {
   const path = integrationSkillPath(p.skillsRoot);
 
   record = { ...upsertEntry(record, { path, kind: "skill", sha256: p.template.sha256 }), skillsRoot: p.skillsRoot };
+  save(record);
   if (p.skill.action === "write") {
-    save(record);
-    writeSkill(p.skillsRoot, p.template.text);
+    const { rootCreated } = writeSkill(p.skillsRoot, p.template.text);
+    if (rootCreated) {
+      record = { ...record, skillsRootCreated: true };
+      save(record);
+      out(`created skills root ${p.skillsRoot} (0700)`);
+    }
     out(`wrote ${path} (0600)`);
   } else {
-    save(record);
-    out(`kept  ${path} (0600)`);
+    let m = null;
+    try {
+      m = (lstatSync(path).mode & 0o777).toString(8).padStart(4, "0");
+    } catch {
+      // reported without a mode
+    }
+    out(`kept  ${path}${m ? ` (${m})` : ""}`);
   }
 
   const entry = { path: p.commandText, kind: "mcp-registration", name: INTEGRATION_SERVER_NAME, scope: "user" };
@@ -170,8 +219,13 @@ export function applyIntegration(p, record, { env, save, out, mcpTimeoutMs }) {
   }
   const add = mcpAddUser(p.claudePath, INTEGRATION_SERVER_NAME, p.expected.command, p.expected.args, opts);
   const got = mcpGet(p.claudePath, INTEGRATION_SERVER_NAME, opts);
-  if (!ownsRegistration(got, p.expected)) {
-    throw new Error(`\`claude mcp add\` did not leave the expected registration (add ${describeExit(add)}; get ${got.exists === "unknown" ? describeExit(got.exit) : got.exists ? "shows a different command" : "finds none"})`);
+  // A failed add is a failure even when `get` shows the entry: the record (saved above) keeps
+  // the registration, so uninstall can remove it.
+  const owned = ownsRegistration(got, p.expected);
+  if (!add.ok || !owned) {
+    throw new Error(
+      `\`claude mcp add\` ${add.ok ? "did not leave the expected registration" : "failed"} (add ${describeExit(add)}; get ${got.exists === "unknown" ? describeExit(got.exit) : owned ? "shows this install's registration" : got.exists ? "shows a different command" : "finds none"})`,
+    );
   }
   out(`registered MCP server "${INTEGRATION_SERVER_NAME}" (user scope): ${p.commandText}`);
   return record;
@@ -183,7 +237,7 @@ export function applyIntegration(p, record, { env, save, out, mcpTimeoutMs }) {
  * is gone, skillsRoot) dropped, and `left` counts parts left in place. With dryRun nothing
  * changes (the `get` still runs; it is read-only).
  */
-export function removeIntegration(record, { env, L, dryRun, claudeFallbacks, mcpTimeoutMs }) {
+export function removeIntegration(record, { env, L, dryRun, claudeFallbacks, mcpTimeoutMs, realHome }) {
   const lines = [];
   let left = 0;
   const would = dryRun ? "would " : "";
@@ -192,7 +246,7 @@ export function removeIntegration(record, { env, L, dryRun, claudeFallbacks, mcp
 
   if (registration) {
     const expected = registration.name === INTEGRATION_SERVER_NAME && registration.scope === "user" && allowedPath("mcp-registration", registration.path, L, record) ? parseRegistrationCommand(registration.path) : null;
-    const claude = integrationClaude(env, claudeFallbacks);
+    const claude = integrationClaude(env, claudeFallbacks, realHome);
     if (!expected) {
       lines.push(`SKIP MCP registration ${JSON.stringify(registration.path)} (not a registration setup makes; not touching)`);
       left++;
@@ -200,6 +254,7 @@ export function removeIntegration(record, { env, L, dryRun, claudeFallbacks, mcp
       lines.push(`SKIP MCP server "${INTEGRATION_SERVER_NAME}" (${claude.error}; not touching)`);
       left++;
     } else if (dryRun) {
+      lines.push(GET_NOTE);
       const get = mcpGet(claude.path, INTEGRATION_SERVER_NAME, mcpOpts(env, mcpTimeoutMs));
       if (get.exists === false) lines.push(`skip MCP server "${INTEGRATION_SERVER_NAME}" (already absent)`);
       else if (ownsRegistration(get, expected)) lines.push(`would remove MCP server "${INTEGRATION_SERVER_NAME}" (user scope; still exactly ${registration.path})`);
@@ -234,7 +289,14 @@ export function removeIntegration(record, { env, L, dryRun, claudeFallbacks, mcp
       left++;
     } else {
       const dir = skillDir(record.skillsRoot);
-      const state = dryRun ? dryRunSkillState(dir, skill.sha256) : removeSkill(record.skillsRoot, skill.sha256);
+      let state;
+      try {
+        // The root may have been swapped (e.g. for a symlink) since setup checked it.
+        checkSkillsRoot(record.skillsRoot);
+        state = dryRun ? dryRunSkillState(dir, skill.sha256) : removeSkill(record.skillsRoot, skill.sha256);
+      } catch (e) {
+        state = `skills root check failed: ${e.message}`;
+      }
       if (state === "removed" || state === "would_remove") {
         lines.push(`${would}remove ${dir} (holds exactly the recorded skill)`);
         drop.add(skill);
@@ -251,7 +313,13 @@ export function removeIntegration(record, { env, L, dryRun, claudeFallbacks, mcp
   const skillsRoot = record.skillsRoot;
   const files = record.files.filter((f) => !drop.has(f));
   const next = { ...record, files };
-  if (!files.some((f) => f.kind === "skill")) delete next.skillsRoot;
+  if (!files.some((f) => f.kind === "skill")) {
+    delete next.skillsRoot;
+    delete next.skillsRootCreated;
+    if (skillsRoot && record.skillsRootCreated === true) {
+      lines.push(`${dryRun ? "would leave" : "left"} skills root ${skillsRoot} in place: setup created it, but Claude Code shares it`);
+    }
+  }
   if (skillsRoot) {
     const w = countRuntimeWrappers(L.exportsManifest, skillsRoot);
     lines.push(
@@ -259,6 +327,7 @@ export function removeIntegration(record, { env, L, dryRun, claudeFallbacks, mcp
         ? `Scout app skill wrappers in ${skillsRoot}: unknown (${w.manifest} unreadable); setup never touches them`
         : `Scout app skill wrappers remaining in ${skillsRoot}: ${w.count} (listed in ${w.manifest}; the Scout app manages them, setup never touches them)`,
     );
+    if (w.count > 0) lines.push("To remove them, revoke those capabilities in Scout (which removes their wrappers) before uninstalling; uninstall never removes them.");
   }
   return { record: next, lines, left };
 }
@@ -274,7 +343,7 @@ function dryRunSkillState(dir, expected) {
  * Doctor checks for the integration: [{ status, label, detail }]. Read-only (runs
  * `claude mcp get`, which the CLI also uses to health-check the server).
  */
-export function checkIntegration(record, { env, L, claudeFallbacks, mcpTimeoutMs }) {
+export function checkIntegration(record, { env, L, claudeFallbacks, mcpTimeoutMs, realHome }) {
   const out = [];
   const add = (status, label, detail = "") => out.push({ status, label, detail });
   const { registration, skill } = recordedIntegration(record);
@@ -282,6 +351,8 @@ export function checkIntegration(record, { env, L, claudeFallbacks, mcpTimeoutMs
     add("OK", "agent integration", "not installed (optional: npm run setup -- --agent-integration)");
     return out;
   }
+  const refusal = overrideRefusal(env, realHome);
+  if (refusal) add("FAIL", "agent integration test overrides are unset", refusal);
 
   let rootOk = false;
   try {
@@ -302,15 +373,17 @@ export function checkIntegration(record, { env, L, claudeFallbacks, mcpTimeoutMs
   if (!registration) add("FAIL", "MCP registration", "not recorded");
   else {
     const expected = registration.name === INTEGRATION_SERVER_NAME && registration.scope === "user" ? parseRegistrationCommand(registration.path) : null;
-    const claude = integrationClaude(env, claudeFallbacks);
+    const claude = integrationClaude(env, claudeFallbacks, realHome);
     if (!expected) add("FAIL", "MCP registration", `recorded entry is not one setup makes: ${registration.path}`);
     else if (claude.error) add("WARN", "MCP registration not checked", claude.error);
     else {
       const get = mcpGet(claude.path, INTEGRATION_SERVER_NAME, mcpOpts(env, mcpTimeoutMs));
-      if (get.exists === "unknown") add("WARN", `MCP server "${INTEGRATION_SERVER_NAME}" state unknown`, `claude mcp get: ${describeExit(get.exit)}`);
-      else if (get.exists === false) add("FAIL", `MCP server "${INTEGRATION_SERVER_NAME}" is registered and is this install's`, "absent; re-run `npm run setup -- --agent-integration`");
-      else if (ownsRegistration(get, expected)) add("OK", `MCP server "${INTEGRATION_SERVER_NAME}" is registered and is this install's`, `${registration.path} (status: ${get.health ?? "?"})`);
-      else add("FAIL", `MCP server "${INTEGRATION_SERVER_NAME}" is registered and is this install's`, `foreign: ${get.command ?? "?"} ${get.args ?? ""} (${get.scope ?? "?"})`);
+      const label = `MCP server "${INTEGRATION_SERVER_NAME}" is registered and is this install's`;
+      const note = `; ${GET_NOTE}`;
+      if (get.exists === "unknown") add("WARN", `MCP server "${INTEGRATION_SERVER_NAME}" state unknown`, `claude mcp get: ${describeExit(get.exit)}${note}`);
+      else if (get.exists === false) add("FAIL", label, `absent; re-run \`npm run setup -- --agent-integration\`${note}`);
+      else if (ownsRegistration(get, expected)) add("OK", label, `${registration.path} (status: ${get.health ?? "?"})${note}`);
+      else add("FAIL", label, `foreign: ${describeForeign(get)}${note}`);
     }
   }
   return out;

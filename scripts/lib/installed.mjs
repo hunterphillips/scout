@@ -1,6 +1,7 @@
 // Scout setup: ~/.scout/installed.json, the record of every file setup wrote.
 //
-// { "version": 1, "marker": "<token>", "skillsRoot"?: "<abs dir>", "files": [ { "path", "kind", ...extra } ] }
+// { "version": 1, "marker": "<token>", "skillsRoot"?: "<abs dir>", "skillsRootCreated"?: true,
+//   "files": [ { "path", "kind", ...extra } ] }
 // kinds: config | config-merged | wrapper | nmh-manifest | key | extension-manifest-key
 //        | mcp-registration | skill
 // config-merged: a file someone else owns (the personal-context config); setup added
@@ -8,6 +9,8 @@
 // The agent integration (setup --agent-integration, lib/agent-integration.mjs) adds:
 //   skillsRoot        the Claude Code skills root; scout-core reads it (installedRecord.ts)
 //                     to export runtime skill wrappers there
+//   skillsRootCreated true only when setup created the skills root itself; uninstall leaves
+//                     the root in place either way (Claude Code shares it) and says so
 //   mcp-registration  { path: "<nodePath> <scout-mcp main.js>", name: "scout", scope: "user" }:
 //                     the command `claude mcp add` registered; `path` is that command, not a file
 //   skill             { path: "<skillsRoot>/scout-integration/SKILL.md", sha256 }: the static skill
@@ -49,6 +52,7 @@ export function readInstalled(path) {
     throw new Error(`${path} is not a Scout install record`);
   }
   if ("skillsRoot" in data && !isCleanAbsolute(data.skillsRoot)) throw new Error(`${path} has an invalid skillsRoot`);
+  if ("skillsRootCreated" in data && typeof data.skillsRootCreated !== "boolean") throw new Error(`${path} has an invalid skillsRootCreated`);
   return data;
 }
 

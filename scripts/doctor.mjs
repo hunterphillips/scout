@@ -3,6 +3,7 @@
 // OK / WARN / FAIL line per check; exits 1 if any check fails. When the agent integration
 // is recorded, it also checks the `scout` MCP registration (via `claude mcp get`, which the
 // CLI uses to health-check the server), the integration skill, and the recorded skillsRoot.
+// SCOUT_SKILLS_ROOT or SCOUT_CLAUDE_BIN with the real ~/.scout is a failed check.
 //
 // Usage: node scripts/doctor.mjs
 // Env overrides: SCOUT_HOME, PERSONAL_CONTEXT_HOME, CHROME_NMH_DIR, SCOUT_CLAUDE_BIN (see lib/paths.mjs).
@@ -19,7 +20,7 @@ import { checkIntegration } from "./lib/agent-integration.mjs";
 const oct = (m) => (m & 0o777).toString(8).padStart(4, "0");
 
 /** Run every check; returns [{ status: "OK"|"WARN"|"FAIL", label, detail }]. Writes nothing. */
-export function runChecks(env = process.env, { claudeFallbacks, mcpTimeoutMs } = {}) {
+export function runChecks(env = process.env, { claudeFallbacks, mcpTimeoutMs, realHome } = {}) {
   const results = [];
   const add = (status, label, detail = "") => results.push({ status, label, detail });
   const check = (ok, label, detail) => add(ok ? "OK" : "FAIL", label, detail);
@@ -120,7 +121,7 @@ export function runChecks(env = process.env, { claudeFallbacks, mcpTimeoutMs } =
   }
 
   // Agent integration (optional)
-  if (installed.value) results.push(...checkIntegration(installed.value, { env, L, claudeFallbacks, mcpTimeoutMs }));
+  if (installed.value) results.push(...checkIntegration(installed.value, { env, L, claudeFallbacks, mcpTimeoutMs, realHome }));
   return results;
 }
 

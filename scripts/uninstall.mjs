@@ -11,7 +11,8 @@
 // The agent integration (the `scout` MCP registration and the scout-integration skill) is
 // removed with everything else, or alone with --agent-integration; each part only while it is
 // still exactly what setup installed (lib/agent-integration.mjs). Scout app skill wrappers in
-// the skills root are never touched; uninstall reports how many remain.
+// the skills root are never touched; uninstall reports how many remain. With the real ~/.scout
+// and SCOUT_SKILLS_ROOT or SCOUT_CLAUDE_BIN set, it refuses before changing anything.
 //
 // Usage: node scripts/uninstall.mjs [--dry-run] [--yes] [--include-key] [--agent-integration]
 // Env overrides: SCOUT_HOME, PERSONAL_CONTEXT_HOME, SCOUT_CLAUDE_BIN (see lib/paths.mjs); the
@@ -25,7 +26,7 @@ import { extensionIdFromPem } from "./lib/extension-key.mjs";
 import { PC_MERGED_KEYS, allowedPath, readInstalled } from "./lib/installed.mjs";
 import { exists, fileMarker, readJsonObject, writeJson } from "./lib/files.mjs";
 import { isMain } from "./lib/is-main.mjs";
-import { isIntegrationEntry, removeIntegration } from "./lib/agent-integration.mjs";
+import { isIntegrationEntry, overrideRefusal, removeIntegration } from "./lib/agent-integration.mjs";
 
 export function parseArgs(argv) {
   const opts = { dryRun: false, yes: false, includeKey: false, agentIntegration: false };
@@ -133,7 +134,7 @@ function removeDirIfEmpty(dir, out, dryRun) {
   }
 }
 
-export async function runUninstall(argv, { env = process.env, out = console.log, err = console.error, confirm = ttyConfirm, claudeFallbacks, mcpTimeoutMs } = {}) {
+export async function runUninstall(argv, { env = process.env, out = console.log, err = console.error, confirm = ttyConfirm, claudeFallbacks, mcpTimeoutMs, realHome } = {}) {
   let opts, record;
   const L = layout({ env });
   try {
@@ -152,6 +153,11 @@ export async function runUninstall(argv, { env = process.env, out = console.log,
   if (opts.agentIntegration && !hasIntegration) {
     out(`Nothing to uninstall: ${L.installed} lists no agent integration.`);
     return 0;
+  }
+  const refusal = hasIntegration && overrideRefusal(env, realHome);
+  if (refusal) {
+    err(`uninstall: agent integration: ${refusal}. Nothing changed.`);
+    return 1;
   }
   const listed = opts.agentIntegration ? record.files.filter(isIntegrationEntry) : record.files;
   out(`${opts.agentIntegration ? "Agent integration" : "Files"} listed in ${L.installed}:`);
@@ -176,7 +182,7 @@ export async function runUninstall(argv, { env = process.env, out = console.log,
   let skipped = 0;
   let working = record;
   if (hasIntegration) {
-    const r = removeIntegration(record, { env, L, dryRun: opts.dryRun, claudeFallbacks, mcpTimeoutMs });
+    const r = removeIntegration(record, { env, L, dryRun: opts.dryRun, claudeFallbacks, mcpTimeoutMs, realHome });
     for (const line of r.lines) out(line);
     skipped += r.left;
     working = r.record;

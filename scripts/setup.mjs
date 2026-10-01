@@ -10,7 +10,8 @@
 //
 // Usage: node scripts/setup.mjs [--dry-run] [--scout-root <dir>] [--agent-integration]
 // Env overrides: SCOUT_HOME, PERSONAL_CONTEXT_HOME, CHROME_NMH_DIR, SCOUT_SKILLS_ROOT,
-// SCOUT_CLAUDE_BIN (see lib/paths.mjs).
+// SCOUT_CLAUDE_BIN (see lib/paths.mjs). The last two are for test installs; with the real
+// ~/.scout, --agent-integration refuses them.
 // When the Scout home is not the real ~/.scout (SCOUT_HOME or HOME overridden),
 // --scout-root is required so a test install cannot re-key the real built extension.
 // Never touches ~/.rook or any process.
@@ -185,12 +186,12 @@ export function planSetup({ env = process.env, scoutRoot = REPO_ROOT, dryRun = f
   return { L, marker, record, extensionId, nodePath, claudePath, warnings, dirs, steps };
 }
 
-export function runSetup(argv, { env = process.env, out = console.log, err = console.error, claudeFallbacks, mcpTimeoutMs } = {}) {
+export function runSetup(argv, { env = process.env, out = console.log, err = console.error, claudeFallbacks, mcpTimeoutMs, realHome } = {}) {
   let opts, plan, integration;
   try {
     opts = parseArgs(argv);
     const home = resolve(scoutHome(env));
-    if (!isRealScoutHome(env) && !opts.scoutRootGiven) {
+    if (!isRealScoutHome(env, realHome) && !opts.scoutRootGiven) {
       throw new Error(
         `Scout home ${home} is not the real ~/.scout and --scout-root is not given; a test install would re-key the real built extension in ${REPO_ROOT}.\n` +
           `Pass --scout-root <dir> pointing at a separate built copy.`,
@@ -198,7 +199,7 @@ export function runSetup(argv, { env = process.env, out = console.log, err = con
     }
     plan = planSetup({ env, scoutRoot: opts.scoutRoot, dryRun: opts.dryRun, claudeFallbacks });
     // Every refusal happens here, before anything is written.
-    if (opts.agentIntegration) integration = planIntegration({ env, L: plan.L, nodePath: plan.nodePath, record: plan.record, claudeFallbacks, mcpTimeoutMs });
+    if (opts.agentIntegration) integration = planIntegration({ env, L: plan.L, nodePath: plan.nodePath, record: plan.record, claudeFallbacks, mcpTimeoutMs, realHome });
   } catch (e) {
     err(`setup: ${e.message}`);
     return 1;
