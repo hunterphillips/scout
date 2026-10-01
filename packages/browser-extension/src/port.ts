@@ -4,9 +4,13 @@
 // bound survives MV3 worker restarts.
 //
 // A port counts as healthy only after the host says `ready` (core socket
-// connected, hello sent) or the core acks a page_text. Time alone never does.
+// connected, the core answered hello with a capture_policy) or the core acks a
+// page_text. Time alone never does. Each capture_policy goes to onPolicy; a
+// new or lost port clears the policy, so capture starts disabled until the
+// core sends one. A core_unavailable with reason upgrade_required is sticky
+// until a later port is ready: mixed versions show as such, not as "down".
 
-import { ToChromeFrameSchema } from "@scout/contracts";
+import { type CapturePolicy, ToChromeFrameSchema } from "@scout/contracts";
 import { HOST_NAME } from "./hosts.js";
 import type { LinkState } from "./messages.js";
 import { type Clock, createReconnectPolicy, type ReconnectPolicy, type SeriesState, type SeriesStore } from "./reconnect.js";
@@ -32,6 +36,8 @@ export interface PortDeps {
   counters: Counters;
   /** A new port is open (not yet ready). */
   onOpen(): void;
+  /** The core sent a capture_policy on the current port. */
+  onPolicy(policy: CapturePolicy): void;
   /** The port is gone: stop in-flight reads (bumps the cancel epoch). */
   onLost(): void;
 }
@@ -69,6 +75,7 @@ export function createPortLink(deps: PortDeps): PortLink {
   const { ch, clock, state, counters } = deps;
   let ready = false;
   let coreUnavailable = false;
+  let upgradeRequired = false;
 
   const policy = createReconnectPolicy({ clock, attempt: () => connect(), store: sessionSeriesStore(ch) });
 
@@ -82,6 +89,7 @@ export function createPortLink(deps: PortDeps): PortLink {
       return;
     }
     state.port = p;
+    state.policy = null;
     ready = false;
     coreUnavailable = false;
     p.onMessage.addListener((m: unknown) => onHostMessage(p, m));
@@ -89,6 +97,7 @@ export function createPortLink(deps: PortDeps): PortLink {
       void ch.runtime.lastError; // read it so Chrome does not log it as unchecked
       if (state.port !== p) return;
       state.port = null;
+      state.policy = null;
       const healthy = ready;
       deps.onLost();
       policy.disconnected(healthy);
@@ -103,11 +112,18 @@ export function createPortLink(deps: PortDeps): PortLink {
     switch (parsed.data.type) {
       case "core_unavailable":
         coreUnavailable = true;
+        if (parsed.data.reason === "upgrade_required") upgradeRequired = true;
         break;
       case "ready":
         ready = true;
         coreUnavailable = false;
+        upgradeRequired = false;
         break;
+      case "capture_policy":
+        deps.onPolicy(parsed.data);
+        break;
+      case "upgrade_required":
+        break; // the host turns this into core_unavailable; never expected here
       case "ack":
         ready = true;
         coreUnavailable = false;
@@ -117,6 +133,7 @@ export function createPortLink(deps: PortDeps): PortLink {
   }
 
   function linkState(): LinkState {
+    if (upgradeRequired) return "upgrade_required";
     if (state.port) {
       if (coreUnavailable) return "core_unavailable";
       return ready ? "connected" : "connecting";
@@ -132,6 +149,7 @@ export function createPortLink(deps: PortDeps): PortLink {
     if (state.port) {
       const p = state.port;
       state.port = null; // our own disconnect() does not fire onDisconnect
+      state.policy = null;
       try {
         p.disconnect();
       } catch {

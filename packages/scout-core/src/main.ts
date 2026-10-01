@@ -7,6 +7,11 @@
 // <scoutHome>/run/agent-token, both published only after the capability store is open and
 // its startup export sync has settled.
 //
+// Settled visits run resource discovery (coordinator.ts); shutdown stops the coordinator
+// first, which cancels any pending dwell. SCOUT_DWELL_MS overrides the dwell for tests
+// only (so a test's real visits never settle into real fetches); anything but a positive
+// integer that a Node timer can hold falls back to DWELL_MS.
+//
 // The core opens the capability store once for its lifetime (its lock keeps the dev CLI
 // from writing meanwhile), collects garbage at start and hourly, and wires the store's
 // revocation hook to the agent socket. Skill wrappers are exported only when the
@@ -32,11 +37,14 @@ import { type AgentSocketServer, createAgentSocketServer } from "./agentSocketSe
 import { createSkillExporter, ExportError, type SkillExporter } from "./capabilities/exports.js";
 import { type CapabilityStore, createCapabilityStore, StoreCorruptError } from "./capabilities/store.js";
 import { StoreLockedError } from "./capabilities/storeLock.js";
+import { createSiteResourceDiscoverer } from "./capabilities/discovery.js";
 import { createCatalogCache } from "./catalog/cache.js";
+import { createCatalogResolver } from "./catalog/resolveCatalog.js";
 import { type Clock, systemClock } from "./clock.js";
 import { ConfigError, type CoreConfig, readConfig } from "./config.js";
 import { type Coordinator, createCoordinator } from "./coordinator.js";
 import { createDiagnostics, defaultDiagnosticsPath, type Diagnostics, scoutHome } from "./diagnostics.js";
+import { DWELL_MS } from "./dwell.js";
 import { createOriginFetchSession } from "./fetch/originSession.js";
 import { InstalledRecordError, readInstalledRecord } from "./installedRecord.js";
 import { createSocketServer, SocketServerError } from "./socketServer.js";
@@ -45,6 +53,17 @@ import { createSocketServer, SocketServerError } from "./socketServer.js";
 export const SHUTDOWN_DEADLINE_MS = 2000;
 /** How often the capability store collects garbage while the core runs (also once at start). */
 export const GC_INTERVAL_MS = 60 * 60 * 1000;
+
+/** The longest delay a Node timer holds; longer ones fire at once. */
+const MAX_TIMER_MS = 2 ** 31 - 1;
+
+/** The dwell from SCOUT_DWELL_MS (tests only), or DWELL_MS when unset or invalid. */
+export function dwellMsFromEnv(env: NodeJS.ProcessEnv): number {
+  const raw = env.SCOUT_DWELL_MS;
+  if (raw === undefined || !/^[0-9]+$/.test(raw)) return DWELL_MS;
+  const ms = Number(raw);
+  return Number.isSafeInteger(ms) && ms > 0 && ms <= MAX_TIMER_MS ? ms : DWELL_MS;
+}
 
 export const EXIT_OK = 0;
 export const EXIT_START_FAILED = 1;
@@ -120,24 +139,24 @@ export async function runStdio(deps: StdioDeps): Promise<StdioCore> {
     deps.stdout.write(`${JSON.stringify(state)}\n`);
   };
 
-  let coordinator: Coordinator;
-  try {
-    coordinator = createCoordinator({
-      config,
-      clock,
-      diagnostics,
-      emitPanel,
-      onShutdownRequested: () => void shutdown("shutdown-command"),
-      capabilities: { store, createFetchSession: (origin) => createOriginFetchSession({ origin, clock }) },
-    });
-  } catch {
-    clearInterval(gcTimer);
-    await store.close();
-    deps.log("scout-core: config-invalid-destinations");
-    diagnostics.event("start_failed", { code: "config-invalid-destinations" });
-    deps.exit(EXIT_START_FAILED);
-    return { shutdown: async () => {} };
-  }
+  // Settled visits run the same catalog and discovery pipelines as the dev CLI, with their
+  // caches under SCOUT_HOME; the coordinator owns each pass's fetch session and window.
+  const catalogResolver = createCatalogResolver({ scoutHome: home, clock, diagnostics });
+  const discoverer = createSiteResourceDiscoverer({ scoutHome: home, clock, diagnostics });
+  const coordinator: Coordinator = createCoordinator({
+    config,
+    clock,
+    diagnostics,
+    emitPanel,
+    dwellMs: dwellMsFromEnv(deps.env),
+    onShutdownRequested: () => void shutdown("shutdown-command"),
+    capabilities: {
+      store,
+      createFetchSession: (origin) => createOriginFetchSession({ origin, clock }),
+      resolveCatalog: (origin, session) => catalogResolver.resolve(origin, { session }),
+      discover: (origin, session) => discoverer.discover(origin, { session }),
+    },
+  });
 
   const server = createSocketServer({
     runDir,

@@ -24,7 +24,7 @@ export type Sleep = (ms: number) => Promise<void>;
 export interface PacedFetch extends CatalogFetch {
   /** Minimum gap between the end of one request and the start of the next (robots `Crawl-delay`). */
   setCrawlDelay(ms: number | undefined): void;
-  /** Requests refused because the budget was spent, the run deadline passed, or the URL left the origin. Counts across windows. */
+  /** Requests refused because the budget was spent, the run deadline passed, the URL left the origin, or the run was cancelled. Counts across windows. */
   readonly refused: number;
   /** Requests that reached `guardedFetch`, across windows. */
   readonly requests: number;
@@ -38,6 +38,12 @@ export interface PacedCatalogFetch extends PacedFetch {
    * revalidation and another for rediscovery.
    */
   startWindow(): void;
+  /**
+   * Refuse every request from now on, in every window. A request already at the network
+   * finishes; queued ones and any made later get a refusal (`isRefusal`), as for a spent
+   * budget. Irreversible.
+   */
+  cancel(): void;
 }
 
 export interface PacedCatalogFetchOptions {
@@ -77,7 +83,8 @@ export function isRefusal(result: GuardedFetchResult): boolean {
  * beyond `maxRequests`, after the run deadline (counted from the first request), or to
  * another origin return a `policy` error without touching the network; `isRefusal` tells
  * those apart from the site's own answers. `startWindow` restarts the deadline and the
- * budget without dropping the crawl delay.
+ * budget without dropping the crawl delay. After `cancel` every request is refused the
+ * same way.
  */
 export function createPacedCatalogFetch(options: PacedCatalogFetchOptions): PacedCatalogFetch {
   const doFetch = options.guardedFetch ?? guardedFetch;
@@ -91,6 +98,7 @@ export function createPacedCatalogFetch(options: PacedCatalogFetchOptions): Pace
   let startedAt: number | null = null;
   let refused = 0;
   let requests = 0;
+  let cancelled = false;
   let queue: Promise<unknown> = Promise.resolve();
 
   const run = async (url: string, opts: CatalogFetchOptions): Promise<GuardedFetchResult> => {
@@ -108,12 +116,14 @@ export function createPacedCatalogFetch(options: PacedCatalogFetchOptions): Pace
       refusals.add(result);
       return result;
     };
+    if (cancelled) return refuse("catalog run cancelled");
     if (!sameOrigin) return refuse("catalog request left the origin");
     if (made >= maxRequests) return refuse("catalog request budget spent");
     if (pastDeadline()) return refuse("catalog run deadline passed");
     if (lastEndedAt !== null && crawlDelayMs > 0) {
       const wait = lastEndedAt + crawlDelayMs - options.clock.now();
       if (wait > 0) await sleep(wait);
+      if (cancelled) return refuse("catalog run cancelled");
       if (pastDeadline()) return refuse("catalog run deadline passed");
     }
     made += 1;
@@ -141,6 +151,9 @@ export function createPacedCatalogFetch(options: PacedCatalogFetchOptions): Pace
   fetch.startWindow = () => {
     startedAt = null;
     made = 0;
+  };
+  fetch.cancel = () => {
+    cancelled = true;
   };
   Object.defineProperty(fetch, "refused", { get: () => refused });
   Object.defineProperty(fetch, "requests", { get: () => requests });

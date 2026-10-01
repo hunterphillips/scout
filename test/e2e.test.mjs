@@ -3,6 +3,7 @@
 // `npm run test:all`). Never touches the real ~/.scout.
 
 import { spawn } from "node:child_process";
+import { connect } from "node:net";
 import { existsSync, lstatSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { endianness, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -80,7 +81,54 @@ describe.skipIf(!BUILT)("host <-> core end to end", () => {
     const hostExit = exitOf(host);
 
     const at = Date.now();
-    const pageTextSeq = 3;
+    // page_text before the handshake is dropped by the relay (approved under no policy);
+    // the focus waits in its buffer.
+    host.stdin.write(
+      frame({
+        kind: "page_text",
+        seq: 1,
+        at,
+        tabId: 7,
+        documentId: "D1",
+        url: ISSUE,
+        source: "github_issue",
+        title: TITLE,
+        text: BODY,
+        truncated: false,
+      }),
+    );
+    host.stdin.write(frame({ kind: "focus", seq: 2, at, browserFocused: true, windowId: 1, tabId: 7, url: ISSUE, title: TITLE, incognito: false }));
+    await until(() => toChrome.some((f) => f.type === "core_unavailable"), "core_unavailable before the core starts");
+    expect(toChrome.some((f) => f.type === "ready")).toBe(false);
+
+    // 2. The core starts; the app tells it Chrome is frontmost.
+    // A 10-minute dwell: no visit here settles into real fetches.
+    const core = spawn(process.execPath, [CORE, "--stdio"], { env: { ...env, SCOUT_DWELL_MS: "600000" }, cwd: ROOT, stdio: ["pipe", "pipe", "pipe"] });
+    children.push(core);
+    let coreOut = "";
+    let coreErr = "";
+    core.stdout.on("data", (c) => (coreOut += c));
+    core.stderr.on("data", (c) => (coreErr += c));
+    const coreExit = exitOf(core);
+    core.stdin.write(`${JSON.stringify({ type: "frontmost", bundleId: "com.google.Chrome", at: Date.now() })}\n`);
+
+    // The core's capture-disabled policy reaches Chrome before ready.
+    await until(() => toChrome.some((f) => f.type === "ready"), "ready from the host");
+    const firstPolicy = toChrome.findIndex((f) => f.type === "capture_policy");
+    expect(firstPolicy).toBeGreaterThanOrEqual(0);
+    expect(firstPolicy).toBeLessThan(toChrome.findIndex((f) => f.type === "ready"));
+    expect(toChrome[firstPolicy]).toEqual({ type: "capture_policy", revision: 0, paused: false, captureEnabled: false });
+
+    // 3. The extension answers with a snapshot (GitHub granted, capture on), then focus; only then does capture turn on.
+    expect(toChrome.filter((f) => f.type === "capture_policy")).toHaveLength(1);
+    host.stdin.write(frame({ kind: "permissions", revision: 1, at, granted: ["https://github.com/*"], githubCapture: true }));
+    host.stdin.write(
+      frame({ kind: "focus", seq: 3, at, browserFocused: true, windowId: 1, tabId: 7, url: ISSUE, title: TITLE, incognito: false, permissionsRevision: 1 }),
+    );
+    await until(() => toChrome.some((f) => f.type === "capture_policy" && f.captureEnabled), "the enabling capture_policy");
+    expect(toChrome.filter((f) => f.type === "capture_policy").at(-1)).toEqual({ type: "capture_policy", revision: 1, paused: false, captureEnabled: true });
+
+    const pageTextSeq = 4;
     host.stdin.write(
       frame({
         kind: "page_text",
@@ -95,23 +143,10 @@ describe.skipIf(!BUILT)("host <-> core end to end", () => {
         truncated: false,
       }),
     );
-    host.stdin.write(frame({ kind: "focus", seq: 2, at, browserFocused: true, windowId: 1, tabId: 7, documentId: "D1", url: ISSUE, title: TITLE, incognito: false }));
-    await until(() => toChrome.some((f) => f.type === "core_unavailable"), "core_unavailable before the core starts");
-    expect(toChrome.some((f) => f.type === "ready")).toBe(false);
-
-    // 2. The core starts; the app tells it Chrome is frontmost.
-    const core = spawn(process.execPath, [CORE, "--stdio"], { env, cwd: ROOT, stdio: ["pipe", "pipe", "pipe"] });
-    children.push(core);
-    let coreOut = "";
-    let coreErr = "";
-    core.stdout.on("data", (c) => (coreOut += c));
-    core.stderr.on("data", (c) => (coreErr += c));
-    const coreExit = exitOf(core);
-    core.stdin.write(`${JSON.stringify({ type: "frontmost", bundleId: "com.google.Chrome", at: Date.now() })}\n`);
-
-    await until(() => toChrome.some((f) => f.type === "ready"), "ready from the host");
-    await until(() => toChrome.some((f) => f.type === "ack"), "ack for the buffered page_text");
+    await until(() => toChrome.some((f) => f.type === "ack"), "ack for the page_text");
     expect(toChrome.filter((f) => f.type === "ack")).toEqual([{ type: "ack", seq: pageTextSeq }]);
+    // Leave the GitHub visit at once, so its dwell never settles into a real discovery pass.
+    core.stdin.write(`${JSON.stringify({ type: "frontmost", bundleId: "com.apple.Terminal", at: Date.now() })}\n`);
 
     expect(lstatSync(runDir).mode & 0o777).toBe(0o700);
     const sock = lstatSync(sockPath);
@@ -141,5 +176,39 @@ describe.skipIf(!BUILT)("host <-> core end to end", () => {
       }
     }
     expect(coreOut).not.toContain(BODY);
+    expect(diag).not.toContain('"event":"dwell_settled"');
+  }, 30_000);
+
+  it("the core answers a protocol-1 hello with upgrade_required and closes", async () => {
+    home = mkdtempSync(join(tmpdir(), "scout-e2e-"));
+    const env = { ...process.env, SCOUT_HOME: home };
+    // A 10-minute dwell: no visit here settles into real fetches.
+    const core = spawn(process.execPath, [CORE, "--stdio"], { env: { ...env, SCOUT_DWELL_MS: "600000" }, cwd: ROOT, stdio: ["pipe", "pipe", "pipe"] });
+    children.push(core);
+    let coreErr = "";
+    core.stderr.on("data", (c) => (coreErr += c));
+    await until(() => coreErr.includes("listening on"), "the core to listen");
+
+    const sock = connect({ path: join(home, "run", "core.sock") });
+    sock.on("error", () => {});
+    const frames = [];
+    let buf = Buffer.alloc(0);
+    sock.on("data", (chunk) => {
+      buf = Buffer.concat([buf, chunk]);
+      while (buf.length >= 4) {
+        const n = LE ? buf.readUInt32LE(0) : buf.readUInt32BE(0);
+        if (buf.length < 4 + n) break;
+        frames.push(JSON.parse(buf.subarray(4, 4 + n).toString("utf8")));
+        buf = buf.subarray(4 + n);
+      }
+    });
+    const closed = new Promise((r) => sock.once("close", r));
+    await new Promise((r) => sock.once("connect", r));
+    sock.write(frame({ type: "hello", protocol: 1 }));
+    await closed;
+    expect(frames).toEqual([{ type: "upgrade_required", protocol: 2 }]);
+
+    core.stdin.end();
+    expect(await exitOf(core)).toBe(0);
   }, 30_000);
 });

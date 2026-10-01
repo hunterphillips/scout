@@ -1,7 +1,11 @@
 // Focus observations: debounced to one per burst of tab/window events, read
-// from the browser-owned active tab, never sent while paused.
+// from the browser-owned active tab, never sent while paused. Each carries the
+// revision of the last permissions snapshot sent, and a tab's url and title
+// only when its exact origin is in that snapshot: Chrome also exposes them
+// under a temporary activeTab grant, which must not leave the extension.
 
 import type { FocusObservation } from "@scout/contracts";
+import { sitePattern } from "./origin.js";
 import type { Clock } from "./reconnect.js";
 import { activeTab, type Counters, post, type SharedState } from "./shared-state.js";
 
@@ -10,6 +14,8 @@ export const FOCUS_DEBOUNCE_MS = 150;
 export interface FocusObserver {
   /** Emit one observation FOCUS_DEBOUNCE_MS after the last call. */
   schedule(): void;
+  /** Emit one now, dropping any scheduled one (it would carry the same state). */
+  flush(): Promise<void>;
   readFocus(): Promise<FocusObservation>;
   emitFocus(): Promise<void>;
 }
@@ -36,16 +42,26 @@ export function createFocusObserver(deps: FocusDeps): FocusObserver {
     }, FOCUS_DEBOUNCE_MS);
   }
 
+  function flush(): Promise<void> {
+    if (timer !== null) clock.clearTimeout(timer);
+    timer = null;
+    return emitFocus();
+  }
+
   async function readFocus(): Promise<FocusObservation> {
-    if (!state.browserFocused) return { kind: "focus", seq: ++state.seq, at: clock.now(), browserFocused: false, windowId: windowIdNone };
+    const base = (): Pick<FocusObservation, "kind" | "seq" | "at"> => ({ kind: "focus", seq: ++state.seq, at: clock.now() });
+    if (!state.browserFocused) return { ...base(), browserFocused: false, windowId: windowIdNone, permissionsRevision: state.permissionsRevision };
     const t = await activeTab(ch).catch(() => null);
-    const obs: FocusObservation = { kind: "focus", seq: ++state.seq, at: clock.now(), browserFocused: true, windowId: t?.windowId ?? windowIdNone };
+    // Stamped after the await: the snapshot this observation is checked against is the latest sent.
+    const obs: FocusObservation = { ...base(), browserFocused: true, windowId: t?.windowId ?? windowIdNone, permissionsRevision: state.permissionsRevision };
     if (!t) return obs;
     if (Number.isInteger(t.id) && t.id !== undefined && t.id >= 0) obs.tabId = t.id;
-    // Chrome only fills url/title for tabs whose host is granted. Absent means unapproved.
-    if (typeof t.url === "string" && t.url !== "") obs.url = t.url;
-    if (typeof t.title === "string" && obs.url !== undefined) obs.title = t.title;
     obs.incognito = t.incognito === true;
+    // url/title only for an exact origin in the snapshot sent (and visible to Chrome's grant).
+    const pattern = typeof t.url === "string" && !obs.incognito ? sitePattern(t.url) : null;
+    if (pattern === null || !state.sentGranted.has(pattern)) return obs;
+    obs.url = t.url!;
+    if (typeof t.title === "string") obs.title = t.title;
     return obs;
   }
 
@@ -57,5 +73,5 @@ export function createFocusObserver(deps: FocusDeps): FocusObserver {
     if (post(state, obs)) counters.focus++;
   }
 
-  return { schedule, readFocus, emitFocus };
+  return { schedule, flush, readFocus, emitFocus };
 }

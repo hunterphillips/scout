@@ -124,4 +124,59 @@ describe("createPacedCatalogFetch", () => {
     advance(5000); // idle time before the window's first request does not count
     expect((await fetch(`${ORIGIN}/c`)).kind).toBe("absent");
   });
+
+  it("cancel lets the request in flight finish and refuses every later one, across windows", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const log: string[] = [];
+    const fetch = createPacedCatalogFetch({
+      origin: ORIGIN,
+      clock: { now: () => 0 },
+      sleep: async () => undefined,
+      guardedFetch: async (url) => {
+        log.push(new URL(url).pathname);
+        await gate;
+        return { kind: "absent", status: 404 };
+      },
+    });
+    const inFlight = fetch(`${ORIGIN}/a`);
+    const queued = fetch(`${ORIGIN}/b`);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(log).toEqual(["/a"]);
+    fetch.cancel();
+    release();
+
+    expect((await inFlight).kind).toBe("absent");
+    const refused = await queued;
+    expect(refused).toMatchObject({ kind: "error", reason: "policy", message: "catalog run cancelled" });
+    expect(isRefusal(refused)).toBe(true);
+    fetch.startWindow();
+    expect(isRefusal(await fetch(`${ORIGIN}/c`))).toBe(true);
+    expect(log).toEqual(["/a"]);
+    expect(fetch.requests).toBe(1);
+    expect(fetch.refused).toBe(2);
+  });
+
+  it("a request waiting out the crawl delay when cancel lands is refused", async () => {
+    let wake!: () => void;
+    const log: string[] = [];
+    const fetch = createPacedCatalogFetch({
+      origin: ORIGIN,
+      clock: { now: () => 0 },
+      sleep: () => new Promise<void>((r) => (wake = r)),
+      guardedFetch: async (url) => {
+        log.push(new URL(url).pathname);
+        return { kind: "absent", status: 404 };
+      },
+    });
+    await fetch(`${ORIGIN}/robots.txt`);
+    fetch.setCrawlDelay(1000);
+    const waiting = fetch(`${ORIGIN}/a`);
+    for (let i = 0; i < 5; i++) await Promise.resolve();
+    fetch.cancel();
+    wake();
+    expect(isRefusal(await waiting)).toBe(true);
+    expect(log).toEqual(["/robots.txt"]);
+  });
 });

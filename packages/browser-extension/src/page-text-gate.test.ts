@@ -91,10 +91,10 @@ describe("page_text gate (through the background)", () => {
 
   it("a pause landing during the approval's awaits cancels it (cancel epoch)", async () => {
     const { f, bg } = await setup();
-    const orig = f.permissions.contains;
-    f.permissions.contains = async (a) => {
+    const orig = f.windows.get;
+    f.windows.get = async (id) => {
       await bg.handleMessage({ type: "popup-pause", paused: true }, popupSender());
-      return orig(a);
+      return orig(id);
     };
     expect((await approve(bg, f)).approved).toBe(false);
     expect(bg.approvals.size).toBe(0);
@@ -111,6 +111,30 @@ describe("page_text gate (through the background)", () => {
   });
 });
 
+describe("page_text gate: capture toggle and core policy", () => {
+  it("denies with 'permission' when GitHub is granted but the capture toggle is off", async () => {
+    const { f, bg } = await setup({ granted: [GITHUB_PATTERN] });
+    expect(bg.snapshot().githubCapture).toBe(false);
+    expect(await approve(bg, f)).toEqual({ approved: false, reason: "permission" });
+  });
+
+  it("drops text approved before the toggle went off", async () => {
+    const { f, bg } = await setup();
+    expect((await approve(bg, f)).approved).toBe(true);
+    await bg.handleMessage({ type: "popup-github-capture", enabled: false }, popupSender());
+    expect(await pageText(bg, f)).toMatchObject({ ok: false });
+    expect(observations(f, "page_text")).toEqual([]);
+  });
+
+  it("drops text when the core's policy stops capture between approval and send", async () => {
+    const { f, bg } = await setup();
+    expect((await approve(bg, f)).approved).toBe(true);
+    f._.ports.at(-1)!.onMessage.emit({ type: "capture_policy", revision: 9, paused: false, captureEnabled: false });
+    expect(await pageText(bg, f)).toMatchObject({ ok: false });
+    expect(observations(f, "page_text")).toEqual([]);
+  });
+});
+
 describe("page_text gate (standalone, shared state only)", () => {
   /** Just enough chrome for the gate: tab 10 is the active issue tab of focused window 1. */
   function gateHarness() {
@@ -118,10 +142,12 @@ describe("page_text gate (standalone, shared state only)", () => {
     const state = createSharedState(clock);
     const posted: unknown[] = [];
     state.port = { postMessage: (m: unknown) => void posted.push(m) } as unknown as chrome.runtime.Port;
+    state.policy = { revision: 2, captureEnabled: true, paused: false };
+    state.githubCapture = true;
+    state.granted = [GITHUB_PATTERN];
     const tab = { id: 10, windowId: 1, active: true, incognito: false, url: ISSUE1 };
     const ch = {
       runtime: { id: EXT_ID },
-      permissions: { contains: async () => true },
       tabs: { query: async () => [tab], sendMessage: async () => {} },
       windows: { get: async () => ({ id: 1, focused: true, incognito: false }) },
     } as unknown as typeof chrome;

@@ -190,7 +190,7 @@ describe("socketServer", () => {
     expect(st.mode & 0o777).toBe(0o600);
     const c = await rawClient(s.socketPath);
     extra.push(c.sock);
-    c.send({ type: "hello", protocol: 1 });
+    c.send({ type: "hello", protocol: 2 });
     await until(() => clients.length === 1);
   });
 
@@ -282,11 +282,31 @@ describe("socketServer", () => {
     expect(events).toContainEqual({ name: "bridge_rejected", fields: { conn: 1, code: "invalid-json" } });
   });
 
-  it("rejects a hello with the wrong protocol", async () => {
-    const { server: s } = await start();
+  it.each([1, 3])("answers a protocol-%i hello with upgrade_required, then closes", async (protocol) => {
+    const clients: SocketClient[] = [];
+    const { server: s, events } = await start((cl) => clients.push(cl));
     const c = await rawClient(s.socketPath);
-    c.send({ type: "hello", protocol: 2 });
+    // A frame after the mismatched hello is ignored.
+    c.sock.write(
+      Buffer.concat([
+        encodeFrame({ type: "hello", protocol }, MAX_FRAME_FROM_CHROME),
+        encodeFrame({ type: "observation", observation: FOCUS }, MAX_FRAME_FROM_CHROME),
+      ]),
+    );
     await c.closed;
+    expect(c.frames).toEqual([{ type: "upgrade_required", protocol: 2 }]);
+    expect(clients).toHaveLength(0);
+    expect(events).toContainEqual({ name: "bridge_rejected", fields: { conn: 1, code: "upgrade_required", protocol } });
+  });
+
+  it("a protocol-2 hello reaches onClient", async () => {
+    const clients: SocketClient[] = [];
+    const { server: s } = await start((cl) => clients.push(cl));
+    const c = await rawClient(s.socketPath);
+    extra.push(c.sock);
+    c.send({ type: "hello", protocol: 2 });
+    await until(() => clients.length === 1);
+    expect(c.frames).toEqual([]);
   });
 
   it("relays observation frames after hello, drops bad ones, and sends frames back", async () => {
@@ -303,12 +323,12 @@ describe("socketServer", () => {
     // hello and the first observation in one write: both must be handled.
     c.sock.write(
       Buffer.concat([
-        encodeFrame({ type: "hello", protocol: 1 }, MAX_FRAME_FROM_CHROME),
+        encodeFrame({ type: "hello", protocol: 2 }, MAX_FRAME_FROM_CHROME),
         encodeFrame({ type: "observation", observation: FOCUS }, MAX_FRAME_FROM_CHROME),
       ]),
     );
     c.send({ type: "observation", observation: { kind: "bogus" } });
-    c.send({ type: "hello", protocol: 1 });
+    c.send({ type: "hello", protocol: 2 });
     c.sock.write(Buffer.concat([frameHeader(2), Buffer.from("[]")]));
     c.send({ type: "observation", observation: { ...FOCUS, seq: 2 } });
     await until(() => received.length === 2 && c.frames.length === 2);
@@ -326,7 +346,7 @@ describe("socketServer", () => {
     const received: unknown[] = [];
     const { server: s } = await start((cl) => cl.onFrame((f) => received.push(f)));
     const c = await rawClient(s.socketPath);
-    c.send({ type: "hello", protocol: 1 });
+    c.send({ type: "hello", protocol: 2 });
     // Control characters JSON-escape to six bytes each: an 8 KiB body becomes a ~48 KiB frame.
     const text = "\u0001".repeat(8 * 1024);
     const obs = {
@@ -358,8 +378,8 @@ describe("socketServer", () => {
     });
     const a = await rawClient(s.socketPath);
     const b = await rawClient(s.socketPath);
-    a.send({ type: "hello", protocol: 1 });
-    b.send({ type: "hello", protocol: 1 });
+    a.send({ type: "hello", protocol: 2 });
+    b.send({ type: "hello", protocol: 2 });
     await until(() => clients.length === 2);
     a.sock.end();
     await until(() => closed.length === 1);

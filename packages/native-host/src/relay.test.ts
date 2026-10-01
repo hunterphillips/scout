@@ -5,6 +5,7 @@ import { createServer, connect as netConnect, type Server, type Socket } from "n
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough, Writable } from "node:stream";
+import { AnyHelloSchema, BRIDGE_PROTOCOL } from "@scout/contracts";
 import { encodeFrame, FrameDecoder, frameHeader, MAX_FRAME_FROM_CHROME } from "@scout/contracts/frame";
 import { afterEach, describe, expect, it } from "vitest";
 import { checkRuntimeDir, coreSocketPath } from "./config.js";
@@ -17,6 +18,7 @@ import {
   EXIT_OK,
   EXIT_REFUSED,
   type HostDeps,
+  POLICY_TIMEOUT_MS,
   RETRY_INTERVAL_MS,
   RETRY_WINDOW_MS,
 } from "./relay.js";
@@ -25,7 +27,12 @@ const EXT_ID = "abcdefghijklmnopabcdefghijklmnop";
 const ORIGIN = `chrome-extension://${EXT_ID}/`;
 
 const focus = { kind: "focus", seq: 1, at: 1000, browserFocused: true, windowId: 7 } as const;
-const permissions = { kind: "permissions", granted: ["https://github.com/*"] } as const;
+const permissions = { kind: "permissions", revision: 5, at: 999, granted: ["https://github.com/*"], githubCapture: false } as const;
+/** The core's answer to hello: capture disabled until it has the extension's snapshot. */
+const POLICY = { type: "capture_policy", revision: 1, paused: false, captureEnabled: false } as const;
+const HELLO = { type: "hello", protocol: 2 } as const;
+const UNREACHABLE = { type: "core_unavailable", reason: "unreachable" } as const;
+const UNSAFE = { type: "core_unavailable", reason: "unsafe" } as const;
 
 const tick = () => new Promise<void>((r) => setImmediate(r));
 const settle = async () => {
@@ -93,6 +100,11 @@ class FakeSocket extends EventEmitter implements CoreSocket {
   }
   feed(obj: object) {
     this.emit("data", encodeFrame(obj));
+  }
+  /** Connect, then answer hello with the initial capture-disabled policy. */
+  handshake() {
+    this.succeed();
+    this.feed(POLICY);
   }
   frames() {
     const d = new FrameDecoder();
@@ -163,10 +175,10 @@ describe("origin check", () => {
 describe("relay", () => {
   it("sends hello first, then forwards validated, re-encoded frames both ways", async () => {
     const h = harness();
-    h.last().succeed();
-    expect(h.last().frames()).toEqual([{ type: "hello", protocol: 1 }]);
+    h.last().handshake();
+    expect(h.last().frames()).toEqual([HELLO]);
     await settle();
-    expect(h.toChrome()).toEqual([{ type: "ready" }]);
+    expect(h.toChrome()).toEqual([POLICY, { type: "ready" }]);
 
     h.stdin.write(encodeFrame({ ...focus, injected: "x" }));
     h.stdin.write(encodeFrame(permissions));
@@ -179,15 +191,15 @@ describe("relay", () => {
     h.last().feed({ type: "ack", seq: 4, extra: "dropped" });
     h.last().feed({ type: "core_unavailable" });
     await settle();
-    expect(h.toChrome()).toEqual([{ type: "ready" }, { type: "ack", seq: 4 }, { type: "core_unavailable" }]);
+    expect(h.toChrome()).toEqual([POLICY, { type: "ready" }, { type: "ack", seq: 4 }, { type: "core_unavailable" }]);
     expect(h.host.drops().fromChrome.forwarded).toBe(2);
-    expect(h.host.drops().fromCore.forwarded).toBe(2);
+    expect(h.host.drops().fromCore.forwarded).toBe(3);
     expect(h.exits).toEqual([]);
   });
 
   it("drops and counts invalid Chrome frames and keeps the stream going", async () => {
     const h = harness();
-    h.last().succeed();
+    h.last().handshake();
     const notJson = Buffer.from("{nope", "utf8");
     const bigLen = MAX_FRAME_FROM_CHROME + 1;
     h.stdin.write(
@@ -209,13 +221,25 @@ describe("relay", () => {
 
   it("drops and counts invalid core frames", async () => {
     const h = harness();
-    h.last().succeed();
+    h.last().handshake();
     h.last().feed({ type: "ack", seq: -1 });
     h.last().feed({ type: "hello", protocol: 1 });
+    h.last().feed({ type: "capture_policy", revision: 2, paused: "no", captureEnabled: true });
     h.last().feed({ type: "ack", seq: 2 });
     await settle();
-    expect(h.toChrome()).toEqual([{ type: "ready" }, { type: "ack", seq: 2 }]);
-    expect(h.host.drops().fromCore).toEqual({ forwarded: 1, invalid: 2 });
+    expect(h.toChrome()).toEqual([POLICY, { type: "ready" }, { type: "ack", seq: 2 }]);
+    expect(h.host.drops().fromCore).toEqual({ forwarded: 2, invalid: 3 });
+  });
+
+  it("relays later capture_policy frames from the core to Chrome", async () => {
+    const h = harness();
+    h.last().handshake();
+    const enabled = { type: "capture_policy", revision: 2, paused: false, captureEnabled: true, extra: 1 };
+    const paused = { type: "capture_policy", revision: 3, paused: true, captureEnabled: false };
+    h.last().feed(enabled);
+    h.last().feed(paused);
+    await settle();
+    expect(h.toChrome()).toEqual([POLICY, { type: "ready" }, { type: "capture_policy", revision: 2, paused: false, captureEnabled: true }, paused]);
   });
 
   it("buffers the latest observation per kind before connect and flushes it after hello, in order", async () => {
@@ -226,16 +250,16 @@ describe("relay", () => {
     h.stdin.write(encodeFrame(focus2)); // replaces the older focus
     await settle();
     expect(h.last().frames()).toEqual([]);
-    h.last().succeed();
+    h.last().handshake();
     expect(h.last().frames()).toEqual([
-      { type: "hello", protocol: 1 },
+      HELLO,
       { type: "observation", observation: permissions },
       { type: "observation", observation: focus2 },
     ]);
     expect(h.host.drops().fromChrome).toMatchObject({ forwarded: 2, noCore: 1 });
   });
 
-  it("flushes permissions, then focus, then page_text regardless of arrival order", async () => {
+  it("flushes permissions, then focus, regardless of arrival order, and drops page_text sent before the handshake", async () => {
     const h = harness();
     const pageText = {
       kind: "page_text",
@@ -255,14 +279,13 @@ describe("relay", () => {
     h.stdin.write(encodeFrame(refocus)); // same tab refocused
     h.stdin.write(encodeFrame(permissions));
     await settle();
-    h.last().succeed();
+    h.last().handshake();
     expect(h.last().frames()).toEqual([
-      { type: "hello", protocol: 1 },
+      HELLO,
       { type: "observation", observation: permissions },
       { type: "observation", observation: refocus },
-      { type: "observation", observation: pageText },
     ]);
-    expect(h.host.drops().fromChrome).toMatchObject({ forwarded: 3, noCore: 1 });
+    expect(h.host.drops().fromChrome).toMatchObject({ forwarded: 2, noCore: 1, textBeforeReady: 1 });
   });
 
   it("keeps the pre-connect buffer across retries and counts leftovers on exit", async () => {
@@ -271,7 +294,7 @@ describe("relay", () => {
     await settle();
     h.last().fail();
     h.timers.advance(RETRY_INTERVAL_MS);
-    h.last().succeed();
+    h.last().handshake();
     expect(h.last().frames().slice(1)).toEqual([{ type: "observation", observation: focus }]);
 
     const g = harness();
@@ -283,17 +306,17 @@ describe("relay", () => {
 
   it("drops and counts observations while the core socket is backed up", async () => {
     const h = harness();
-    h.last().succeed();
+    h.last().handshake();
     h.last().writableLength = CORE_WRITE_HIGH_WATER_BYTES + 1;
     h.stdin.write(encodeFrame(focus));
     await settle();
-    expect(h.last().frames()).toEqual([{ type: "hello", protocol: 1 }]);
+    expect(h.last().frames()).toEqual([HELLO]);
     expect(h.host.drops().fromChrome).toMatchObject({ forwarded: 0, backpressure: 1 });
   });
 
   it("returns a snapshot from drops(), not live counters", async () => {
     const h = harness();
-    h.last().succeed();
+    h.last().handshake();
     const before = h.host.drops();
     h.stdin.write(encodeFrame(focus));
     await settle();
@@ -302,12 +325,135 @@ describe("relay", () => {
   });
 });
 
+describe("protocol-2 handshake", () => {
+  const pageText = {
+    kind: "page_text", seq: 3, at: 1002, tabId: 3, documentId: "doc-a", url: "https://github.com/o/r/issues/1",
+    source: "github_issue", title: "Issue", text: "body", truncated: false,
+  } as const;
+
+  it("holds ready until the core's capture_policy, forwards the policy first, and buffers observations meanwhile", async () => {
+    const h = harness();
+    h.last().succeed();
+    h.stdin.write(encodeFrame(focus));
+    h.stdin.write(encodeFrame(permissions));
+    h.stdin.write(encodeFrame(pageText));
+    await settle();
+    expect(h.last().frames()).toEqual([HELLO]);
+    expect(h.toChrome()).toEqual([]);
+
+    h.last().feed({ type: "ack", seq: 1 }); // not a policy: the handshake is not done
+    await settle();
+    expect(h.toChrome()).toEqual([]);
+    expect(h.host.drops().fromCore.invalid).toBe(1);
+
+    h.last().feed(POLICY);
+    await settle();
+    expect(h.toChrome()).toEqual([POLICY, { type: "ready" }]);
+    expect(h.last().frames()).toEqual([HELLO, { type: "observation", observation: permissions }, { type: "observation", observation: focus }]);
+    expect(h.host.drops().fromChrome).toMatchObject({ textBeforeReady: 1 });
+
+    // After ready, page_text goes straight through.
+    h.stdin.write(encodeFrame(pageText));
+    await settle();
+    expect(h.last().frames().at(-1)).toEqual({ type: "observation", observation: pageText });
+  });
+
+  it("upgrade_required from the core: core_unavailable{upgrade_required}, exit 1, no retry", async () => {
+    const h = harness();
+    h.stdin.write(encodeFrame(permissions));
+    await settle();
+    h.last().succeed();
+    h.last().feed({ type: "upgrade_required", protocol: 3 });
+    await settle();
+    expect(h.toChrome()).toEqual([{ type: "core_unavailable", reason: "upgrade_required" }]);
+    expect(h.exits).toEqual([EXIT_CORE_UNAVAILABLE]);
+    expect(h.last().destroyed).toBe(true);
+    expect(h.last().frames()).toEqual([HELLO]);
+    h.timers.advance(RETRY_WINDOW_MS * 2);
+    expect(h.sockets).toHaveLength(1);
+    expect(h.host.drops().fromChrome.noCore).toBe(1);
+  });
+
+  it("a core that connects but never sends a policy: given up after the policy timeout, retried, then exit 1", async () => {
+    const h = harness();
+    h.stdin.write(encodeFrame(permissions));
+    await settle();
+    h.last().succeed();
+    h.timers.advance(POLICY_TIMEOUT_MS - 1);
+    await settle();
+    expect(h.last().destroyed).toBe(false);
+    expect(h.toChrome()).toEqual([]);
+    h.timers.advance(1);
+    await settle();
+    expect(h.last().destroyed).toBe(true);
+    expect(h.last().frames()).toEqual([HELLO]);
+    expect(h.toChrome()).toEqual([UNREACHABLE]);
+    expect(h.timers.pending).toBe(1); // the retry, inside the usual window
+
+    // Every retry connects and stays silent: the bounded retry window still ends in exit 1.
+    for (let t = 0; t < RETRY_WINDOW_MS; t += RETRY_INTERVAL_MS) {
+      h.timers.advance(RETRY_INTERVAL_MS);
+      h.last().succeed();
+      h.timers.advance(POLICY_TIMEOUT_MS);
+    }
+    await settle();
+    expect(h.sockets).toHaveLength(16);
+    expect(h.sockets.every((s) => s.destroyed)).toBe(true);
+    expect(h.exits).toEqual([EXIT_CORE_UNAVAILABLE]);
+    expect(h.toChrome()).toEqual([UNREACHABLE]);
+    expect(h.timers.pending).toBe(0);
+    expect(h.logs.join("\n")).toContain("no-policy");
+    expect(h.host.drops().fromChrome.noCore).toBe(1);
+  });
+
+  it("a policy and an ack in one chunk are forwarded in order", async () => {
+    const h = harness();
+    h.last().succeed();
+    h.last().emit("data", Buffer.concat([encodeFrame(POLICY), encodeFrame({ type: "ack", seq: 1 })]));
+    await settle();
+    expect(h.toChrome()).toEqual([POLICY, { type: "ready" }, { type: "ack", seq: 1 }]);
+    expect(h.timers.pending).toBe(0); // the policy timer is gone
+  });
+
+  it("upgrade_required followed by more bytes in the same chunk: nothing after it is processed", async () => {
+    const h = harness();
+    h.last().succeed();
+    h.last().emit(
+      "data",
+      Buffer.concat([encodeFrame({ type: "upgrade_required", protocol: 3 }), encodeFrame(POLICY), encodeFrame({ type: "ack", seq: 1 })]),
+    );
+    await settle();
+    expect(h.toChrome()).toEqual([{ type: "core_unavailable", reason: "upgrade_required" }]);
+    expect(h.exits).toEqual([EXIT_CORE_UNAVAILABLE]);
+    expect(h.host.drops().fromCore).toEqual({ forwarded: 0, invalid: 0 });
+    expect(h.timers.pending).toBe(0);
+  });
+
+  it("an old core that closes right after hello: unreachable, then a retry that can still succeed", async () => {
+    const h = harness();
+    h.stdin.write(encodeFrame(permissions));
+    await settle();
+    h.last().succeed();
+    h.last().destroy(); // no frame at all
+    await settle();
+    expect(h.toChrome()).toEqual([UNREACHABLE]);
+    expect(h.exits).toEqual([]);
+    expect(h.timers.pending).toBe(1);
+    h.timers.advance(RETRY_INTERVAL_MS);
+    expect(h.sockets).toHaveLength(2);
+    h.last().handshake();
+    await settle();
+    expect(h.toChrome()).toEqual([UNREACHABLE, POLICY, { type: "ready" }]);
+    expect(h.last().frames()).toEqual([HELLO, { type: "observation", observation: permissions }]);
+  });
+});
+
 describe("core unavailable", () => {
   it("reports once, retries every 2 s, and exits 1 after 30 s", async () => {
     const h = harness();
     h.last().fail("ENOENT");
     await settle();
-    expect(h.toChrome()).toEqual([{ type: "core_unavailable" }]);
+    expect(h.toChrome()).toEqual([UNREACHABLE]);
 
     for (let t = RETRY_INTERVAL_MS; t < RETRY_WINDOW_MS; t += RETRY_INTERVAL_MS) {
       h.timers.advance(RETRY_INTERVAL_MS);
@@ -321,7 +467,7 @@ describe("core unavailable", () => {
     await settle();
     expect(h.connectTimes).toEqual(Array.from({ length: 16 }, (_, i) => i * RETRY_INTERVAL_MS));
     expect(h.exits).toEqual([EXIT_CORE_UNAVAILABLE]);
-    expect(h.toChrome()).toEqual([{ type: "core_unavailable" }]);
+    expect(h.toChrome()).toEqual([UNREACHABLE]);
     expect(h.timers.pending).toBe(0);
   });
 
@@ -331,8 +477,8 @@ describe("core unavailable", () => {
     h.timers.advance(RETRY_INTERVAL_MS);
     h.last().fail();
     h.timers.advance(RETRY_INTERVAL_MS);
-    h.last().succeed();
-    expect(h.last().frames()).toEqual([{ type: "hello", protocol: 1 }]);
+    h.last().handshake();
+    expect(h.last().frames()).toEqual([HELLO]);
 
     h.timers.advance(RETRY_WINDOW_MS * 2);
     h.stdin.write(encodeFrame(focus));
@@ -342,12 +488,12 @@ describe("core unavailable", () => {
     expect(h.exits).toEqual([]);
   });
 
-  it("reports core_unavailable and exits 0 when the core closes the socket", async () => {
+  it("reports core_unavailable and exits 0 when the core closes the socket after the handshake", async () => {
     const h = harness();
-    h.last().succeed();
+    h.last().handshake();
     h.last().destroy();
     await settle();
-    expect(h.toChrome()).toEqual([{ type: "ready" }, { type: "core_unavailable" }]);
+    expect(h.toChrome()).toEqual([POLICY, { type: "ready" }, UNREACHABLE]);
     expect(h.exits).toEqual([EXIT_OK]);
     expect(h.sockets).toHaveLength(1);
   });
@@ -356,17 +502,17 @@ describe("core unavailable", () => {
 describe("shutdown", () => {
   it("closes the socket and exits 0 when Chrome closes stdin", async () => {
     const h = harness();
-    h.last().succeed();
+    h.last().handshake();
     h.stdin.end();
     await settle();
     expect(h.last().destroyed).toBe(true);
     expect(h.exits).toEqual([EXIT_OK]);
-    expect(h.toChrome()).toEqual([{ type: "ready" }]);
+    expect(h.toChrome()).toEqual([POLICY, { type: "ready" }]);
   });
 
   it("stop() closes the socket, logs the reason, and exits 0 once", async () => {
     const h = harness();
-    h.last().succeed();
+    h.last().handshake();
     h.host.stop("signal:SIGTERM");
     h.host.stop("signal:SIGINT");
     await settle();
@@ -413,7 +559,7 @@ describe("shutdown", () => {
 
   it("logs drop counts, never content", async () => {
     const h = harness();
-    h.last().succeed();
+    h.last().handshake();
     h.stdin.write(encodeFrame({ kind: "page_text", secret: "SECRET-PAGE-TEXT" }));
     h.stdin.end();
     await settle();
@@ -422,6 +568,40 @@ describe("shutdown", () => {
     expect(all).not.toContain("SECRET-PAGE-TEXT");
   });
 });
+
+/**
+ * A fake core on a real Unix socket. It reads hello the way the protocol-2 core does: any
+ * hello parses, a mismatched protocol gets upgrade_required and a close, a matching one the
+ * initial capture-disabled policy. `protocol: 1` with `oldCore` models a protocol-1 core,
+ * which closes on a hello it does not know without sending anything.
+ */
+async function fakeCore(path: string, { protocol = BRIDGE_PROTOCOL, oldCore = false } = {}) {
+  const received: unknown[] = [];
+  const peers: Socket[] = [];
+  const server = createServer((s) => {
+    peers.push(s);
+    const d = new FrameDecoder();
+    let greeted = false;
+    s.on("data", (c) => {
+      for (const r of d.push(c)) {
+        if (!r.ok) continue;
+        received.push(r.value);
+        if (greeted) continue;
+        greeted = true;
+        const hello = AnyHelloSchema.safeParse(r.value);
+        if (hello.success && hello.data.protocol === protocol) {
+          s.write(encodeFrame(POLICY));
+        } else if (oldCore) {
+          s.destroy();
+        } else {
+          s.end(encodeFrame({ type: "upgrade_required", protocol }));
+        }
+      }
+    });
+  });
+  await new Promise<void>((r) => server.listen(path, r));
+  return { server, received, peers };
+}
 
 describe("with a real Unix socket", () => {
   let dir: string;
@@ -435,28 +615,20 @@ describe("with a real Unix socket", () => {
   it("relays through net.connect to a fake core server", async () => {
     dir = mkdtempSync(join(tmpdir(), "scout-nh-"));
     const path = join(dir, "core.sock");
-    const received: unknown[] = [];
-    let peer: Socket | undefined;
-    server = createServer((s) => {
-      peer = s;
-      const d = new FrameDecoder();
-      s.on("data", (c) => {
-        for (const r of d.push(c)) if (r.ok) received.push(r.value);
-      });
-    });
-    await new Promise<void>((r) => server!.listen(path, r));
+    const core = await fakeCore(path);
+    server = core.server;
 
     const h = harness({ socketPath: path, connect: (p) => netConnect({ path: p }) });
-    await waitFor(() => received.length === 1);
+    await waitFor(() => h.toChrome().length === 2);
     h.stdin.write(encodeFrame(focus));
-    await waitFor(() => received.length === 2);
-    expect(received).toEqual([{ type: "hello", protocol: 1 }, { type: "observation", observation: focus }]);
+    await waitFor(() => core.received.length === 2);
+    expect(core.received).toEqual([HELLO, { type: "observation", observation: focus }]);
 
-    peer!.write(encodeFrame({ type: "ack", seq: 1 }));
-    await waitFor(() => h.toChrome().length === 1);
-    peer!.destroy();
+    core.peers[0]!.write(encodeFrame({ type: "ack", seq: 1 }));
+    await waitFor(() => h.toChrome().length === 3);
+    core.peers[0]!.destroy();
     await waitFor(() => h.exits.length === 1);
-    expect(h.toChrome()).toEqual([{ type: "ready" }, { type: "ack", seq: 1 }, { type: "core_unavailable" }]);
+    expect(h.toChrome()).toEqual([POLICY, { type: "ready" }, { type: "ack", seq: 1 }, UNREACHABLE]);
     expect(h.exits).toEqual([EXIT_OK]);
   });
 
@@ -464,11 +636,91 @@ describe("with a real Unix socket", () => {
     dir = mkdtempSync(join(tmpdir(), "scout-nh-"));
     const h = harness({ socketPath: join(dir, "core.sock"), connect: (p) => netConnect({ path: p }) });
     await waitFor(() => h.timers.pending === 1);
-    expect(h.toChrome()).toEqual([{ type: "core_unavailable" }]);
+    expect(h.toChrome()).toEqual([UNREACHABLE]);
     expect(h.timers.pending).toBe(1);
     h.stdin.end();
     await settle();
     expect(h.exits).toEqual([EXIT_OK]);
+  });
+});
+
+describe("mixed bridge versions fail closed", () => {
+  let dir: string;
+  let server: Server | null = null;
+  afterEach(() => {
+    server?.close();
+    server = null;
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  const start = async (opts: Parameters<typeof fakeCore>[1]) => {
+    dir = mkdtempSync(join(tmpdir(), "scout-nh-"));
+    const path = join(dir, "core.sock");
+    const core = await fakeCore(path, opts);
+    server = core.server;
+    return { path, core };
+  };
+
+  it("a protocol-1 relay's hello gets upgrade_required from a protocol-2 core, then a close", async () => {
+    const { path } = await start({});
+    const got: unknown[] = [];
+    const client = netConnect({ path });
+    const d = new FrameDecoder();
+    client.on("data", (c) => {
+      for (const r of d.push(c)) if (r.ok) got.push(r.value);
+    });
+    const closed = new Promise<void>((r) => client.on("close", () => r()));
+    client.write(encodeFrame({ type: "hello", protocol: 1 }));
+    await closed;
+    expect(got).toEqual([{ type: "upgrade_required", protocol: 2 }]);
+  });
+
+  it("this relay against a newer core: core_unavailable{upgrade_required}, exit 1, no retry", async () => {
+    const { path, core } = await start({ protocol: 3 });
+    let connects = 0;
+    const h = harness({
+      socketPath: path,
+      connect: (p) => {
+        connects++;
+        return netConnect({ path: p });
+      },
+    });
+    await waitFor(() => h.exits.length === 1);
+    expect(h.toChrome()).toEqual([{ type: "core_unavailable", reason: "upgrade_required" }]);
+    expect(h.exits).toEqual([EXIT_CORE_UNAVAILABLE]);
+    expect(h.timers.pending).toBe(0);
+    h.timers.advance(RETRY_WINDOW_MS * 2);
+    expect(connects).toBe(1);
+    expect(core.received).toEqual([HELLO]);
+    expect(h.logs.join("\n")).toContain("upgrade-required");
+  });
+
+  it("this relay against a protocol-1 core that just closes: unreachable, then the retry window and exit 1", async () => {
+    const { path, core } = await start({ protocol: 1, oldCore: true });
+    let connects = 0;
+    let closes = 0;
+    const h = harness({
+      socketPath: path,
+      connect: (p) => {
+        connects++;
+        const s = netConnect({ path: p });
+        s.on("close", () => closes++);
+        return s;
+      },
+    });
+    // Between connect and close the policy timer is pending too: wait for each close.
+    await waitFor(() => closes === 1 && h.timers.pending === 1);
+    expect(h.toChrome()).toEqual([UNREACHABLE]);
+    h.stdin.write(encodeFrame({ ...focus, seq: 9 }));
+    await settle();
+    for (let t = 0; t < RETRY_WINDOW_MS; t += RETRY_INTERVAL_MS) {
+      h.timers.advance(RETRY_INTERVAL_MS);
+      await waitFor(() => (closes === connects && h.timers.pending === 1) || h.exits.length === 1);
+    }
+    expect(h.exits).toEqual([EXIT_CORE_UNAVAILABLE]);
+    expect(h.toChrome()).toEqual([UNREACHABLE]);
+    // Only hellos ever reached the old core: nothing is relayed without a policy.
+    expect(core.received.every((f) => (f as { type?: string }).type === "hello")).toBe(true);
   });
 });
 
@@ -484,7 +736,7 @@ describe("runtime-dir check against a temp SCOUT_HOME", () => {
     const h = withRealCheck(coreSocketPath(home));
     await settle();
     expect(h.sockets).toHaveLength(0);
-    expect(h.toChrome()).toEqual([{ type: "core_unavailable" }]);
+    expect(h.toChrome()).toEqual([UNREACHABLE]);
     expect(h.timers.pending).toBe(1);
 
     mkdirSync(join(home, "run"), { mode: 0o700 });
@@ -501,7 +753,7 @@ describe("runtime-dir check against a temp SCOUT_HOME", () => {
     const h = withRealCheck(coreSocketPath(home));
     await settle();
     expect(h.sockets).toHaveLength(0);
-    expect(h.toChrome()).toEqual([{ type: "core_unavailable" }]);
+    expect(h.toChrome()).toEqual([UNSAFE]);
     expect(h.exits).toEqual([EXIT_CORE_UNAVAILABLE]);
     expect(h.timers.pending).toBe(0);
     expect(h.logs.join("\n")).toContain("runtime-refused:runtime-dir-not-private");
@@ -515,7 +767,7 @@ describe("runtime-dir check against a temp SCOUT_HOME", () => {
     chmodSync(join(home, "run"), 0o770);
     h.timers.advance(RETRY_INTERVAL_MS);
     await settle();
-    expect(h.toChrome()).toEqual([{ type: "core_unavailable" }]);
+    expect(h.toChrome()).toEqual([UNREACHABLE, UNSAFE]);
     expect(h.exits).toEqual([EXIT_CORE_UNAVAILABLE]);
     expect(h.timers.pending).toBe(0);
   });
@@ -524,23 +776,17 @@ describe("runtime-dir check against a temp SCOUT_HOME", () => {
     home = mkdtempSync(join(tmpdir(), "scout-home-"));
     mkdirSync(join(home, "run"), { mode: 0o700 });
     const path = coreSocketPath(home);
-    const received: unknown[] = [];
-    const server = createServer((s) => {
-      const d = new FrameDecoder();
-      s.on("data", (c) => {
-        for (const r of d.push(c)) if (r.ok) received.push(r.value);
-      });
-    });
-    await new Promise<void>((r) => server.listen(path, r));
+    const core = await fakeCore(path);
     try {
       chmodSync(path, 0o600);
       const h = withRealCheck(path, { connect: (p) => netConnect({ path: p }) });
-      await waitFor(() => received.length === 1);
-      expect(received).toEqual([{ type: "hello", protocol: 1 }]);
+      await waitFor(() => h.toChrome().length === 2);
+      expect(core.received).toEqual([HELLO]);
+      expect(h.toChrome()).toEqual([POLICY, { type: "ready" }]);
       h.host.stop("test-done");
       await waitFor(() => h.exits.length === 1);
     } finally {
-      server.close();
+      core.server.close();
     }
   });
 });

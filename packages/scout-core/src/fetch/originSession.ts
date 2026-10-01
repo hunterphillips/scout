@@ -33,6 +33,12 @@ export interface OriginFetchSession {
   readonly fetch: PacedFetch;
   /** Open a new pacing window: refill the request budget and restart the deadline. */
   startWindow(): void;
+  /**
+   * Stop the pass's network use: the request in flight finishes, and every later one
+   * (queued or new) is refused like a spent budget, so callers see their usual refusal.
+   * Irreversible; a new pass makes a new session.
+   */
+  cancel(): void;
   stats(): OriginFetchStats;
 }
 
@@ -59,6 +65,7 @@ export function createOriginFetchSession(options: OriginFetchSessionOptions): Or
     origin,
     fetch: withoutWindowControl(paced, createCoalescingFetch),
     startWindow: () => paced.startWindow(),
+    cancel: () => paced.cancel(),
     stats: () => ({ requests: paced.requests, refused: paced.refused, bytesReceived }),
   };
 }

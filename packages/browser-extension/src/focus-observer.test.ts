@@ -35,7 +35,7 @@ describe("focus observations", () => {
     await Promise.all(f.windows.onFocusChanged.emit(-1 as never));
     await clock.advance(FOCUS_DEBOUNCE_MS);
     const obs = observations(f, "focus").at(-1)!;
-    expect(obs).toEqual({ kind: "focus", seq: expect.any(Number), at: expect.any(Number), browserFocused: false, windowId: -1 });
+    expect(obs).toEqual({ kind: "focus", seq: expect.any(Number), at: expect.any(Number), browserFocused: false, windowId: -1, permissionsRevision: expect.any(Number) });
   });
 
   it("a tab on a host without a grant is sent with url (and title) absent", async () => {
