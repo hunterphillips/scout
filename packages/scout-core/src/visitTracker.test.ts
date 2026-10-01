@@ -1,5 +1,5 @@
 import type { FocusObservation } from "@scout/contracts";
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import type { DiagnosticFields, Diagnostics } from "./diagnostics.js";
 import { createVisitTracker, type VisitChange, WINDOW_ID_NONE } from "./visitTracker.js";
 
@@ -16,8 +16,9 @@ function setup(opts: { onChange?: (c: VisitChange) => void } = {}) {
   const changes: Array<VisitChange & { at: number }> = [];
   let contextRevision = 7;
   const { events, diagnostics } = spyDiagnostics();
+  const granted = new Set(["https://docs.stripe.com", "https://www.peakdesign.com"]);
   const tracker = createVisitTracker({
-    destinations: ["docs.stripe.com", "www.peakdesign.com"],
+    isPermitted: (origin) => granted.has(origin),
     clock,
     getContextRevision: () => contextRevision,
     diagnostics,
@@ -55,12 +56,13 @@ function setup(opts: { onChange?: (c: VisitChange) => void } = {}) {
     focus,
     chrome,
     activate,
+    granted,
     setRevision: (r: number) => (contextRevision = r),
   };
 }
 
 describe("visitTracker", () => {
-  it("starts a visit when Chrome is frontmost and an approved https page is focused", () => {
+  it("starts a visit when Chrome is frontmost and a permitted https page is focused", () => {
     const { tracker, changes, focus, chrome, clock } = setup();
     chrome();
     clock.t = 2_000;
@@ -86,7 +88,7 @@ describe("visitTracker", () => {
   });
 
   const clearing: Array<[string, (s: ReturnType<typeof setup>) => void]> = [
-    ["tab switch to an unapproved tab", (s) => s.tracker.observeFocus(s.focus({ tabId: 11, url: "https://example.com/" }))],
+    ["tab switch to an unpermitted tab", (s) => s.tracker.observeFocus(s.focus({ tabId: 11, url: "https://example.com/" }))],
     ["window blur", (s) => s.tracker.observeFocus(s.focus({ browserFocused: false }))],
     [
       "WINDOW_ID_NONE",
@@ -100,7 +102,7 @@ describe("visitTracker", () => {
       "non-Chrome frontmost",
       (s) => s.tracker.observeFrontmost({ type: "frontmost", bundleId: "com.apple.Terminal", at: s.clock.t }),
     ],
-    ["unapproved origin", (s) => s.tracker.observeFocus(s.focus({ url: "https://stripe.com/pricing" }))],
+    ["unpermitted origin", (s) => s.tracker.observeFocus(s.focus({ url: "https://stripe.com/pricing" }))],
     ["non-default port", (s) => s.tracker.observeFocus(s.focus({ url: "https://docs.stripe.com:8443/payments" }))],
     ["http instead of https", (s) => s.tracker.observeFocus(s.focus({ url: "http://docs.stripe.com/payments" }))],
     ["malformed URL", (s) => s.tracker.observeFocus(s.focus({ url: "not a url" }))],
@@ -127,7 +129,7 @@ describe("visitTracker", () => {
     expect(s.changes[0]!.at - startedAt).toBeLessThan(250);
   });
 
-  it("switching between two approved tabs is a new epoch with the new visit", () => {
+  it("switching between two permitted tabs is a new epoch with the new visit", () => {
     const s = setup();
     s.activate();
     s.tracker.observeFocus(s.focus({ tabId: 20, url: "https://www.peakdesign.com/products/everyday-backpack", documentId: "doc-b" }));
@@ -234,12 +236,45 @@ describe("visitTracker", () => {
     expect(s.events.some((e) => e.name === "visit_change_handler_error")).toBe(true);
   });
 
-  it.each(["https://docs.stripe.com", "Docs.Stripe.com", "docs.stripe.com/payments", "", "bad host"])(
-    "rejects the invalid destination %j at construction",
-    (d) => {
-      expect(() =>
-        createVisitTracker({ destinations: ["docs.stripe.com", d], clock: { now: () => 0 }, onChange: vi.fn() }),
-      ).toThrow(/invalid destination/);
-    },
-  );
+  it("asks isPermitted with the page's exact origin and forms no visit for an unpermitted one", () => {
+    const s = setup();
+    s.chrome();
+    s.tracker.observeFocus(s.focus({ url: "https://example.com/a" }));
+    expect(s.tracker.current()).toBeNull();
+    s.granted.add("https://example.com");
+    s.tracker.recompute();
+    expect(s.tracker.current()).toMatchObject({ origin: "https://example.com", url: "https://example.com/a" });
+  });
+
+  it("recompute ends the visit when the current origin loses its grant", () => {
+    const s = setup();
+    s.activate();
+    const before = s.tracker.epoch;
+    s.granted.delete("https://docs.stripe.com");
+    s.tracker.recompute();
+    expect(s.tracker.current()).toBeNull();
+    expect(s.changes).toHaveLength(1);
+    expect(s.changes[0]).toMatchObject({ epoch: before + 1, visit: null, previous: { epoch: before } });
+  });
+
+  it("recompute with unchanged grants changes nothing", () => {
+    const s = setup();
+    s.activate();
+    const visit = s.tracker.current();
+    s.granted.add("https://example.com");
+    s.tracker.recompute();
+    expect(s.tracker.current()).toBe(visit);
+    expect(s.changes).toHaveLength(0);
+  });
+
+  it("a focus without documentId still forms a visit, and a later one with a documentId is a change", () => {
+    const s = setup();
+    s.chrome();
+    const { documentId: _drop, ...noDoc } = s.focus();
+    s.tracker.observeFocus(noDoc);
+    expect(s.tracker.current()).toMatchObject({ origin: "https://docs.stripe.com", tabId: 10 });
+    const epoch = s.tracker.epoch;
+    s.tracker.observeFocus(s.focus());
+    expect(s.tracker.epoch).toBe(epoch + 1);
+  });
 });

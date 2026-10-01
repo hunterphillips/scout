@@ -1,4 +1,4 @@
-export { type Clock, systemClock } from "./clock.js";
+export { type Clock, systemClock, systemTimers } from "./clock.js";
 export {
   createDiagnostics,
   defaultDiagnosticsPath,
@@ -67,9 +67,18 @@ export {
 export {
   createCoordinator,
   type Coordinator,
+  type CoordinatorCapabilities,
   type CoordinatorConfig,
   type CoordinatorOptions,
 } from "./coordinator.js";
+export {
+  createDwellScheduler,
+  DWELL_MS,
+  type DwellCancelReason,
+  type DwellScheduler,
+  type DwellSchedulerOptions,
+} from "./dwell.js";
+export { createPermissionState, GITHUB_ORIGIN, patternToOrigin, type PermissionState } from "./permissionState.js";
 export {
   createSocketServer,
   ensurePrivateRunDir,

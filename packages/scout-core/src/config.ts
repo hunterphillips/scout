@@ -1,4 +1,8 @@
 // Core configuration read from <scoutHome>/config.json.
+//
+// `destinations` is the list of hosts where recommendations are enabled (consumed in
+// Phase 3). It no longer decides which sites are visits or can have capabilities: that is
+// Chrome's per-origin grant, reported by the extension's permissions snapshot.
 
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -22,7 +26,7 @@ export class ConfigError extends Error {
 }
 
 export interface CoreConfig {
-  /** Approved hostnames, e.g. "docs.stripe.com". */
+  /** Hosts with recommendations enabled, e.g. "docs.stripe.com" (Phase 3). Not a visit or capability gate. */
   destinations: readonly string[];
   /** The bundle id treated as "Chrome frontmost", e.g. com.google.chrome.for.testing. */
   chromeBundleId: string;
@@ -57,7 +61,7 @@ export function readConfig(home: string): CoreConfig {
   let destinations = defaults.destinations;
   if ("destinations" in cfg) {
     const d = (cfg as { destinations: unknown }).destinations;
-    if (!Array.isArray(d) || !d.every((x) => typeof x === "string")) throw new ConfigError("config-invalid-destinations");
+    if (!Array.isArray(d) || !d.every(isBareHost)) throw new ConfigError("config-invalid-destinations");
     destinations = d as string[];
   }
 
@@ -76,6 +80,16 @@ export function readConfig(home: string): CoreConfig {
   }
 
   return { destinations, chromeBundleId, agentBrowserContext };
+}
+
+/** A bare host as URL parsing would print it: no scheme, path, or uppercase. */
+function isBareHost(d: unknown): boolean {
+  if (typeof d !== "string") return false;
+  try {
+    return new URL(`https://${d}`).host === d;
+  } catch {
+    return false;
+  }
 }
 
 /** The `destinations` field alone; see readConfig. */

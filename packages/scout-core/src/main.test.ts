@@ -99,7 +99,9 @@ describe("main --stdio", () => {
     const sock = connect({ path: socketPath() });
     sock.on("error", () => {});
     await new Promise<void>((r) => sock.once("connect", () => r()));
-    sock.write(encodeFrame({ type: "hello", protocol: 1 }, MAX_FRAME_FROM_CHROME));
+    // The core answers hello with a capture_policy; read it so the socket can see its close.
+    sock.resume();
+    sock.write(encodeFrame({ type: "hello", protocol: 2 }, MAX_FRAME_FROM_CHROME));
     await until(() => c.lines.some((l) => (l as { status?: string }).status === "idle"));
     const hostClosed = new Promise<void>((r) => sock.once("close", () => r()));
     const closedAt = Date.now();
@@ -151,7 +153,7 @@ describe("main --stdio", () => {
     expect(existsSync(socketPath())).toBe(false);
   });
 
-  it("relays host frames into panel states and acks page_text back to the host", async () => {
+  it("relays host frames into panel states, answers hello with a policy, and acks page_text back to the host", async () => {
     const c = await startReady();
     expect(c.lines[0]).toEqual({ type: "state", status: "disconnected" });
     c.child.stdin.write("not json\n");
@@ -159,15 +161,23 @@ describe("main --stdio", () => {
     const sock = connect({ path: socketPath() });
     sock.on("error", () => {});
     await new Promise<void>((r) => sock.once("connect", () => r()));
-    const acks: unknown[] = [];
+    const received: Array<{ type: string }> = [];
     const dec = new FrameDecoder({ maxBytes: MAX_FRAME_FROM_CHROME });
     sock.on("data", (chunk: Buffer) => {
-      for (const r of dec.push(chunk)) if (r.ok) acks.push(r.value);
+      for (const r of dec.push(chunk)) if (r.ok) received.push(r.value as { type: string });
     });
+    const acks = () => received.filter((f) => f.type === "ack");
     const send = (o: object) => sock.write(encodeFrame(o, MAX_FRAME_FROM_CHROME));
-    send({ type: "hello", protocol: 1 });
-    await until(() => c.lines.length >= 2);
+    send({ type: "hello", protocol: 2 });
+    await until(() => c.lines.length >= 2 && received.length >= 1);
     expect(c.lines[1]).toEqual({ type: "state", status: "idle", visitEpoch: 0 });
+    expect(received).toEqual([{ type: "capture_policy", revision: 0, paused: false, captureEnabled: false }]);
+    send({
+      type: "observation",
+      observation: { kind: "permissions", revision: 1, at: 1, granted: ["https://docs.stripe.com/*", "https://github.com/*"], githubCapture: true },
+    });
+    await until(() => received.length >= 2);
+    expect(received[1]).toEqual({ type: "capture_policy", revision: 1, paused: false, captureEnabled: true });
 
     // Either arrival order ends at epoch 2 with one emission: the first is idle to idle.
     c.child.stdin.write(`${JSON.stringify({ type: "frontmost", bundleId: "com.google.Chrome", at: 1 })}\n`);
@@ -197,9 +207,10 @@ describe("main --stdio", () => {
         truncated: false,
       },
     });
-    await until(() => acks.length === 1);
-    expect(acks).toEqual([{ type: "ack", seq: 3 }]);
-    expect(c.lines.slice(3)).toEqual([{ type: "state", status: "idle", visitEpoch: 3 }]);
+    await until(() => acks().length === 1);
+    expect(acks()).toEqual([{ type: "ack", seq: 3 }]);
+    // GitHub is granted, so the issue tab is a visit too.
+    expect(c.lines.slice(3)).toEqual([{ type: "state", status: "idle", visitEpoch: 3, detail: "github.com" }]);
 
     sock.destroy();
     await until(() => (c.lines.at(-1) as { status?: string }).status === "disconnected");
@@ -364,6 +375,14 @@ describe("readDestinations", () => {
     writeFileSync(join(home, "config.json"), JSON.stringify({ destinations: "docs.stripe.com" }));
     expect(() => readDestinations(home)).toThrow("config-invalid-destinations");
   });
+
+  it.each(["https://docs.stripe.com", "Docs.Stripe.com", "docs.stripe.com/payments", "", "bad host"])(
+    "throws on the invalid destination host %j",
+    (d) => {
+      writeFileSync(join(home, "config.json"), JSON.stringify({ destinations: ["docs.stripe.com", d] }));
+      expect(() => readDestinations(home)).toThrow("config-invalid-destinations");
+    },
+  );
 });
 
 describe("readConfig chromeBundleId", () => {

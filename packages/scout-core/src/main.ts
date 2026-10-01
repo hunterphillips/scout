@@ -7,6 +7,9 @@
 // <scoutHome>/run/agent-token, both published only after the capability store is open and
 // its startup export sync has settled.
 //
+// Settled visits run resource discovery (coordinator.ts); shutdown stops the coordinator
+// first, which cancels any pending dwell.
+//
 // The core opens the capability store once for its lifetime (its lock keeps the dev CLI
 // from writing meanwhile), collects garbage at start and hourly, and wires the store's
 // revocation hook to the agent socket. Skill wrappers are exported only when the
@@ -32,7 +35,9 @@ import { type AgentSocketServer, createAgentSocketServer } from "./agentSocketSe
 import { createSkillExporter, ExportError, type SkillExporter } from "./capabilities/exports.js";
 import { type CapabilityStore, createCapabilityStore, StoreCorruptError } from "./capabilities/store.js";
 import { StoreLockedError } from "./capabilities/storeLock.js";
+import { createSiteResourceDiscoverer } from "./capabilities/discovery.js";
 import { createCatalogCache } from "./catalog/cache.js";
+import { createCatalogResolver } from "./catalog/resolveCatalog.js";
 import { type Clock, systemClock } from "./clock.js";
 import { ConfigError, type CoreConfig, readConfig } from "./config.js";
 import { type Coordinator, createCoordinator } from "./coordinator.js";
@@ -120,24 +125,23 @@ export async function runStdio(deps: StdioDeps): Promise<StdioCore> {
     deps.stdout.write(`${JSON.stringify(state)}\n`);
   };
 
-  let coordinator: Coordinator;
-  try {
-    coordinator = createCoordinator({
-      config,
-      clock,
-      diagnostics,
-      emitPanel,
-      onShutdownRequested: () => void shutdown("shutdown-command"),
-      capabilities: { store, createFetchSession: (origin) => createOriginFetchSession({ origin, clock }) },
-    });
-  } catch {
-    clearInterval(gcTimer);
-    await store.close();
-    deps.log("scout-core: config-invalid-destinations");
-    diagnostics.event("start_failed", { code: "config-invalid-destinations" });
-    deps.exit(EXIT_START_FAILED);
-    return { shutdown: async () => {} };
-  }
+  // Settled visits run the same catalog and discovery pipelines as the dev CLI, with their
+  // caches under SCOUT_HOME; the coordinator owns each pass's fetch session and window.
+  const catalogResolver = createCatalogResolver({ scoutHome: home, clock, diagnostics });
+  const discoverer = createSiteResourceDiscoverer({ scoutHome: home, clock, diagnostics });
+  const coordinator: Coordinator = createCoordinator({
+    config,
+    clock,
+    diagnostics,
+    emitPanel,
+    onShutdownRequested: () => void shutdown("shutdown-command"),
+    capabilities: {
+      store,
+      createFetchSession: (origin) => createOriginFetchSession({ origin, clock }),
+      resolveCatalog: (origin, session) => catalogResolver.resolve(origin, { session }),
+      discover: (origin, session) => discoverer.discover(origin, { session }),
+    },
+  });
 
   const server = createSocketServer({
     runDir,

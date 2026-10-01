@@ -1,3 +1,9 @@
+// Turns Chrome focus plus the Mac's frontmost app into the current visit: a permitted
+// https page in the focused Chrome window while Chrome is frontmost. "Permitted" means the
+// live connection's permissions snapshot grants the page's exact origin (injected as
+// `isPermitted`); whether recommendations are enabled for that origin is a separate
+// setting this tracker does not read. Every real change of the visit tuple is a new epoch.
+
 import type { ActiveVisit, FocusObservation, NativeCommand } from "@scout/contracts";
 import type { Clock } from "./clock.js";
 import type { Diagnostics } from "./diagnostics.js";
@@ -9,21 +15,21 @@ export const WINDOW_ID_NONE = -1;
 
 export interface VisitChange {
   epoch: number;
-  /** null means idle: no approved page is in front. */
+  /** null means idle: no permitted page is in front. */
   visit: ActiveVisit | null;
   /** The visit this change replaces; null means the tracker was idle. idle to idle is possible. */
   previous: ActiveVisit | null;
 }
 
 export interface VisitTrackerOptions {
-  /** Approved hostnames, e.g. "docs.stripe.com". Each must be a bare lowercase host; construction throws otherwise. */
-  destinations: readonly string[];
+  /** True when Chrome currently grants this exact origin (`https://host`, default port). */
+  isPermitted: (origin: string) => boolean;
   chromeBundleId?: string;
   clock: Clock;
   /**
    * Called synchronously on every real change, never on a duplicate. A throw is caught and
    * logged, never rethrown. Re-entry is not supported: the handler must not call
-   * observeFocus or observeFrontmost.
+   * observeFocus, observeFrontmost, or recompute.
    */
   onChange: (change: VisitChange) => void;
   /** Scout's current contextRevision, stamped on each new visit. */
@@ -34,6 +40,8 @@ export interface VisitTrackerOptions {
 export interface VisitTracker {
   observeFocus(obs: FocusObservation): void;
   observeFrontmost(cmd: Extract<NativeCommand, { type: "frontmost" }>): void;
+  /** Re-check the tuple against `isPermitted` (the permissions snapshot changed). Losing the current origin ends the visit. */
+  recompute(): void;
   current(): ActiveVisit | null;
   readonly epoch: number;
 }
@@ -45,7 +53,7 @@ interface VisitTuple {
   tabId: number | null;
   documentId: string | null;
   url: string | null;
-  approvedOrigin: string | null;
+  permittedOrigin: string | null;
 }
 
 const EMPTY_TUPLE: VisitTuple = {
@@ -54,7 +62,7 @@ const EMPTY_TUPLE: VisitTuple = {
   tabId: null,
   documentId: null,
   url: null,
-  approvedOrigin: null,
+  permittedOrigin: null,
 };
 
 /**
@@ -63,8 +71,6 @@ const EMPTY_TUPLE: VisitTuple = {
  */
 export function createVisitTracker(options: VisitTrackerOptions): VisitTracker {
   const chromeBundleId = options.chromeBundleId ?? CHROME_BUNDLE_ID;
-  for (const d of options.destinations) assertDestination(d);
-  const approvedOrigins = new Set(options.destinations.map((d) => `https://${d}`));
   const getContextRevision = options.getContextRevision ?? (() => 0);
 
   let focus: FocusObservation | null = null;
@@ -73,16 +79,16 @@ export function createVisitTracker(options: VisitTrackerOptions): VisitTracker {
   let epoch = 0;
   let visit: ActiveVisit | null = null;
 
-  const approvedOrigin = (url: string): string | null => {
+  const permittedOrigin = (url: string): string | null => {
     let parsed: URL;
     try {
       parsed = new URL(url);
     } catch {
       return null;
     }
-    if (parsed.protocol !== "https:") return null;
-    // Compare the full origin so a port-bearing origin (https://host:8443) is not approved.
-    return approvedOrigins.has(parsed.origin) ? parsed.origin : null;
+    // Grants are exact host patterns with no port, so a port-bearing origin never qualifies.
+    if (parsed.protocol !== "https:" || parsed.port !== "") return null;
+    return options.isPermitted(parsed.origin) ? parsed.origin : null;
   };
 
   const computeTuple = (): VisitTuple => {
@@ -97,7 +103,7 @@ export function createVisitTracker(options: VisitTrackerOptions): VisitTracker {
       tabId: focus.tabId ?? null,
       documentId: focus.documentId ?? null,
       url,
-      approvedOrigin: url === null ? null : approvedOrigin(url),
+      permittedOrigin: url === null ? null : permittedOrigin(url),
     };
   };
 
@@ -108,7 +114,7 @@ export function createVisitTracker(options: VisitTrackerOptions): VisitTracker {
     epoch += 1;
     const previous = visit;
     visit = toVisit(next, epoch, options.clock.now(), getContextRevision());
-    // Idle to idle (e.g. switching between unapproved tabs) is not worth a log line.
+    // Idle to idle (e.g. switching between unpermitted tabs) is not worth a log line.
     if (visit !== null || previous !== null) {
       options.diagnostics?.event("visit_change", { epoch, active: visit !== null });
     }
@@ -132,27 +138,17 @@ export function createVisitTracker(options: VisitTrackerOptions): VisitTracker {
       frontmostBundleId = cmd.bundleId;
       recompute();
     },
+    recompute,
   };
-}
-
-/** A destination must be a bare host as URL parsing would print it: no scheme, path, or uppercase. */
-function assertDestination(d: string): void {
-  let host: string | null = null;
-  try {
-    host = new URL(`https://${d}`).host;
-  } catch {
-    // Falls through to the throw below.
-  }
-  if (host !== d) throw new Error(`scout: invalid destination host ${JSON.stringify(d)}`);
 }
 
 function toVisit(t: VisitTuple, epoch: number, now: number, contextRevision: number): ActiveVisit | null {
   if (!t.chromeFrontmost || !t.browserFocused) return null;
-  if (t.tabId === null || t.url === null || t.approvedOrigin === null) return null;
+  if (t.tabId === null || t.url === null || t.permittedOrigin === null) return null;
   const visit: ActiveVisit = {
     epoch,
     tabId: t.tabId,
-    origin: t.approvedOrigin,
+    origin: t.permittedOrigin,
     url: t.url,
     startedAt: now,
     contextRevision,
@@ -168,6 +164,6 @@ function sameTuple(a: VisitTuple, b: VisitTuple): boolean {
     a.tabId === b.tabId &&
     a.documentId === b.documentId &&
     a.url === b.url &&
-    a.approvedOrigin === b.approvedOrigin
+    a.permittedOrigin === b.permittedOrigin
   );
 }

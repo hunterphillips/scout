@@ -1,11 +1,115 @@
-import type { BrowserObservation, FocusObservation, ObservationFrame, PageTextObservation, PanelState, ToChromeFrame } from "@scout/contracts";
+import type {
+  BrowserObservation,
+  FocusObservation,
+  ObservationFrame,
+  PageTextObservation,
+  PanelState,
+  ToChromeFrame,
+} from "@scout/contracts";
 import { describe, expect, it } from "vitest";
-import { type CoordinatorOptions, createCoordinator } from "./coordinator.js";
+import type { DiscoveryResult } from "./capabilities/discovery.js";
+import type { IngestReport } from "./capabilities/store.js";
+import type { CatalogResolution } from "./catalog/resolveCatalog.js";
+import type { Timers } from "./clock.js";
+import { type CoordinatorCapabilities, type CoordinatorOptions, createCoordinator } from "./coordinator.js";
 import type { DiagnosticFields, Diagnostics } from "./diagnostics.js";
+import { DWELL_MS } from "./dwell.js";
+import type { OriginFetchSession } from "./fetch/originSession.js";
 import type { SocketClient } from "./socketServer.js";
 
 const STRIPE = "https://docs.stripe.com/payments/checkout";
 const ISSUE = "https://github.com/o/r/issues/1";
+const DEFAULT_GRANTS = ["https://docs.stripe.com/*", "https://www.peakdesign.com/*", "https://github.com/*"];
+
+/** One-shot timers on a manual clock. */
+function fakeTimers() {
+  let now = 0;
+  let nextId = 0;
+  const pending = new Map<number, { at: number; fn: () => void }>();
+  const timers: Timers = {
+    setTimeout: (fn, ms) => {
+      const id = ++nextId;
+      pending.set(id, { at: now + ms, fn });
+      return id;
+    },
+    clearTimeout: (h) => void pending.delete(h as number),
+  };
+  const advance = (ms: number): void => {
+    const until = now + ms;
+    for (;;) {
+      const due = [...pending.entries()].filter(([, t]) => t.at <= until).sort((a, b) => a[1].at - b[1].at)[0];
+      if (due === undefined) break;
+      pending.delete(due[0]);
+      now = due[1].at;
+      due[1].fn();
+    }
+    now = until;
+  };
+  return { timers, advance };
+}
+
+function deferred<T>() {
+  let resolve!: (v: T) => void;
+  let reject!: (e: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
+/** Let queued promise callbacks run. */
+const flush = async (): Promise<void> => {
+  for (let i = 0; i < 10; i++) await Promise.resolve();
+};
+
+const discoveryFor = (origin: string): DiscoveryResult => ({
+  origin,
+  checkedAt: 0,
+  robots: "not_fetched",
+  items: [],
+  externalReferences: [],
+  skillsOverCap: 0,
+  acceptedBytes: 0,
+  stats: { requests: 0, refused: 0, ms: 0 },
+});
+
+/** Fake discovery wiring: each pass waits on a deferred the test resolves. */
+function fakeCapabilities() {
+  const passes: Array<{ origin: string; discover: ReturnType<typeof deferred<DiscoveryResult>> }> = [];
+  const sessions: Array<{ origin: string; windows: number }> = [];
+  const catalogCalls: Array<{ origin: string; session: OriginFetchSession }> = [];
+  const ingests: Array<{ origin: string; chromePermitted: boolean }> = [];
+  const capabilities: CoordinatorCapabilities = {
+    store: {
+      ingest: async (discovery, context) => {
+        ingests.push({ origin: discovery.origin, chromePermitted: context.chromePermitted });
+        return { origin: discovery.origin, results: [], skipped: 0, cleanup: Promise.resolve({ ok: true }) } satisfies IngestReport;
+      },
+    },
+    createFetchSession: (origin) => {
+      const rec = { origin, windows: 0 };
+      sessions.push(rec);
+      return {
+        origin,
+        fetch: undefined as unknown as OriginFetchSession["fetch"],
+        startWindow: () => void (rec.windows += 1),
+        stats: () => ({ requests: 0, refused: 0, bytesReceived: 0 }),
+      };
+    },
+    resolveCatalog: async (origin, session) => {
+      catalogCalls.push({ origin, session });
+      return { result: { ok: false }, stats: { requests: 0, refused: 0, bytesReceived: 0, ms: 0 } } as unknown as CatalogResolution;
+    },
+    discover: (origin, session) => {
+      const d = deferred<DiscoveryResult>();
+      expect(session.origin).toBe(origin);
+      passes.push({ origin, discover: d });
+      return d.promise;
+    },
+  };
+  return { capabilities, passes, sessions, catalogCalls, ingests };
+}
 
 function fakeClient(id: number) {
   const frameHandlers: Array<(f: ObservationFrame) => void> = [];
@@ -36,17 +140,20 @@ function fakeClient(id: number) {
 
 function setup(extra: Partial<CoordinatorOptions> = {}) {
   const clock = { t: 1_000, now: () => clock.t };
+  const timers = fakeTimers();
   const panel: PanelState[] = [];
   const events: Array<{ name: string; fields: DiagnosticFields }> = [];
   const diagnostics: Diagnostics = { failures: 0, event: (name, fields = {}) => void events.push({ name, fields }) };
   const coordinator = createCoordinator({
-    config: { destinations: ["docs.stripe.com", "www.peakdesign.com"] },
+    config: {},
     clock,
+    timers: timers.timers,
     diagnostics,
     emitPanel: (s) => void panel.push(s),
     ...extra,
   });
   let seq = 0;
+  let permissionsRevision = 100;
   const focus = (overrides: Partial<FocusObservation> = {}): FocusObservation => ({
     kind: "focus",
     seq: ++seq,
@@ -72,18 +179,30 @@ function setup(extra: Partial<CoordinatorOptions> = {}) {
     ...overrides,
   });
   const chrome = () => coordinator.handleNativeCommand({ type: "frontmost", bundleId: "com.google.Chrome", at: clock.t });
-  const connect = (id = 1) => {
+  /** Attach a sensor without a permissions snapshot. */
+  const attach = (id = 1) => {
     const c = fakeClient(id);
     coordinator.attachClient(c.client);
     return c;
   };
-  return { coordinator, panel, events, focus, pageText, chrome, connect };
+  /** A permissions snapshot with the next revision. */
+  const grant = (c: ReturnType<typeof attach>, granted: string[] = DEFAULT_GRANTS, githubCapture = true) =>
+    c.observe({ kind: "permissions", revision: ++permissionsRevision, at: clock.t, granted, githubCapture });
+  /** Attach a sensor and send the usual snapshot (Stripe, Peak Design, GitHub; GitHub capture on). */
+  const connect = (id = 1) => {
+    const c = attach(id);
+    grant(c);
+    return c;
+  };
+  const acks = (c: ReturnType<typeof attach>) => c.sent.filter((f) => f.type === "ack");
+  const policies = (c: ReturnType<typeof attach>) => c.sent.filter((f) => f.type === "capture_policy");
+  return { coordinator, panel, events, focus, pageText, chrome, attach, grant, connect, acks, policies, advance: timers.advance };
 }
 
 describe("coordinator", () => {
   it("a configured chromeBundleId is the one that counts as Chrome frontmost", () => {
     const { coordinator, focus, connect } = setup({
-      config: { destinations: ["docs.stripe.com"], chromeBundleId: "com.google.chrome.for.testing" },
+      config: { chromeBundleId: "com.google.chrome.for.testing" },
     });
     const c = connect();
     coordinator.handleNativeCommand({ type: "frontmost", bundleId: "com.google.Chrome", at: 1 });
@@ -101,7 +220,7 @@ describe("coordinator", () => {
     expect(panel.at(-1)).toEqual({ type: "state", status: "idle", visitEpoch: 0 });
   });
 
-  it("an active visit's idle state carries the approved hostname only; leaving drops it", () => {
+  it("an active visit's idle state carries the permitted hostname only; leaving drops it", () => {
     const { coordinator, panel, focus, chrome, connect } = setup();
     const c = connect();
     chrome();
@@ -126,11 +245,11 @@ describe("coordinator", () => {
     });
     coordinator.handleNativeCommand({ type: "pause" });
     expect(coordinator.agentView().paused).toBe(true);
-    c.observe(focus({ url: ISSUE }));
+    c.observe(focus({ url: "https://example.com/" }));
     expect(coordinator.agentView().currentSite).toBeNull();
   });
 
-  it("an approved focus while Chrome is frontmost emits idle with the new epoch; a repeat emits nothing", () => {
+  it("a permitted focus while Chrome is frontmost emits idle with the new epoch; a repeat emits nothing", () => {
     const { coordinator, panel, focus, chrome, connect } = setup();
     const c = connect();
     chrome(); // idle -> idle: no emission
@@ -159,7 +278,7 @@ describe("coordinator", () => {
     expect(panel.length).toBe(before);
   });
 
-  it("leaving an approved page emits idle with the new epoch", () => {
+  it("leaving a permitted page emits idle with the new epoch", () => {
     const { coordinator, panel, focus, chrome, connect } = setup();
     const c = connect();
     chrome();
@@ -170,14 +289,14 @@ describe("coordinator", () => {
   });
 
   it("page_text from the focused tab bumps contextRevision and is acked to the host", () => {
-    const { coordinator, events, focus, pageText, chrome, connect } = setup();
+    const { coordinator, events, focus, pageText, chrome, connect, acks } = setup();
     const c = connect();
     chrome();
     c.observe(focus({ tabId: 20, url: ISSUE, documentId: "doc-issue" }));
     const obs = pageText();
     c.observe(obs);
     expect(coordinator.forwarder.contextRevision).toBe(1);
-    expect(c.sent).toEqual([{ type: "ack", seq: obs.seq }]);
+    expect(acks(c)).toEqual([{ type: "ack", seq: obs.seq }]);
     expect(events.some((e) => e.name === "activity_forwarded")).toBe(true);
   });
 
@@ -192,7 +311,7 @@ describe("coordinator", () => {
   });
 
   it("page_text from another tab, an unfocused browser, or with Chrome in back is dropped and not acked", () => {
-    const { coordinator, events, focus, pageText, chrome, connect } = setup();
+    const { coordinator, events, focus, pageText, chrome, connect, acks } = setup();
     const c = connect();
     chrome();
     c.observe(focus({ tabId: 20, url: ISSUE, documentId: "doc-issue" }));
@@ -202,7 +321,7 @@ describe("coordinator", () => {
     c.observe(focus({ tabId: 20, url: ISSUE, documentId: "doc-issue" }));
     coordinator.handleNativeCommand({ type: "frontmost", bundleId: "com.apple.Terminal", at: 1 });
     c.observe(pageText());
-    expect(c.sent).toEqual([]);
+    expect(acks(c)).toEqual([]);
     expect(coordinator.forwarder.contextRevision).toBe(0);
     expect(events.filter((e) => e.name === "page_text_dropped").map((e) => e.fields.reason)).toEqual([
       "not-focused-tab",
@@ -212,42 +331,42 @@ describe("coordinator", () => {
   });
 
   it("page_text is dropped while the focused tab is incognito", () => {
-    const { coordinator, events, focus, pageText, chrome, connect } = setup();
+    const { coordinator, events, focus, pageText, chrome, connect, acks } = setup();
     const c = connect();
     chrome();
     c.observe(focus({ tabId: 20, url: ISSUE, documentId: "doc-issue", incognito: true }));
     c.observe(pageText());
-    expect(c.sent).toEqual([]);
+    expect(acks(c)).toEqual([]);
     expect(coordinator.forwarder.contextRevision).toBe(0);
     expect(events.filter((e) => e.name === "page_text_dropped").map((e) => e.fields.reason)).toEqual(["incognito"]);
   });
 
   it("page_text from a document the focused tab has left is dropped; no focus documentId skips the check", () => {
-    const { coordinator, events, focus, pageText, chrome, connect } = setup();
+    const { coordinator, events, focus, pageText, chrome, connect, acks } = setup();
     const c = connect();
     chrome();
     c.observe(focus({ tabId: 20, url: ISSUE, documentId: "doc-next" }));
     c.observe(pageText());
-    expect(c.sent).toEqual([]);
+    expect(acks(c)).toEqual([]);
     expect(events.filter((e) => e.name === "page_text_dropped").map((e) => e.fields.reason)).toEqual([
       "not-focused-document",
     ]);
     c.observe(focus({ tabId: 20, url: ISSUE, documentId: undefined }));
     const obs = pageText();
     c.observe(obs);
-    expect(c.sent).toEqual([{ type: "ack", seq: obs.seq }]);
+    expect(acks(c)).toEqual([{ type: "ack", seq: obs.seq }]);
     expect(coordinator.forwarder.contextRevision).toBe(1);
   });
 
   it("page_text whose URL is not the focused tab's issue is dropped as url-mismatch", () => {
-    const { coordinator, events, focus, pageText, chrome, connect } = setup();
+    const { coordinator, events, focus, pageText, chrome, connect, acks } = setup();
     const c = connect();
     chrome();
     c.observe(focus({ tabId: 20, url: "https://github.com/o/r/issues/2", documentId: "doc-issue" }));
     c.observe(pageText());
     c.observe(focus({ tabId: 20, url: "https://github.com/o/r/pulls", documentId: "doc-issue" }));
     c.observe(pageText());
-    expect(c.sent).toEqual([]);
+    expect(acks(c)).toEqual([]);
     expect(coordinator.forwarder.contextRevision).toBe(0);
     expect(events.filter((e) => e.name === "page_text_dropped").map((e) => e.fields.reason)).toEqual([
       "url-mismatch",
@@ -256,18 +375,18 @@ describe("coordinator", () => {
   });
 
   it("the URL gate ignores query, fragment, trailing slash, and owner/repo case", () => {
-    const { coordinator, focus, pageText, chrome, connect } = setup();
+    const { coordinator, focus, pageText, chrome, connect, acks } = setup();
     const c = connect();
     chrome();
     c.observe(focus({ tabId: 20, url: "https://github.com/O/R/issues/1/?tab=x#issuecomment-5", documentId: "doc-issue" }));
     const obs = pageText();
     c.observe(obs);
-    expect(c.sent).toEqual([{ type: "ack", seq: obs.seq }]);
+    expect(acks(c)).toEqual([{ type: "ack", seq: obs.seq }]);
     expect(coordinator.forwarder.contextRevision).toBe(1);
   });
 
   it("pause emits paused and suppresses forwarding and visit states; resume emits idle", () => {
-    const { coordinator, panel, focus, pageText, chrome, connect } = setup();
+    const { coordinator, panel, focus, pageText, chrome, connect, acks } = setup();
     const c = connect();
     chrome();
     c.observe(focus({ tabId: 20, url: ISSUE, documentId: "doc-issue" }));
@@ -277,7 +396,7 @@ describe("coordinator", () => {
     c.observe(pageText());
     c.observe(focus());
     expect(panel.length).toBe(before);
-    expect(c.sent).toEqual([]);
+    expect(acks(c)).toEqual([]);
     expect(coordinator.forwarder.contextRevision).toBe(0);
     coordinator.handleNativeCommand({ type: "resume" });
     // The visit to docs.stripe.com (tracked while paused) is still active.
@@ -287,13 +406,6 @@ describe("coordinator", () => {
       visitEpoch: coordinator.tracker.epoch,
       detail: "docs.stripe.com",
     });
-  });
-
-  it("permissions observations are logged as a count only", () => {
-    const { events, connect } = setup();
-    const c = connect();
-    c.observe({ kind: "permissions", granted: ["https://github.com/*", "https://docs.stripe.com/*"] });
-    expect(events.at(-1)).toEqual({ name: "permissions", fields: { granted: 2 } });
   });
 
   it("the most recent hello is the live sensor; an older connection's frames and close are ignored", () => {
@@ -349,5 +461,319 @@ describe("coordinator", () => {
     expect(coordinator.tracker.epoch).toBe(0);
     const late = connect(2);
     expect(late.closed).toBe(true);
+  });
+});
+
+describe("coordinator capture policy and permissions", () => {
+  it("answers a new sensor with a capture-disabled policy before any other frame", () => {
+    const { attach } = setup();
+    const c = attach();
+    expect(c.sent).toEqual([{ type: "capture_policy", revision: 0, paused: false, captureEnabled: false }]);
+  });
+
+  it("the initial policy carries the pause state", () => {
+    const { coordinator, attach } = setup();
+    coordinator.handleNativeCommand({ type: "pause" });
+    const c = attach();
+    expect(c.sent).toEqual([{ type: "capture_policy", revision: 0, paused: true, captureEnabled: false }]);
+  });
+
+  it("enables capture only for a snapshot with the GitHub toggle and the GitHub grant, and only on change", () => {
+    const { attach, grant, policies } = setup();
+    const c = attach();
+    grant(c, ["https://docs.stripe.com/*"], true);
+    grant(c, ["https://github.com/*"], false);
+    expect(policies(c)).toHaveLength(1);
+    grant(c, ["https://github.com/*"], true);
+    expect(policies(c)).toEqual([
+      { type: "capture_policy", revision: 0, paused: false, captureEnabled: false },
+      { type: "capture_policy", revision: 1, paused: false, captureEnabled: true },
+    ]);
+    grant(c, ["https://github.com/*", "https://docs.stripe.com/*"], true);
+    expect(policies(c)).toHaveLength(2);
+    grant(c, ["https://docs.stripe.com/*"], true);
+    expect(policies(c).at(-1)).toEqual({ type: "capture_policy", revision: 2, paused: false, captureEnabled: false });
+  });
+
+  it("pause sends a disabling policy and resume re-enables it, each with the next revision", () => {
+    const { coordinator, connect, policies } = setup();
+    const c = connect();
+    coordinator.handleNativeCommand({ type: "pause" });
+    coordinator.handleNativeCommand({ type: "pause" });
+    coordinator.handleNativeCommand({ type: "resume" });
+    expect(policies(c)).toEqual([
+      { type: "capture_policy", revision: 0, paused: false, captureEnabled: false },
+      { type: "capture_policy", revision: 1, paused: false, captureEnabled: true },
+      { type: "capture_policy", revision: 2, paused: true, captureEnabled: false },
+      { type: "capture_policy", revision: 3, paused: false, captureEnabled: true },
+    ]);
+  });
+
+  it("pause and resume without a snapshot still send a policy (paused changes)", () => {
+    const { coordinator, attach, policies } = setup();
+    const c = attach();
+    coordinator.handleNativeCommand({ type: "pause" });
+    coordinator.handleNativeCommand({ type: "resume" });
+    expect(policies(c).map((p) => [p.revision, p.paused, p.captureEnabled])).toEqual([
+      [0, false, false],
+      [1, true, false],
+      [2, false, false],
+    ]);
+  });
+
+  it("before a snapshot (e.g. an old extension whose snapshot failed validation) focus forms no visit and page_text is dropped", () => {
+    const { coordinator, events, focus, pageText, chrome, attach, acks, policies } = setup();
+    const c = attach();
+    chrome();
+    c.observe(focus());
+    expect(coordinator.tracker.current()).toBeNull();
+    c.observe(focus({ tabId: 20, url: ISSUE }));
+    c.observe(pageText());
+    expect(acks(c)).toEqual([]);
+    expect(policies(c)).toHaveLength(1);
+    expect(coordinator.forwarder.contextRevision).toBe(0);
+    expect(events.filter((e) => e.name === "page_text_dropped").map((e) => e.fields.reason)).toEqual(["no_permissions_snapshot"]);
+  });
+
+  it("page_text is refused when the snapshot turns GitHub capture off or lacks the GitHub grant", () => {
+    const { coordinator, events, focus, pageText, chrome, attach, grant, acks } = setup();
+    const c = attach();
+    chrome();
+    grant(c, ["https://github.com/*"], false);
+    c.observe(focus({ tabId: 20, url: ISSUE, documentId: "doc-issue" }));
+    c.observe(pageText());
+    grant(c, ["https://docs.stripe.com/*"], true);
+    c.observe(pageText());
+    expect(acks(c)).toEqual([]);
+    expect(coordinator.forwarder.contextRevision).toBe(0);
+    expect(events.filter((e) => e.name === "page_text_dropped").map((e) => e.fields.reason)).toEqual([
+      "capture_disabled",
+      "capture_disabled",
+    ]);
+  });
+
+  it("a focus on an origin the snapshot does not grant forms no visit until it is granted", () => {
+    const { coordinator, focus, chrome, attach, grant } = setup();
+    const c = attach();
+    chrome();
+    grant(c, ["https://docs.stripe.com/*"]);
+    c.observe(focus({ url: "https://example.com/page" }));
+    expect(coordinator.tracker.current()).toBeNull();
+    grant(c, ["https://docs.stripe.com/*", "https://example.com/*"]);
+    expect(coordinator.tracker.current()).toMatchObject({ origin: "https://example.com" });
+  });
+
+  it("losing the current origin's grant ends the visit and its dwell", () => {
+    const { coordinator, events, focus, chrome, connect, grant, advance } = setup({ capabilities: fakeCapabilities().capabilities });
+    const c = connect();
+    chrome();
+    c.observe(focus());
+    expect(coordinator.tracker.current()).not.toBeNull();
+    advance(DWELL_MS - 1);
+    grant(c, ["https://github.com/*"]);
+    expect(coordinator.tracker.current()).toBeNull();
+    advance(DWELL_MS);
+    expect(events.filter((e) => e.name === "dwell_cancelled").map((e) => e.fields.reason)).toEqual(["permission_lost"]);
+    expect(events.some((e) => e.name === "discovery_start")).toBe(false);
+  });
+
+  it("drops a focus stamped with an older permissions revision", () => {
+    const { coordinator, events, focus, chrome, attach } = setup();
+    const c = attach();
+    chrome();
+    c.observe({ kind: "permissions", revision: 10, at: 1, granted: ["https://docs.stripe.com/*"], githubCapture: false });
+    c.observe(focus({ permissionsRevision: 9 }));
+    expect(coordinator.tracker.current()).toBeNull();
+    expect(events.at(-1)).toMatchObject({ name: "focus_dropped", fields: { reason: "stale_permissions_revision" } });
+    c.observe(focus({ permissionsRevision: 10 }));
+    expect(coordinator.tracker.current()).not.toBeNull();
+  });
+
+  it("drops a snapshot older than the current one", () => {
+    const { coordinator, focus, chrome, attach } = setup();
+    const c = attach();
+    chrome();
+    c.observe({ kind: "permissions", revision: 10, at: 1, granted: ["https://docs.stripe.com/*"], githubCapture: false });
+    c.observe(focus());
+    c.observe({ kind: "permissions", revision: 9, at: 1, granted: [], githubCapture: false });
+    expect(coordinator.tracker.current()).not.toBeNull();
+  });
+
+  it("a new connection starts with no grants and its own revision-0 disabled policy", () => {
+    const { coordinator, focus, chrome, connect, attach, grant, policies } = setup();
+    const first = connect(1);
+    chrome();
+    first.observe(focus());
+    expect(policies(first).at(-1)?.captureEnabled).toBe(true);
+    const second = attach(2);
+    expect(second.sent).toEqual([{ type: "capture_policy", revision: 0, paused: false, captureEnabled: false }]);
+    second.observe(focus());
+    expect(coordinator.tracker.current()).toBeNull();
+    expect(coordinator.permissions.received).toBe(false);
+    // The old connection's late snapshot changes nothing.
+    grant(first);
+    expect(coordinator.permissions.received).toBe(false);
+    grant(second);
+    expect(coordinator.tracker.current()).not.toBeNull();
+    expect(policies(second).at(-1)).toEqual({ type: "capture_policy", revision: 1, paused: false, captureEnabled: true });
+  });
+
+  it("a disconnect forgets the grants", () => {
+    const { coordinator, connect } = setup();
+    const c = connect();
+    expect(coordinator.permissions.isPermitted("https://github.com")).toBe(true);
+    c.disconnect();
+    expect(coordinator.permissions.received).toBe(false);
+    expect(coordinator.permissions.isPermitted("https://github.com")).toBe(false);
+  });
+});
+
+describe("coordinator dwell and discovery", () => {
+  /** Connected, Chrome frontmost, focused on Stripe: a permitted visit whose dwell is running. */
+  function visiting(extra: Partial<CoordinatorOptions> = {}) {
+    const caps = fakeCapabilities();
+    const s = setup({ capabilities: caps.capabilities, ...extra });
+    const c = s.connect();
+    s.chrome();
+    c.observe(s.focus());
+    return { ...s, ...caps, c };
+  }
+
+  it("a visit that stays put for DWELL_MS runs one pass: one session, one window, catalog and discovery on it, then ingest", async () => {
+    const s = visiting();
+    s.advance(DWELL_MS - 1);
+    expect(s.passes).toHaveLength(0);
+    s.advance(1);
+    expect(s.sessions).toEqual([{ origin: "https://docs.stripe.com", windows: 1 }]);
+    expect(s.catalogCalls.map((c) => c.origin)).toEqual(["https://docs.stripe.com"]);
+    expect(s.passes.map((p) => p.origin)).toEqual(["https://docs.stripe.com"]);
+    s.passes[0]!.discover.resolve(discoveryFor("https://docs.stripe.com"));
+    await flush();
+    expect(s.ingests).toEqual([{ origin: "https://docs.stripe.com", chromePermitted: true }]);
+    expect(s.events.some((e) => e.name === "discovery_ingested")).toBe(true);
+    s.advance(DWELL_MS * 5);
+    expect(s.passes).toHaveLength(1);
+  });
+
+  it.each<[string, (s: ReturnType<typeof visiting>) => void, string]>([
+    ["pause", (s) => s.coordinator.handleNativeCommand({ type: "pause" }), "paused"],
+    ["navigation", (s) => s.c.observe(s.focus({ url: "https://docs.stripe.com/billing" })), "visit_changed"],
+    ["Chrome losing the foreground", (s) => s.coordinator.handleNativeCommand({ type: "frontmost", bundleId: "com.apple.Terminal", at: 1 }), "visit_ended"],
+    ["permission loss", (s) => s.grant(s.c, ["https://github.com/*"]), "permission_lost"],
+    ["disconnect", (s) => s.c.disconnect(), "disconnected"],
+    ["shutdown", (s) => s.coordinator.stop(), "stopped"],
+  ])("%s cancels the dwell", (_name, act, reason) => {
+    const s = visiting();
+    s.advance(DWELL_MS - 1);
+    act(s);
+    s.advance(1);
+    expect(s.events.filter((e) => e.name === "dwell_cancelled").map((e) => e.fields.reason)[0]).toBe(reason);
+    // Navigation re-arms for the new page; nothing else settles.
+    if (reason !== "visit_changed") {
+      s.advance(DWELL_MS * 2);
+      expect(s.passes).toHaveLength(0);
+    } else {
+      expect(s.passes).toHaveLength(0);
+      s.advance(DWELL_MS);
+      expect(s.passes).toHaveLength(1);
+    }
+  });
+
+  it("resume starts a fresh dwell for the visit tracked while paused", () => {
+    const s = visiting();
+    s.coordinator.handleNativeCommand({ type: "pause" });
+    s.advance(DWELL_MS * 2);
+    expect(s.passes).toHaveLength(0);
+    s.coordinator.handleNativeCommand({ type: "resume" });
+    s.advance(DWELL_MS);
+    expect(s.passes).toHaveLength(1);
+  });
+
+  it.each<[string, (s: ReturnType<typeof visiting>) => void, string]>([
+    ["the visit changes", (s) => s.c.observe(s.focus({ url: "https://docs.stripe.com/billing" })), "epoch_changed"],
+    ["the origin loses its grant", (s) => s.grant(s.c, ["https://github.com/*"]), "permission_lost"],
+    ["Scout is paused", (s) => s.coordinator.handleNativeCommand({ type: "pause" }), "paused"],
+    ["the coordinator stops", (s) => s.coordinator.stop(), "stopped"],
+  ])("a pass whose result arrives after %s is discarded", async (_name, act, reason) => {
+    const s = visiting();
+    s.advance(DWELL_MS);
+    act(s);
+    s.passes[0]!.discover.resolve(discoveryFor("https://docs.stripe.com"));
+    await flush();
+    expect(s.ingests).toEqual([]);
+    expect(s.events.find((e) => e.name === "discovery_discarded")?.fields).toMatchObject({ reason });
+  });
+
+  it("runs one pass at a time; settles meanwhile queue with the latest winning", async () => {
+    const s = visiting();
+    s.advance(DWELL_MS);
+    s.c.observe(s.focus({ url: "https://www.peakdesign.com/a" }));
+    s.advance(DWELL_MS);
+    s.c.observe(s.focus({ url: "https://github.com/o/r" }));
+    s.advance(DWELL_MS);
+    expect(s.passes.map((p) => p.origin)).toEqual(["https://docs.stripe.com"]);
+    expect(s.events.filter((e) => e.name === "discovery_discarded").map((e) => e.fields)).toEqual([
+      { origin: "https://www.peakdesign.com", epoch: expect.any(Number), reason: "superseded" },
+    ]);
+    s.passes[0]!.discover.resolve(discoveryFor("https://docs.stripe.com"));
+    await flush();
+    expect(s.passes.map((p) => p.origin)).toEqual(["https://docs.stripe.com", "https://github.com"]);
+    expect(s.sessions.map((x) => x.origin)).toEqual(["https://docs.stripe.com", "https://github.com"]);
+    s.passes[1]!.discover.resolve(discoveryFor("https://github.com"));
+    await flush();
+    expect(s.ingests.map((i) => i.origin)).toEqual(["https://github.com"]);
+  });
+
+  it("a queued settle whose visit is gone by the time the running pass ends is not started", async () => {
+    const s = visiting();
+    s.advance(DWELL_MS);
+    s.c.observe(s.focus({ url: "https://www.peakdesign.com/a" }));
+    s.advance(DWELL_MS);
+    s.coordinator.handleNativeCommand({ type: "frontmost", bundleId: "com.apple.Terminal", at: 1 });
+    s.passes[0]!.discover.resolve(discoveryFor("https://docs.stripe.com"));
+    await flush();
+    expect(s.passes).toHaveLength(1);
+    expect(s.events.filter((e) => e.name === "discovery_discarded").map((e) => e.fields.reason)).toEqual([
+      "epoch_changed",
+      "epoch_changed",
+    ]);
+  });
+
+  it("a failing discovery or catalog is logged as a code and the next settle still runs", async () => {
+    const s = visiting();
+    s.advance(DWELL_MS);
+    s.passes[0]!.discover.reject(Object.assign(new Error("https://docs.stripe.com/secret"), { code: "ECONNRESET" }));
+    await flush();
+    const failed = s.events.find((e) => e.name === "discovery_failed");
+    expect(failed?.fields).toMatchObject({ code: "ECONNRESET" });
+    expect(JSON.stringify(s.events)).not.toContain("secret");
+    s.c.observe(s.focus({ url: "https://docs.stripe.com/billing" }));
+    s.advance(DWELL_MS);
+    expect(s.passes).toHaveLength(2);
+  });
+
+  it("a catalog failure does not block ingesting the discovery", async () => {
+    const caps = fakeCapabilities();
+    caps.capabilities.resolveCatalog = async () => {
+      throw new TypeError("bad");
+    };
+    const s = setup({ capabilities: caps.capabilities });
+    const c = s.connect();
+    s.chrome();
+    c.observe(s.focus());
+    s.advance(DWELL_MS);
+    caps.passes[0]!.discover.resolve(discoveryFor("https://docs.stripe.com"));
+    await flush();
+    expect(caps.ingests).toHaveLength(1);
+    expect(s.events.find((e) => e.name === "discovery_catalog_failed")?.fields).toMatchObject({ code: "TypeError" });
+  });
+
+  it("without capabilities a settle is only logged", () => {
+    const s = setup();
+    const c = s.connect();
+    s.chrome();
+    c.observe(s.focus());
+    s.advance(DWELL_MS);
+    expect(s.events.find((e) => e.name === "discovery_skipped")?.fields).toMatchObject({ reason: "not_wired" });
   });
 });
