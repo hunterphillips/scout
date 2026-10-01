@@ -81,6 +81,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             send(model.refreshCapabilities())
         case let .retry(id):
             send(model.retry(id))
+        case let .dismiss(id):
+            model.dismiss(id)
         }
         render()
     }

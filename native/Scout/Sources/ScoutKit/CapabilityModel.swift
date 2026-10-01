@@ -76,7 +76,8 @@ public struct CapabilityModel: Sendable, Equatable {
         case .approved:
             return entry.defaultVersion == key.version ? .alreadyApproved : nil
         case .pending, .declined, .superseded:
-            if version.state == .pending, originSetting(entry.siteOrigin)?.permitted == false {
+            // An origin the frame does not list counts as not permitted.
+            if version.state == .pending, originSetting(entry.siteOrigin)?.permitted != true {
                 return .siteNotPermitted
             }
             return nil
@@ -96,7 +97,7 @@ public enum ApprovalBlocker: Sendable, Equatable {
     /// Neither offered nor in the library any more.
     case notOffered
     case alreadyApproved
-    /// A pending version for a site Chrome does not grant right now.
+    /// A pending version for a site Chrome does not grant right now, or one the frame does not list.
     case siteNotPermitted
 
     public var reason: String {

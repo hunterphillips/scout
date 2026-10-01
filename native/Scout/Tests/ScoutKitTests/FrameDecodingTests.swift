@@ -78,8 +78,8 @@ import Testing
 
     @Test func auditAndGrant() throws {
         #expect(try F.frame("frame.audit.json") == .audit([
-            AuditEntry(at: 1_759_300_001_000, role: .interactive, method: .currentSite, outcome: "ok", origin: F.origin),
-            AuditEntry(at: 1_759_300_002_000, role: .job, method: .readResource, outcome: "not_granted"),
+            AuditEntry(at: 1_759_300_001_000, role: .interactive, method: .currentSite, outcome: .ok, origin: F.origin),
+            AuditEntry(at: 1_759_300_002_000, role: .job, method: .readResource, outcome: .notGranted),
         ]))
         #expect(try F.frame("frame.audit.empty.json") == .audit([]))
         #expect(try F.frame("frame.grant.json") == .grant(agentBrowserContext: true))
@@ -120,6 +120,47 @@ import Testing
             entry["method"] = "write_file"
             $0["entries"] = [entry]
         })
+    }
+
+    @Test func coreInstanceIdIsAToken() throws {
+        let accepted = { (id: String) in try !self.refused("frame.capabilities.minimal.json") { $0["coreInstanceId"] = id } }
+        #expect(try accepted("core_7-A"))
+        #expect(try accepted(String(repeating: "z", count: 64)))
+        #expect(try !accepted(String(repeating: "z", count: 65)))
+        #expect(try !accepted(""))
+        #expect(try !accepted("core 1"))
+        #expect(try !accepted("core.1"))
+        #expect(try !accepted("cöre"))
+    }
+
+    @Test func auditOutcomeIsAClosedSet() throws {
+        let withOutcome = { (outcome: String) -> Data in
+            let object = try F.object("frame.audit.json").mutableCopy() as! NSMutableDictionary
+            let entry = ((object["entries"] as! NSArray)[0] as! NSDictionary).mutableCopy() as! NSMutableDictionary
+            entry["outcome"] = outcome
+            object["entries"] = [entry]
+            var line = try JSONSerialization.data(withJSONObject: object)
+            line.append(0x0A)
+            return line
+        }
+        let all = ["ok", "not_granted", "paused", "revoked", "not_found", "expired_snapshot", "limit_exceeded",
+                   "unavailable", "protocol_mismatch"]
+        #expect(Set(AuditOutcome.allCases.map(\.rawValue)) == Set(all))
+        for outcome in all {
+            #expect(PanelState.decode(line: try withOutcome(outcome)) != nil, "\(outcome)")
+        }
+        var parser = JSONLParser()
+        #expect(parser.append(try withOutcome("deleted_everything")).isEmpty)
+        #expect(parser.ignoredLineCount == 1)
+    }
+
+    @Test func fullFixtureOffersNothingTheLibraryBlocks() throws {
+        guard case let .capabilities(caps) = try F.frame("frame.capabilities.full.json") else {
+            Issue.record("not capabilities"); return
+        }
+        let blocked = Set(caps.library.filter { $0.state == .blocked }.map(\.resourceId))
+        #expect(!blocked.isEmpty)
+        #expect(caps.offers.allSatisfy { !blocked.contains($0.resourceId) })
     }
 
     /// The largest view the core may send: every list at its bound, long URLs.

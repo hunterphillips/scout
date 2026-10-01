@@ -44,14 +44,14 @@
       "resourceRevision": 5
     },
     {
-      "resourceId": "res_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "resourceId": "res_cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
       "kind": "skill",
       "siteOrigin": "https://docs.example.com",
-      "sourceUrl": "https://docs.example.com/.well-known/agent-skills/deploy/SKILL.md",
+      "sourceUrl": "https://docs.example.com/.well-known/agent-skills/lint/SKILL.md",
       "state": "blocked",
       "versions": [
         {
-          "hash": "3333333333333333333333333333333333333333333333333333333333333333",
+          "hash": "4444444444444444444444444444444444444444444444444444444444444444",
           "state": "revoked",
           "byteLength": 2048,
           "fetchedAt": 1759300000500.5
@@ -63,7 +63,7 @@
   "conflicts": [
     {
       "name": "scout-skill-0123456789abcdef",
-      "resourceId": "res_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "resourceId": "res_cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
       "code": "left_modified"
     }
   ],

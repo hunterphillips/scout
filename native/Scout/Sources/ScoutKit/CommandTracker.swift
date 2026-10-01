@@ -3,12 +3,15 @@ import Foundation
 /// Issues command IDs for Scout's window and follows each command to its ack.
 ///
 /// A command is `pending` from the moment it is issued until an ack (or, for `preview`, its
-/// chunk) arrives. A write the pipe refused leaves it pending and `unsent`; the app re-sends
-/// unsent commands with the same ID. When the core restarts, every still-pending mutation is
-/// re-sent with the same ID: the new core re-checks it against the store, and the
-/// `expectedRevision` inside keeps a stale change from applying. Pending previews fail as
-/// `unavailable` instead (their cursors died with the old core); the user restarts them.
-/// A retry never draws a new ID, so one decision can never become two commands.
+/// chunk) arrives. A write the pipe refused leaves it pending and `unsent`; within one core
+/// instance the app re-sends unsent commands with the same ID. When the core restarts, only
+/// pending decisions (approve, decline, revoke) are re-sent with the same ID: the new core
+/// re-checks each against the store, and the `expectedRevision` inside keeps a stale change from
+/// applying. Pending toggles and refreshes become `unknown` (settled, not failed); the window
+/// re-renders them from the new core's next `capabilities` or `grant` frame. Pending previews
+/// fail as `unavailable` (their cursors died with the old core); the user restarts them.
+/// A retry never draws a new ID, so one decision can never become two commands. Toggles are
+/// never retried: the user toggles again, under a new ID with a fresh `expectedEnabled`.
 public struct CommandTracker: Sendable, Equatable {
     public static let capacity = 64
 
@@ -16,6 +19,8 @@ public struct CommandTracker: Sendable, Equatable {
         case pending
         case ok
         case failed(AckFailureCode)
+        /// The core restarted before answering; the next frame shows what took effect.
+        case unknown
     }
 
     public struct Record: Sendable, Equatable {
@@ -94,14 +99,16 @@ public struct CommandTracker: Sendable, Equatable {
         records.filter { $0.state == .pending && !$0.sent }.map(\.command)
     }
 
-    /// A fresh core is running: returns the pending mutations to re-send with their IDs, and
-    /// fails pending previews.
+    /// A fresh core is running: returns the pending decisions to re-send with their IDs, settles
+    /// pending toggles and refreshes as `unknown`, and fails pending previews.
     public mutating func coreRestarted() -> [NativeCommand] {
         var resend: [NativeCommand] = []
         for i in records.indices where records[i].state == .pending {
-            if records[i].request.isMutation {
+            if records[i].request.isDecision {
                 records[i].sent = false
                 resend.append(records[i].command)
+            } else if records[i].request.isMutation {
+                records[i].state = .unknown
             } else {
                 records[i].state = .failed(.unavailable)
             }
@@ -109,11 +116,17 @@ public struct CommandTracker: Sendable, Equatable {
         return resend
     }
 
-    /// Re-sends a mutation that failed for a passing reason (`AckFailureCode.isRetryable`) or
-    /// whose write was refused, with its own ID. Previews restart from their first chunk through
-    /// a new command instead, so they are not retried here.
+    /// Settles `id` as `ok`: a refusal that the latest frame shows was moot.
+    public mutating func settle(_ id: String) {
+        guard let i = index(id) else { return }
+        records[i].state = .ok
+    }
+
+    /// Re-sends a decision or refresh that failed for a passing reason (`AckFailureCode.isRetryable`)
+    /// or whose write was refused, with its own ID. Previews restart from their first chunk through
+    /// a new command instead, and toggles are toggled again, so neither is retried here.
     public mutating func retry(_ id: String) -> NativeCommand? {
-        guard let i = index(id), records[i].request.isMutation else { return nil }
+        guard let i = index(id), records[i].request.isMutation, !records[i].request.isToggle else { return nil }
         switch records[i].state {
         case let .failed(code) where code.isRetryable:
             records[i].state = .pending

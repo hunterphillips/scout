@@ -43,7 +43,8 @@ public enum PanelLimits {
     public static let conflictsMax = 50
     public static let libraryVersionsMax = 6
     public static let auditMax = 200
-    public static let urlMaxChars = 2048
+    /// Counted in UTF-8 bytes, so an origin echoed in a command keeps the line under `commandMaxBytes`.
+    public static let urlMaxBytes = 2048
     /// zod `z.int()`: a safe integer.
     public static let maxRevision = 9_007_199_254_740_991
 }
@@ -67,9 +68,12 @@ public enum WireFormat {
         s.hasPrefix("res_") && isHash(String(s.dropFirst(4)))
     }
 
-    /// A loose https check; the core holds the strict one.
+    /// A loose https check; the core holds the strict one. At most `urlMaxBytes` UTF-8 bytes, and
+    /// nothing JSON would escape (control characters, `"`, `\`), so its encoded size is its byte count.
     public static func isHttpsURL(_ s: String) -> Bool {
-        s.hasPrefix("https://") && s.count > 8 && s.count <= PanelLimits.urlMaxChars
+        let bytes = s.utf8
+        return s.hasPrefix("https://") && bytes.count > 8 && bytes.count <= PanelLimits.urlMaxBytes
+            && bytes.allSatisfy { $0 >= 0x20 && $0 != 0x22 && $0 != 0x5C }
     }
 
     static func isRevision(_ n: Int) -> Bool { n >= 0 && n <= PanelLimits.maxRevision }
@@ -260,7 +264,7 @@ public struct Capabilities: Sendable, Equatable, Decodable {
         conflicts = try c.decode([CapabilityConflict].self, forKey: .conflicts)
         origins = try c.decode([OriginSetting].self, forKey: .origins)
         truncated = try c.decode(Bool.self, forKey: .truncated)
-        try check(!coreInstanceId.isEmpty && coreInstanceId.utf8.count <= 128)
+        try check(WireFormat.isToken(coreInstanceId))
         try check(WireFormat.isRevision(revision) && WireFormat.isRevision(approvalRevision))
         try check(offers.count <= PanelLimits.offersMax && library.count <= PanelLimits.libraryMax)
         try check(conflicts.count <= PanelLimits.conflictsMax && origins.count <= PanelLimits.originsMax)
@@ -395,17 +399,28 @@ public enum AgentMethod: String, Sendable, Equatable, Decodable {
     case readResource = "read_resource"
 }
 
+/// `ok` or one of the agent status codes (`AGENT_STATUS_CODES` in contracts agent.ts).
+public enum AuditOutcome: String, Sendable, Equatable, Decodable, CaseIterable {
+    case ok
+    case notGranted = "not_granted"
+    case paused, revoked
+    case notFound = "not_found"
+    case expiredSnapshot = "expired_snapshot"
+    case limitExceeded = "limit_exceeded"
+    case unavailable
+    case protocolMismatch = "protocol_mismatch"
+}
+
 /// One browser-context read by the user's agent. Never the text read.
 public struct AuditEntry: Sendable, Equatable, Decodable {
     /// Milliseconds since the Unix epoch.
     public let at: Double
     public let role: AgentRole
     public let method: AgentMethod
-    /// `ok` or an agent status code.
-    public let outcome: String
+    public let outcome: AuditOutcome
     public let origin: String?
 
-    public init(at: Double, role: AgentRole, method: AgentMethod, outcome: String, origin: String? = nil) {
+    public init(at: Double, role: AgentRole, method: AgentMethod, outcome: AuditOutcome, origin: String? = nil) {
         self.at = at
         self.role = role
         self.method = method
@@ -519,6 +534,22 @@ public enum PanelRequest: Sendable, Equatable, Hashable {
     public var isMutation: Bool {
         if case .preview = self { return false }
         return true
+    }
+
+    /// Approve, decline, and revoke: guarded by `expectedRevision`, so safe to re-send to a new core.
+    public var isDecision: Bool {
+        switch self {
+        case .approve, .decline, .revoke: return true
+        default: return false
+        }
+    }
+
+    /// A settings toggle: never retried; the user toggles again from fresh state.
+    public var isToggle: Bool {
+        switch self {
+        case .setAutoAcquire, .setAgentBrowserContext: return true
+        default: return false
+        }
     }
 }
 

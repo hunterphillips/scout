@@ -3,6 +3,8 @@
 // Activity, Problems. It renders a `PanelModel` and reports clicks as `PanelAction`s; every
 // decision lives in ScoutKit. It never activates the app and never brings itself forward on
 // a new frame; the preview pane changes content only when the user picks another preview.
+// Approve lives only in the Preview pane, bound to the shown version, so a list reordering
+// under the pointer can never put an approval where the user clicks.
 import AppKit
 import ScoutKit
 
@@ -19,6 +21,7 @@ enum PanelAction {
     case pauseOrResume
     case refresh
     case retry(String)
+    case dismiss(String)
 }
 
 @MainActor
@@ -293,7 +296,7 @@ final class ScoutPanel: NSObject {
         case .offers:
             let keys = caps.offers.map { PreviewKey(resourceId: $0.resourceId, version: $0.version) }
             return "offers|\(running)|\(model.currentHost ?? "")|\(caps.offers)|\(caps.capabilities?.truncated ?? false)|"
-                + keys.map { "\(String(describing: model.preview($0)?.phase))\(String(describing: model.decisionRecord($0)))\(model.approveBlocker($0) ?? "")" }.joined()
+                + keys.map { "\(String(describing: model.decisionRecord($0)))\(model.canDecline($0))" }.joined()
         case .library:
             return "library|\(running)|\(libraryPage)|\(caps.library)|\(caps.origins)|"
                 + caps.library.map { "\(String(describing: model.revokeRecord($0.resourceId)))\(model.canRevoke($0.resourceId))" }.joined()
@@ -331,17 +334,10 @@ final class ScoutPanel: NSObject {
 
             let preview = button("Preview", id: "offer.\(offer.resourceId).\(offer.version).preview",
                                  label: "Preview \(name) from \(site)") { [onAction] in onAction(.preview(key)) }
-            let approve = button("Approve", id: "offer.\(offer.resourceId).\(offer.version).approve",
-                                 label: "Approve \(name) from \(site)") { [onAction] in onAction(.approve(key)) }
-            approve.isEnabled = model.canApprove(key)
-            if let reason = model.approveBlocker(key) {
-                approve.toolTip = reason
-                approve.setAccessibilityHelp(reason)
-            }
             let decline = button("Decline", id: "offer.\(offer.resourceId).\(offer.version).decline",
                                  label: "Decline \(name) from \(site)") { [onAction] in onAction(.decline(key)) }
             decline.isEnabled = model.canDecline(key)
-            var controls: [NSView] = [preview, approve, decline]
+            var controls: [NSView] = [preview, decline]
             controls += commandStatus(model.decisionRecord(key), what: "decision on \(name)")
             rows.append(row(lines + [hstack(controls)], summary: "\(name) from \(site), \(Self.bytes(offer.byteLength))"))
         }
@@ -371,7 +367,7 @@ final class ScoutPanel: NSObject {
             let versions = entry.versions.map { "\($0.hash.prefix(8)) \($0.state.rawValue)" }.joined(separator: ", ")
             lines.append(Self.secondary("Versions: \(versions)"))
             if entry.versions.contains(where: { $0.state == .pending }),
-               model.capabilities.originSetting(entry.siteOrigin)?.permitted == false {
+               model.capabilities.originSetting(entry.siteOrigin)?.permitted != true {
                 lines.append(Self.secondary(ApprovalBlocker.siteNotPermitted.reason))
             }
             var controls: [NSView] = []
@@ -449,7 +445,7 @@ final class ScoutPanel: NSObject {
         formatter.timeStyle = .medium
         return audit.reversed().map { entry in
             let time = formatter.string(from: Date(timeIntervalSince1970: entry.at / 1000))
-            var parts = [time, entry.role.rawValue, entry.method.rawValue, entry.outcome]
+            var parts = [time, entry.role.rawValue, entry.method.rawValue, entry.outcome.rawValue]
             if let origin = entry.origin { parts.append(CapabilityModel.host(of: origin) ?? origin) }
             let text = Self.secondary(parts.joined(separator: " · "))
             text.setAccessibilityLabel(parts.joined(separator: ", "))
@@ -471,11 +467,16 @@ final class ScoutPanel: NSObject {
                 let what = describe(record.request, model)
                 guard case let .failed(code) = record.state else { return row([], summary: what) }
                 let text = "\(what) failed: \(code.rawValue)"
-                guard code.isRetryable else { return row([Self.secondary(text)], summary: text) }
-                let retry = button("Retry", id: "problem.\(record.id).retry", label: "Retry \(what)") { [onAction] in
-                    onAction(.retry(record.id))
+                var controls: [NSView] = []
+                if code.isRetryable, !record.request.isToggle {
+                    controls.append(button("Retry", id: "problem.\(record.id).retry", label: "Retry \(what)") { [onAction] in
+                        onAction(.retry(record.id))
+                    })
                 }
-                return row([Self.secondary(text), retry], summary: text)
+                controls.append(button("Dismiss", id: "problem.\(record.id).dismiss", label: "Dismiss \(what) failure") { [onAction] in
+                    onAction(.dismiss(record.id))
+                })
+                return row([Self.secondary(text), hstack(controls)], summary: text)
             case let .preview(key, failure):
                 let text = "Preview of version \(key.version.prefix(12)) failed: \(Self.describe(failure))"
                 let again = button("Load again", id: "problem.preview.\(key.resourceId).\(key.version)",
@@ -637,10 +638,17 @@ final class ScoutPanel: NSObject {
         return button
     }
 
+    /// A checkbox that shows `on` (the model's value) until the model says otherwise: a click puts
+    /// it back at once, and only a new frame changes it.
     private func checkbox(_ title: String, id: String, on: Bool, action: @escaping () -> Void) -> NSButton {
-        let target = ActionTarget(action)
+        let box = NSButton(checkboxWithTitle: title, target: nil, action: nil)
+        let target = ActionTarget { [weak box] in
+            box?.state = on ? .on : .off
+            action()
+        }
         handlers.append(target)
-        let box = NSButton(checkboxWithTitle: title, target: target, action: #selector(ActionTarget.fire))
+        box.target = target
+        box.action = #selector(ActionTarget.fire)
         box.state = on ? .on : .off
         box.identifier = NSUserInterfaceItemIdentifier(id)
         box.setAccessibilityLabel(title)
@@ -655,7 +663,7 @@ final class ScoutPanel: NSObject {
     private func commandStatus(_ record: CommandTracker.Record?, what: String, into store: inout [ActionTarget]) -> [NSView] {
         guard let record else { return [] }
         switch record.state {
-        case .ok:
+        case .ok, .unknown:
             return []
         case .pending:
             let spinner = NSProgressIndicator()
@@ -668,7 +676,7 @@ final class ScoutPanel: NSObject {
             let label = Self.secondary("Failed: \(code.rawValue)")
             label.textColor = .systemRed
             label.setAccessibilityLabel("\(what) failed: \(code.rawValue)")
-            guard record.request.isMutation, code.isRetryable else { return [label] }
+            guard record.request.isMutation, !record.request.isToggle, code.isRetryable else { return [label] }
             let onAction = self.onAction
             let retry = button("Retry", id: "retry.\(record.id)", label: "Retry \(what)", into: &store) { onAction(.retry(record.id)) }
             return [label, retry]

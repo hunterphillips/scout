@@ -47,7 +47,8 @@ import Testing
         let rid = "res_" + String(repeating: "f", count: 64)
         let hash = String(repeating: "f", count: 64)
         let rev = PanelLimits.maxRevision
-        let origin = "https://" + String(repeating: "a", count: PanelLimits.urlMaxChars - 8)
+        let origin = "https://" + String(repeating: "a", count: PanelLimits.urlMaxBytes - 8)
+        #expect(WireFormat.isHttpsURL(origin))
         let requests: [PanelRequest] = [
             .preview(resourceId: rid, version: hash, cursor: cursor),
             .approve(resourceId: rid, version: hash, expectedRevision: rev),
@@ -60,6 +61,23 @@ import Testing
         for request in requests {
             let size = NativeCommand.panel(commandId: id, request).jsonLine().count
             #expect(size < PanelLimits.commandMaxBytes, "\(request) is \(size) bytes")
+        }
+    }
+
+    @Test func originsAreBoundedInUTF8Bytes() {
+        // 2048 characters but 6136 bytes: refused, so it can never be echoed into a command.
+        let wide = "https://" + String(repeating: "\u{7FFF}", count: PanelLimits.urlMaxBytes - 8)
+        #expect(!WireFormat.isHttpsURL(wide))
+        // The widest origin that passes, multi-byte characters included, still fits one write.
+        let fill = PanelLimits.urlMaxBytes - 8
+        let accepted = "https://" + String(repeating: "\u{7FFF}", count: fill / 3) + String(repeating: "a", count: fill % 3)
+        #expect(accepted.utf8.count == PanelLimits.urlMaxBytes && WireFormat.isHttpsURL(accepted))
+        let size = NativeCommand.panel(commandId: String(repeating: "Z", count: 64),
+            .setAutoAcquire(origin: accepted, enabled: false, acknowledgeRisk: false, expectedEnabled: false)).jsonLine().count
+        #expect(size < PanelLimits.commandMaxBytes)
+        // Characters JSON would escape (and so grow) are refused.
+        for bad in ["\"", "\\", "\u{01}", "\n"] {
+            #expect(!WireFormat.isHttpsURL("https://a" + bad + "b.example"), "\(bad.unicodeScalars.map(\.value))")
         }
     }
 

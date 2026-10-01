@@ -62,6 +62,35 @@ import Testing
         #expect(t.record(a.commandId!)?.state == .ok)
     }
 
+    @Test func restartNeverResendsTogglesAndSettlesThemAsUnknown() {
+        var t = CommandTracker(prefix: "p")
+        let auto = t.issue(.setAutoAcquire(origin: F.origin, enabled: true, acknowledgeRisk: true, expectedEnabled: false))
+        let grant = t.issue(.setAgentBrowserContext(enabled: true, expectedEnabled: false))
+        let refresh = t.issue(.refreshCapabilities)
+        let revoke = t.issue(.revoke(resourceId: F.rid, expectedRevision: 2))
+        t.markSent(auto.commandId!, written: true)
+        t.markSent(grant.commandId!, written: false)  // refused write: still unsent
+        // Within one instance, a refused toggle write goes again under its ID.
+        #expect(t.unsent.contains(grant))
+        #expect(t.coreRestarted() == [revoke])
+        for c in [auto, grant, refresh] {
+            #expect(t.record(c.commandId!)?.state == .unknown)
+        }
+        // Settled, so the resend timer leaves them alone.
+        #expect(t.unsent == [revoke])
+    }
+
+    @Test func togglesAreNeverRetried() {
+        var t = CommandTracker(prefix: "p")
+        let grant = t.issue(.setAgentBrowserContext(enabled: true, expectedEnabled: false))
+        t.apply(.failed(commandId: grant.commandId!, code: .unavailable, revision: nil))
+        #expect(t.retry(grant.commandId!) == nil)
+        let auto = t.issue(.setAutoAcquire(origin: F.origin, enabled: false, acknowledgeRisk: false, expectedEnabled: true))
+        t.markSent(auto.commandId!, written: false)
+        #expect(t.retry(auto.commandId!) == nil)
+        #expect(t.record(grant.commandId!)?.state == .failed(.unavailable))
+    }
+
     @Test func retryReusesTheIdForFailedMutationsOnly() {
         var t = CommandTracker(prefix: "p")
         let a = t.issue(approve)

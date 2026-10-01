@@ -27,6 +27,8 @@ public enum Problem: Sendable, Equatable {
 /// previews, command states, and the user's expanded-view selection. A pure value: every
 /// event goes through `apply`, every user action through a method that returns the commands
 /// to send. Nothing here expands the panel or changes the shown preview except a user action.
+/// Approve exists only for the shown preview, so a list reordering under the pointer cannot
+/// redirect an approval.
 public struct PanelModel: Sendable, Equatable {
     public static let previewCapacity = 8
 
@@ -50,6 +52,8 @@ public struct PanelModel: Sendable, Equatable {
     /// Versions decided (ok ack) since the last `capabilities` frame, which may still list them.
     private var decidedSinceFrame: Set<PreviewKey> = []
     private var revokedSinceFrame: Set<String> = []
+    /// Failed commands the user dismissed from Problems.
+    private var dismissed: Set<String> = []
 
     public init(commands: CommandTracker = CommandTracker()) {
         self.commands = commands
@@ -99,6 +103,7 @@ public struct PanelModel: Sendable, Equatable {
             if capabilities.apply(frame) {
                 decidedSinceFrame = []
                 revokedSinceFrame = []
+                settleMootToggles()
                 // Another core answered without the app seeing a restart: treat it as one.
                 if let previous, previous != frame.coreInstanceId { return coreRestarted() }
             }
@@ -117,6 +122,8 @@ public struct PanelModel: Sendable, Equatable {
                 decidedSinceFrame.insert(PreviewKey(resourceId: rid, version: version))
             case let (.revoke(rid, _), .ok):
                 revokedSinceFrame.insert(rid)
+            case (_, .failed(_, .staleRevision, _)) where record.request.isToggle:
+                settleMootToggles()
             default:
                 break
             }
@@ -124,8 +131,24 @@ public struct PanelModel: Sendable, Equatable {
             capabilities.applyAudit(entries)
         case let .grant(enabled):
             capabilities.applyGrant(enabled)
+            settleMootToggles()
         }
         return []
+    }
+
+    /// A toggle refused as stale whose target the latest frame already shows did what the user
+    /// wanted: settle it as ok so it is not a problem.
+    private mutating func settleMootToggles() {
+        for record in commands.records where record.state == .failed(.staleRevision) {
+            switch record.request {
+            case let .setAutoAcquire(origin, enabled, _, _):
+                if capabilities.originSetting(origin)?.autoAcquire == enabled { commands.settle(record.id) }
+            case let .setAgentBrowserContext(enabled, _):
+                if capabilities.agentBrowserContext == enabled { commands.settle(record.id) }
+            default:
+                break
+            }
+        }
     }
 
     private mutating func receive(_ chunk: PreviewChunk) -> [NativeCommand] {
@@ -176,7 +199,7 @@ public struct PanelModel: Sendable, Equatable {
         if let blocker = decisionBlocker(key) { return blocker }
         if let blocker = capabilities.approvalBlocker(key) { return blocker.reason }
         switch previews[key]?.phase {
-        case .complete: return nil
+        case .complete: return shownPreview == key ? nil : "Open this version in Preview to approve it."
         case .loading: return "Preview is still loading."
         case .failed: return "Preview failed; load it again to approve."
         case nil: return "Preview this version before approving it."
@@ -243,9 +266,19 @@ public struct PanelModel: Sendable, Equatable {
         }
     }
 
-    /// Re-sends a failed or unsent mutation with its own ID.
+    /// Re-sends a failed or unsent decision or refresh with its own ID. Toggles are not retried.
     public mutating func retry(_ commandId: String) -> NativeCommand? {
-        commands.retry(commandId)
+        guard let command = commands.retry(commandId) else { return nil }
+        dismissed.remove(commandId)
+        return command
+    }
+
+    /// Removes a failed command from Problems.
+    public mutating func dismiss(_ commandId: String) {
+        guard case .failed? = commands.record(commandId)?.state else { return }
+        dismissed.insert(commandId)
+        // Forget dismissals of commands the tracker no longer holds.
+        dismissed = dismissed.filter { commands.record($0) != nil }
     }
 
     public mutating func markSent(_ command: NativeCommand, written: Bool) {
@@ -322,7 +355,10 @@ public struct PanelModel: Sendable, Equatable {
         case .starting, .running: break
         }
         out += capabilities.conflicts.map(Problem.conflict)
-        out += commands.records.filter { if case .failed = $0.state { return $0.request.isMutation } else { return false } }
+        out += commands.records.filter {
+            guard case .failed = $0.state, !dismissed.contains($0.id) else { return false }
+            return $0.request.isMutation
+        }
             .reversed().map(Problem.command)
         for key in previewOrder.reversed() {
             if case let .failed(failure) = previews[key]?.phase { out.append(.preview(key, failure)) }

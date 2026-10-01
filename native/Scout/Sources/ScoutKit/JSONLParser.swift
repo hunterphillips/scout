@@ -6,7 +6,8 @@ import Foundation
 /// Each byte is scanned for a newline once and the consumed prefix is dropped once per
 /// `append`, so a large line arriving in many chunks costs linear time.
 public struct JSONLParser: Sendable {
-    /// A line longer than this with no newline yet is discarded and counted.
+    /// A line longer than this (newline excluded) is discarded and counted, whether it arrives
+    /// whole or in pieces.
     public static let maxLineBytes = 1 << 20
 
     public private(set) var ignoredLineCount = 0
@@ -26,6 +27,8 @@ public struct JSONLParser: Sendable {
         while let newline = buffer[searchFrom...].firstIndex(of: 0x0A) {
             if skipping {
                 skipping = false
+            } else if buffer.distance(from: lineStart, to: newline) > Self.maxLineBytes {
+                ignoredLineCount += 1
             } else if let state = Self.decode(buffer[lineStart..<newline]) {
                 states.append(state)
             } else if !Self.isBlank(buffer[lineStart..<newline]) {

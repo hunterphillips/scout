@@ -89,6 +89,36 @@ import Testing
         #expect(parser.ignoredLineCount == 1)
     }
 
+    /// A grant frame padded to exactly `bytes` bytes, newline excluded.
+    private func grantLine(bytes: Int) -> Data {
+        let head = Data(#"{"type":"grant","agentBrowserContext":true,"pad":""#.utf8), tail = Data("\"}".utf8)
+        return head + Data(repeating: 0x61, count: bytes - head.count - tail.count) + tail
+    }
+
+    private func feed(_ parser: inout JSONLParser, _ data: Data, chunk: Int) -> [PanelState] {
+        var states: [PanelState] = []
+        var i = 0
+        while i < data.count {
+            states += parser.append(data[i..<min(i + chunk, data.count)])
+            i += chunk
+        }
+        return states
+    }
+
+    @Test func lineJustUnderTheLimitDecodesAndJustOverIsDropped() {
+        let under = grantLine(bytes: JSONLParser.maxLineBytes - 1) + Data([0x0A])
+        let over = grantLine(bytes: JSONLParser.maxLineBytes + 1) + Data([0x0A])
+        let next = Data((#"{"type":"state","status":"idle"}"# + "\n").utf8)
+        for chunk in [65_536, under.count + over.count + next.count] {
+            var parser = JSONLParser()
+            #expect(feed(&parser, under, chunk: chunk) == [.grant(agentBrowserContext: true)], "chunk \(chunk)")
+            #expect(parser.ignoredLineCount == 0)
+            // Just over: dropped and counted once whether it arrives whole or in pieces; the next line parses.
+            #expect(feed(&parser, over + next, chunk: chunk) == [.state(status: .idle, visitEpoch: nil, detail: nil)], "chunk \(chunk)")
+            #expect(parser.ignoredLineCount == 1, "chunk \(chunk)")
+        }
+    }
+
     @Test func largeFrameSplitIntoSmallChunksParsesOnce() throws {
         var parser = JSONLParser()
         let line = Data(#"{"type":"grant","agentBrowserContext":true,"pad":""#.utf8)
