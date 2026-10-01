@@ -26,8 +26,11 @@ branch ceremony for the PoC; merge and move on).
 `../thoughts/shared/plans/2026-10-01-scout-website-agent-design.md`). Its "Implementation
 progress" section is the new phase log. **Pivot Phase 1 (prove the agent connection)
 passed its gate the same day**; Phase 2 (website capabilities) is in progress: P2.2, P2.3,
-all seven tasks (P2.1–P2.7) are built, reviewed, and merged; the Phase 2 live checks
-and gate are pending. The old
+all seven tasks (P2.1–P2.7) are built, reviewed, merged, and live-checked against real
+sites from throwaway locations (evidence in
+`../thoughts/shared/research/2026-10-01-scout-phase2-live-check/`); the gate review is
+pending Hunter (the Swift window's live checklist and the inference-backed skill check
+are the open items). The old
 build above is still intact and still not wired into the app; the legacy
 `personal-context-mcp` package stays untouched until pivot Phase 4.
 
