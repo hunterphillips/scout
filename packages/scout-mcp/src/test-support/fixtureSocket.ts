@@ -1,4 +1,4 @@
-// Test-only: serve a fixture backend on a Unix socket with the agent framing, so the real
+// Test-only (exported as `@scout/scout-mcp/testing` for scout-core's job tests): serve a fixture backend on a Unix socket with the agent framing, so the real
 // stdio adapter can be driven end to end. The first frame must be an accepted `hello`;
 // anything else closes the connection. The socket is chmod 0600, as the core publishes it. Phase 2's core owns the production server.
 
@@ -11,6 +11,8 @@ import type { FixtureBackend } from "../fixture.js";
 export interface FixtureSocket {
   /** Frames received, hello included. */
   readonly requests: Record<string, unknown>[];
+  /** Client connections still open. */
+  readonly openConnections: number;
   close(): Promise<void>;
 }
 
@@ -52,6 +54,9 @@ export async function serveFixture(backend: FixtureBackend, socketPath: string):
   chmodSync(socketPath, 0o600);
   return {
     requests,
+    get openConnections() {
+      return sockets.size;
+    },
     close: () =>
       new Promise<void>((resolve) => {
         for (const s of sockets) s.destroy();

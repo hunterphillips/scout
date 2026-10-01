@@ -11,6 +11,10 @@
     "scout-mcp": "dist/main.js"
   },
   "exports": {
+    "./main": {
+      "types": "./dist/main.d.ts",
+      "default": "./dist/main.js"
+    },
     "./client": {
       "types": "./dist/client.d.ts",
       "default": "./dist/client.js"
@@ -22,6 +26,10 @@
     "./fixture": {
       "types": "./dist/fixture.d.ts",
       "default": "./dist/fixture.js"
+    },
+    "./testing": {
+      "types": "./dist/test-support/fixtureSocket.d.ts",
+      "default": "./dist/test-support/fixtureSocket.js"
     }
   },
   "files": [
