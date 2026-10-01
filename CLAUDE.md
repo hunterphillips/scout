@@ -19,15 +19,49 @@ hostname. No personal source is enabled; Hunter has not granted one. Don't descr
 Phase 4+ feature as built. `scout/` is its own git repo on `main` (Hunter's call: no
 branch ceremony for the PoC; merge and move on).
 
-## Planning update (2026-10-01)
+## Website-agent pivot (2026-10-01)
 
-The build described above is unchanged. **Do not resume the old Phase 4.** Hunter
-agreed to website-capability acquisition and background recommendations through the
-user's agent, without a custom personal-context service. The full replacement plan
-is written but awaits explicit implementation approval:
-`../thoughts/shared/plans/2026-10-01-scout-website-agent-implementation.md`.
-Its architecture is `../thoughts/shared/plans/2026-10-01-scout-website-agent-design.md`.
-No new phases, installed configuration changes, or live checks are authorized yet.
+**Do not resume the old Phase 4.** Hunter approved the replacement plan on 2026-10-01:
+`../thoughts/shared/plans/2026-10-01-scout-website-agent-implementation.md` (architecture:
+`../thoughts/shared/plans/2026-10-01-scout-website-agent-design.md`). Its "Implementation
+progress" section is the new phase log. **Pivot Phase 1 (prove the agent connection)
+passed its gate the same day**; Phase 2 (website capabilities) is in progress. The old
+build above is still intact and still not wired into the app; the legacy
+`personal-context-mcp` package stays untouched until pivot Phase 4.
+
+Pivot Phase 1 additions (all tested hermetically with a fake `claude`; live evidence in
+the plan's phase log):
+
+- `packages/contracts/src/{capability,agent,job}.ts`: resources/versions, the read-only
+  `agent.sock` protocol (`hello` + `current_site`, `recent_activity`, `site_links`,
+  `list_resources`, `read_resource`; closed status-code set; 16 KiB in / 64 KiB out /
+  16 KiB chunks), and the job request / agent output (`ok` 1–3 picks or `empty`) /
+  host result contracts. `isHttpsOrigin` is RFC 1123-strict.
+- `packages/scout-mcp` (`@scout/scout-mcp`): the stdio MCP adapter the user's Claude
+  loads as server `scout`. Depends only on contracts + the MCP SDK. `src/client.ts`
+  (socket client; checks socket ownership before sending the token), `src/tools.ts`,
+  `src/main.ts`, `src/fixture.ts` (`./fixture`, the in-memory reference backend Phase 2's
+  production core must match), `src/test-support/` (`./testing`, test-only socket server).
+- `packages/scout-core/src/agents/`: the background job runtime. `claudeJob.ts`
+  (`ClaudeJobAdapter`: one fresh `claude -p` per job in a 0700 `SCOUT_HOME/run/jobs/<id>/`,
+  argv-only, strict MCP config, exact `--allowedTools`, hooks off, no persistence),
+  `profile.ts` (`agent-profile.json`; `model: claude-sonnet-5-5` required, editable, never
+  inherited), `toolProfile.ts` / `toolPolicy.ts` / `contextToolBridge.ts` + `bridgeMain.ts`
+  (user-selected stdio tools behind a per-job forwarding bridge; secrets resolved in memory
+  from `{file, pointer}` bindings, never written to disk; managed-policy check),
+  `initCheck.ts`, `outputValidation.ts`, `prompt.ts`, `childSupervisor.ts`,
+  `streamMonitor.ts`, `jobStop.ts`, `mapOutcome.ts`, `jsonLineStream.ts`,
+  `exactEnvTransport.ts`, `privateFile.ts`, and provenance-tagged copies of
+  `launchProfile.ts` / `authPreflight.ts` / `processTree.ts`. `testing/` holds the fake
+  `claude` CLI (`fake-claude.mjs`, `fake-claude-session.mjs`) and fake backend.
+- `packages/scout-core/src/capabilities/{identity,wrapper}.ts`: managed skill-wrapper
+  names (`scout-<kind>-<16 hex>`), tagged ownership hash, and the `SKILL.md` renderer
+  (frontmatter is exactly `name` + `description`; body is fixed Scout text).
+- `scripts/agent-check/` + `npm run test:agent-contract` and
+  `npm run verify:agent -- --case <hotload|baseline|selected-tool|cancel> --home <dir>`:
+  the Phase 1 compatibility checks. Read `scripts/agent-check/README.md` before running
+  anything live; every non-dry run spends Hunter's quota and `hotload --authorize-real-root`
+  writes (and removes) proof additions in the real `~/.claude/skills` and user MCP registry.
 
 ## Read first
 
