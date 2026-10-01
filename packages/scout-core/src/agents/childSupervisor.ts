@@ -124,8 +124,15 @@ export function startChild(o: ChildSupervisorOptions): SupervisedChild {
     terminate() {
       if (terminating || disposed) return;
       terminating = true;
-      signalGroup("SIGTERM");
-      signalTree("SIGTERM", false);
+      // Snapshot the tree first, then signal: a descendant reparented in reaction to the
+      // group SIGTERM is still recorded under its old parent. Without a tree, signal at once.
+      if (!tree) signalGroup("SIGTERM");
+      else
+        void fresh().then((s) => {
+          if (disposed) return;
+          signalGroup("SIGTERM");
+          tree.signalAll("SIGTERM", s);
+        });
       killTimer = setTimeout(() => {
         signalGroup("SIGKILL");
         signalTree("SIGKILL", true);

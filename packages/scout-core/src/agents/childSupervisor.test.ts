@@ -1,5 +1,5 @@
 import { spawn as nodeSpawn } from "node:child_process";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { startChild, type SupervisedChild } from "./childSupervisor.js";
 import type { PsSnapshot } from "./processTree.js";
 
@@ -60,6 +60,30 @@ describe("childSupervisor", () => {
     expect(maxRunning).toBe(1);
     s.terminate();
     expect(await s.waitExit()).toEqual({ spawnError: false });
+  });
+
+  it("terminate takes its tree snapshot before the group SIGTERM", async () => {
+    const order: string[] = [];
+    const s = start("setInterval(()=>{},1000)", {
+      snapshot: async () => {
+        order.push("snapshot");
+        return new Map();
+      },
+      pollMs: 60_000,
+    });
+    await until(() => order.length === 1); // the initial snapshot
+    const realKill = process.kill.bind(process);
+    const spy = vi.spyOn(process, "kill").mockImplementation((pid: number, sig?: string | number) => {
+      if (pid === -s.child.pid! && sig === "SIGTERM") order.push("group SIGTERM");
+      return realKill(pid, sig);
+    });
+    try {
+      s.terminate();
+      expect(await s.waitExit()).toEqual({ spawnError: false });
+    } finally {
+      spy.mockRestore();
+    }
+    expect(order).toEqual(["snapshot", "snapshot", "group SIGTERM"]);
   });
 
   it("dispose kills a CLI that is still running", async () => {
