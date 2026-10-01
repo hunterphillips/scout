@@ -57,6 +57,17 @@ the plan's phase log):
 - `packages/scout-core/src/capabilities/{identity,wrapper}.ts`: managed skill-wrapper
   names (`scout-<kind>-<16 hex>`), tagged ownership hash, and the `SKILL.md` renderer
   (frontmatter is exactly `name` + `description`; body is fixed Scout text).
+- Pivot Phase 2 so far (P2.2, P2.3): `packages/scout-core/src/capabilities/{discovery,
+  skillsIndex,textValidation,discoveryCache}.ts` (fixed root probes for `llms.txt`,
+  `AGENTS.md`, `/.well-known/agent-skills/index.json`; preview cache under
+  `cache/discovery/`), `fetch/{inflight,originSession}.ts` (one paced fetch session per
+  origin shared by catalog + discovery; the caller starts its window),
+  `capabilities/{store,decisions,garbageCollection,exports,storeLock,atomicWrite,
+  capabilityCli}.ts` (`capabilities/store.json` + `blobs/` + `exports.json` under
+  `SCOUT_HOME`; versioned approvals keyed by content hash; wrapper export only into the
+  validated skills root under `scout-<kind>-<hex>/`; `store.lock` keeps the dev CLI from
+  writing while the core runs), `privateCacheFile.ts`. Dev CLI: `discover <origin>` and
+  `capability list|approve|decline|revoke|policy` (both read/write `SCOUT_HOME`).
 - `scripts/agent-check/` + `npm run test:agent-contract` and
   `npm run verify:agent -- --case <hotload|baseline|selected-tool|cancel> --home <dir>`:
   the Phase 1 compatibility checks. Read `scripts/agent-check/README.md` before running
