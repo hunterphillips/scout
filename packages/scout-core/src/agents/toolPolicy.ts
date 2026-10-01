@@ -18,7 +18,8 @@
 // resolution here is a dry run: the values are checked and discarded. The bridge's job file
 // carries the bindings (`{file, pointer}`), never the values, plus the definition's
 // non-secret `literalEnv` verbatim; the bridge resolves them again
-// in memory just before it starts each backend. A connection that cannot be prepared makes
+// in memory just before it starts each backend. A connection that cannot be prepared, or
+// that carries the setup CLI's `unavailable` mark (an auth prompt at its last inspection), makes
 // its tools unavailable: a required one blocks the job (`tool_unavailable`), an optional one
 // is reported unavailable in the job details and left out of the bridge. At startup the
 // bridge drops a tool whose connection's bindings no longer resolve, that is missing, or
@@ -145,7 +146,7 @@ export function planJobTools(o: ToolPlanOptions): ToolPlan {
   const unavailable: UnavailableTool[] = [];
   for (const s of selections) {
     const conn = byId.get(s.connectionId);
-    if (conn && prepare(conn)) offered.push(s);
+    if (conn && !conn.unavailable && prepare(conn)) offered.push(s);
     else if (s.required) return { ok: false, reason: "tool_unavailable", detail: "required_connection_unavailable" };
     else unavailable.push({ server: BRIDGE_SERVER_NAME, tool: mcpToolName(BRIDGE_SERVER_NAME, s.toolName) });
   }
