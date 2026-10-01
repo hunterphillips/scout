@@ -7,16 +7,25 @@
 //   - before each connect attempt, checks the core's runtime dir and socket are
 //     ours and private: missing is treated like ENOENT (retry), anything else
 //     unsafe reports core_unavailable and exits 1 without retrying;
-//   - connects to the core, sends hello, flushes the pre-connect buffer, then
-//     tells the extension {type:"ready"} (its signal that the link is healthy);
+//   - connects to the core and sends a protocol-2 hello. The core answers with a
+//     capture-disabled capture_policy (the negotiation ack); the relay forwards it,
+//     flushes the pre-connect buffer, then tells the extension {type:"ready"} (its
+//     signal that the link is healthy). The extension answers that policy with a
+//     fresh permissions snapshot and focus, so the policy must not wait on them;
+//   - a core that answers upgrade_required (protocol mismatch) is reported as
+//     core_unavailable{reason:"upgrade_required"} and the relay exits 1 without
+//     retrying: mixed versions fail closed. A core that closes before any policy (an
+//     old core) is treated as unreachable: the normal retry window, then exit 1;
 //   - relays Chrome -> core: each frame validated as a BrowserObservation and
-//     re-encoded as {type:"observation", observation}. Frames that arrive before
-//     the core is connected wait in a small buffer holding the latest observation
-//     per kind, flushed right after hello;
+//     re-encoded as {type:"observation", observation}. Frames that arrive before the
+//     handshake is done wait in a small buffer holding only the latest permissions
+//     and latest focus, flushed in that order. page_text that arrives before then is
+//     dropped and counted: it was approved under no current policy;
 //   - relays core -> Chrome: each frame validated as a ToChromeFrame and re-encoded;
 //   - when the core is unavailable, reports core_unavailable once and retries every
 //     2 s for 30 s, then exits 1;
-//   - when the core closes the socket, reports core_unavailable and exits 0;
+//   - when the core closes the socket after the handshake, reports core_unavailable
+//     and exits 0;
 //   - when Chrome closes stdin, or stop() is called, closes the socket and exits 0.
 // It never launches the core. stdout carries frames only; logs contain codes and
 // counts, never message content.
@@ -24,8 +33,8 @@
 import type { Readable, Writable } from "node:stream";
 import {
   BRIDGE_PROTOCOL,
-  type BrowserObservation,
   BrowserObservationSchema,
+  type CoreUnavailableReason,
   type Hello,
   type ObservationFrame,
   type ToChromeFrame,
@@ -55,12 +64,14 @@ export const EXIT_REFUSED = 2;
 
 const EXTENSION_ID_RE = /^[a-p]{32}$/;
 
+/** Observation kinds the pre-connect buffer keeps (latest of each). */
+type BufferedKind = "permissions" | "focus";
+
 /**
  * Flush order for the pre-connect buffer. Fixed, not arrival order: the core
- * accepts page_text only while it has a current focus, and a reconnect clears it,
- * so focus must land before page_text.
+ * accepts focus only after a permissions snapshot on the same connection.
  */
-const PRE_CONNECT_FLUSH_ORDER: readonly BrowserObservation["kind"][] = ["permissions", "focus", "page_text"];
+const PRE_CONNECT_FLUSH_ORDER: readonly BufferedKind[] = ["permissions", "focus"];
 
 export interface HostTimers {
   setTimeout(fn: () => void, ms: number): unknown;
@@ -102,6 +113,8 @@ export interface HostDrops {
     noCore: number;
     oversized: number;
     backpressure: number;
+    /** page_text that arrived before the handshake finished: dropped, never buffered. */
+    textBeforeReady: number;
   };
   fromCore: { forwarded: number; invalid: number };
   decoderDrops: { fromChrome: Record<DropCode, number>; fromCore: Record<DropCode, number> };
@@ -120,7 +133,7 @@ export function expectedOrigin(extensionId: string): string {
 
 export function createHost(deps: HostDeps): Host {
   const { stdin, stdout, timers, log } = deps;
-  const fromChrome = { forwarded: 0, invalid: 0, noCore: 0, oversized: 0, backpressure: 0 };
+  const fromChrome = { forwarded: 0, invalid: 0, noCore: 0, oversized: 0, backpressure: 0, textBeforeReady: 0 };
   const fromCore = { forwarded: 0, invalid: 0 };
   const chromeDecoder = new FrameDecoder({ maxBytes: MAX_FRAME_FROM_CHROME });
   const coreDecoder = new FrameDecoder({ maxBytes: MAX_FRAME_TO_CHROME });
@@ -136,13 +149,14 @@ export function createHost(deps: HostDeps): Host {
   let pendingWrites = 0;
   let exitCode = EXIT_OK;
   let socket: CoreSocket | null = null;
-  let connected = false;
+  /** The core answered hello with a capture_policy, and ready was sent. */
+  let ready = false;
   let retryTimer: unknown = null;
   let flushTimer: unknown = null;
   let retriesLeft = Math.floor(RETRY_WINDOW_MS / RETRY_INTERVAL_MS);
-  let reportedUnavailable = false;
-  /** Encoded observations waiting for the core: latest per kind. */
-  const preConnect = new Map<BrowserObservation["kind"], Buffer>();
+  let reportedUnavailable: CoreUnavailableReason | null = null;
+  /** Encoded observations waiting for the handshake: latest permissions and latest focus. */
+  const preConnect = new Map<BufferedKind, Buffer>();
 
   const doExit = () => {
     if (exited) return;
@@ -179,11 +193,11 @@ export function createHost(deps: HostDeps): Host {
     });
   };
 
-  /** First failed attempt of the retry window: tell the extension once. */
-  const reportUnavailable = () => {
-    if (reportedUnavailable) return;
-    reportedUnavailable = true;
-    sendToChrome({ type: "core_unavailable" });
+  /** Tell the extension the core is unavailable: once per reason, so retries do not repeat it. */
+  const reportUnavailable = (reason: CoreUnavailableReason) => {
+    if (reportedUnavailable === reason) return;
+    reportedUnavailable = reason;
+    sendToChrome({ type: "core_unavailable", reason });
   };
 
   // Origin check comes first, before any filesystem or socket activity.
@@ -205,15 +219,42 @@ export function createHost(deps: HostDeps): Host {
     s.write(bytes);
   };
 
-  const onCoreFrame = (r: FrameResult) => {
+  /** The core accepted hello: forward its policy, flush the buffer, then announce ready. */
+  const completeHandshake = (s: CoreSocket, policy: ToChromeFrame) => {
+    fromCore.forwarded += 1;
+    sendToChrome(policy);
+    for (const kind of PRE_CONNECT_FLUSH_ORDER) {
+      const bytes = preConnect.get(kind);
+      if (bytes !== undefined) writeToCore(s, bytes);
+    }
+    preConnect.clear();
+    ready = true;
+    sendToChrome({ type: "ready" });
+    log("scout-native-host: connected to core");
+  };
+
+  const onCoreFrame = (s: CoreSocket, r: FrameResult) => {
     if (!r.ok) return; // counted by the decoder
     const parsed = ToChromeFrameSchema.safeParse(r.value);
     if (!parsed.success) {
       fromCore.invalid += 1;
       return;
     }
+    const frame = parsed.data;
+    if (frame.type === "upgrade_required") {
+      // Mixed versions: fail closed and stay down until the components match.
+      reportUnavailable("upgrade_required");
+      finish(EXIT_CORE_UNAVAILABLE, `upgrade-required:${frame.protocol}`);
+      return;
+    }
+    if (!ready) {
+      // Only a capture_policy completes the handshake; nothing else is relayed before it.
+      if (frame.type === "capture_policy") completeHandshake(s, frame);
+      else fromCore.invalid += 1;
+      return;
+    }
     fromCore.forwarded += 1;
-    sendToChrome(parsed.data);
+    sendToChrome(frame);
   };
 
   const onChromeFrame = (r: FrameResult) => {
@@ -232,18 +273,23 @@ export function createHost(deps: HostDeps): Host {
       fromChrome.oversized += 1;
       return;
     }
-    if (socket !== null && connected) {
+    if (socket !== null && ready) {
       writeToCore(socket, bytes);
       return;
     }
-    // Not connected yet (or retrying): keep only the latest per kind.
+    // Handshake not done (or retrying). page_text was approved under no current
+    // policy: drop it. Otherwise keep only the latest per kind.
     const kind = parsed.data.kind;
+    if (kind === "page_text") {
+      fromChrome.textBeforeReady += 1;
+      return;
+    }
     if (preConnect.has(kind)) fromChrome.noCore += 1;
     preConnect.set(kind, bytes);
   };
 
   const scheduleRetry = (errorCode: string) => {
-    reportUnavailable();
+    reportUnavailable("unreachable");
     if (retriesLeft <= 0) {
       finish(EXIT_CORE_UNAVAILABLE, `core-unavailable:${errorCode}`);
       return;
@@ -262,7 +308,7 @@ export function createHost(deps: HostDeps): Host {
       return;
     }
     if (check.status === "refused") {
-      reportUnavailable();
+      reportUnavailable("unsafe");
       finish(EXIT_CORE_UNAVAILABLE, `runtime-refused:${check.reason}`);
       return;
     }
@@ -272,20 +318,16 @@ export function createHost(deps: HostDeps): Host {
     let errorCode = "closed";
     s.on("connect", () => {
       if (socket !== s) return;
-      connected = true;
       const hello: Hello = { type: "hello", protocol: BRIDGE_PROTOCOL };
       s.write(encodeFrame(hello, MAX_FRAME_FROM_CHROME));
-      for (const kind of PRE_CONNECT_FLUSH_ORDER) {
-        const bytes = preConnect.get(kind);
-        if (bytes !== undefined) writeToCore(s, bytes);
-      }
-      preConnect.clear();
-      sendToChrome({ type: "ready" });
-      log("scout-native-host: connected to core");
+      // ready waits for the core's capture_policy (completeHandshake).
     });
     s.on("data", (chunk) => {
       if (socket !== s) return;
-      for (const r of coreDecoder.push(chunk)) onCoreFrame(r);
+      for (const r of coreDecoder.push(chunk)) {
+        if (socket !== s) return; // a frame in this chunk ended the connection
+        onCoreFrame(s, r);
+      }
     });
     s.on("error", (e) => {
       errorCode = e.code ?? "error";
@@ -293,16 +335,17 @@ export function createHost(deps: HostDeps): Host {
     s.on("close", () => {
       if (socket !== s) return; // we closed it
       socket = null;
-      if (connected) {
-        // Any close after connect, including one during hello, is the core going
-        // away: exit so Chrome relaunches us, rather than retrying.
-        connected = false;
-        coreDecoder.end();
-        sendToChrome({ type: "core_unavailable" });
+      coreDecoder.end();
+      if (ready) {
+        // A close after the handshake is the core going away: exit so Chrome
+        // relaunches us, rather than retrying.
+        ready = false;
+        sendToChrome({ type: "core_unavailable", reason: "unreachable" });
         finish(EXIT_OK, "core-closed");
         return;
       }
-      scheduleRetry(errorCode);
+      // Closed before any policy: not up yet, or an old core that refused our hello.
+      scheduleRetry(errorCode === "closed" ? "closed-before-policy" : errorCode);
     });
   }
 
