@@ -26,7 +26,8 @@
 //   advertises each under its own name on one server.
 // - Setup bookkeeping (optional, written by the setup CLI, never part of a launch): the
 //   connection's definition file, its revision, the command's resolved path/size/mtime at
-//   inspection (drift), and the tools the last inspection listed (inspected, not selected).
+//   inspection (drift), the tools the last inspection listed (inspected, not selected), and
+//   `unavailable` when the last inspection attempt hit an auth prompt.
 //   `tools.revision` is bumped on every change that alters what a job may call.
 //
 // Errors carry fixed codes only: never a path, pointer or value.
@@ -225,6 +226,12 @@ const ConnectionSetupFields = {
   resolvedCommand: ResolvedCommandSchema.optional(),
   inspectedAt: z.iso.datetime().optional(),
   inspectedTools: z.array(InspectedToolSchema).max(MAX_INSPECTED_TOOLS).optional(),
+  /**
+   * Set when the last inspection attempt failed because the backend asked Scout for input
+   * (an auth prompt); cleared by the next successful inspection. While set, nothing on the
+   * connection can be selected.
+   */
+  unavailable: z.strictObject({ reason: z.literal("auth_prompt"), at: z.iso.datetime() }).optional(),
 };
 
 export const ConnectionSchema = ConnectionFields.extend(ConnectionSetupFields).refine(envNamesDisjoint, { message: "env name both bound and literal" });

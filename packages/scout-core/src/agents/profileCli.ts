@@ -16,7 +16,9 @@
 //   status [--json]                             per connection: command drift, each env
 //       source and whether its binding resolves now, inspected tools, and each selection's
 //       compatibility under the bridge's drop rule (selectedToolDropReason) applied to the
-//       last inspection. Nothing starts.
+//       last inspection. A connection whose binary changed or is missing is unavailable
+//       (`binary_changed` / `binary_missing`) and its selections read `needs_review` until a
+//       refresh. Nothing starts.
 //
 // Every write holds `<SCOUT_HOME>/agent-profile.lock` (capabilities/storeLock.ts) for its
 // read-modify-write and bumps `tools.revision` and the connection's `revision`. The running
@@ -25,44 +27,41 @@
 //
 // Output never carries an environment value: the profile stores bindings (`{file, pointer}`)
 // and non-secret literals only, resolved values live in memory for the one spawn, and
-// errors are field paths and fixed codes. Backend-provided names and descriptions are
-// printed with control characters replaced.
+// errors are field paths and fixed codes. Backend- and user-provided names, paths and argv
+// entries are printed with control characters replaced. An argv entry that looks like it
+// carries a secret draws a warning (argv is stored in the profile and visible to other
+// processes); it is not refused.
 //
 // An auth prompt makes the connection unavailable (P2.7; the plan: "an auth prompt produces
 // an unavailable connection; do not open a hidden login flow"). When the backend makes any
 // request of Scout during inspection (inspectBackend's `auth_prompt`), the command prints
 // the reason and exits 1, and stores nothing from that inspection. For a new connection
 // that is all. For a known one (`refresh`, or `inspect` of a known id) its last stored
-// inspection is left as it was, every selection on it is deselected (revisions bumped), and
-// it is recorded as unavailable with the code in `<SCOUT_HOME>/agent-unavailable.json`
-// (AGENT_UNAVAILABLE_FILE, 0600; the profile's connection schema has no field for it).
+// inspection is left as it was, every selection on it is deselected, and the connection's
+// `unavailable` field records the code, all in one profile write (revisions bumped).
 // `status` reports it unavailable with that reason and `enable` refuses it until an
-// inspection succeeds, which clears the record.
+// inspection succeeds, which replaces the connection without the field.
 //
 // Exit codes: 0 ok, 1 usage / validation / unavailable, 2 locked, 3 needs --allow-start.
 
 import { mkdirSync } from "node:fs";
-import { join, resolve } from "node:path";
-import { z } from "zod";
-import { writeFileAtomic } from "../capabilities/atomicWrite.js";
+import { resolve } from "node:path";
 import { StoreLockedError, acquireStoreLock, type StoreLock } from "../capabilities/storeLock.js";
 import { scoutHome } from "../diagnostics.js";
-import { commandDrift, inspectBackend, INSPECT_DEFAULT_LIMITS, loadBackendDefinition, type BackendDefinition, type CommandDrift, type InspectLimits, type InspectOutcome } from "./backendDefinition.js";
+import { commandDrift, inspectBackend, INSPECT_DEFAULT_LIMITS, loadBackendDefinition, SECRET_NAME_RE, type BackendDefinition, type CommandDrift, type InspectLimits, type InspectOutcome } from "./backendDefinition.js";
 import { selectedToolDropReason, type BridgeDropCode } from "./contextToolBridge.js";
 import { BINDING_STATUS_TEXT, checkEnvBindings, resolveBackendEnv, type BindingStatus } from "./environmentBindings.js";
-import { readPrivateFile } from "./privateFile.js";
 import { AgentProfileError, createDefaultAgentProfile, loadAgentProfile, PROFILE_MAX_BYTES, writeAgentProfile, type AgentProfile } from "./profile.js";
-import { canonicalJson, CONNECTION_ID_RE, MAX_CONNECTIONS, MAX_INSPECTED_TOOLS, MAX_SELECTIONS, type Connection, type ToolSelection, type ToolsProfile } from "./toolProfile.js";
+import { canonicalJson, MAX_CONNECTIONS, MAX_INSPECTED_TOOLS, MAX_SELECTIONS, type Connection, type ToolSelection, type ToolsProfile } from "./toolProfile.js";
 
 export const AGENT_PROFILE_LOCK_FILE = "agent-profile.lock";
-/** Connections an inspection found unavailable, by id (see the header). */
-export const AGENT_UNAVAILABLE_FILE = "agent-unavailable.json";
-const UNAVAILABLE_MAX_BYTES = 64 * 1024;
 
-/** Why a connection is unavailable until an inspection succeeds. Fixed codes only. */
-export type UnavailableReason = "auth_prompt";
-const UnavailableSchema = z.record(z.string().regex(CONNECTION_ID_RE), z.strictObject({ reason: z.literal("auth_prompt"), at: z.iso.datetime() }));
-type UnavailableRecords = z.infer<typeof UnavailableSchema>;
+/**
+ * Why `status` reports a connection unavailable, when there is a single reason. Fixed codes:
+ * `auth_prompt` is stored in the profile (Connection.unavailable); the binary codes are
+ * computed by `status` only.
+ */
+export type UnavailableReason = NonNullable<Connection["unavailable"]>["reason"] | "binary_changed" | "binary_missing";
 
 const EXIT_OK = 0;
 const EXIT_FAIL = 1;
@@ -93,6 +92,9 @@ export interface AgentCliIo {
 /** Backend- or file-provided text, safe for a terminal line. */
 const clean = (s: string): string => s.replace(/[\p{Cc}\p{Cf}]+/gu, " ");
 const short = (hash: string | undefined): string => (hash ? hash.slice(0, 16) : "-");
+/** An argv for a terminal line: each entry quoted, control characters replaced. */
+const argv = (args: readonly string[]): string => args.map((a) => JSON.stringify(clean(a))).join(" ") || "(none)";
+const SECRET_FLAG_RE = /--(token|key|password|secret)/i;
 
 export async function agentCommand(args: readonly string[], io: AgentCliIo): Promise<number> {
   const usage = (): number => {
@@ -181,22 +183,6 @@ class Ctx {
       lock.release();
     }
   }
-  /**
-   * The unavailable records; empty when the file is absent. A file that is unreadable, not
-   * private or not valid is treated as empty too (selections were already dropped in the profile).
-   */
-  unavailable(): UnavailableRecords {
-    try {
-      const parsed = UnavailableSchema.safeParse(JSON.parse(readPrivateFile(join(this.home, AGENT_UNAVAILABLE_FILE), UNAVAILABLE_MAX_BYTES, { private: true, ...this.fs }).toString("utf8")));
-      return parsed.success ? parsed.data : {};
-    } catch {
-      return {};
-    }
-  }
-  /** Replace the unavailable records (call while holding the lock). */
-  writeUnavailable(records: UnavailableRecords): void {
-    writeFileAtomic(join(this.home, AGENT_UNAVAILABLE_FILE), `${JSON.stringify(records, null, 2)}\n`);
-  }
   /** Validate the size the loader accepts, then write atomically. */
   write(profile: AgentProfile): number | undefined {
     if (Buffer.byteLength(JSON.stringify(profile, null, 2) + "\n", "utf8") > PROFILE_MAX_BYTES) {
@@ -224,7 +210,12 @@ function printProposal(ctx: Ctx, def: BackendDefinition): void {
   ctx.out(`connection   ${c.id}`);
   ctx.out(`command      ${clean(c.command)}`);
   ctx.out(`resolves to  ${clean(def.resolvedCommand.path)}`);
-  ctx.out(`args         ${JSON.stringify(c.args)}`);
+  ctx.out(`args         ${argv(c.args)}`);
+  c.args.forEach((a, i) => {
+    if (SECRET_NAME_RE.test(a) || SECRET_FLAG_RE.test(a)) {
+      ctx.io.stderr(`warning: argument ${i + 1} looks like it may name or carry a secret. Arguments are stored in the agent profile and other processes can see them; put secrets in env (a 0600 definition file or a binding) instead.\n`);
+    }
+  });
   ctx.out(`cwd          ${clean(c.cwd ?? "/")}`);
   ctx.out(`definition   ${clean(def.file)} (${def.private ? "mode 0600: literal values stay in this file and are read at launch" : "readable by others: its literals are copied into the profile; chmod 600 it to keep them there"})`);
   if (def.envEntries.length === 0) ctx.out("env          (none: the backend gets an empty environment)");
@@ -243,7 +234,7 @@ async function reviewAndInspect(ctx: Ctx, file: string, allowStart: boolean, ref
     return EXIT_FAIL;
   }
   const def = loaded.definition;
-  if (refreshId !== undefined && def.connection.id !== refreshId) return ctx.fail(`refresh: the definition file now names connection "${def.connection.id}", not "${refreshId}"; inspect it as a new connection`);
+  if (refreshId !== undefined && def.connection.id !== refreshId) return ctx.fail(`refresh: the definition file now names connection "${clean(def.connection.id)}", not "${clean(refreshId)}"; inspect it as a new connection`);
   printProposal(ctx, def);
   if (!allowStart) return ctx.fail("not started. Re-run with --allow-start to read the files listed above and start this command once to list its tools.", EXIT_NEEDS_START);
 
@@ -280,11 +271,6 @@ async function reviewAndInspect(ctx: Ctx, file: string, allowStart: boolean, ref
     profile.tools = tools;
     const wrote = ctx.write(profile);
     if (wrote !== undefined) return wrote;
-    const marks = ctx.unavailable();
-    if (Object.hasOwn(marks, def.connection.id)) {
-      delete marks[def.connection.id];
-      ctx.writeUnavailable(marks);
-    }
 
     ctx.out();
     ctx.out(`listed ${outcome.tools.length} tool(s)${outcome.skipped ? `, ${outcome.skipped} skipped (unusable name, duplicate, or over ${MAX_INSPECTED_TOOLS})` : ""}${outcome.truncated ? `, ${outcome.truncated} description(s) cut to 1024 characters` : ""}:`);
@@ -304,17 +290,17 @@ const AUTH_PROMPT_TEXT = "the backend asked Scout for input while starting (samp
 
 /**
  * The backend made a request during inspection: store nothing from it. A known connection
- * keeps its last inspection, loses every selection and is recorded unavailable.
+ * keeps its last inspection, loses every selection and is marked unavailable, in one write.
  */
 function markAuthPrompt(ctx: Ctx, profile: AgentProfile, tools: ToolsProfile, prev: Connection | undefined): number {
   ctx.io.stderr(`${AUTH_PROMPT_TEXT}; stopped\n`);
   if (!prev) return ctx.fail("connection unavailable (auth_prompt): nothing stored");
   const deselected = tools.selections.filter((s) => s.connectionId === prev.id).map((s) => s.toolName);
   tools.selections = tools.selections.filter((s) => s.connectionId !== prev.id);
+  const unavailable = { reason: "auth_prompt", at: new Date(ctx.now()).toISOString() } as const;
+  tools.connections = tools.connections.map((c) => (c.id === prev.id ? { ...c, unavailable } : c));
   const revision = bump(tools, prev.id);
   profile.tools = tools;
-  // The record first: if the profile write then fails, the connection still reads unavailable.
-  ctx.writeUnavailable({ ...ctx.unavailable(), [prev.id]: { reason: "auth_prompt", at: new Date(ctx.now()).toISOString() } });
   const wrote = ctx.write(profile);
   if (wrote !== undefined) return wrote;
   for (const t of deselected) ctx.io.stderr(`deselected ${clean(t)}: connection_unavailable\n`);
@@ -342,6 +328,7 @@ export function applyInspection(
   });
   const known = new Set((prev?.inspectedTools ?? []).map((t) => t.name));
   const added = prev ? outcome.tools.map((t) => t.name).filter((n) => !known.has(n)) : [];
+  // Built from the definition, not from `prev`: a successful inspection drops `unavailable`.
   const next: Connection = { ...def.connection, definitionFile: def.file, revision: prev?.revision ?? 0, resolvedCommand: def.resolvedCommand, inspectedAt, inspectedTools: outcome.tools };
   tools.connections = prev ? tools.connections.map((c) => (c.id === id ? next : c)) : [...tools.connections, next];
   return { deselected, added, definitionChanged };
@@ -358,13 +345,12 @@ async function enable(ctx: Ctx, id: string, toolName: string, required: boolean)
     const conn = tools?.connections.find((c) => c.id === id);
     if (!profile || !tools || !conn?.inspectedTools) return ctx.fail(`enable: connection "${clean(id)}" has not been inspected; run agent inspect <definition-file> --allow-start first`);
     const tool = conn.inspectedTools.find((t) => t.name === toolName);
-    if (!tool) return ctx.fail(`enable: "${clean(toolName)}" was not listed by the last inspection of ${id}; run agent refresh ${id} --allow-start`);
-    const mark = ctx.unavailable()[id];
-    if (mark) return ctx.fail(`enable: connection "${id}" is unavailable (${mark.reason}); run agent refresh ${id} --allow-start`);
+    if (!tool) return ctx.fail(`enable: "${clean(toolName)}" was not listed by the last inspection of ${clean(id)}; run agent refresh ${clean(id)} --allow-start`);
+    if (conn.unavailable) return ctx.fail(`enable: connection "${clean(id)}" is unavailable (${conn.unavailable.reason}); run agent refresh ${clean(id)} --allow-start`);
     if (!tool.inputSchema || !tool.schemaHash) return ctx.fail(`enable: "${clean(toolName)}" cannot be selected (${tool.unselectable ?? "no schema"})`);
     const drift = commandDrift(conn.command, conn.resolvedCommand);
-    if (drift !== "same") return ctx.fail(`enable: the command is ${drift === "missing" ? "missing" : "not the binary that was inspected"}; run agent refresh ${id} --allow-start`);
-    if (tools.selections.some((s) => s.toolName === toolName && s.connectionId !== id)) return ctx.fail(`enable: a tool named "${toolName}" is already selected on another connection; tool names must be unique`);
+    if (drift !== "same") return ctx.fail(`enable: the command is ${drift === "missing" ? "missing" : "not the binary that was inspected"}; run agent refresh ${clean(id)} --allow-start`);
+    if (tools.selections.some((s) => s.toolName === toolName && s.connectionId !== id)) return ctx.fail(`enable: a tool named "${clean(toolName)}" is already selected on another connection; tool names must be unique`);
     const existing = tools.selections.findIndex((s) => s.toolName === toolName && s.connectionId === id);
     if (existing < 0 && tools.selections.length >= MAX_SELECTIONS) return ctx.fail(`enable: at most ${MAX_SELECTIONS} selected tools`);
     const selection: ToolSelection = {
@@ -382,7 +368,7 @@ async function enable(ctx: Ctx, id: string, toolName: string, required: boolean)
     const revision = bump(tools, id);
     const wrote = ctx.write(profile);
     if (wrote !== undefined) return wrote;
-    ctx.out(`enabled ${toolName} on ${id} (${required ? "required: a job does not run without it" : "optional"}), schema ${short(tool.schemaHash)}, command ${clean(conn.resolvedCommand!.path)}; profile revision ${revision}`);
+    ctx.out(`enabled ${clean(toolName)} on ${clean(id)} (${required ? "required: a job does not run without it" : "optional"}), schema ${short(tool.schemaHash)}, command ${clean(conn.resolvedCommand!.path)}; profile revision ${revision}`);
     return EXIT_OK;
   });
 }
@@ -399,7 +385,7 @@ async function disable(ctx: Ctx, id: string, toolName: string): Promise<number> 
     const revision = bump(tools, id);
     const wrote = ctx.write(profile);
     if (wrote !== undefined) return wrote;
-    ctx.out(`disabled ${toolName} on ${id}; profile revision ${revision}. The Scout core cancels running jobs that use it when it sees the new revision.`);
+    ctx.out(`disabled ${clean(toolName)} on ${clean(id)}; profile revision ${revision}. The Scout core cancels running jobs that use it when it sees the new revision.`);
     return EXIT_OK;
   });
 }
@@ -425,11 +411,16 @@ export interface ConnectionStatus {
   resolvedCommand?: string;
   commandDrift: CommandDrift;
   available: boolean;
-  /** Set when the last inspection attempt made the connection unavailable. */
+  /**
+   * Set when one known cause makes the connection unavailable: an auth prompt at the last
+   * inspection attempt, or a binary that changed or is missing since it. Binding problems
+   * are reported per env source instead.
+   */
   unavailableReason?: UnavailableReason;
   env: EnvSourceStatus[];
   inspectedTools: { name: string; schemaHash?: string; selectable: boolean }[];
-  selected: { tool: string; required: boolean; compatibility: "ok" | BridgeDropCode }[];
+  /** `needs_review`: the binary changed or is missing; refresh before relying on the selection. */
+  selected: { tool: string; required: boolean; compatibility: "ok" | BridgeDropCode | "needs_review" }[];
 }
 
 export interface AgentStatus {
@@ -439,13 +430,14 @@ export interface AgentStatus {
 }
 
 /** The status report: names, paths, codes and hashes; never a value. */
-export function agentStatus(profile: AgentProfile | undefined, fs: { getuid?: () => number } = {}, unavailable: Readonly<Record<string, { reason: UnavailableReason }>> = {}): AgentStatus {
+export function agentStatus(profile: AgentProfile | undefined, fs: { getuid?: () => number } = {}): AgentStatus {
   const tools = profile?.tools;
   const connections = (tools?.connections ?? []).map((c): ConnectionStatus => {
     const checks = checkEnvBindings(c.env, fs);
     const drift = commandDrift(c.command, c.resolvedCommand);
-    const mark = Object.hasOwn(unavailable, c.id) ? unavailable[c.id] : undefined;
-    const available = !mark && drift !== "missing" && checks.every((b) => b.status === "ok");
+    const binaryReason = drift === "missing" ? "binary_missing" : drift === "changed" ? "binary_changed" : undefined;
+    const reason: UnavailableReason | undefined = c.unavailable?.reason ?? binaryReason;
+    const available = reason === undefined && checks.every((b) => b.status === "ok");
     const listed = available ? (c.inspectedTools ?? []) : undefined;
     const s: ConnectionStatus = {
       id: c.id,
@@ -459,9 +451,9 @@ export function agentStatus(profile: AgentProfile | undefined, fs: { getuid?: ()
       inspectedTools: (c.inspectedTools ?? []).map((t) => ({ name: t.name, ...(t.schemaHash ? { schemaHash: t.schemaHash } : {}), selectable: t.inputSchema !== undefined })),
       selected: (tools?.selections ?? [])
         .filter((sel) => sel.connectionId === c.id)
-        .map((sel) => ({ tool: sel.toolName, required: sel.required, compatibility: selectedToolDropReason({ name: sel.toolName, schemaHash: sel.schemaHash }, listed) ?? "ok" })),
+        .map((sel) => ({ tool: sel.toolName, required: sel.required, compatibility: binaryReason ? "needs_review" : (selectedToolDropReason({ name: sel.toolName, schemaHash: sel.schemaHash }, listed) ?? "ok") })),
     };
-    if (mark) s.unavailableReason = mark.reason;
+    if (reason) s.unavailableReason = reason;
     if (c.definitionFile) s.definitionFile = c.definitionFile;
     if (c.inspectedAt) s.inspectedAt = c.inspectedAt;
     if (c.resolvedCommand) s.resolvedCommand = c.resolvedCommand.path;
@@ -473,7 +465,7 @@ export function agentStatus(profile: AgentProfile | undefined, fs: { getuid?: ()
 function status(ctx: Ctx, json: boolean): number {
   const loaded = ctx.load();
   if (!loaded.ok) return loaded.code;
-  const report = agentStatus(loaded.profile, ctx.fs, ctx.unavailable());
+  const report = agentStatus(loaded.profile, ctx.fs);
   if (json) {
     ctx.out(JSON.stringify(report, null, 2));
     return EXIT_OK;
@@ -489,7 +481,7 @@ function status(ctx: Ctx, json: boolean): number {
     ctx.out(`connection   ${c.id}  (revision ${c.revision}${c.available ? "" : `, UNAVAILABLE${c.unavailableReason ? `: ${c.unavailableReason}` : ""}`})`);
     if (c.unavailableReason === "auth_prompt") ctx.out(`             ${AUTH_PROMPT_TEXT}. Run agent refresh ${c.id} --allow-start once it starts without one.`);
     ctx.out(`command      ${clean(c.command)}  binary ${c.commandDrift === "same" ? "unchanged since inspection" : c.commandDrift === "changed" ? "CHANGED since inspection (run agent refresh)" : c.commandDrift === "missing" ? "MISSING" : "not recorded"}`);
-    ctx.out(`args         ${JSON.stringify(c.args)}`);
+    ctx.out(`args         ${argv(c.args)}`);
     ctx.out(`cwd          ${clean(c.cwd)}`);
     if (c.definitionFile) ctx.out(`definition   ${clean(c.definitionFile)}`);
     if (c.inspectedAt) ctx.out(`inspected    ${c.inspectedAt}`);
@@ -498,7 +490,7 @@ function status(ctx: Ctx, json: boolean): number {
     }
     ctx.out(`inspected    ${c.inspectedTools.length ? c.inspectedTools.map((t) => `${clean(t.name)}${t.selectable ? "" : " (not selectable)"}`).join(", ") : "(none)"}`);
     if (c.selected.length === 0) ctx.out("selected     (none)");
-    for (const s of c.selected) ctx.out(`selected     ${s.tool}  ${s.required ? "required" : "optional"}  ${s.compatibility}`);
+    for (const s of c.selected) ctx.out(`selected     ${clean(s.tool)}  ${s.required ? "required" : "optional"}  ${s.compatibility}`);
   }
   return EXIT_OK;
 }

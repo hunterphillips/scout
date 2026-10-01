@@ -47,13 +47,24 @@ describe("loadBackendDefinition", () => {
     expect(JSON.stringify(r)).not.toContain(SECRET);
   });
 
-  it("copies non-secret literals of a readable file into literalEnv, and refuses secret-looking ones", () => {
+  it("copies allowlisted literals of a readable file into literalEnv", () => {
     const d = dir();
-    const ok = loadBackendDefinition(def(d, { ...base, env: { LANG: "C" } }, 0o644));
-    expect(ok.ok && ok.definition.connection).toMatchObject({ env: {}, literalEnv: { LANG: "C" } });
-    const bad = loadBackendDefinition(def(d, { ...base, env: { API_TOKEN: SECRET } }, 0o644));
+    const env = { LANG: "C", LC_ALL: "C", TZ: "UTC", PATH: "/usr/bin:/bin", HOME: "/Users/u", XDG_CONFIG_HOME: "/Users/u/.config", NO_COLOR: "1", PYTHONUNBUFFERED: "1" };
+    const ok = loadBackendDefinition(def(d, { ...base, env }, 0o644));
+    expect(ok.ok && ok.definition.connection).toMatchObject({ env: {}, literalEnv: env });
+  });
+
+  it.each(["API_TOKEN", "DATABASE_URL", "NOTES_ENDPOINT", "lang", "LC_"])("refuses the literal %s in a readable file, asking for chmod 600, without quoting it", (name) => {
+    const bad = loadBackendDefinition(def(dir(), { ...base, env: { LANG: "C", [name]: SECRET } }, 0o644));
     expect(bad.ok).toBe(false);
+    expect(!bad.ok && bad.errors.join("\n")).toContain(`env.${name}`);
+    expect(!bad.ok && bad.errors.join("\n")).toContain("chmod 600");
     expect(JSON.stringify(bad)).not.toContain(SECRET);
+  });
+
+  it.each([0o620, 0o602, 0o660, 0o666])("refuses a definition file writable by group or others (mode %o)", (mode) => {
+    const r = loadBackendDefinition(def(dir(), { ...base, env: { LANG: "C" } }, mode));
+    expect(r).toEqual({ ok: false, errors: ["definition: writable by group or others (chmod go-w it, or chmod 600 it)"] });
   });
 
   it.each<[string, Record<string, unknown>]>([

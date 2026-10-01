@@ -7,10 +7,12 @@
 //     "cwd"?: "/abs/dir" }
 // validated strictly against toolProfile.ts's caps and name rules (process-injection names
 // such as NODE_OPTIONS and DYLD_* are refused). It must be a regular file (not a symlink)
-// owned by this user, at most 4 MiB. Literal values never reach the profile when the file is
-// mode 0600: each becomes a `{file: <definition>, pointer: "/env/NAME"}` binding read at
-// launch. A file readable by others may hold only literals whose names do not look secret
-// (SECRET_NAME_RE); those are copied into the profile's non-secret `literalEnv`.
+// owned by this user, not writable by group or others, at most 4 MiB. Literal values never
+// reach the profile when the file is mode 0600: each becomes a
+// `{file: <definition>, pointer: "/env/NAME"}` binding read at launch. A file readable by
+// others may hold literals only for the names in LITERAL_ALLOWED_IN_READABLE_FILE (locale,
+// paths, terminal and output settings); those are copied into the profile's non-secret
+// `literalEnv`. Any other literal is refused with a request to chmod 600 the file.
 //
 // The command must be an absolute path to an executable file. Its real path, size and mtime
 // are recorded (resolveCommand) so `status` can show when the binary behind the reviewed
@@ -69,8 +71,16 @@ import {
   type ResolvedCommand,
 } from "./toolProfile.js";
 
-/** Literal names that must not sit in a file others can read. */
+/** Names that look like they hold a secret (used to warn about argv entries). */
 export const SECRET_NAME_RE = /token|secret|key|pass|credential|auth/i;
+
+const LITERAL_ALLOWED_NAMES = new Set(["LANG", "TZ", "PATH", "HOME", "TERM", "TMPDIR", "USER", "LOGNAME", "NO_COLOR", "PYTHONUNBUFFERED", "PYTHONIOENCODING"]);
+const LITERAL_ALLOWED_PREFIXES = ["LC_", "XDG_"];
+
+/** Whether a definition file readable by others may hold `name` as a literal (an allowlist, case-sensitive). */
+export function literalAllowedInReadableFile(name: string): boolean {
+  return LITERAL_ALLOWED_NAMES.has(name) || LITERAL_ALLOWED_PREFIXES.some((p) => name.startsWith(p) && name.length > p.length);
+}
 
 const noNul = (s: string): boolean => !s.includes("\0");
 
@@ -122,6 +132,7 @@ function readOwnedFile(path: string, fs: DefinitionFs): { ok: true; text: string
     const st = fstatSync(fd);
     const uid = fs.getuid ?? process.getuid;
     if (!st.isFile() || (typeof uid === "function" && st.uid !== uid())) return { ok: false, error: "definition: must be a regular file you own" };
+    if ((st.mode & 0o022) !== 0) return { ok: false, error: "definition: writable by group or others (chmod go-w it, or chmod 600 it)" };
     if (st.size > BINDING_FILE_MAX_BYTES) return { ok: false, error: "definition: file larger than 4 MiB" };
     const buf = Buffer.alloc(BINDING_FILE_MAX_BYTES + 1);
     let n = 0;
@@ -194,8 +205,8 @@ export function loadBackendDefinition(path: string, fs: DefinitionFs = {}): Defi
     } else if (isPrivate) {
       env[name] = { file: path, pointer: `/env/${name}` };
       envEntries.push({ name, kind: "literal_in_definition", file: path, pointer: `/env/${name}` });
-    } else if (SECRET_NAME_RE.test(name)) {
-      errors.push(`definition: env.${name}: looks secret, so the definition file must be mode 0600 (chmod 600 it)`);
+    } else if (!literalAllowedInReadableFile(name)) {
+      errors.push(`definition: env.${name}: a literal value is allowed in a file others can read only for locale, path and terminal settings; chmod 600 the definition file to keep it there`);
     } else if (v.length > MAX_LITERAL_ENV_CHARS) {
       errors.push(`definition: env.${name}: literal longer than ${MAX_LITERAL_ENV_CHARS} characters (chmod 600 the file to keep it there)`);
     } else {

@@ -50,8 +50,14 @@ describe("selected tools in the agent profile", () => {
     ["the same tool name twice", tools({ connections: [conn(), conn({ id: "notes2" })], selections: [selection("notes", "lookup", true), selection("notes2", "lookup", false)] })],
     ["a duplicate connection id", tools({ connections: [conn(), conn()] })],
     ["an unknown field", { ...tools(), extra: 1 }],
+    ["an unavailable mark with an unknown reason", tools({ connections: [{ ...conn(), unavailable: { reason: "binary_changed", at: "2026-10-01T12:00:00.000Z" } } as unknown as Connection] })],
+    ["an unavailable mark with an extra field", tools({ connections: [{ ...conn(), unavailable: { reason: "auth_prompt", at: "2026-10-01T12:00:00.000Z", why: "x" } } as unknown as Connection] })],
   ])("refuses %s", (_label, t) => {
     expect(ToolsProfileSchema.safeParse(t).success).toBe(false);
+  });
+
+  it("accepts a connection marked unavailable by an auth prompt", () => {
+    expect(ToolsProfileSchema.safeParse(tools({ connections: [conn({ unavailable: { reason: "auth_prompt", at: "2026-10-01T12:00:00.000Z" } })] })).success).toBe(true);
   });
 
   it("refuses process-injection names and keeps ordinary ones", () => {

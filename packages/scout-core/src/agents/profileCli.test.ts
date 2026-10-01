@@ -2,12 +2,12 @@
 // wrapper in a temp dir (the wrapper reads its mode from a file, so a schema can change while
 // the reviewed command and argv stay the same). No model, no real backend, temp SCOUT_HOME.
 
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { runCli } from "../cli.js";
-import { AGENT_PROFILE_LOCK_FILE, AGENT_UNAVAILABLE_FILE, type AgentStatus } from "./profileCli.js";
+import { AGENT_PROFILE_LOCK_FILE, type AgentStatus } from "./profileCli.js";
 import { agentProfilePath, DEFAULT_AGENT_MODEL, loadAgentProfile, writeAgentProfile } from "./profile.js";
 import { FAKE_BACKEND, LOOKUP_SCHEMA, type BackendLogLine } from "./testing/fakeBackend.js";
 import { schemaHash } from "./toolProfile.js";
@@ -201,10 +201,24 @@ describe("agent inspect", () => {
     expect(r.out).not.toContain("listed");
     expect(profileText(f)).toBe(before);
     expect(toolsOf(f)).toBeUndefined();
-    expect(existsSync(join(f.home, AGENT_UNAVAILABLE_FILE))).toBe(false);
     expect(f.logLines().some((l) => l.method === "tools/list")).toBe(false);
     expect(() => process.kill(f.logLines()[0]!.pid!, 0)).toThrow();
     expect((await f.status()).connections).toEqual([]);
+  });
+
+  it("prints argv quoted with control characters replaced, and warns (without refusing) about secret-looking arguments", async () => {
+    const f = fixture();
+    f.writeDef({ id: "notes", command: f.wrapper, args: ["--stdio", "--api-key=abc", "a\u001b[2Jb"], env: { LANG: "C" } });
+    const r = await f.run(["inspect", f.def]);
+    expect(r.code).toBe(3);
+    expect(r.out).toContain('args         "--stdio" "--api-key=abc" "a [2Jb"');
+    expect(r.out).not.toContain("\u001b");
+    expect(r.err).toContain("warning: argument 2 looks like it may name or carry a secret");
+    expect(r.err).not.toContain("argument 1 ");
+    expect(r.err).not.toContain("argument 3 ");
+    // A flag spelled --password is warned about too.
+    f.writeDef({ id: "notes", command: f.wrapper, args: ["--password", "hunter2"], env: { LANG: "C" } });
+    expect((await f.run(["inspect", f.def])).err).toContain("warning: argument 1 ");
   });
 
   it("refuses a definition owned by another user", async () => {
@@ -322,6 +336,8 @@ describe("agent refresh", () => {
     expect(conn.revision).toBe(conn0.revision! + 1);
     expect(conn.inspectedAt).toBe(conn0.inspectedAt);
     expect(conn.inspectedTools).toEqual(conn0.inspectedTools);
+    expect(conn.unavailable).toEqual({ reason: "auth_prompt", at: "2026-10-01T12:00:00.000Z" });
+    expect(readdirSync(f.home).filter((n) => n.startsWith("agent-"))).toEqual(["agent-profile.json"]);
 
     const c = (await f.status()).connections[0]!;
     expect(c).toMatchObject({ id: "notes", available: false, unavailableReason: "auth_prompt", selected: [] });
@@ -341,7 +357,22 @@ describe("agent refresh", () => {
     const ok = (await f.status()).connections[0]!;
     expect(ok.available).toBe(true);
     expect(ok.unavailableReason).toBeUndefined();
+    expect(toolsOf(f)!.connections[0]!.unavailable).toBeUndefined();
     expect((await f.run(["enable", "notes", "lookup", "--unattended-read"])).code).toBe(0);
+  });
+
+  it("enable refuses a connection whose profile entry carries the auth-prompt mark, even one written by hand", async () => {
+    const f = fixture();
+    await f.run(["inspect", f.def, "--allow-start"]);
+    const profile = loadAgentProfile(f.home);
+    profile.tools!.connections[0]!.unavailable = { reason: "auth_prompt", at: "2026-10-01T11:00:00.000Z" };
+    writeAgentProfile(f.home, profile);
+    const before = profileText(f);
+    const r = await f.run(["enable", "notes", "lookup", "--unattended-read"]);
+    expect(r.code).toBe(1);
+    expect(r.err).toContain("unavailable (auth_prompt)");
+    expect(profileText(f)).toBe(before);
+    expect((await f.status()).connections[0]).toMatchObject({ available: false, unavailableReason: "auth_prompt" });
   });
 
   it("a rotated credential at the same binding keeps the selection", async () => {
@@ -363,31 +394,45 @@ describe("agent status", () => {
     let s = await f.status();
     let c = s.connections[0]!;
     expect(c).toMatchObject({ id: "notes", commandDrift: "same", available: true, selected: [{ tool: "lookup", required: true, compatibility: "ok" }] });
+    expect(c.unavailableReason).toBeUndefined();
     expect(c.env.map((e) => [e.name, e.kind, e.status])).toEqual([
       ["NOTES_TOKEN", "binding", "ok"],
       ["NOTES_API", "binding", "ok"],
       ["LANG", "binding", "ok"],
     ]);
 
-    // The binary behind the reviewed path changed: drift is visible and enable refuses.
+    // The binary behind the reviewed path changed: unavailable, selections need review, enable refuses.
     writeWrapper(f.wrapper, f.modeFile, f.log, "# upgraded\n");
-    s = await f.status();
-    expect(s.connections[0]!.commandDrift).toBe("changed");
+    c = (await f.status()).connections[0]!;
+    expect(c).toMatchObject({ commandDrift: "changed", available: false, unavailableReason: "binary_changed", selected: [{ tool: "lookup", compatibility: "needs_review" }] });
+    let text = await f.run(["status"]);
+    expect(text.out).toContain("UNAVAILABLE: binary_changed");
+    expect(text.out).toContain("CHANGED since inspection");
+    expect(text.out).toContain("lookup  required  needs_review");
     expect((await f.run(["enable", "notes", "peek", "--unattended-read"])).code).toBe(1);
 
-    // A binding file that is no longer private: unavailable, with the reason.
+    // A refresh records the new binary and keeps the selection (same command, argv, cwd, env).
+    expect((await f.run(["refresh", "notes", "--allow-start"])).code).toBe(0);
+    c = (await f.status()).connections[0]!;
+    expect(c).toMatchObject({ commandDrift: "same", available: true, selected: [{ tool: "lookup", compatibility: "ok" }] });
+
+    // A binding file that is no longer private: unavailable, reported on the env source.
     chmodSync(f.config, 0o644);
     s = await f.status();
     c = s.connections[0]!;
     expect(c.available).toBe(false);
+    expect(c.unavailableReason).toBeUndefined();
     expect(c.env.find((e) => e.name === "NOTES_API")?.status).toBe("file_not_private");
     expect(c.selected[0]?.compatibility).toBe("connection_unavailable");
-    const text = await f.run(["status"]);
-    expect(text.out).toContain("UNAVAILABLE");
-    expect(text.out).toContain("CHANGED");
+    expect((await f.run(["status"])).out).toContain("UNAVAILABLE");
 
+    // The binary is gone.
     rmSync(f.wrapper);
-    expect((await f.status()).connections[0]!.commandDrift).toBe("missing");
+    c = (await f.status()).connections[0]!;
+    expect(c).toMatchObject({ commandDrift: "missing", available: false, unavailableReason: "binary_missing", selected: [{ tool: "lookup", compatibility: "needs_review" }] });
+    text = await f.run(["status"]);
+    expect(text.out).toContain("UNAVAILABLE: binary_missing");
+    expect(text.out).toContain("MISSING");
   });
 
   it("works without a profile, and while the profile is locked", async () => {
@@ -424,13 +469,24 @@ describe("secrets", () => {
     await f.run(["status", "--json"]);
     writeFileSync(f.modeFile, "schema-change");
     await f.run(["refresh", "notes", "--allow-start"]);
-    // Failure paths: a readable definition with a secret-looking literal, and a bad pointer.
+    // Failure paths: a readable definition with a literal off the allowlist, and a bad pointer.
     chmodSync(f.def, 0o644);
     await f.run(["inspect", f.def, "--allow-start"]);
     chmodSync(f.def, 0o600);
     writeFileSync(f.config, JSON.stringify({ other: CFG_SECRET }), { mode: 0o600 });
     await f.run(["refresh", "notes", "--allow-start"]);
     await f.run(["status"]);
+    // The auth-prompt path, on a known connection and on a new one, after the values resolved.
+    writeFileSync(f.config, JSON.stringify({ notes: { token: CFG_SECRET } }), { mode: 0o600 });
+    writeFileSync(f.modeFile, "elicit-init");
+    const prompted = f.logLines().length;
+    expect((await f.run(["refresh", "notes", "--allow-start"])).code).toBe(1);
+    f.writeDef({ id: "notes-two", command: f.wrapper, args: ["--stdio"], env: { NOTES_TOKEN: DEF_SECRET, NOTES_API: { file: f.config, pointer: "/notes/token" } } });
+    expect((await f.run(["inspect", f.def, "--allow-start"])).code).toBe(1);
+    await f.run(["status"]);
+    await f.run(["status", "--json"]);
+    expect(f.logLines().slice(prompted).filter((l) => l.env?.NOTES_TOKEN === DEF_SECRET && l.env?.NOTES_API === CFG_SECRET)).toHaveLength(2);
+    expect(toolsOf(f)!.connections.map((c) => [c.id, c.unavailable?.reason])).toEqual([["notes", "auth_prompt"]]);
 
     // The backend did receive both values, so they were resolved.
     expect(f.logLines().some((l) => l.env?.NOTES_TOKEN === DEF_SECRET && l.env?.NOTES_API === CFG_SECRET)).toBe(true);

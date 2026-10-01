@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { buildJobSurface, SCOUT_TOOL_NAMES } from "./jobSurface.js";
 import { fakeBackend, selection } from "./testing/fakeBackend.js";
 import { defaultManagedPaths } from "./claudeJob.js";
-import { BRIDGE_JOB_MAX_BYTES } from "./contextToolBridge.js";
+import { BRIDGE_JOB_MAX_BYTES, BridgeJobSchema } from "./contextToolBridge.js";
 import { BRIDGE_SERVER_NAME, checkManagedPolicy, managedSettingsConflict, planJobTools, type JobManagedPaths, type ToolPlanOptions } from "./toolPolicy.js";
 import { MAX_ARG_CHARS, MAX_ARGS, MAX_CONNECTIONS, MAX_DESCRIPTION_CHARS, MAX_SELECTIONS, ToolsProfileSchema, type ToolsProfile } from "./toolProfile.js";
 
@@ -91,6 +91,18 @@ describe("planJobTools", () => {
     const plan = planJobTools(opts({ connections: [a.connection], selections: [selection("notes", "lookup", true)] }));
     expect(plan.ok && plan.bridgeJob!.connections[0]!.literalEnv).toEqual({ PATH: "/usr/bin:/bin" });
     expect(JSON.stringify(plan.ok && plan.bridgeJob)).not.toContain(SECRET);
+  });
+
+  it("never carries setup bookkeeping (the auth-prompt mark included) into the bridge job; the job schema refuses it", () => {
+    const a = fakeBackend(dir(), "notes", "honest");
+    const marked = { ...a.connection, definitionFile: a.definitionFile, revision: 3, inspectedAt: "2026-10-01T12:00:00.000Z", unavailable: { reason: "auth_prompt" as const, at: "2026-10-01T12:00:00.000Z" } };
+    const plan = planJobTools(opts({ connections: [marked], selections: [selection("notes", "lookup", false)] }));
+    expect(plan.ok).toBe(true);
+    if (!plan.ok) return;
+    const jobText = JSON.stringify(plan.bridgeJob);
+    for (const field of ["unavailable", "auth_prompt", "definitionFile", "inspectedAt", "revision"]) expect(jobText).not.toContain(field);
+    const conn0 = plan.bridgeJob!.connections[0]!;
+    expect(BridgeJobSchema.safeParse({ ...plan.bridgeJob, connections: [{ ...conn0, unavailable: marked.unavailable }] }).success).toBe(false);
   });
 
   it("an optional tool whose command is gone is reported unavailable and left out; Scout alone still runs", () => {
