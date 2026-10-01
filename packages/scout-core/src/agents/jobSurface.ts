@@ -1,10 +1,13 @@
 // The per-job tool surface: the strict MCP configuration a job's CLI loads, the exact
 // allowed-tool list, and what its init event must therefore show.
 //
-// The input is a typed description, `{ servers, allowedTools }`. In P1.2 the only server is
-// Scout's own (`scout`: `node <scout-mcp dist/main.js> --socket <path> --token-file <path>`).
-// P1.3 adds the forwarding bridge for explicitly selected user tools as another server in
-// the same description, plus its tool policy; nothing here needs to change for that.
+// The input is a typed description, `{ servers, allowedTools }`: Scout's own server (`scout`:
+// `node <scout-mcp dist/main.js> --socket <path> --token-file <path>`) and, when the user
+// selected tools, the per-job forwarding bridge (toolPolicy.ts decides which).
+//
+// Availability is per tool. A `required` server must connect. Every tool of a required
+// server must load unless it is listed in `optionalTools`; every tool of an optional server
+// is optional. A missing optional tool is reported and the job goes on (initCheck.ts).
 //
 // Built-in tools, skill invocation and user hooks are off for jobs; claudeJob.ts sets the
 // flags that do it (CLAUDE_JOB_FLAGS). This module only describes MCP tools.
@@ -36,6 +39,8 @@ export interface JobServerSpec {
   tools: readonly string[];
   /** A required server that fails to connect stops the job; an optional one is reported unavailable. */
   required: boolean;
+  /** Tools of a required server that may be missing (reported, not fatal). Ignored for an optional server, whose tools all are. */
+  optionalTools?: readonly string[];
 }
 
 export interface JobSurfaceSpec {
@@ -51,7 +56,7 @@ export interface JobSurface {
   allowedToolsArg: string;
   allowedTools: ReadonlySet<string>;
   /** What the init event must show, per server, with full tool names. */
-  expected: readonly { name: string; tools: readonly string[]; required: boolean }[];
+  expected: readonly ExpectedServer[];
 }
 
 export class JobSurfaceError extends Error {
@@ -61,6 +66,15 @@ export class JobSurfaceError extends Error {
   }
 }
 
+export interface ExpectedServer {
+  name: string;
+  /** Full `mcp__<server>__<tool>` names. */
+  tools: readonly string[];
+  required: boolean;
+  /** Full names of the tools that may be missing. */
+  optionalTools: readonly string[];
+}
+
 export const mcpToolName = (server: string, tool: string): string => `mcp__${server}__${tool}`;
 
 export function buildJobSurface(spec: JobSurfaceSpec): JobSurface {
@@ -68,7 +82,7 @@ export function buildJobSurface(spec: JobSurfaceSpec): JobSurface {
   const names = new Set<string>();
   const mcpServers: JobSurface["mcpConfig"]["mcpServers"] = {};
   const advertised = new Set<string>();
-  const expected: { name: string; tools: string[]; required: boolean }[] = [];
+  const expected: ExpectedServer[] = [];
   for (const s of spec.servers) {
     const okShape =
       NAME_RE.test(s.name) &&
@@ -77,7 +91,9 @@ export function buildJobSurface(spec: JobSurfaceSpec): JobSurface {
       s.args.every((a) => typeof a === "string" && !a.includes("\0")) &&
       s.tools.length > 0 &&
       s.tools.length <= MAX_TOOLS_PER_SERVER &&
-      s.tools.every((t) => TOOL_RE.test(t));
+      s.tools.every((t) => TOOL_RE.test(t)) &&
+      new Set(s.tools).size === s.tools.length &&
+      (s.optionalTools ?? []).every((t) => s.tools.includes(t));
     if (!okShape) throw new JobSurfaceError("surface: invalid server");
     names.add(s.name);
     const entry: JobSurface["mcpConfig"]["mcpServers"][string] = { type: "stdio", command: s.command, args: [...s.args] };
@@ -85,7 +101,8 @@ export function buildJobSurface(spec: JobSurfaceSpec): JobSurface {
     mcpServers[s.name] = entry;
     const full = s.tools.map((t) => mcpToolName(s.name, t));
     for (const t of full) advertised.add(t);
-    expected.push({ name: s.name, tools: full, required: s.required });
+    const optional = s.required ? (s.optionalTools ?? []).map((t) => mcpToolName(s.name, t)) : full;
+    expected.push({ name: s.name, tools: full, required: s.required, optionalTools: optional });
   }
   const allowed = new Set<string>();
   for (const t of spec.allowedTools) {
@@ -116,9 +133,4 @@ export function scoutServerSpec(o: ScoutServerOptions): JobServerSpec {
     tools: SCOUT_TOOL_NAMES,
     required: true,
   };
-}
-
-/** The P1.2 surface: Scout's server only, every Scout tool allowed. */
-export function scoutOnlySurface(o: ScoutServerOptions): JobSurfaceSpec {
-  return { servers: [scoutServerSpec(o)], allowedTools: SCOUT_TOOL_NAMES.map((t) => mcpToolName(SCOUT_SERVER_NAME, t)) };
 }

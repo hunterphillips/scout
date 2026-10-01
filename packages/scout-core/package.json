@@ -13,6 +13,10 @@
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
+    },
+    "./agents/bridge": {
+      "types": "./dist/agents/bridgeMain.d.ts",
+      "default": "./dist/agents/bridgeMain.js"
     }
   },
   "files": [

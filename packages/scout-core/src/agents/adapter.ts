@@ -10,10 +10,12 @@ import { createHash } from "node:crypto";
 import { JOB_CANCELLED_REASONS, type HostJobResult, type JobRequest } from "@scout/contracts";
 import type { Clock } from "../clock.js";
 
-/** What the job gets from Scout: the core's agent socket and this job's token. */
+/**
+ * What the job gets from Scout: the core's agent socket and this job's token. The user's
+ * selected tools come from the adapter's agent profile (toolPolicy.ts), not from here.
+ */
 export interface JobToolSurface {
   scout: { socketPath: string; token: string };
-  // P1.3: the forwarding bridge for explicitly selected user tools is added here.
 }
 
 export interface JobRunOptions {
@@ -66,8 +68,12 @@ export interface JobDetails {
   model?: string;
   /** Tool names the agent called, in order (bounded). Names only, never arguments. */
   toolUses: string[];
-  /** Optional servers and whether they loaded (P1.2 has none; P1.3 adds the bridge). */
-  optionalTools: { server: string; status: "available" | "unavailable" }[];
+  /**
+   * Each optional selected tool (full `mcp__<server>__<tool>` name) and whether the job had
+   * it: unavailable before launch (its connection could not be prepared) or at startup (it
+   * did not load). Missing optional tools are never hidden.
+   */
+  optionalTools: { server: string; tool: string; status: "available" | "unavailable" }[];
   /** Picks the model returned that failed validation. */
   droppedPicks: number;
   /** Valid picks past the request's maxPicks. */

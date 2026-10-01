@@ -21,6 +21,9 @@
 //
 // In the answering modes it connects to the REAL scout-mcp server named in the job's
 // mcp.json (which talks to the fixture core socket) and calls Scout tools before answering.
+// With selected user tools, mcp.json also names the REAL per-job bridge (scout_bridge),
+// which it starts like any server; `bridge-call` calls the bridged `lookup` and puts its
+// reply in the first pick's reason, so a test sees the tool was called, not just listed.
 
 import { appendFileSync, readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -130,11 +133,19 @@ function startup() {
 }
 
 let toolUseSeq = 0;
+/** Call a tool; returns its first text content (or the error text). */
 async function useTool(server, tool, args = {}) {
   const id = `toolu_${++toolUseSeq}`;
   emit({ type: "assistant", message: { content: [{ type: "tool_use", id, name: `mcp__${server.name}__${tool}`, input: args }] } });
-  await server.client.callTool({ name: tool, arguments: args });
+  let text;
+  try {
+    const r = await server.client.callTool({ name: tool, arguments: args });
+    text = r.content?.find((c) => c.type === "text")?.text;
+  } catch (e) {
+    text = `error ${e?.code ?? ""}`;
+  }
   emit({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: id, content: "(elided)" }] } });
+  return text;
 }
 
 function result(extra) {
@@ -181,8 +192,8 @@ const probe = prompt.includes("Compatibility check:");
 
 const item = (id, reason = "Fits the open billing work") => ({ id, reason });
 
-/** Start up, call two Scout tools, answer. */
-async function answer(build) {
+/** Start up, call two Scout tools (and, if `bridged`, the bridge's `lookup`), answer. */
+async function answer(build, bridged = false) {
   startup();
   const servers = await connectAll();
   emit(initEvent(servers));
@@ -191,8 +202,11 @@ async function answer(build) {
     await useTool(scout, "current_site");
     await useTool(scout, "recent_activity");
   }
+  let reply;
+  const bridge = servers.find((s) => s.name === "scout_bridge" && s.client);
+  if (bridged && bridge?.tools.includes("mcp__scout_bridge__lookup")) reply = await useTool(bridge, "lookup", { query: "metered" });
   for (const s of servers) await s.client?.close();
-  result({ structured_output: build() });
+  result({ structured_output: build(reply) });
 }
 
 /** Start up, close the servers, then emit the final event(s). */
@@ -219,6 +233,9 @@ switch (mode) {
       if (marker) first.reason = `${marker} ${first.reason}`;
       return { status: "ok", items: [first, item(ids[1])] };
     });
+    break;
+  case "bridge-call":
+    await answer((reply) => ({ status: "ok", items: [item(ids[0], `Matches ${reply ?? "no reply"}`), item(ids[1])] }), true);
     break;
   case "marker-only":
     // The first reason is the visible marker and nothing else.

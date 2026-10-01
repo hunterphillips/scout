@@ -3,8 +3,14 @@
 // Per job: a direct launch profile (launchProfile.ts: allowlisted child env, the agent
 // profile's absolute claude path and explicit model) whose private 0700 cwd is
 // `SCOUT_HOME/run/jobs/<request-id>/`. Four 0600 files go there (mcp.json, settings.json,
-// instructions.md, agent-token); the CLI is spawned argv-only, detached, with the request on
+// instructions.md, agent-token), plus bridge.json when the profile selects user tools (the
+// bridge's job file, holding the resolved backend environment, which never enters the
+// CLI's own environment); the CLI is spawned argv-only, detached, with the request on
 // stdin; the job dir is removed when the job ends, however it ends.
+//
+// Tool surface (toolPolicy.ts): Scout's server, plus the forwarding bridge for the
+// profile's selected tools. Before anything is written, managed policy is checked; a policy
+// that would defeat the job's restrictions is `unsupported_configuration`.
 //
 // Lifecycle (adapted from packages/personal-context-mcp/src/agentRunner.ts, temporary
 // duplicate until Phase 4), one unit each: jsonLineStream.ts parses stdout; streamMonitor.ts
@@ -36,15 +42,17 @@
 
 import { spawn as nodeSpawn } from "node:child_process";
 import { writeFileSync } from "node:fs";
+import { userInfo } from "node:os";
 import { isAbsolute, join } from "node:path";
 import { AgentTokenSchema, JOB_AGENT_OUTPUT_JSON_SCHEMA, JobRequestSchema, type HostJobResult, type JobRequest } from "@scout/contracts";
 import { systemClock, type Clock } from "../clock.js";
 import type { Diagnostics } from "../diagnostics.js";
 import { hashRequestId, toCancelReason, type AgentJobAdapter, type JobDetails, type JobOutcome, type JobRunOptions, type JobTermination } from "./adapter.js";
-import type { Env, Verdict } from "./authPreflight.js";
+import { managedPathsFor, type Env, type ManagedPaths, type Verdict } from "./authPreflight.js";
+import type { BridgeJob } from "./contextToolBridge.js";
 import { startChild, type SnapshotFn, type SpawnFn, type SupervisedChild } from "./childSupervisor.js";
 import type { ExpectedInit } from "./initCheck.js";
-import { buildJobSurface, defaultScoutMcpEntrypoint, scoutOnlySurface, type JobSurface } from "./jobSurface.js";
+import { buildJobSurface, defaultScoutMcpEntrypoint, type JobSurface } from "./jobSurface.js";
 import { JobStop, type Ending, type Out } from "./jobStop.js";
 import { createJsonLineStream } from "./jsonLineStream.js";
 import { createLaunchProfile, LaunchProfileError, runDirectPreflight, type DirectPreflightOptions, type LaunchProfile } from "./launchProfile.js";
@@ -52,6 +60,7 @@ import { mapOutcome, recordUsage } from "./mapOutcome.js";
 import { MODEL_RE, profileFingerprint, type AgentProfile } from "./profile.js";
 import { buildJobInstructions, buildJobPrompt } from "./prompt.js";
 import { createStreamMonitor } from "./streamMonitor.js";
+import { checkManagedPolicy, defaultBridgeEntrypoint, planJobTools, type ToolPlanOptions } from "./toolPolicy.js";
 
 export type { SpawnFn, SnapshotFn } from "./childSupervisor.js";
 
@@ -86,7 +95,8 @@ export type { SpawnFn, SnapshotFn } from "./childSupervisor.js";
  * resumed), --system-prompt[-file] (replaces the default prompt), --fallback-model,
  * --dangerously-skip-permissions, --bare (its auth is API-key only), --add-dir.
  * Not used yet: --permission-prompts none (new in this version; dontAsk already denies).
- * Managed-policy hooks are not covered by --settings; P1.3 checks managed policy.
+ * Managed-policy hooks are not covered by --settings; checkManagedPolicy (toolPolicy.ts)
+ * refuses a job when managed policy defines hooks or otherwise overrides these flags.
  */
 export const VERIFIED_CLI_VERSION = "2.1.286";
 export const JOB_MAX_TURNS = 16;
@@ -96,7 +106,7 @@ export const MAX_STDOUT_BYTES = 4 * 1024 * 1024;
 /** Do not launch inference with less than this left (plan: common limits). */
 export const MIN_LAUNCH_MS = 5000;
 
-export const JOB_FILES = Object.freeze({ mcp: "mcp.json", settings: "settings.json", instructions: "instructions.md", token: "agent-token" });
+export const JOB_FILES = Object.freeze({ mcp: "mcp.json", settings: "settings.json", instructions: "instructions.md", token: "agent-token", bridge: "bridge.json" });
 
 /** argv after the claude path. */
 export function buildJobArgv(model: string, jobDir: string, allowedToolsArg: string, maxTurns = JOB_MAX_TURNS): string[] {
@@ -154,6 +164,12 @@ export interface ClaudeJobDeps {
   nodePath?: string;
   /** scout-mcp's built entrypoint. Defaults to the package export. */
   scoutMcpEntrypoint?: string;
+  /** The bridge's built entrypoint. Defaults to the package export. */
+  bridgeEntrypoint?: string;
+  /** Bridge limits (tests). */
+  bridgeLimits?: BridgeJob["limits"];
+  /** Managed-settings locations (tests). Default: managedPathsFor this platform, the job's config dir and OS user. */
+  managedPaths?: ManagedPaths;
   clock?: Clock;
   diagnostics?: Diagnostics;
   spawn?: SpawnFn;
@@ -214,6 +230,20 @@ export function launchProfileFailure(e: unknown): Out {
     default:
       return { result: { status: "error", reason: "unsupported_configuration" }, termination: "unsupported_configuration", detail };
   }
+}
+
+/** The managed-settings locations for the job's environment: this platform, its CLI config dir, the OS user. */
+export function defaultManagedPaths(env: Readonly<Record<string, string>>): ManagedPaths {
+  const configDir = env.CLAUDE_CONFIG_DIR ?? join(env.HOME!, ".claude");
+  let user: string | undefined;
+  try {
+    user = userInfo().username;
+  } catch {
+    // below
+  }
+  // Per-user MDM policy is keyed by the OS account; without one, fail closed.
+  if (!user || user.includes("/")) return { files: [], dropInDirs: [], opaque: [], unsupported: true };
+  return managedPathsFor(process.platform, configDir, user);
 }
 
 // ---------- the adapter ----------
@@ -322,18 +352,24 @@ export function createClaudeJobAdapter(deps: ClaudeJobDeps): ClaudeJobAdapter {
     }
     const jobDir = launch.cwd;
     try {
+      const policy = checkManagedPolicy(deps.managedPaths ?? defaultManagedPaths(launch.env));
+      if (!policy.ok) return { result: { status: "error", reason: "unsupported_configuration" }, termination: "unsupported_configuration", detail: policy.detail };
       let surface: JobSurface;
       try {
-        surface = buildJobSurface(
-          scoutOnlySurface({
-            nodePath: deps.nodePath ?? process.execPath,
-            entrypoint: deps.scoutMcpEntrypoint ?? defaultScoutMcpEntrypoint(),
-            socketPath: scout.socketPath,
-            tokenFile: join(jobDir, JOB_FILES.token),
-          }),
-        );
+        const nodePath = deps.nodePath ?? process.execPath;
+        const planOpts: ToolPlanOptions = {
+          tools: profile.tools,
+          scout: { nodePath, entrypoint: deps.scoutMcpEntrypoint ?? defaultScoutMcpEntrypoint(), socketPath: scout.socketPath, tokenFile: join(jobDir, JOB_FILES.token) },
+          bridge: { nodePath, entrypoint: deps.bridgeEntrypoint ?? defaultBridgeEntrypoint(), jobFile: join(jobDir, JOB_FILES.bridge) },
+        };
+        if (deps.bridgeLimits) planOpts.limits = deps.bridgeLimits;
+        const plan = planJobTools(planOpts);
+        if (!plan.ok) return { result: { status: "error", reason: "tool_unavailable" }, termination: "tool_unavailable", detail: plan.detail };
+        for (const u of plan.unavailable) details.optionalTools.push({ ...u, status: "unavailable" });
+        surface = buildJobSurface(plan.spec);
         const write = (name: string, text: string): void => writeFileSync(join(jobDir, name), text, { mode: 0o600, flag: "wx" });
         write(JOB_FILES.token, `${scout.token}\n`);
+        if (plan.bridgeJob) write(JOB_FILES.bridge, JSON.stringify(plan.bridgeJob));
         write(JOB_FILES.mcp, JSON.stringify(surface.mcpConfig, null, 2));
         write(JOB_FILES.settings, JSON.stringify(JOB_SETTINGS));
         write(JOB_FILES.instructions, buildJobInstructions(JOB_MAX_TURNS));

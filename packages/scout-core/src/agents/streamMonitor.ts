@@ -5,7 +5,7 @@
 //   - anything but `system` or `result` before init: malformed_startup;
 //   - a second init: malformed_startup, `second_init`;
 //   - the init event must pass checkInit (initCheck.ts); it fills the job's model, CLI
-//     version and optional-tool status;
+//     version and per-tool optional status;
 //   - an assistant `tool_use` must name an allowed tool or the structured-output tool
 //     (`unexpected_tool_use`); names are recorded, bounded;
 //   - the first `result` event is kept;
@@ -72,7 +72,10 @@ export function createStreamMonitor(o: StreamMonitorOptions): StreamMonitor {
       }
       details.model = check.model;
       if (check.cliVersion !== undefined) details.cliVersion = check.cliVersion;
-      details.optionalTools = expected.servers.filter((s) => !s.required).map((s) => ({ server: s.name, status: check.optionalUnavailable.includes(s.name) ? "unavailable" : "available" }));
+      // Appended: the adapter may already have listed tools that were unavailable before launch.
+      for (const s of expected.servers) {
+        for (const tool of s.optionalTools) details.optionalTools.push({ server: s.name, tool, status: check.optionalUnavailable.includes(tool) ? "unavailable" : "available" });
+      }
     } else if (ev.type === "assistant") {
       const content = isRecord(ev.message) && Array.isArray(ev.message.content) ? ev.message.content : [];
       for (const c of content) {

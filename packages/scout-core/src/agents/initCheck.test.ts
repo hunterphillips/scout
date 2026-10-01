@@ -3,11 +3,12 @@ import { checkInit, type ExpectedInit } from "./initCheck.js";
 
 const scoutTools = ["current_site", "recent_activity", "site_links", "list_resources", "read_resource"].map((t) => `mcp__scout__${t}`);
 const bridgeTools = ["mcp__bridge__search"];
+const twoBridgeTools = ["mcp__bridge__search", "mcp__bridge__lookup"];
 
 const expected = (extra: Partial<ExpectedInit> = {}): ExpectedInit => ({
   servers: [
-    { name: "scout", tools: scoutTools, required: true },
-    { name: "bridge", tools: bridgeTools, required: false },
+    { name: "scout", tools: scoutTools, required: true, optionalTools: [] },
+    { name: "bridge", tools: bridgeTools, required: false, optionalTools: bridgeTools },
   ],
   model: "claude-sonnet-5-5",
   cliVersion: "2.1.286",
@@ -35,11 +36,34 @@ describe("checkInit", () => {
     expect(checkInit(good({ apiProvider: "firstParty" }), expected()).ok).toBe(true);
   });
 
-  it("reports an optional server that did not load and carries on", () => {
+  it("reports each tool of an optional server that did not load and carries on", () => {
     const init = good({ tools: [...scoutTools, "StructuredOutput"], mcp_servers: [{ name: "scout", status: "connected" }, { name: "bridge", status: "failed" }] });
-    expect(checkInit(init, expected())).toMatchObject({ ok: true, optionalUnavailable: ["bridge"] });
+    expect(checkInit(init, expected())).toMatchObject({ ok: true, optionalUnavailable: bridgeTools });
     const absent = good({ tools: [...scoutTools, "StructuredOutput"], mcp_servers: [{ name: "scout", status: "connected" }] });
-    expect(checkInit(absent, expected())).toMatchObject({ ok: true, optionalUnavailable: ["bridge"] });
+    expect(checkInit(absent, expected())).toMatchObject({ ok: true, optionalUnavailable: bridgeTools });
+  });
+
+  // Availability is per tool: a connected server missing one optional tool keeps the others.
+  const partial = (required: boolean, optionalTools: string[]): Partial<ExpectedInit> => ({
+    servers: [
+      { name: "scout", tools: scoutTools, required: true, optionalTools: [] },
+      { name: "bridge", tools: twoBridgeTools, required, optionalTools },
+    ],
+  });
+  const onlySearch = { tools: [...scoutTools, "mcp__bridge__search", "StructuredOutput"] };
+
+  it("a connected optional server missing one of its tools: that tool is reported, the job goes on", () => {
+    expect(checkInit(good(onlySearch), expected(partial(false, twoBridgeTools)))).toMatchObject({ ok: true, optionalUnavailable: ["mcp__bridge__lookup"] });
+  });
+
+  it("a required server missing only an optional tool goes on; missing a required tool stops", () => {
+    expect(checkInit(good(onlySearch), expected(partial(true, ["mcp__bridge__lookup"])))).toMatchObject({ ok: true, optionalUnavailable: ["mcp__bridge__lookup"] });
+    expect(checkInit(good({ tools: [...scoutTools, "mcp__bridge__lookup"] }), expected(partial(true, ["mcp__bridge__lookup"])))).toEqual({ ok: false, reason: "tool_unavailable", detail: "required_tool_missing" });
+  });
+
+  it("a required bridge that failed to connect stops the job even if some of its tools are optional", () => {
+    const init = good({ tools: [...scoutTools], mcp_servers: [{ name: "scout", status: "connected" }, { name: "bridge", status: "failed" }] });
+    expect(checkInit(init, expected(partial(true, ["mcp__bridge__lookup"])))).toEqual({ ok: false, reason: "tool_unavailable", detail: "required_server_unavailable" });
   });
 
   it.each<[string, Record<string, unknown>, Partial<ExpectedInit>, string, string]>([

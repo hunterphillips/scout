@@ -11,15 +11,18 @@
 //   - unsupported_configuration: an unexpected server or tool (a built-in tool means
 //     `--tools ""` did not hold), permission mode not dontAsk, another model, another CLI
 //     version than the preflight saw, or a malformed event.
-//   - tool_unavailable: a required server missing or not connected, or one of its tools
-//     missing. An optional server in that state is reported, and the job goes on.
+//   - tool_unavailable: a required server missing or not connected, or a required tool
+//     missing. Availability is per tool: an optional tool that did not load (its server
+//     failed, or the server connected without it, e.g. the bridge dropped it for a changed
+//     schema) is reported unavailable by its full name and the job goes on; the tools of a
+//     partially loaded optional server that did load stay usable and are reported available.
 //   - preflight_failed: an auth route other than the subscription login (apiKeySource not
 //     `none`, or a non-first-party apiProvider).
 
-import { STRUCTURED_OUTPUT_TOOL } from "./jobSurface.js";
+import { STRUCTURED_OUTPUT_TOOL, type ExpectedServer } from "./jobSurface.js";
 
 export interface ExpectedInit {
-  servers: readonly { name: string; tools: readonly string[]; required: boolean }[];
+  servers: readonly ExpectedServer[];
   model: string;
   /** The CLI version the preflight saw; absent if it could not tell. */
   cliVersion?: string;
@@ -37,7 +40,7 @@ export type InitFailureDetail =
   | "required_tool_missing";
 
 export type InitCheckResult =
-  | { ok: true; optionalUnavailable: string[]; model: string; cliVersion?: string }
+  | { ok: true; /** Full names of optional tools that did not load. */ optionalUnavailable: string[]; model: string; cliVersion?: string }
   | { ok: false; reason: "unsupported_configuration" | "tool_unavailable" | "preflight_failed"; detail: InitFailureDetail };
 
 type Rec = Record<string, unknown>;
@@ -70,11 +73,16 @@ export function checkInit(init: Rec, expected: ExpectedInit): InitCheckResult {
   if (expected.cliVersion !== undefined && version !== expected.cliVersion) return fail("unsupported_configuration", "cli_version_changed");
 
   const optionalUnavailable: string[] = [];
+  const listed = new Set(tools as string[]);
   for (const s of expected.servers) {
-    const up = loaded.get(s.name) === "connected" && s.tools.every((t) => (tools as string[]).includes(t));
-    if (up) continue;
-    if (s.required) return fail("tool_unavailable", loaded.get(s.name) === "connected" ? "required_tool_missing" : "required_server_unavailable");
-    optionalUnavailable.push(s.name);
+    const connected = loaded.get(s.name) === "connected";
+    if (!connected && s.required) return fail("tool_unavailable", "required_server_unavailable");
+    const optional = new Set(s.optionalTools);
+    for (const t of s.tools) {
+      if (connected && listed.has(t)) continue;
+      if (!optional.has(t)) return fail("tool_unavailable", "required_tool_missing");
+      optionalUnavailable.push(t);
+    }
   }
   const ok: InitCheckResult = { ok: true, optionalUnavailable, model: init.model };
   if (version !== undefined) ok.cliVersion = version;
