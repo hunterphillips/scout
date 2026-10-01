@@ -19,10 +19,20 @@ hostname. No personal source is enabled; Hunter has not granted one. Don't descr
 Phase 4+ feature as built. `scout/` is its own git repo on `main` (Hunter's call: no
 branch ceremony for the PoC; merge and move on).
 
+## Planning update (2026-10-01)
+
+The build described above is unchanged. **Do not resume the old Phase 4.** Hunter
+agreed to website-capability acquisition and background recommendations through the
+user's agent, without a custom personal-context service. The full replacement plan
+is written but awaits explicit implementation approval:
+`../thoughts/shared/plans/2026-10-01-scout-website-agent-implementation.md`.
+Its architecture is `../thoughts/shared/plans/2026-10-01-scout-website-agent-design.md`.
+No new phases, installed configuration changes, or live checks are authorized yet.
+
 ## Read first
 
-- Approved implementation plan (phases, contracts, gates; its last section, "Implementation
-  progress", is the live phase log):
+- Historical implementation plan and completed-build evidence (its last section,
+  "Implementation progress", is the old phase log):
   `../thoughts/shared/plans/2026-09-23-scout-implementation.md`
 - Design record: `../thoughts/shared/plans/2026-09-23-scout-design.md`
 - Lane handoff (current state and next steps): `../thoughts/shared/lanes/scout-poc/handoff.md`

@@ -1,5 +1,14 @@
 # Scout
 
+**Planning update, October 1:** the [replacement implementation plan](../thoughts/shared/plans/2026-10-01-scout-website-agent-implementation.md)
+is complete and awaiting implementation approval. It adds website-capability acquisition
+and uses the user's agent for background recommendations instead of a custom
+personal-context service. No pivot code has been implemented. The build and commands
+below describe the existing September 30 implementation; its old Phase 4 is no longer
+the next task.
+
+## Current build
+
 Scout is a proof of concept. When Hunter lands on a website, it shows a few links from
 that site that fit what he is working on. Phase 1 is the plumbing: a Chrome
 extension senses the focused tab, a native host relays that to a local core process,
