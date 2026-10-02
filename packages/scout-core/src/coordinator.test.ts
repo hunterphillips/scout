@@ -11,7 +11,7 @@ import type { DiscoveryResult } from "./capabilities/discovery.js";
 import type { IngestReport } from "./capabilities/store.js";
 import type { CatalogResolution } from "./catalog/resolveCatalog.js";
 import type { Timers } from "./clock.js";
-import { type ActivityStore, createActivityStore } from "./activity/store.js";
+import { ACTIVITY_TTL_MS, type ActivityStore, createActivityStore } from "./activity/store.js";
 import { type Coordinator, type CoordinatorCapabilities, type CoordinatorOptions, createCoordinator } from "./coordinator.js";
 import type { DiagnosticFields, Diagnostics } from "./diagnostics.js";
 import { DWELL_MS } from "./dwell.js";
@@ -251,15 +251,16 @@ describe("coordinator", () => {
     expect(panel.at(-1)).not.toHaveProperty("detail");
   });
 
-  it("agentView shows the focused permitted visit and the pause state, nothing else", () => {
+  it("agentView shows the focused permitted visit, the pause state, and whether recommendations are enabled, nothing else", () => {
     const { coordinator, focus, chrome, connect } = setup();
-    expect(coordinator.agentView()).toEqual({ currentSite: null, paused: false });
+    expect(coordinator.agentView()).toEqual({ currentSite: null, paused: false, recommendationsEnabled: false });
     const c = connect();
     chrome();
     c.observe(focus());
     expect(coordinator.agentView()).toEqual({
       currentSite: { origin: "https://docs.stripe.com", url: STRIPE, visitEpoch: coordinator.tracker.epoch },
       paused: false,
+      recommendationsEnabled: false,
     });
     coordinator.handleNativeCommand({ type: "pause" });
     expect(coordinator.agentView().paused).toBe(true);
@@ -1260,5 +1261,125 @@ describe("coordinator results", () => {
     s.coordinator.resendState();
     expect(s.panel).toHaveLength(count + 1);
     expect(s.panel.at(-1)).toEqual(last);
+  });
+});
+
+describe("coordinator: recommendation job hooks", () => {
+  type Call = [string, ...unknown[]];
+  function recordingJobs() {
+    const calls: Call[] = [];
+    const jobs: NonNullable<CoordinatorOptions["jobs"]> = {
+      onSettled: (visit, catalog, settledAt) => void calls.push(["onSettled", visit.epoch, catalog.result.ok, settledAt]),
+      onVisitChanged: () => void calls.push(["onVisitChanged"]),
+      onPause: () => void calls.push(["onPause"]),
+      onSensorLost: () => void calls.push(["onSensorLost"]),
+      onPermissionsChanged: () => void calls.push(["onPermissionsChanged"]),
+      onActivityAccepted: (revision) => void calls.push(["onActivityAccepted", revision]),
+      stop: () => void calls.push(["stop"]),
+    };
+    return { jobs, calls };
+  }
+
+  const catalogOf = (source: "fresh" | "miss"): CatalogResolution =>
+    ({
+      result: { ok: true, source, stale: false, catalog: { origin: "https://docs.stripe.com", version: "v1", fetchedAt: 0, candidates: [], truncated: false, errors: [] } },
+      stats: { requests: 0, refused: 0, bytesReceived: 0, ms: 0 },
+    }) as CatalogResolution;
+
+  function visitingWithJobs(source: "fresh" | "miss", config: CoordinatorOptions["config"] = {}) {
+    const caps = fakeCapabilities();
+    caps.capabilities.resolveCatalog = async () => catalogOf(source);
+    const rec = recordingJobs();
+    const s = setup({ capabilities: caps.capabilities, jobs: rec.jobs, config });
+    const c = s.connect();
+    s.chrome();
+    c.observe(s.focus());
+    return { ...s, ...caps, ...rec, c };
+  }
+
+  it("a fresh cached catalog reaches the scheduler before discovery finishes, with the settle time", async () => {
+    const s = visitingWithJobs("fresh");
+    s.clock.t = 5_000;
+    s.advance(DWELL_MS);
+    await flush();
+    const settledAt = s.clock.t;
+    expect(s.calls.filter((c) => c[0] === "onSettled")).toEqual([["onSettled", s.coordinator.tracker.epoch, true, settledAt]]);
+    s.passes[0]!.discover.resolve(discoveryFor("https://docs.stripe.com"));
+    await flush();
+    expect(s.calls.filter((c) => c[0] === "onSettled")).toHaveLength(1);
+  });
+
+  it("a fetched catalog reaches the scheduler only when the whole pass has finished; a cancelled pass never", async () => {
+    const s = visitingWithJobs("miss");
+    s.advance(DWELL_MS);
+    await flush();
+    expect(s.calls.some((c) => c[0] === "onSettled")).toBe(false);
+    s.passes[0]!.discover.resolve(discoveryFor("https://docs.stripe.com"));
+    await flush();
+    expect(s.calls.filter((c) => c[0] === "onSettled")).toHaveLength(1);
+
+    const t = visitingWithJobs("miss");
+    t.advance(DWELL_MS);
+    await flush();
+    t.coordinator.handleNativeCommand({ type: "pause" });
+    t.passes[0]!.discover.resolve(discoveryFor("https://docs.stripe.com"));
+    await flush();
+    expect(t.calls.some((c) => c[0] === "onSettled")).toBe(false);
+  });
+
+  it("forwards visit changes, permissions, accepted activity (new content only), pause, sensor loss and stop", () => {
+    const s = visitingWithJobs("fresh");
+    const names = () => s.calls.map((c) => c[0]);
+    s.calls.length = 0;
+    s.c.observe(s.focus({ url: "https://docs.stripe.com/billing" }));
+    expect(names()).toEqual(["onVisitChanged"]);
+    s.calls.length = 0;
+    s.grant(s.c);
+    expect(names()).toEqual(["onPermissionsChanged"]);
+    s.calls.length = 0;
+    s.c.observe(s.focus({ tabId: 20, url: ISSUE, documentId: "doc-issue" }));
+    s.c.observe(s.pageText());
+    s.c.observe(s.pageText());
+    expect(s.calls.filter((c) => c[0] === "onActivityAccepted")).toEqual([["onActivityAccepted", s.coordinator.activity.revision]]);
+    s.calls.length = 0;
+    s.coordinator.handleNativeCommand({ type: "pause" });
+    expect(names()).toContain("onPause");
+    s.coordinator.handleNativeCommand({ type: "resume" });
+    s.calls.length = 0;
+    s.c.disconnect();
+    expect(names()).toContain("onSensorLost");
+    s.calls.length = 0;
+    s.coordinator.stop();
+    expect(names()).toEqual(["stop"]);
+  });
+
+  it("activity expiring or being cleared moves the store revision but never reaches the scheduler as an accept", () => {
+    const s = visitingWithJobs("fresh");
+    s.c.observe(s.focus({ tabId: 20, url: ISSUE, documentId: "doc-issue" }));
+    s.c.observe(s.pageText());
+    expect(s.calls.filter((c) => c[0] === "onActivityAccepted")).toHaveLength(1);
+    const before = s.coordinator.activity.revision;
+    s.clock.t += ACTIVITY_TTL_MS + 1;
+    expect(s.coordinator.activity.revision).toBeGreaterThan(before);
+    s.grant(s.c, DEFAULT_GRANTS, false);
+    expect(s.calls.filter((c) => c[0] === "onActivityAccepted")).toHaveLength(1);
+  });
+
+  it("showWorking and showIdle emit only for the current, shown visit; working carries the job and the hostname only", () => {
+    const s = visitingWithJobs("fresh", { destinations: ["docs.stripe.com"] });
+    const epoch = s.coordinator.tracker.epoch;
+    expect(s.coordinator.agentView().recommendationsEnabled).toBe(true);
+    const before = s.panel.length;
+    s.coordinator.showWorking(epoch - 1, "job-old");
+    expect(s.panel.length).toBe(before);
+    s.coordinator.showWorking(epoch, "job-1");
+    expect(s.panel.at(-1)).toEqual({ type: "state", status: "working", visitEpoch: epoch, detail: "docs.stripe.com", jobId: "job-1" });
+    s.coordinator.showIdle(epoch);
+    expect(s.panel.at(-1)).toEqual({ type: "state", status: "idle", visitEpoch: epoch, detail: "docs.stripe.com", permitted: true });
+    s.coordinator.handleNativeCommand({ type: "pause" });
+    const paused = s.panel.length;
+    s.coordinator.showWorking(epoch, "job-2");
+    s.coordinator.showIdle(epoch);
+    expect(s.panel.length).toBe(paused);
   });
 });

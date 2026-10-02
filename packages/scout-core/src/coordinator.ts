@@ -29,6 +29,13 @@
 // pass for its origin (discoveryRunner.ts). Pause, loss of the pass origin's grant,
 // disconnect (or a new sensor replacing the live one), and stop cancel it.
 //
+// Recommendation jobs (jobScheduler.ts, `jobs`): the pass's catalog goes to the scheduler with
+// the settle time (its 30 s budget starts at the settle), and the scheduler hears visit
+// changes, pause, sensor loss (and a replacing sensor), applied permissions, accepted
+// activity (new content only), and stop. It shows a job through `showWorking` / `showIdle`,
+// which emit only for the current, shown visit. Whether a visit's host is recommendation-
+// enabled (`config.destinations`) is in `agentView()`.
+//
 // Scout's window commands (those with a `commandId`) go to the panel channel
 // (panelChannel.ts), which answers them; without one each gets an `unavailable` ack. The
 // coordinator tells the channel when the capability view may have changed: a permissions
@@ -51,6 +58,7 @@ import type {
 } from "@scout/contracts";
 import { type ActivityStore, canonicalIssueUrl, createActivityStore } from "./activity/store.js";
 import type { AgentView } from "./agentApi/handlers.js";
+import type { JobScheduler } from "./jobScheduler.js";
 import type { PanelChannel } from "./panelChannel.js";
 import type { ResultRegistry } from "./results.js";
 import type { Clock, Timers } from "./clock.js";
@@ -58,14 +66,21 @@ import type { Diagnostics } from "./diagnostics.js";
 import { createDiscoveryRunner, type DiscoveryCapabilities } from "./discoveryRunner.js";
 import { createDwellScheduler, type DwellScheduler } from "./dwell.js";
 import { createPermissionState, GITHUB_ORIGIN, type PermissionState } from "./permissionState.js";
-import { createResumeCache, type ResumeCache } from "./resumeCache.js";
 import type { SocketClient } from "./socketServer.js";
 import { CHROME_BUNDLE_ID, createVisitTracker, type VisitChange, type VisitTracker, WINDOW_ID_NONE } from "./visitTracker.js";
 
 export interface CoordinatorConfig {
   /** The bundle id treated as "Chrome frontmost". Defaults to CHROME_BUNDLE_ID. */
   chromeBundleId?: string;
+  /** Hosts with recommendations enabled. Defaults to none. */
+  destinations?: readonly string[];
 }
+
+/** What the coordinator tells the job scheduler. */
+export type CoordinatorJobs = Pick<
+  JobScheduler,
+  "onSettled" | "onVisitChanged" | "onPause" | "onSensorLost" | "onPermissionsChanged" | "onActivityAccepted" | "stop"
+>;
 
 export interface CoordinatorOptions {
   config: CoordinatorConfig;
@@ -88,6 +103,8 @@ export interface CoordinatorOptions {
   panel?: Pick<PanelChannel, "handle" | "capabilitiesChanged">;
   /** Recommendation results, cleared whenever their visit stops being current. */
   results?: Pick<ResultRegistry, "clear">;
+  /** Recommendation jobs. Without it a settled visit only runs discovery. */
+  jobs?: CoordinatorJobs;
 }
 
 export type CoordinatorCapabilities = DiscoveryCapabilities;
@@ -102,13 +119,20 @@ export interface Coordinator {
   readonly tracker: VisitTracker;
   readonly permissions: PermissionState;
   readonly activity: ActivityStore;
-  /** Constructed for Phase 2's ranking; not used in Phase 1. */
-  readonly resumeCache: ResumeCache<unknown>;
   readonly capabilities: CoordinatorCapabilities | undefined;
-  /** What agent.sock may see right now: the focused permitted visit and whether Scout is paused. A fresh copy. */
-  agentView(): AgentView;
+  /**
+   * What agent.sock may see right now: the focused permitted visit and whether Scout is paused,
+   * plus whether the visit's host is recommendation-enabled. A fresh copy.
+   */
+  agentView(): AgentView & { recommendationsEnabled: boolean };
   /** Send the current panel state again, even if it is the last one sent. */
   resendState(): void;
+  /** GitHub capture is allowed right now: not paused, capture on, GitHub granted. */
+  captureAllowed(): boolean;
+  /** Show job `jobId` working for `visitEpoch`, if that visit is current and shown. */
+  showWorking(visitEpoch: number, jobId: string): void;
+  /** Send `visitEpoch`'s idle state, if that visit is current and shown (a job ended). */
+  showIdle(visitEpoch: number): void;
 }
 
 const utf8 = new TextEncoder();
@@ -117,9 +141,10 @@ export function createCoordinator(options: CoordinatorOptions): Coordinator {
   const { clock, diagnostics } = options;
   const chromeBundleId = options.config.chromeBundleId ?? CHROME_BUNDLE_ID;
   const activity = options.activity ?? createActivityStore({ clock });
-  const resumeCache = createResumeCache<unknown>({ clock, diagnostics });
   const permissions = createPermissionState({ diagnostics });
   const caps = options.capabilities;
+  const jobs = options.jobs;
+  const destinations = new Set(options.config.destinations ?? []);
   const panelChanged = (): void => options.panel?.capabilitiesChanged();
   // Silent: every caller sends a state frame next (a new visit's idle, paused, disconnected),
   // or none at all (stop), so a `resendState` here would only add a stray frame (an idle for the
@@ -187,10 +212,16 @@ export function createCoordinator(options: CoordinatorOptions): Coordinator {
     },
     isPermitted: (origin) => permissions.isPermitted(origin),
     onIngested: panelChanged,
+    onCatalogReady: (visit, catalog) => jobs?.onSettled(visit, catalog, lastSettle?.epoch === visit.epoch ? lastSettle.at : clock.now()),
   });
+  /** The last dwell settle: a job's budget starts there, not when its (possibly queued) pass ran. */
+  let lastSettle: { epoch: number; at: number } | null = null;
 
   const dwell: DwellScheduler = createDwellScheduler({
-    onSettled: (visit) => discovery.settle(visit),
+    onSettled: (visit) => {
+      lastSettle = { epoch: visit.epoch, at: clock.now() };
+      discovery.settle(visit);
+    },
     diagnostics,
     ...(options.timers ? { timers: options.timers } : {}),
     ...(options.dwellMs !== undefined ? { dwellMs: options.dwellMs } : {}),
@@ -201,6 +232,7 @@ export function createCoordinator(options: CoordinatorOptions): Coordinator {
   const onVisitChange = (change: VisitChange): void => {
     if (change.previous === null && change.visit === null) return;
     clearResults("visit_changed");
+    jobs?.onVisitChanged();
     panelChanged();
     if (change.visit === null) dwell.cancel("visit_ended");
     else if (!paused && liveClient !== null) dwell.arm(change.visit);
@@ -255,6 +287,7 @@ export function createCoordinator(options: CoordinatorOptions): Coordinator {
       diagnostics.event("permission_lost", { origin: before.origin, epoch: before.epoch });
     }
     discovery.permissionsChanged();
+    jobs?.onPermissionsChanged();
     tracker.recompute();
     syncPolicy();
     panelChanged();
@@ -285,6 +318,7 @@ export function createCoordinator(options: CoordinatorOptions): Coordinator {
           duplicate: result.duplicate,
         });
         client.send({ type: "ack", seq: obs.seq });
+        if (result.accepted) jobs?.onActivityAccepted(result.revision);
         return;
       }
       case "permissions":
@@ -302,6 +336,7 @@ export function createCoordinator(options: CoordinatorOptions): Coordinator {
   /** The live connection is gone or replaced: cancel its work and forget its grants. */
   const dropConnectionState = (): void => {
     clearResults("disconnected");
+    jobs?.onSensorLost();
     dwell.cancel("disconnected");
     discovery.cancel("disconnected");
     permissions.clear();
@@ -321,11 +356,25 @@ export function createCoordinator(options: CoordinatorOptions): Coordinator {
     tracker,
     permissions,
     activity,
-    resumeCache,
     capabilities: caps,
     agentView() {
       const visit = tracker.current();
-      return { currentSite: visit === null ? null : { origin: visit.origin, url: visit.url, visitEpoch: visit.epoch }, paused };
+      return {
+        currentSite: visit === null ? null : { origin: visit.origin, url: visit.url, visitEpoch: visit.epoch },
+        paused,
+        recommendationsEnabled: visit !== null && destinations.has(new URL(visit.origin).host),
+      };
+    },
+    captureAllowed: captureEnabled,
+    showWorking(visitEpoch, jobId) {
+      const visit = tracker.current();
+      if (stopped || paused || liveClient === null || visit?.epoch !== visitEpoch) return;
+      emit({ type: "state", status: "working", visitEpoch, detail: new URL(visit.origin).hostname, jobId });
+    },
+    showIdle(visitEpoch) {
+      const visit = tracker.current();
+      if (stopped || paused || liveClient === null || visit?.epoch !== visitEpoch) return;
+      emit(idleState(visitEpoch, visit));
     },
     get stopped() {
       return stopped;
@@ -345,6 +394,7 @@ export function createCoordinator(options: CoordinatorOptions): Coordinator {
         case "pause":
           paused = true;
           clearResults("paused");
+          jobs?.onPause();
           dwell.cancel("paused");
           discovery.cancel("paused");
           diagnostics.event("paused", {});
@@ -401,6 +451,7 @@ export function createCoordinator(options: CoordinatorOptions): Coordinator {
       if (stopped) return;
       stopped = true;
       clearResults("stopped");
+      jobs?.stop();
       dwell.stop();
       discovery.cancel("stopped");
       diagnostics.event("coordinator_stopped", {});

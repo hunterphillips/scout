@@ -12,6 +12,10 @@
 // called with the permission state that check saw. A permission loss, pause, or navigation
 // while the store's own ingest is in flight is not caught: that ingest commits with
 // `chromePermitted: true`. The window is the store's write, and is accepted.
+//
+// The pass's catalog is handed on (`onCatalogReady`) so a recommendation job reuses it
+// instead of fetching again: at once when it came from the fresh cache (no request made),
+// otherwise when the whole pass has finished, and never for a cancelled or blocked pass.
 
 import type { ActiveVisit } from "@scout/contracts";
 import type { DiscoveryResult } from "./capabilities/discovery.js";
@@ -41,6 +45,8 @@ export interface DiscoveryRunnerOptions {
   isPermitted: (origin: string) => boolean;
   /** An ingest committed (and again when its export sync settles). */
   onIngested: () => void;
+  /** The pass's catalog, for a job on the same visit (see the header). */
+  onCatalogReady?: (visit: ActiveVisit, catalog: CatalogResolution) => void;
 }
 
 export interface DiscoveryRunner {
@@ -81,17 +87,38 @@ export function createDiscoveryRunner(options: DiscoveryRunnerOptions): Discover
     pendingSettle = null;
   };
 
+  /** Hand the catalog on if the pass is still live and its visit current. */
+  const catalogReady = (pass: RunningPass, catalog: CatalogResolution): void => {
+    if (options.onCatalogReady === undefined || pass.cancelled !== null || options.blocker(pass.visit) !== null) return;
+    try {
+      options.onCatalogReady(pass.visit, catalog);
+    } catch {
+      diagnostics.event("discovery_catalog_handler_failed", { epoch: pass.visit.epoch });
+    }
+  };
+
   const runPass = async (visit: ActiveVisit, c: DiscoveryCapabilities): Promise<void> => {
     const pass: RunningPass = { visit, cancelled: null, session: null };
     runningPass = pass;
     const { origin, epoch } = visit;
     const started = clock.now();
+    let catalog: CatalogResolution | null = null;
+    let catalogHandedOn = false;
     try {
       const session = c.createFetchSession(origin);
       pass.session = session;
       session.startWindow();
       diagnostics.event("discovery_start", { origin, epoch });
-      const [catalogOutcome, discovery] = await Promise.allSettled([c.resolveCatalog(origin, session), c.discover(origin, session)]);
+      const catalogPromise = c.resolveCatalog(origin, session).then((resolution) => {
+        catalog = resolution;
+        // A fresh cached catalog made no request: a job need not wait for discovery.
+        if (resolution.result.ok && resolution.result.source === "fresh") {
+          catalogHandedOn = true;
+          catalogReady(pass, resolution);
+        }
+        return resolution;
+      });
+      const [catalogOutcome, discovery] = await Promise.allSettled([catalogPromise, c.discover(origin, session)]);
       if (catalogOutcome.status === "rejected") diagnostics.event("discovery_catalog_failed", { origin, epoch, code: errorCode(catalogOutcome.reason) });
       if (discovery.status === "rejected") {
         diagnostics.event("discovery_failed", { origin, epoch, code: errorCode(discovery.reason) });
@@ -118,6 +145,8 @@ export function createDiscoveryRunner(options: DiscoveryRunnerOptions): Discover
       diagnostics.event("discovery_failed", { origin, epoch, code: errorCode(e) });
     } finally {
       runningPass = null;
+      const resolved = catalog as CatalogResolution | null;
+      if (resolved !== null && !catalogHandedOn) catalogReady(pass, resolved);
       const next = pendingSettle;
       pendingSettle = null;
       if (next !== null) settle(next);
