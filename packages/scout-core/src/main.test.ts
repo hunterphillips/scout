@@ -580,6 +580,22 @@ describe("runStdio (in process)", () => {
     await until(() => h.exits.length > 0);
   });
 
+  it("without configured destinations no origin is recommendation-enabled: a settled visit never begins a job", async () => {
+    const h = harness();
+    await h.run();
+    const { scheduler } = h.jobs;
+    expect(scheduler.isEnabled("https://docs.stripe.com")).toBe(false);
+    expect(scheduler.isEnabled("https://www.peakdesign.com")).toBe(false);
+    const visit = { epoch: 7, origin: "https://docs.stripe.com" } as never;
+    const catalog = { result: { ok: true, catalog: { candidates: [{ id: "c1", url: "https://docs.stripe.com/a", label: "A" }], version: "cat" } } } as never;
+    scheduler.onSettled(visit, catalog, Date.now());
+    expect(scheduler.running).toBeNull();
+    expect(h.fields.filter((f) => f.name === "job_skipped").map((f) => f.fields)).toEqual([{ epoch: 7, reason: "not_enabled" }]);
+    expect(h.events).not.toContain("job_started");
+    h.stdin.end();
+    await until(() => h.exits.length > 0);
+  });
+
   it("a stdout error (EPIPE) shuts down with 0 after removing the socket", async () => {
     const h = harness();
     await h.run();
@@ -618,6 +634,10 @@ describe("readDestinations", () => {
     home = mkdtempSync(join(tmpdir(), "scd-"));
   });
   afterEach(() => rmSync(home, { recursive: true, force: true }));
+
+  it("the default is empty: recommendations start off for every origin", () => {
+    expect(DEFAULT_DESTINATIONS).toEqual([]);
+  });
 
   it("defaults when config.json or its destinations field is missing", () => {
     expect(readDestinations(home)).toBe(DEFAULT_DESTINATIONS);

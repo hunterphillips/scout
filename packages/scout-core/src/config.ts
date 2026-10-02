@@ -8,7 +8,10 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { CHROME_BUNDLE_ID } from "./visitTracker.js";
 
-export const DEFAULT_DESTINATIONS: readonly string[] = ["docs.stripe.com", "www.peakdesign.com"];
+// Recommendations start off for every origin: a destination spends the user's agent quota on
+// every settled visit there, so each one is the user's choice. `docs.stripe.com` and
+// `www.peakdesign.com` are the acceptance examples a user adds to `destinations`.
+export const DEFAULT_DESTINATIONS: readonly string[] = [];
 
 const BUNDLE_ID_PATTERN = /^[A-Za-z0-9.-]+$/;
 
