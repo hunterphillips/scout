@@ -29,7 +29,7 @@ progress" section is the new phase log. **Pivot Phase 1 (prove the agent connect
 passed its gate the same day**; Phase 2 (website capabilities) is in progress: P2.2, P2.3,
 Phase 2's seven tasks are built, reviewed, merged, and live-checked against real
 sites from throwaway locations (evidence in
-`../thoughts/shared/research/2026-10-01-scout-phase2-live-check/`); the gate review is
+`../thoughts/shared/research/2026-10-01-scout-phase2-live-check/`); the gate
 passed on 2026-10-01 (the Swift window's live checklist moved to P4.1). Phase 3
 (background recommendations) is in progress: P3.1 and P3.3 merged, P3.2 building. The old
 build above is still intact and still not wired into the app; the legacy
