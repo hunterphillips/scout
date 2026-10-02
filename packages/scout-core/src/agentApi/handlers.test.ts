@@ -19,6 +19,8 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { DiscoveryResult } from "../capabilities/discovery.js";
 import { type CapabilityStore, createCapabilityStore } from "../capabilities/store.js";
 import { CATALOG_CACHE_SCHEMA_VERSION, createCatalogCache } from "../catalog/cache.js";
+import { type ActivityStore, createActivityStore } from "../activity/store.js";
+import { createSnapshotRegistry, type SnapshotRegistry, type TakeSnapshotInput } from "../activity/snapshots.js";
 import { cacheFileName } from "../privateCacheFile.js";
 import { type AgentAuth, createAgentAuth } from "./auth.js";
 import { type AgentConnection, type AgentHandlers, type AgentView, createAgentHandlers, MAX_CURSORS } from "./handlers.js";
@@ -38,6 +40,8 @@ let granted: boolean;
 let auth: AgentAuth;
 let audit: ReadAudit;
 let handlers: AgentHandlers;
+let activity: ActivityStore;
+let snapshots: SnapshotRegistry;
 let seq = 0;
 let connSeq = 0;
 
@@ -135,6 +139,32 @@ function readAll(conn: AgentConnection, resourceId: string, version?: string) {
   return chunks;
 }
 
+let jobSeq = 0;
+/** A job snapshot over the store's current approvals, with its token. */
+function takeJob(overrides: Partial<TakeSnapshotInput> = {}) {
+  return snapshots.take({
+    jobId: `job-${++jobSeq}`,
+    origin: SITE,
+    visitEpoch: 7,
+    activity: [],
+    candidates: [],
+    catalogHash: "cat-hash",
+    permissionsRevision: 1,
+    profileFingerprint: "fp",
+    deadline: now + 30_000,
+    ...overrides,
+  });
+}
+
+let pageSeq = 0;
+/** Accept one GitHub issue observation into the live activity store. */
+function observe(n: number, text = `Body ${n}`) {
+  return activity.accept(
+    { kind: "page_text", seq: ++pageSeq, at: now, tabId: 1, documentId: "d", url: `https://github.com/o/r/issues/${n}`, source: "github_issue", title: `Issue ${n}`, text, truncated: false, policyRevision: 0 },
+    "conn",
+  );
+}
+
 beforeEach(async () => {
   home = mkdtempSync(join(tmpdir(), "scout-agent-"));
   now = 1_800_000_000_000;
@@ -142,8 +172,10 @@ beforeEach(async () => {
   store = await createCapabilityStore({ scoutHome: home, clock, onRevoked: (id) => handlers.dropResource(id) });
   view = { currentSite: { origin: SITE, url: `${SITE}/billing`, visitEpoch: 7 }, paused: false };
   granted = true;
-  auth = createAgentAuth({ interactiveToken: TOKEN });
+  auth = createAgentAuth({ interactiveToken: TOKEN, clock });
   audit = createReadAudit();
+  activity = createActivityStore({ clock });
+  snapshots = createSnapshotRegistry({ store, auth, clock });
   handlers = createAgentHandlers({
     coreInstanceId: "core-test",
     auth,
@@ -153,6 +185,8 @@ beforeEach(async () => {
     browserContextGranted: () => granted,
     audit,
     clock,
+    activity,
+    getSnapshot: (jobId) => snapshots.getForJob(jobId),
   });
 });
 afterEach(async () => {
@@ -305,7 +339,7 @@ describe("read_resource", () => {
   it("refuses a job-token cursor on the interactive connection and the reverse", async () => {
     const r = await ingest("llms_txt", "/llms.txt", LONG_TEXT);
     await approve(r.id, r.version);
-    const job = connect(auth.issueJobToken({ jobId: "job-1", resourceIds: [r.id] }));
+    const job = connect(takeJob().token);
     expect(job.principal?.role).toBe("job");
     const interactive = connect();
     const jobCursor = ok(job, "read_resource", { resourceId: r.id }).nextCursor!;
@@ -533,14 +567,14 @@ describe("browser context", () => {
     for (const m of ["current_site", "recent_activity", "site_links"] as const) expect(code(conn, m, {})).toBe("paused");
   });
 
-  it("serves the current site without a title, recent_activity as unavailable, and nothing to a job", () => {
+  it("serves the current site without a title, and nothing live to a job", () => {
     const conn = connect();
     expect(ok(conn, "current_site", {})).toEqual({ site: { origin: SITE, url: `${SITE}/billing`, visitEpoch: 7 } });
-    expect(code(conn, "recent_activity", {})).toBe("unavailable");
     view = { ...view, currentSite: null };
     expect(ok(conn, "current_site", {})).toEqual({ site: null });
-    const job = connect(auth.issueJobToken({ jobId: "job-1", resourceIds: [] }));
-    expect(code(job, "current_site", {})).toBe("not_granted");
+    // A job token without a snapshot (issued outside the registry) reads nothing.
+    const job = connect(auth.issueJobToken({ jobId: "job-x", resourceIds: [], expiresAt: Infinity }));
+    for (const m of ["current_site", "recent_activity", "site_links", "list_resources"] as const) expect(code(job, m, {})).toBe("expired_snapshot");
   });
 
   it("turning the grant off reaches an open connection on its next call", () => {
@@ -597,5 +631,126 @@ describe("site_links", () => {
     expect(first.links.length).toBeGreaterThan(0);
     expect(first.links.length).toBeLessThan(50);
     expect(first.nextCursor).toBeDefined();
+  });
+});
+
+describe("recent_activity (interactive)", () => {
+  it("answers not_granted before paused, then serves the live store newest first", () => {
+    observe(1);
+    now += 1;
+    observe(2);
+    const conn = connect();
+    granted = false;
+    view = { ...view, paused: true };
+    expect(code(conn, "recent_activity", {})).toBe("not_granted");
+    granted = true;
+    expect(code(conn, "recent_activity", {})).toBe("paused");
+    view = { ...view, paused: false };
+    expect(ok(conn, "recent_activity", {})).toEqual({
+      entries: [
+        { origin: "https://github.com", url: "https://github.com/o/r/issues/2", observedAt: now, title: "Issue 2", text: "Body 2", textTruncated: false },
+        { origin: "https://github.com", url: "https://github.com/o/r/issues/1", observedAt: now - 1, title: "Issue 1", text: "Body 1", textTruncated: false },
+      ],
+    });
+  });
+
+  it("pages within one store revision and expires the cursor when the store changes", () => {
+    for (let i = 1; i <= 5; i++) observe(i);
+    const conn = connect();
+    const first = ok(conn, "recent_activity", { limit: 2 });
+    expect(first.entries.map((e) => e.title)).toEqual(["Issue 5", "Issue 4"]);
+    const second = ok(conn, "recent_activity", { limit: 2, cursor: first.nextCursor! });
+    expect(second.entries.map((e) => e.title)).toEqual(["Issue 3", "Issue 2"]);
+    observe(6);
+    expect(code(conn, "recent_activity", { cursor: second.nextCursor! })).toBe("expired_snapshot");
+  });
+
+  it("shrinks a page of large entries to fit the 64 KiB response cap", () => {
+    // Control characters escape to six bytes each in JSON: about 48 KiB per entry.
+    for (let i = 1; i <= 3; i++) observe(i, "\u0001".repeat(8 * 1024 - 8) + `#${i}`);
+    const conn = connect();
+    const first = ok(conn, "recent_activity", {});
+    expect(first.entries).toHaveLength(1);
+    expect(first.nextCursor).toBeDefined();
+  });
+
+  it("is audited with method and outcome only", () => {
+    observe(1);
+    const conn = connect();
+    ok(conn, "recent_activity", {});
+    expect(audit.entries()).toEqual([{ at: now, role: "interactive", method: "recent_activity", outcome: "ok" }]);
+  });
+});
+
+describe("job snapshots", () => {
+  it("recent_activity pages the snapshot, unaffected by new live activity or a lost grant", () => {
+    for (let i = 1; i <= 3; i++) observe(i);
+    const { token } = takeJob({ activity: activity.entries() });
+    const job = connect(token);
+    const first = ok(job, "recent_activity", { limit: 2 });
+    expect(first.entries.map((e) => e.title)).toEqual(["Issue 3", "Issue 2"]);
+    observe(4);
+    activity.clear();
+    granted = false;
+    const second = ok(job, "recent_activity", { cursor: first.nextCursor! });
+    expect(second.entries.map((e) => e.title)).toEqual(["Issue 1"]);
+    expect(ok(job, "recent_activity", {}).entries).toHaveLength(3);
+  });
+
+  it("list_resources and read_resource see only the snapshot's versions, not a newer approval", async () => {
+    const v1 = await ingest("llms_txt", "/llms.txt", "guide v1\n");
+    await approve(v1.id, v1.version);
+    const { token } = takeJob();
+    const job = connect(token);
+    const v2 = await ingest("llms_txt", "/llms.txt", "guide v2\n");
+    await approve(v1.id, v2.version);
+    const other = await ingest("agents_md", "/AGENTS.md", "agents\n");
+    await approve(other.id, other.version);
+
+    expect(ok(job, "list_resources", {}).resources.map((r) => [r.resourceId, r.version])).toEqual([[v1.id, v1.version]]);
+    expect(ok(job, "list_resources", { origin: "https://elsewhere.example.org" }).resources).toEqual([]);
+    expect(ok(job, "read_resource", { resourceId: v1.id })).toMatchObject({ version: v1.version, text: "guide v1\n", approval: "superseded" });
+    expect(code(job, "read_resource", { resourceId: v1.id, version: v2.version })).toBe("not_found");
+    expect(code(job, "read_resource", { resourceId: other.id })).toBe("not_found");
+    // The interactive connection sees the live store.
+    expect(ok(connect(), "read_resource", { resourceId: v1.id })).toMatchObject({ version: v2.version });
+  });
+
+  it("site_links serves the snapshot's candidates with the catalog hash as version; current_site the job's origin and visit", () => {
+    seedCatalog("live-cat", [{ title: "Live" }]);
+    const candidates = Array.from({ length: 25 }, (_, i) => ({ id: `c${i.toString(36)}`, title: `Pick ${i}`, labelQuality: "published" as const, href: `${SITE}/p${i}` }));
+    const { token } = takeJob({ candidates, visitEpoch: 5 });
+    const job = connect(token);
+    granted = false;
+    view = { ...view, currentSite: { origin: "https://other.example.org", url: "https://other.example.org/x", visitEpoch: 9 } };
+    const first = ok(job, "site_links", {});
+    expect(first).toMatchObject({ origin: SITE, catalogVersion: "cat-hash", total: 25 });
+    expect(first.links[0]).toEqual({ id: "c0", href: `${SITE}/p0`, title: "Pick 0" });
+    expect(ok(job, "site_links", { cursor: first.nextCursor! }).links).toHaveLength(5);
+    expect(ok(job, "current_site", {})).toEqual({ site: { origin: SITE, url: SITE, visitEpoch: 5 } });
+  });
+
+  it("release refuses the already-connected job's next read; a replacement job reads its own snapshot", () => {
+    observe(1);
+    const first = takeJob({ activity: activity.entries() });
+    const job = connect(first.token);
+    expect(code(job, "recent_activity", {})).toBe("ok");
+    observe(2);
+    const second = takeJob({ activity: activity.entries() });
+    // The old job is still readable until released.
+    expect(ok(job, "recent_activity", {}).entries).toHaveLength(1);
+    snapshots.release(first.snapshot.id, "cancelled");
+    for (const m of ["recent_activity", "site_links", "current_site", "list_resources"] as const) expect(code(job, m, {})).toBe("not_granted");
+    expect(ok(connect(second.token), "recent_activity", {}).entries).toHaveLength(2);
+  });
+
+  it("a job token is refused past its deadline, and after releaseAll", () => {
+    const a = connect(takeJob({ deadline: now + 1_000 }).token);
+    const b = connect(takeJob({ deadline: now + 60_000 }).token);
+    now += 1_000;
+    expect(code(a, "recent_activity", {})).toBe("not_granted");
+    expect(code(b, "recent_activity", {})).toBe("ok");
+    snapshots.releaseAll("paused");
+    expect(code(b, "recent_activity", {})).toBe("not_granted");
   });
 });

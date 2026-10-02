@@ -15,8 +15,8 @@ describe("agent auth", () => {
 
   it("an issued job token authenticates as a job until revoked, directly or through a pinned resource", () => {
     const auth = createAgentAuth({ interactiveToken: "secret-a" });
-    const t1 = auth.issueJobToken({ jobId: "j1", resourceIds: ["res_a"] });
-    const t2 = auth.issueJobToken({ jobId: "j2", resourceIds: ["res_b"] });
+    const t1 = auth.issueJobToken({ jobId: "j1", resourceIds: ["res_a"], expiresAt: Infinity });
+    const t2 = auth.issueJobToken({ jobId: "j2", resourceIds: ["res_b"], expiresAt: Infinity });
     const p1 = auth.verify(t1)!;
     const p2 = auth.verify(t2)!;
     expect(p1.role).toBe("job");
@@ -29,6 +29,32 @@ describe("agent auth", () => {
     expect(auth.isCurrent(p2)).toBe(true);
     auth.revokeJobToken("j2");
     expect(auth.isCurrent(p2)).toBe(false);
+  });
+
+  it("a job token is 32 random bytes, carries its grant's job, origin and visit, and expires at its deadline", () => {
+    const clock = { t: 1_000, now: () => clock.t };
+    const auth = createAgentAuth({ interactiveToken: "secret-a", clock });
+    const token = auth.issueJobToken({ jobId: "j1", resourceIds: [], expiresAt: 2_000, origin: "https://docs.example.com", visitEpoch: 4 });
+    expect(token).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    const p = auth.verify(token)!;
+    expect(p).toMatchObject({ role: "job", jobId: "j1", origin: "https://docs.example.com", visitEpoch: 4 });
+    clock.t = 1_999;
+    expect(auth.isCurrent(p)).toBe(true);
+    clock.t = 2_000;
+    expect(auth.isCurrent(p)).toBe(false);
+    expect(auth.verify(token)).toBeNull();
+  });
+
+  it("refuses a second live token for one job, and revokeAllJobTokens ends every job token but not the interactive one", () => {
+    const auth = createAgentAuth({ interactiveToken: "secret-a" });
+    const t1 = auth.issueJobToken({ jobId: "j1", resourceIds: [], expiresAt: Infinity });
+    expect(() => auth.issueJobToken({ jobId: "j1", resourceIds: [], expiresAt: Infinity })).toThrow();
+    const t2 = auth.issueJobToken({ jobId: "j2", resourceIds: [], expiresAt: Infinity });
+    const p1 = auth.verify(t1)!;
+    auth.revokeAllJobTokens();
+    expect(auth.isCurrent(p1)).toBe(false);
+    expect(auth.verify(t2)).toBeNull();
+    expect(auth.isCurrent(auth.verify("secret-a")!)).toBe(true);
   });
 });
 

@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { chmodSync, existsSync, lstatSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { connect, createServer, type Server, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -7,6 +7,8 @@ import { AGENT_CURSOR_TTL_MS, AGENT_PROTOCOL_VERSION, AGENT_REQUEST_MAX_BYTES, A
 import { encodeFrame, FrameDecoder, frameHeader, MAX_FRAME_FROM_CHROME } from "@scout/contracts/frame";
 import { BackendError, createSocketBackend } from "@scout/scout-mcp/client";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { createActivityStore } from "./activity/store.js";
+import { createSnapshotRegistry } from "./activity/snapshots.js";
 import { createAgentAuth, type InteractiveTokenFile, writeInteractiveTokenFile } from "./agentApi/auth.js";
 import { createAgentHandlers } from "./agentApi/handlers.js";
 import { createReadAudit } from "./agentApi/readAudit.js";
@@ -329,6 +331,65 @@ describe("the production adapter client against the agent socket", () => {
       const b = await backend.call(list() as never);
       expect(b).toMatchObject({ status: "ok", coreInstanceId: "core-b" });
       expect(second.server.openConnections).toBe(1);
+    } finally {
+      backend.close();
+    }
+  });
+});
+
+describe("job snapshots through the socket", () => {
+  it("a job's adapter reads its snapshot, not live activity, and is refused on its next call once the snapshot is released", async () => {
+    const token = writeInteractiveTokenFile(runDir);
+    const auth = createAgentAuth({ interactiveToken: token.token, clock });
+    const audit = createReadAudit();
+    const activity = createActivityStore({ clock });
+    const registry = createSnapshotRegistry({ store, auth, clock });
+    const handlers = createAgentHandlers({
+      coreInstanceId: "core-a",
+      auth,
+      store,
+      view: () => ({ currentSite: null, paused: false }),
+      catalog: createCatalogCache({ clock, dir: join(root, "cache", "catalog") }),
+      browserContextGranted: () => true,
+      audit,
+      clock,
+      activity,
+      getSnapshot: (jobId) => registry.getForJob(jobId),
+    });
+    const server = createAgentSocketServer({ runDir, handlers, auth, audit, diagnostics });
+    await server.start();
+    running.push({ server, token });
+
+    const issue = (n: number) =>
+      activity.accept(
+        { kind: "page_text", seq: n, at: 0, tabId: 1, documentId: "d", url: `https://github.com/o/r/issues/${n}`, source: "github_issue", title: `Issue ${n}`, text: "body", truncated: false, policyRevision: 0 },
+        "conn",
+      );
+    issue(1);
+    const job = registry.take({
+      jobId: "job-1",
+      origin: "https://docs.example.com",
+      visitEpoch: 2,
+      activity: activity.entries(),
+      candidates: [],
+      catalogHash: "cat",
+      permissionsRevision: 1,
+      profileFingerprint: "fp",
+      deadline: Date.now() + 30_000,
+    });
+    const jobTokenFile = join(root, "job-token");
+    writeFileSync(jobTokenFile, `${job.token}\n`, { mode: 0o600 });
+    const backend = createSocketBackend({ socketPath: server.socketPath, tokenFile: jobTokenFile, timeoutMs: 2_000 });
+    const recent = () => ({ protocol: AGENT_PROTOCOL_VERSION, requestId: `a${++seq}`, method: "recent_activity", params: {} });
+    try {
+      const first = await backend.call(recent() as never);
+      expect(first).toMatchObject({ status: "ok", result: { entries: [{ title: "Issue 1" }] } });
+      issue(2);
+      expect(await backend.call(recent() as never)).toMatchObject({ status: "ok", result: { entries: [{ title: "Issue 1" }] } });
+      expect(server.openConnections).toBe(1);
+
+      registry.release(job.snapshot.id, "cancelled");
+      expect(await backend.call(recent() as never)).toMatchObject({ status: "error", error: { code: "not_granted" } });
     } finally {
       backend.close();
     }

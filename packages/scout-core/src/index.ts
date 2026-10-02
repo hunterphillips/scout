@@ -35,6 +35,17 @@ export {
   type StoredActivity,
 } from "./activity/store.js";
 export {
+  createSnapshotRegistry,
+  snapshotCandidates,
+  type JobSnapshot,
+  type SnapshotCandidate,
+  type SnapshotRegistry,
+  type SnapshotRegistryOptions,
+  type SnapshotReleaseReason,
+  type SnapshotVersion,
+  type TakeSnapshotInput,
+} from "./activity/snapshots.js";
+export {
   createRankClient,
   SCOUT_SENSOR,
   type RankClient,

@@ -17,6 +17,11 @@
 // revocation hook to the agent socket. Skill wrappers are exported only when the
 // installer's record (installed.json) names a skills root.
 //
+// Accepted GitHub issue text lives in the in-memory activity store; each background job reads
+// only its own immutable snapshot (activity/snapshots.ts), built once the agent auth exists.
+// Pause and shutdown release every snapshot and revoke every job token (shutdown does it
+// before closing agent.sock); expired snapshots are released before each collection.
+//
 // Scout's window gets its capability view, previews, command acks, the context-read audit,
 // and the browser-context grant from the panel channel (panelChannel.ts), which starts right
 // after the coordinator and stops right after it, before the sockets and the store close.
@@ -33,6 +38,8 @@ import { createInterface } from "node:readline";
 import type { Readable, Writable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { NATIVE_COMMAND_MAX_BYTES, NativeCommandSchema, type PanelState } from "@scout/contracts";
+import { createActivityStore } from "./activity/store.js";
+import { createSnapshotRegistry, type SnapshotRegistry } from "./activity/snapshots.js";
 import { createAgentAuth, type InteractiveTokenFile, writeInteractiveTokenFile } from "./agentApi/auth.js";
 import { readBrowserContextGrant, writeBrowserContextGrant } from "./agentApi/grants.js";
 import { createAgentHandlers } from "./agentApi/handlers.js";
@@ -112,6 +119,8 @@ export async function runStdio(deps: StdioDeps): Promise<StdioCore> {
 
   // The agent socket is built once the token exists; the store's revocation hook reaches it then.
   let agentServer: AgentSocketServer | null = null;
+  // Built with the agent auth; job snapshots exist only once agent.sock can serve them.
+  let snapshots: SnapshotRegistry | null = null;
   let store: CapabilityStore;
   try {
     store = await createCapabilityStore({
@@ -132,8 +141,9 @@ export async function runStdio(deps: StdioDeps): Promise<StdioCore> {
   // Built below, after the store; GC runs before then only at start, with nothing to sweep.
   let panel: PanelChannel | null = null;
   const collectGarbage = (): void => {
-    // Expired read cursors would otherwise keep their pins until the next agent call.
+    // Expired read cursors and job snapshots would otherwise keep their pins.
     agentServer?.sweepExpired();
+    snapshots?.sweepExpired();
     panel?.sweepExpired();
     void store.collectGarbage().catch(() => diagnostics.event("capability_gc_failed", {}));
   };
@@ -180,6 +190,7 @@ export async function runStdio(deps: StdioDeps): Promise<StdioCore> {
   // caches under SCOUT_HOME; the coordinator owns each pass's fetch session and window.
   const catalogResolver = createCatalogResolver({ scoutHome: home, clock, diagnostics });
   const discoverer = createSiteResourceDiscoverer({ scoutHome: home, clock, diagnostics });
+  const activity = createActivityStore({ clock });
   const coordinator: Coordinator = createCoordinator({
     config,
     clock,
@@ -187,6 +198,8 @@ export async function runStdio(deps: StdioDeps): Promise<StdioCore> {
     emitPanel,
     dwellMs: dwellMsFromEnv(deps.env),
     onShutdownRequested: () => void shutdown("shutdown-command"),
+    activity,
+    onPause: () => snapshots?.releaseAll("paused"),
     capabilities: {
       store,
       createFetchSession: (origin) => createOriginFetchSession({ origin, clock }),
@@ -211,6 +224,8 @@ export async function runStdio(deps: StdioDeps): Promise<StdioCore> {
   const closeAll = (): Promise<void> =>
     (closing ??= (async () => {
       clearInterval(gcTimer);
+      // No job reads past shutdown, even on a connection agent.sock has not closed yet.
+      snapshots?.releaseAll("shutdown");
       await Promise.all([server.close(), agentServer?.close()]);
       await store.close();
       tokenFile?.remove();
@@ -280,7 +295,9 @@ export async function runStdio(deps: StdioDeps): Promise<StdioCore> {
     } catch {
       throw new StartError("agent-token-write-failed");
     }
-    const auth = createAgentAuth({ interactiveToken: tokenFile.token });
+    const auth = createAgentAuth({ interactiveToken: tokenFile.token, clock });
+    const registry = createSnapshotRegistry({ store, auth, clock, diagnostics });
+    snapshots = registry;
     const handlers = createAgentHandlers({
       coreInstanceId,
       auth,
@@ -290,6 +307,8 @@ export async function runStdio(deps: StdioDeps): Promise<StdioCore> {
       browserContextGranted: () => readBrowserContextGrant(home),
       audit,
       clock,
+      activity,
+      getSnapshot: (jobId) => registry.getForJob(jobId),
     });
     agentServer = createAgentSocketServer({ runDir, handlers, auth, audit, diagnostics });
     try {

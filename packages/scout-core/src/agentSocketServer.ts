@@ -41,9 +41,12 @@ export interface AgentSocketServer {
   start(): Promise<void>;
   /** Closes every connection (dropping cursors and releasing pins) and the listener, and removes the socket. */
   close(): Promise<void>;
-  /** A token for one background job; it authenticates as role `job` until revoked. */
+  /** A token for one background job; it authenticates as role `job` until revoked or past `grant.expiresAt`. */
   issueJobToken(grant: JobTokenGrant): string;
+  /** Invalidate one job's token; its open connections are refused on their next call. */
   revokeJobToken(jobId: string): void;
+  /** Invalidate every job token (pause, shutdown). */
+  revokeAllJobTokens(): void;
   /** For the store's `onRevoked`: drop the resource's cursors and the job tokens that pinned it. Synchronous. */
   resourceRevoked(resourceId: string): void;
   /** Drop expired cursors and release their read pins; main runs it before each capability GC. */
@@ -167,6 +170,7 @@ export function createAgentSocketServer(options: AgentSocketServerOptions): Agen
     },
     issueJobToken: (grant) => auth.issueJobToken(grant),
     revokeJobToken: (jobId) => auth.revokeJobToken(jobId),
+    revokeAllJobTokens: () => auth.revokeAllJobTokens(),
     resourceRevoked(resourceId) {
       handlers.dropResource(resourceId);
       auth.revokeJobTokensPinning(resourceId);
