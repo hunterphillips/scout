@@ -347,7 +347,7 @@ describe("protocol-3 window commands and panel frames", () => {
     h.stdin.write(encodeFrame(openLink));
     await settle();
     expect(h.last().frames().slice(1)).toEqual([pause, openLink]);
-    expect(h.host.drops().fromChrome).toMatchObject({ forwarded: 2, commands: 2, invalid: 1 });
+    expect(h.host.drops().fromChrome).toMatchObject({ forwarded: 2, commandsHandedOff: 2, invalid: 1 });
   });
 
   it("refuses frontmost and shutdown from the extension and counts them, never forwarding", async () => {
@@ -359,7 +359,7 @@ describe("protocol-3 window commands and panel frames", () => {
     h.stdin.write(encodeFrame({ type: "command", command: { type: "teleport" } }));
     await settle();
     expect(h.last().frames()).toEqual([HELLO]);
-    expect(h.host.drops().fromChrome).toMatchObject({ forwarded: 0, commands: 0, refusedCommand: 3, invalid: 1 });
+    expect(h.host.drops().fromChrome).toMatchObject({ forwarded: 0, commandsHandedOff: 0, refusedCommand: 3, invalid: 1 });
   });
 
   it("forwards the largest valid command: every relay command fits NATIVE_COMMAND_MAX_BYTES (the size check is a guard)", async () => {
@@ -449,7 +449,7 @@ describe("protocol-3 window commands and panel frames", () => {
   });
 });
 
-describe("protocol-2 handshake", () => {
+describe("protocol-3 handshake", () => {
   const pageText = {
     kind: "page_text", seq: 3, at: 1002, tabId: 3, documentId: "doc-a", url: "https://github.com/o/r/issues/1",
     source: "github_issue", title: "Issue", text: "body", truncated: false,
@@ -694,7 +694,7 @@ describe("shutdown", () => {
 });
 
 /**
- * A fake core on a real Unix socket. It reads hello the way the protocol-2 core does: any
+ * A fake core on a real Unix socket. It reads hello the way the protocol-3 core does: any
  * hello parses, a mismatched protocol gets upgrade_required and a close, a matching one the
  * initial capture-disabled policy. `protocol: 1` with `oldCore` models a protocol-1 core,
  * which closes on a hello it does not know without sending anything.
@@ -785,7 +785,7 @@ describe("mixed bridge versions fail closed", () => {
     return { path, core };
   };
 
-  it("a protocol-1 relay's hello gets upgrade_required from a protocol-2 core, then a close", async () => {
+  it("a protocol-1 relay's hello gets upgrade_required from a protocol-3 core, then a close", async () => {
     const { path } = await start({});
     const got: unknown[] = [];
     const client = netConnect({ path });

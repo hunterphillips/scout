@@ -190,8 +190,14 @@ describe.skipIf(!BUILT)("bridge protocol 3: Scout's window over the relay", () =
     await until(() => fromCore.some((f) => f.type === "panel" && f.state.type === "ack"), "the not_permitted ack");
     expect(fromCore.find((f) => f.type === "panel" && f.state.type === "ack").state).toEqual({ type: "ack", commandId: "direct-1", ok: false, code: "not_permitted" });
     expect(coreOut).not.toContain("direct-1");
-    // The replaced host connection hears nothing more.
+    // The replaced host connection gets no window frames; a command it sends with a commandId is
+    // answered `unavailable` on it alone (the core no longer takes its commands).
     expect(panel().length).toBe(panelBefore);
+    command({ type: "refresh_capabilities", commandId: "side-stale-1" });
+    await until(() => panel().some((f) => f.type === "ack" && f.commandId === "side-stale-1"), "the unavailable ack on the replaced connection");
+    expect(panel().slice(panelBefore)).toEqual([{ type: "ack", commandId: "side-stale-1", ok: false, code: "unavailable" }]);
+    expect(fromCore.some((f) => f.type === "panel" && f.state.commandId === "side-stale-1")).toBe(false);
+    expect(coreOut).not.toContain("side-stale-1");
 
     // 7. The app quits: both exit 0; the host counted the frontmost it refused.
     direct.destroy();
@@ -201,7 +207,7 @@ describe.skipIf(!BUILT)("bridge protocol 3: Scout's window over the relay", () =
     expect(await hostExit).toBe(0);
     const exitLine = hostErr.split("\n").find((l) => l.includes("scout-native-host: exit"));
     const drops = JSON.parse(exitLine.slice(exitLine.indexOf("{")));
-    expect(drops.fromChrome).toMatchObject({ refusedCommand: 1, commands: 3, commandBeforeReady: 0 });
+    expect(drops.fromChrome).toMatchObject({ refusedCommand: 1, commandsHandedOff: 4, commandBeforeReady: 0 });
     // No href, page title or candidate title in any log.
     for (const secret of ["Billing", "Docs billing", `${SITE}/docs`]) {
       expect(coreErr.includes(secret), `core stderr contains ${secret}`).toBe(false);

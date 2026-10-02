@@ -29,7 +29,11 @@ import { createCoordinator } from "./coordinator.js";
 import type { DiagnosticFields, Diagnostics } from "./diagnostics.js";
 import type { GuardedFetchOptions, GuardedFetchResult } from "./fetch/guardedFetch.js";
 import { createOriginFetchSession, type OriginFetchSession } from "./fetch/originSession.js";
+import type { PanelSink } from "./panelSinks.js";
 import type { SocketClient } from "./socketServer.js";
+
+/** The native app's stdio sink: the sender of every command these tests hand in. */
+const STDIO: PanelSink = { id: "stdio", kind: "stdio", send: () => {} };
 
 const ORIGIN = "https://docs.example.com";
 const BOUND_MS = 100;
@@ -88,6 +92,7 @@ function sensor() {
     send: (f) => void sent.push(f),
     onFrame: (h) => void handlers.push(h),
     onClose: () => {},
+    onDrained: () => {},
     close: () => {},
   };
   return { client, observe: (observation: BrowserObservation) => handlers.forEach((h) => h({ type: "observation", observation })) };
@@ -153,7 +158,7 @@ function coreUnderLoad() {
   const s = sensor();
   coordinator.attachClient(s.client);
   s.observe({ kind: "permissions", revision: 1, at: Date.now(), granted: [`${ORIGIN}/*`], githubCapture: false });
-  coordinator.handleNativeCommand({ type: "frontmost", bundleId: "com.google.Chrome", at: Date.now() });
+  coordinator.handleNativeCommand({ type: "frontmost", bundleId: "com.google.Chrome", at: Date.now() }, STDIO);
   let seq = 0;
   const focus = (tabId: number, path: string) =>
     s.observe({ kind: "focus", seq: ++seq, at: Date.now(), browserFocused: true, windowId: 1, tabId, url: `${ORIGIN}${path}`, title: "Docs", incognito: false, permissionsRevision: 1 });
@@ -218,7 +223,7 @@ describe("coordinator responsiveness under a worst-case bounded catalog (Phase 3
     const pause = await new Promise<{ latency: number; handledAt: number; parsing: number }>((resolve, reject) => {
       c.hooks.onParse = (i) => {
         if (i !== base + 2) return;
-        deliver(1, () => c.coordinator.handleNativeCommand({ type: "pause" }), c.panel, (s) => s.type === "state" && s.status === "paused").then((r) => resolve({ ...r, parsing: i }), reject);
+        deliver(1, () => c.coordinator.handleNativeCommand({ type: "pause" }, STDIO), c.panel, (s) => s.type === "state" && s.status === "paused").then((r) => resolve({ ...r, parsing: i }), reject);
       };
     });
     expect(c.parses[pause.parsing]!.settledAt === undefined || c.parses[pause.parsing]!.settledAt! > pause.handledAt).toBe(true);

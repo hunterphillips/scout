@@ -193,6 +193,26 @@ describe("window frames and commands over the port (bridge protocol 3)", () => {
     ]);
   });
 
+  it("refuses a command while the core is reported unavailable, mid-reconnect, until ready again", async () => {
+    const { f, l } = await link();
+    const p = f._.ports[0]!;
+    p.onMessage.emit({ type: "core_unavailable", reason: "unreachable" });
+    expect(l.sendCommand(pause)).toBe(false);
+    p.onMessage.emit({ type: "ready" });
+    expect(l.sendCommand(pause)).toBe(true);
+    // The port drops; the next one is open but not yet ready.
+    p.disconnected = true;
+    p.onDisconnect.emit(p);
+    l.manualReconnect();
+    await flush();
+    const next = f._.ports.at(-1)!;
+    expect(next).not.toBe(p);
+    next.onMessage.emit({ type: "core_unavailable", reason: "unreachable" });
+    expect(l.sendCommand(pause)).toBe(false);
+    expect(p.posted.filter((m) => m["type"] === "command")).toHaveLength(1);
+    expect(next.posted.filter((m) => m["type"] === "command")).toHaveLength(0);
+  });
+
   it("refuses a command once the port is gone", async () => {
     const { f, l } = await link();
     expect(l.sendCommand(pause)).toBe(true);

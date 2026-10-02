@@ -10,11 +10,10 @@ import { afterEach, describe, expect, it } from "vitest";
 import type { JobRequest } from "@scout/contracts";
 import { systemClock } from "../clock.js";
 import { createDiagnostics } from "../diagnostics.js";
+import { AGENT_CWD_DIR, ensureAgentCwd } from "../localSocketFiles.js";
 import {
-  AGENT_CWD_DIR,
   buildJobArgv,
   createClaudeJobAdapter,
-  ensureAgentCwd,
   JobRequestError,
   MIN_LAUNCH_MS,
   VERIFIED_CLI_VERSION,
@@ -1168,6 +1167,14 @@ describe("the stable agent cwd", () => {
       chmodSync(dir, 0o755);
       expect(ensureAgentCwd(home)).toBe(dir);
       expect(lstatSync(dir).mode & 0o777).toBe(0o700);
+      // A run dir that is a link is refused before anything is created under it.
+      const elsewhere = mkdtempSync(join(tmpdir(), "scout-cwd-x-"));
+      const other = mkdtempSync(join(tmpdir(), "scout-cwd-y-"));
+      symlinkSync(elsewhere, join(other, "run"));
+      expect(() => ensureAgentCwd(other)).toThrow();
+      expect(readdirSync(elsewhere)).toEqual([]);
+      rmSync(other, { recursive: true, force: true });
+      rmSync(elsewhere, { recursive: true, force: true });
       rmSync(dir, { recursive: true });
       symlinkSync(home, dir);
       expect(() => ensureAgentCwd(home)).toThrow();

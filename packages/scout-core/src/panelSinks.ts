@@ -31,6 +31,10 @@ export interface PanelSinks {
   emit(frame: PanelState): void;
   /** `sink` sent the command `commandId`: its answer goes there. */
   routeCommand(commandId: string, sink: PanelSink): void;
+  /** The sink the answer to `commandId` would go to, if it is still attached. */
+  routeOf(commandId: string): PanelSink | undefined;
+  /** Send one frame to one sink, bypassing fan-out and routes (a repaint, a direct refusal). */
+  deliver(sink: PanelSink, frame: PanelState): void;
   /** The attached sinks, in registration order. */
   list(): readonly PanelSink[];
 }
@@ -67,6 +71,11 @@ export function createPanelSinks(options: PanelSinksOptions): PanelSinks {
       if (i >= 0) sinks.splice(i, 1);
     },
     has: (sink) => sinks.includes(sink),
+    deliver,
+    routeOf(commandId) {
+      const sink = routes.get(commandId);
+      return sink !== undefined && sinks.includes(sink) ? sink : undefined;
+    },
     list: () => [...sinks],
     routeCommand(commandId, sink) {
       routes.delete(commandId); // a re-sent id moves to the newest end

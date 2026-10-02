@@ -7,7 +7,8 @@ import { BRIDGE_PROTOCOL, type ToChromeFrame } from "@scout/contracts";
 import { encodeFrame, frameHeader, MAX_FRAME_FROM_CHROME, MAX_FRAME_TO_CHROME, toChromeDecoder } from "@scout/contracts/frame";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { DiagnosticFields, Diagnostics } from "./diagnostics.js";
-import { createSocketServer, type SocketClient, type SocketServer, SocketServerError } from "./socketServer.js";
+import { EventEmitter } from "node:events";
+import { createClientWriter, createSocketServer, RELAY_HIGH_WATER_BYTES, type SocketClient, type SocketServer, SocketServerError } from "./socketServer.js";
 
 function spyDiagnostics() {
   const events: Array<{ name: string; fields: DiagnosticFields }> = [];
@@ -399,16 +400,16 @@ describe("socketServer", () => {
     c.send({ type: "command", command: { type: "shutdown", commandId: "not valid!" } });
     c.send({ type: "command", command: { type: "approve", commandId: "a" } }); // incomplete
     c.send({ type: "command", command: { type: "refresh_capabilities", commandId: "sp-1" } });
-    await until(() => received.length === 5);
+    await until(() => received.length === 4);
     expect(received).toEqual([
       { type: "command", command: { type: "pause" } },
       { type: "refused_command", command: "frontmost" },
       { type: "refused_command", command: "shutdown", commandId: "sp-9" },
-      { type: "refused_command", command: "shutdown" },
       { type: "command", command: { type: "refresh_capabilities", commandId: "sp-1" } },
     ]);
-    expect(events.filter((e) => e.name === "bridge_command_refused").map((e) => e.fields.type)).toEqual(["frontmost", "shutdown", "shutdown"]);
-    expect(events.filter((e) => e.name === "bridge_frame_dropped").map((e) => e.fields.code)).toEqual(["schema"]);
+    expect(events.filter((e) => e.name === "bridge_command_refused").map((e) => e.fields.type)).toEqual(["frontmost", "shutdown"]);
+    // An invalid commandId and an incomplete command are neither commands nor refusals.
+    expect(events.filter((e) => e.name === "bridge_frame_dropped").map((e) => e.fields.code)).toEqual(["schema", "schema"]);
   });
 
   it("sends panel frames up to 1 MiB and refuses other frames over 16 KiB", async () => {
@@ -426,5 +427,84 @@ describe("socketServer", () => {
     expect(c.frames.map((f) => f.type)).toEqual(["panel", "ack"]);
     expect(JSON.stringify(big).length).toBeGreaterThan(MAX_FRAME_TO_CHROME);
     expect(events.filter((e) => e.name === "bridge_send_failed").map((e) => e.fields.type)).toEqual(["capture_policy"]);
+  });
+});
+
+describe("client writer backpressure", () => {
+  /** A socket whose buffer only grows until the test drains it. */
+  class FakeSocket extends EventEmitter {
+    writableLength = 0;
+    destroyed = false;
+    writable = true;
+    written: Buffer[] = [];
+    write(b: Buffer) {
+      this.written.push(b);
+      this.writableLength += b.length;
+      return this.writableLength < 16 * 1024;
+    }
+    drain() {
+      this.writableLength = 0;
+      this.emit("drain");
+    }
+    types() {
+      const d = toChromeDecoder();
+      return d.push(Buffer.concat(this.written)).map((r) => (r.ok ? (r.value["type"] === "panel" ? `panel:${(r.value["state"] as { type: string }).type}` : (r.value["type"] as string)) : r.code));
+    }
+  }
+  const setup = () => {
+    const sock = new FakeSocket();
+    const { events, diagnostics } = spyDiagnostics();
+    let drained = 0;
+    const send = createClientWriter({ sock, conn: 7, diagnostics, onDrained: () => void drained++ });
+    return { sock, events, send, drained: () => drained };
+  };
+  const grant = { type: "panel", state: { type: "grant", agentBrowserContext: false } } as const;
+  const ack = { type: "panel", state: { type: "ack", commandId: "a1", ok: false, code: "invalid" } } as const;
+  const capabilities = (bytes: number) =>
+    ({
+      type: "panel",
+      state: { type: "capabilities", coreInstanceId: "core", revision: 1, approvalRevision: 0, offers: [], library: [], conflicts: [], origins: [], truncated: false, pad: "x".repeat(bytes) },
+    }) as unknown as ToChromeFrame;
+
+  it("over the mark: window frames are dropped (once marked stale), answers and bridge frames still go, and one repaint follows the drain", () => {
+    const s = setup();
+    s.sock.writableLength = RELAY_HIGH_WATER_BYTES + 1;
+    s.send(grant);
+    s.send(grant);
+    s.send(ack);
+    s.send({ type: "capture_policy", revision: 1, paused: false, captureEnabled: false });
+    s.send({ type: "ack", seq: 3 });
+    expect(s.sock.types()).toEqual(["panel:ack", "capture_policy", "ack"]);
+    expect(s.events.filter((e) => e.name === "panel_frame_dropped").map((e) => e.fields)).toEqual([
+      { conn: 7, type: "grant", reason: "backpressure" },
+      { conn: 7, type: "grant", reason: "backpressure" },
+    ]);
+    expect(s.drained()).toBe(0);
+    s.sock.drain();
+    expect(s.drained()).toBe(1);
+    expect(s.events.filter((e) => e.name === "panel_repaint")).toEqual([{ name: "panel_repaint", fields: { conn: 7, reason: "drained" } }]);
+    s.sock.drain(); // no new drop: no second repaint
+    expect(s.drained()).toBe(1);
+    s.send(grant);
+    expect(s.sock.types().at(-1)).toBe("panel:grant");
+  });
+
+  it("a 512 KiB capabilities frame alone, or several in a row, never trips it", () => {
+    const s = setup();
+    for (let i = 0; i < 4; i++) s.send(capabilities(512 * 1024 - 300));
+    expect(s.sock.writableLength).toBeLessThanOrEqual(RELAY_HIGH_WATER_BYTES);
+    expect(s.sock.types()).toEqual(["panel:capabilities", "panel:capabilities", "panel:capabilities", "panel:capabilities"]);
+    expect(s.events.filter((e) => e.name === "panel_frame_dropped")).toEqual([]);
+  });
+
+  it("a destroyed socket gets nothing and its drain repaints nothing", () => {
+    const s = setup();
+    s.sock.writableLength = RELAY_HIGH_WATER_BYTES + 1;
+    s.send(grant);
+    s.sock.destroyed = true;
+    s.sock.emit("drain");
+    expect(s.drained()).toBe(0);
+    s.send(ack);
+    expect(s.sock.written).toEqual([]);
   });
 });

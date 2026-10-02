@@ -19,7 +19,11 @@ import type { GuardedFetchResult } from "./fetch/guardedFetch.js";
 import { createOriginFetchSession, type OriginFetchSession } from "./fetch/originSession.js";
 import { createJobScheduler, type JobScheduler } from "./jobScheduler.js";
 import { createResultRegistry } from "./results.js";
+import type { PanelSink } from "./panelSinks.js";
 import type { SocketClient } from "./socketServer.js";
+
+/** The native app's stdio sink: the sender of every command these tests hand in. */
+const STDIO: PanelSink = { id: "stdio", kind: "stdio", send: () => {} };
 
 const STRIPE = "https://docs.stripe.com/payments/checkout";
 const ISSUE = "https://github.com/o/r/issues/1";
@@ -132,6 +136,7 @@ function fakeClient(id: number) {
     send: (f) => void sent.push(f),
     onFrame: (h) => void frameHandlers.push(h),
     onClose: (h) => void closeHandlers.push(h),
+    onDrained: () => {},
     close: () => void (closed = true),
   };
   return {
@@ -196,7 +201,7 @@ function setup(extra: Partial<CoordinatorOptions> = {}) {
     ...(policyRevision() !== undefined ? { policyRevision: policyRevision()! } : {}),
     ...overrides,
   });
-  const chrome = () => coordinator.handleNativeCommand({ type: "frontmost", bundleId: "com.google.Chrome", at: clock.t });
+  const chrome = () => coordinator.handleNativeCommand({ type: "frontmost", bundleId: "com.google.Chrome", at: clock.t }, STDIO);
   /** Attach a sensor without a permissions snapshot. */
   const attach = (id = 1) => {
     const c = fakeClient(id);
@@ -224,10 +229,10 @@ describe("coordinator", () => {
       config: { chromeBundleId: "com.google.chrome.for.testing" },
     });
     const c = connect();
-    coordinator.handleNativeCommand({ type: "frontmost", bundleId: "com.google.Chrome", at: 1 });
+    coordinator.handleNativeCommand({ type: "frontmost", bundleId: "com.google.Chrome", at: 1 }, STDIO);
     c.observe(focus());
     expect(coordinator.tracker.current()).toBeNull();
-    coordinator.handleNativeCommand({ type: "frontmost", bundleId: "com.google.chrome.for.testing", at: 2 });
+    coordinator.handleNativeCommand({ type: "frontmost", bundleId: "com.google.chrome.for.testing", at: 2 }, STDIO);
     expect(coordinator.tracker.current()).not.toBeNull();
     expect(new URL(coordinator.tracker.current()!.origin).hostname).toBe("docs.stripe.com");
   });
@@ -247,7 +252,7 @@ describe("coordinator", () => {
     const state = panel.at(-1);
     expect(state).toEqual({ type: "state", status: "idle", visitEpoch: coordinator.tracker.epoch, detail: "docs.stripe.com", permitted: true });
     expect(JSON.stringify(state)).not.toContain("payments");
-    coordinator.handleNativeCommand({ type: "frontmost", bundleId: "com.apple.Terminal", at: 1 });
+    coordinator.handleNativeCommand({ type: "frontmost", bundleId: "com.apple.Terminal", at: 1 }, STDIO);
     expect(panel.at(-1)).toEqual({ type: "state", status: "idle", visitEpoch: coordinator.tracker.epoch, permitted: false });
     expect(panel.at(-1)).not.toHaveProperty("detail");
   });
@@ -263,7 +268,7 @@ describe("coordinator", () => {
       paused: false,
       recommendationsEnabled: false,
     });
-    coordinator.handleNativeCommand({ type: "pause" });
+    coordinator.handleNativeCommand({ type: "pause" }, STDIO);
     expect(coordinator.agentView().paused).toBe(true);
     c.observe(focus({ url: "https://example.com/" }));
     expect(coordinator.agentView().currentSite).toBeNull();
@@ -293,7 +298,7 @@ describe("coordinator", () => {
     const epoch = coordinator.tracker.epoch;
     c.observe(focus({ url: "https://example.com/a", tabId: 1 }));
     c.observe(focus({ url: "https://example.com/b", tabId: 2 }));
-    coordinator.handleNativeCommand({ type: "frontmost", bundleId: "com.apple.Terminal", at: 1 });
+    coordinator.handleNativeCommand({ type: "frontmost", bundleId: "com.apple.Terminal", at: 1 }, STDIO);
     expect(coordinator.tracker.epoch).toBeGreaterThan(epoch);
     expect(panel.length).toBe(before);
   });
@@ -303,7 +308,7 @@ describe("coordinator", () => {
     const c = connect();
     chrome();
     c.observe(focus());
-    coordinator.handleNativeCommand({ type: "frontmost", bundleId: "com.apple.Terminal", at: 1 });
+    coordinator.handleNativeCommand({ type: "frontmost", bundleId: "com.apple.Terminal", at: 1 }, STDIO);
     expect(coordinator.tracker.current()).toBeNull();
     expect(panel.at(-1)).toEqual({ type: "state", status: "idle", visitEpoch: coordinator.tracker.epoch, permitted: false });
   });
@@ -340,7 +345,7 @@ describe("coordinator", () => {
     c.observe(focus({ tabId: 20, url: ISSUE, documentId: "doc-issue", browserFocused: false, windowId: -1 }));
     c.observe(pageText());
     c.observe(focus({ tabId: 20, url: ISSUE, documentId: "doc-issue" }));
-    coordinator.handleNativeCommand({ type: "frontmost", bundleId: "com.apple.Terminal", at: 1 });
+    coordinator.handleNativeCommand({ type: "frontmost", bundleId: "com.apple.Terminal", at: 1 }, STDIO);
     c.observe(pageText());
     expect(acks(c)).toEqual([]);
     expect(coordinator.activity.revision).toBe(0);
@@ -411,7 +416,7 @@ describe("coordinator", () => {
     const c = connect();
     chrome();
     c.observe(focus({ tabId: 20, url: ISSUE, documentId: "doc-issue" }));
-    coordinator.handleNativeCommand({ type: "pause" });
+    coordinator.handleNativeCommand({ type: "pause" }, STDIO);
     expect(panel.at(-1)).toEqual({ type: "state", status: "paused" });
     const before = panel.length;
     c.observe(pageText());
@@ -419,7 +424,7 @@ describe("coordinator", () => {
     expect(panel.length).toBe(before);
     expect(acks(c)).toEqual([]);
     expect(coordinator.activity.revision).toBe(0);
-    coordinator.handleNativeCommand({ type: "resume" });
+    coordinator.handleNativeCommand({ type: "resume" }, STDIO);
     // The visit to docs.stripe.com (tracked while paused) is still active.
     expect(panel.at(-1)).toEqual({
       type: "state",
@@ -472,8 +477,8 @@ describe("coordinator", () => {
     let requests = 0;
     const { coordinator, panel, focus, chrome, connect } = setup({ onShutdownRequested: () => void (requests += 1) });
     const c = connect();
-    coordinator.handleNativeCommand({ type: "shutdown" });
-    coordinator.handleNativeCommand({ type: "shutdown" });
+    coordinator.handleNativeCommand({ type: "shutdown" }, STDIO);
+    coordinator.handleNativeCommand({ type: "shutdown" }, STDIO);
     expect(coordinator.stopped).toBe(true);
     expect(requests).toBe(1);
     const before = panel.length;
@@ -495,7 +500,7 @@ describe("coordinator capture policy and permissions", () => {
 
   it("the initial policy carries the pause state", () => {
     const { coordinator, attach } = setup();
-    coordinator.handleNativeCommand({ type: "pause" });
+    coordinator.handleNativeCommand({ type: "pause" }, STDIO);
     const c = attach();
     expect(c.sent).toEqual([{ type: "capture_policy", revision: 0, paused: true, captureEnabled: false }]);
   });
@@ -520,9 +525,9 @@ describe("coordinator capture policy and permissions", () => {
   it("pause sends a disabling policy and resume re-enables it, each with the next revision", () => {
     const { coordinator, connect, policies } = setup();
     const c = connect();
-    coordinator.handleNativeCommand({ type: "pause" });
-    coordinator.handleNativeCommand({ type: "pause" });
-    coordinator.handleNativeCommand({ type: "resume" });
+    coordinator.handleNativeCommand({ type: "pause" }, STDIO);
+    coordinator.handleNativeCommand({ type: "pause" }, STDIO);
+    coordinator.handleNativeCommand({ type: "resume" }, STDIO);
     expect(policies(c)).toEqual([
       { type: "capture_policy", revision: 0, paused: false, captureEnabled: false },
       { type: "capture_policy", revision: 1, paused: false, captureEnabled: true },
@@ -534,8 +539,8 @@ describe("coordinator capture policy and permissions", () => {
   it("pause and resume without a snapshot still send a policy (paused changes)", () => {
     const { coordinator, attach, policies } = setup();
     const c = attach();
-    coordinator.handleNativeCommand({ type: "pause" });
-    coordinator.handleNativeCommand({ type: "resume" });
+    coordinator.handleNativeCommand({ type: "pause" }, STDIO);
+    coordinator.handleNativeCommand({ type: "resume" }, STDIO);
     expect(policies(c).map((p) => [p.revision, p.paused, p.captureEnabled])).toEqual([
       [0, false, false],
       [1, true, false],
@@ -693,9 +698,9 @@ describe("coordinator dwell and discovery", () => {
   });
 
   it.each<[string, (s: ReturnType<typeof visiting>) => void, string]>([
-    ["pause", (s) => s.coordinator.handleNativeCommand({ type: "pause" }), "paused"],
+    ["pause", (s) => s.coordinator.handleNativeCommand({ type: "pause" }, STDIO), "paused"],
     ["navigation", (s) => s.c.observe(s.focus({ url: "https://docs.stripe.com/billing" })), "visit_changed"],
-    ["Chrome losing the foreground", (s) => s.coordinator.handleNativeCommand({ type: "frontmost", bundleId: "com.apple.Terminal", at: 1 }), "visit_ended"],
+    ["Chrome losing the foreground", (s) => s.coordinator.handleNativeCommand({ type: "frontmost", bundleId: "com.apple.Terminal", at: 1 }, STDIO), "visit_ended"],
     ["permission loss", (s) => s.grant(s.c, ["https://github.com/*"]), "permission_lost"],
     ["disconnect", (s) => s.c.disconnect(), "disconnected"],
     ["shutdown", (s) => s.coordinator.stop(), "stopped"],
@@ -718,10 +723,10 @@ describe("coordinator dwell and discovery", () => {
 
   it("resume starts a fresh dwell for the visit tracked while paused", () => {
     const s = visiting();
-    s.coordinator.handleNativeCommand({ type: "pause" });
+    s.coordinator.handleNativeCommand({ type: "pause" }, STDIO);
     s.advance(DWELL_MS * 2);
     expect(s.passes).toHaveLength(0);
-    s.coordinator.handleNativeCommand({ type: "resume" });
+    s.coordinator.handleNativeCommand({ type: "resume" }, STDIO);
     s.advance(DWELL_MS);
     expect(s.passes).toHaveLength(1);
   });
@@ -729,7 +734,7 @@ describe("coordinator dwell and discovery", () => {
   it.each<[string, (s: ReturnType<typeof visiting>) => void, string]>([
     ["the visit changes", (s) => s.c.observe(s.focus({ url: "https://docs.stripe.com/billing" })), "visit_changed"],
     ["the origin loses its grant", (s) => s.grant(s.c, ["https://github.com/*"]), "permission_lost"],
-    ["Scout is paused", (s) => s.coordinator.handleNativeCommand({ type: "pause" }), "paused"],
+    ["Scout is paused", (s) => s.coordinator.handleNativeCommand({ type: "pause" }, STDIO), "paused"],
     ["the coordinator stops", (s) => s.coordinator.stop(), "stopped"],
     ["the connection closes", (s) => s.c.disconnect(), "disconnected"],
     [
@@ -778,7 +783,7 @@ describe("coordinator dwell and discovery", () => {
   });
 
   it.each<[string, (s: ReturnType<typeof setup>, c: ReturnType<ReturnType<typeof setup>["connect"]>) => void, string]>([
-    ["pause", (s) => s.coordinator.handleNativeCommand({ type: "pause" }), "paused"],
+    ["pause", (s) => s.coordinator.handleNativeCommand({ type: "pause" }, STDIO), "paused"],
     ["permission loss", (s, c) => s.grant(c, ["https://github.com/*"]), "permission_lost"],
     ["disconnect", (_s, c) => c.disconnect(), "disconnected"],
     ["a new sensor", (s) => void s.connect(2), "disconnected"],
@@ -834,8 +839,8 @@ describe("coordinator dwell and discovery", () => {
     const s = visiting();
     s.advance(DWELL_MS);
     expect(s.passes).toHaveLength(1);
-    s.coordinator.handleNativeCommand({ type: "pause" });
-    s.coordinator.handleNativeCommand({ type: "resume" });
+    s.coordinator.handleNativeCommand({ type: "pause" }, STDIO);
+    s.coordinator.handleNativeCommand({ type: "resume" }, STDIO);
     s.passes[0]!.discover.resolve(discoveryFor("https://docs.stripe.com"));
     await flush();
     expect(s.ingests).toEqual([]);
@@ -850,8 +855,8 @@ describe("coordinator dwell and discovery", () => {
   it("a fresh settle while the paused pass is still unwinding starts at once; only the fresh pass ingests", async () => {
     const s = visiting();
     s.advance(DWELL_MS);
-    s.coordinator.handleNativeCommand({ type: "pause" });
-    s.coordinator.handleNativeCommand({ type: "resume" });
+    s.coordinator.handleNativeCommand({ type: "pause" }, STDIO);
+    s.coordinator.handleNativeCommand({ type: "resume" }, STDIO);
     s.advance(DWELL_MS);
     expect(s.passes).toHaveLength(2);
     s.passes[0]!.discover.resolve(discoveryFor("https://docs.stripe.com"));
@@ -896,7 +901,7 @@ describe("coordinator dwell and discovery", () => {
     s.advance(DWELL_MS);
     s.c.observe(s.focus({ url: "https://www.peakdesign.com/a" }));
     s.advance(DWELL_MS);
-    s.coordinator.handleNativeCommand({ type: "frontmost", bundleId: "com.apple.Terminal", at: 1 });
+    s.coordinator.handleNativeCommand({ type: "frontmost", bundleId: "com.apple.Terminal", at: 1 }, STDIO);
     for (const p of s.passes) p.discover.resolve(discoveryFor(p.origin));
     await flush();
     s.advance(DWELL_MS * 3);
@@ -961,15 +966,15 @@ describe("coordinator panel wiring", () => {
   it("routes window commands to the panel channel and leaves the old commands alone", () => {
     const s = withPanel();
     const approve = { type: "approve", commandId: "a1", resourceId: RES, version: HASH, expectedRevision: 1 } as const;
-    s.coordinator.handleNativeCommand(approve);
-    s.coordinator.handleNativeCommand({ type: "preview", commandId: "p1", resourceId: RES, version: HASH });
-    s.coordinator.handleNativeCommand({ type: "pause" });
+    s.coordinator.handleNativeCommand(approve, STDIO);
+    s.coordinator.handleNativeCommand({ type: "preview", commandId: "p1", resourceId: RES, version: HASH }, STDIO);
+    s.coordinator.handleNativeCommand({ type: "pause" }, STDIO);
     expect(s.handled).toEqual([approve, { type: "preview", commandId: "p1", resourceId: RES, version: HASH }]);
   });
 
   it("without a panel channel a window command gets an unavailable ack", () => {
     const s = setup();
-    s.coordinator.handleNativeCommand({ type: "refresh_capabilities", commandId: "r1" });
+    s.coordinator.handleNativeCommand({ type: "refresh_capabilities", commandId: "r1" }, STDIO);
     expect(s.panel.at(-1)).toEqual({ type: "ack", commandId: "r1", ok: false, code: "unavailable" });
   });
 
@@ -1124,8 +1129,8 @@ describe("coordinator: page_text into the activity store", () => {
   it("keeps captured text on a snapshot that still allows capture, on pause, and on disconnect", () => {
     const { coordinator, events, grant, c, attach } = withIssue();
     grant(c, ["https://github.com/*"], true);
-    coordinator.handleNativeCommand({ type: "pause" });
-    coordinator.handleNativeCommand({ type: "resume" });
+    coordinator.handleNativeCommand({ type: "pause" }, STDIO);
+    coordinator.handleNativeCommand({ type: "resume" }, STDIO);
     c.disconnect();
     expect(coordinator.activity.entries()).toHaveLength(1);
     grant(attach(2), DEFAULT_GRANTS, true);
@@ -1151,7 +1156,7 @@ describe("coordinator: page_text into the activity store", () => {
   it("calls onPause after a pause command", () => {
     let paused = 0;
     const { coordinator } = setup({ onPause: () => void paused++ });
-    coordinator.handleNativeCommand({ type: "pause" });
+    coordinator.handleNativeCommand({ type: "pause" }, STDIO);
     expect(paused).toBe(1);
   });
 });
@@ -1208,11 +1213,11 @@ describe("coordinator results", () => {
   it("pause clears the result and refuses publishing until resumed", () => {
     const s = withResults();
     s.publish();
-    s.coordinator.handleNativeCommand({ type: "pause" });
+    s.coordinator.handleNativeCommand({ type: "pause" }, STDIO);
     expect(s.results.current()).toBeNull();
     expect(s.panel.at(-1)).toEqual({ type: "state", status: "paused" });
     expect(s.publish()).toEqual({ ok: false, code: "stale_visit" });
-    s.coordinator.handleNativeCommand({ type: "resume" });
+    s.coordinator.handleNativeCommand({ type: "resume" }, STDIO);
     expect(s.publish()).toEqual({ ok: true });
   });
 
@@ -1244,9 +1249,9 @@ describe("coordinator results", () => {
     const s = withResults();
     s.publish();
     let before = s.panel.length;
-    s.coordinator.handleNativeCommand({ type: "pause" });
+    s.coordinator.handleNativeCommand({ type: "pause" }, STDIO);
     expect(s.panel.slice(before)).toEqual([{ type: "state", status: "paused" }]);
-    s.coordinator.handleNativeCommand({ type: "resume" });
+    s.coordinator.handleNativeCommand({ type: "resume" }, STDIO);
     s.publish(s.coordinator.tracker.epoch);
     before = s.panel.length;
     s.c.observe(s.focus({ url: "https://www.peakdesign.com/" }));
@@ -1354,7 +1359,7 @@ describe("coordinator: recommendation job hooks", () => {
     const catalog = deferred<CatalogResolution>();
     t.capabilities.resolveCatalog = () => catalog.promise;
     t.advance(DWELL_MS);
-    t.coordinator.handleNativeCommand({ type: "pause" });
+    t.coordinator.handleNativeCommand({ type: "pause" }, STDIO);
     catalog.resolve(catalogOf("miss"));
     t.passes[0]!.discover.resolve(discoveryFor("https://docs.stripe.com"));
     await flush();
@@ -1376,9 +1381,9 @@ describe("coordinator: recommendation job hooks", () => {
     s.c.observe(s.pageText());
     expect(s.calls.filter((c) => c[0] === "onActivityAccepted")).toEqual([["onActivityAccepted", s.coordinator.activity.revision]]);
     s.calls.length = 0;
-    s.coordinator.handleNativeCommand({ type: "pause" });
+    s.coordinator.handleNativeCommand({ type: "pause" }, STDIO);
     expect(names()).toContain("onPause");
-    s.coordinator.handleNativeCommand({ type: "resume" });
+    s.coordinator.handleNativeCommand({ type: "resume" }, STDIO);
     s.calls.length = 0;
     s.c.disconnect();
     expect(names()).toContain("onSensorLost");
@@ -1486,7 +1491,7 @@ describe("coordinator: recommendation job hooks", () => {
     expect(s.panel.at(-1)).toMatchObject({ status: "working", jobId: "job-1" });
     forwarded.length = 0; // the visit's own start
 
-    s.coordinator.handleNativeCommand({ type: "frontmost", bundleId: "com.apple.Terminal", at: s.clock.t });
+    s.coordinator.handleNativeCommand({ type: "frontmost", bundleId: "com.apple.Terminal", at: s.clock.t }, STDIO);
     expect(forwarded).toEqual(["onVisitChanged"]);
     expect(signals[0]!.aborted).toBe(true);
     expect(signals[0]!.reason).toBe("visit_changed");
@@ -1509,7 +1514,7 @@ describe("coordinator: recommendation job hooks", () => {
     expect(s.panel.at(-1)).toEqual({ type: "state", status: "working", visitEpoch: epoch, detail: "docs.stripe.com", jobId: "job-1" });
     s.coordinator.showIdle(epoch);
     expect(s.panel.at(-1)).toEqual({ type: "state", status: "idle", visitEpoch: epoch, detail: "docs.stripe.com", permitted: true });
-    s.coordinator.handleNativeCommand({ type: "pause" });
+    s.coordinator.handleNativeCommand({ type: "pause" }, STDIO);
     const paused = s.panel.length;
     s.coordinator.showWorking(epoch, "job-2");
     s.coordinator.showIdle(epoch);

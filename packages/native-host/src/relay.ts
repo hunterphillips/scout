@@ -50,7 +50,7 @@ import {
   type Hello,
   NATIVE_COMMAND_MAX_BYTES,
   type ObservationFrame,
-  STDIO_ONLY_COMMANDS,
+  StdioOnlyCommandFrameSchema,
   type ToChromeFrame,
   ToChromeFrameSchema,
 } from "@scout/contracts";
@@ -133,7 +133,7 @@ export interface HostDrops {
     /** page_text that arrived before the handshake finished: dropped, never buffered. */
     textBeforeReady: number;
     /** Window commands handed to the core write path (`forwarded` or `backpressure` counts the outcome). */
-    commands: number;
+    commandsHandedOff: number;
     /** frontmost or shutdown sent as a command: only the native app may send them. */
     refusedCommand: number;
     /** A command that arrived before the handshake finished: dropped, never buffered. */
@@ -165,7 +165,7 @@ export function createHost(deps: HostDeps): Host {
     oversized: 0,
     backpressure: 0,
     textBeforeReady: 0,
-    commands: 0,
+    commandsHandedOff: 0,
     refusedCommand: 0,
     commandBeforeReady: 0,
     commandOversized: 0,
@@ -314,9 +314,7 @@ export function createHost(deps: HostDeps): Host {
   const onChromeCommand = (value: Record<string, unknown>) => {
     const parsed = CommandFrameSchema.safeParse(value);
     if (!parsed.success) {
-      const command = value["command"];
-      const type = typeof command === "object" && command !== null ? (command as Record<string, unknown>)["type"] : undefined;
-      if ((STDIO_ONLY_COMMANDS as readonly unknown[]).includes(type)) fromChrome.refusedCommand += 1;
+      if (StdioOnlyCommandFrameSchema.safeParse(value).success) fromChrome.refusedCommand += 1;
       else fromChrome.invalid += 1;
       return;
     }
@@ -330,7 +328,7 @@ export function createHost(deps: HostDeps): Host {
       fromChrome.commandBeforeReady += 1;
       return;
     }
-    fromChrome.commands += 1;
+    fromChrome.commandsHandedOff += 1;
     writeToCore(socket, encodeFrame(frame, MAX_FRAME_FROM_CHROME));
   };
 

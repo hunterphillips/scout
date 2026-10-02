@@ -15,11 +15,13 @@
 // coordinator's own clears are silent: the state frame it sends next resets the window anyway.
 // No stand-in `empty` frame is ever sent. `open_link` is answered from the same registry.
 //
-// A new browser surface (panelSinks.ts: the relay sink of a new native-host connection) is
-// repainted by `repaint(sink, state)` through the same path `start()` takes: `grant`, a fresh
-// `capabilities` (sent to every sink, a refresh, so one revision sequence serves them all),
-// `audit`, then the coordinator's current state and the held `results` frame, if any. All but
-// `capabilities` go to that sink only.
+// A browser surface (panelSinks.ts: the relay sink of a native-host connection) is repainted by
+// `repaint(sink, state)` through the same path `start()` takes: `grant`, a fresh `capabilities`
+// (sent to every sink, a refresh, so one revision sequence serves them all), `audit`, then the
+// coordinator's last state and the held `results` frame, if any. All but `capabilities` go to
+// that sink only. On a new connection no result is held (a replacing sensor clears them); the
+// results frame matters for the repaint after backpressure (socketServer.ts), when a published
+// result may have been dropped on the way to a connection that is still current.
 //
 // Ordering: the window drops a visit's results on any `state` frame for that visit other than
 // `working` for the same job. So the coordinator (or P3.2's job scheduler) emits a job's
@@ -60,6 +62,8 @@ export interface PanelChannelOptions {
   results?: Pick<ResultRegistry, "resolveLink" | "subscribe"> & Partial<Pick<ResultRegistry, "current">>;
   /** Send the coordinator's current state again, even if unchanged (a cleared result). */
   resendState?: () => void;
+  /** One frame to one sink (panelSinks.ts `deliver`), for a repaint. Default: `sink.send`, errors logged. */
+  deliver?: (sink: PanelSink, frame: PanelState) => void;
   clock: Clock;
   timers?: Timers;
   diagnostics: Diagnostics;
@@ -73,8 +77,8 @@ export interface PanelChannel {
    * (the coordinator's current one), and the held results frame, if any.
    */
   repaint(sink: PanelSink, state: PanelState): void;
-  /** Run one command from the app; never rejects. */
-  handle(cmd: PanelCommand): Promise<void>;
+  /** Run one command from a window surface (`scope`: its sink id, for idempotency); never rejects. */
+  handle(cmd: PanelCommand, scope?: string): Promise<void>;
   capabilitiesChanged(): void;
   auditChanged(): void;
   /** Release the pins of abandoned previews. */
@@ -159,6 +163,7 @@ export function createPanelChannel(options: PanelChannelOptions): PanelChannel {
     repaint(sink, state) {
       if (stopped) return;
       const send = (frame: PanelState): void => {
+        if (options.deliver) return options.deliver(sink, frame);
         try {
           sink.send(frame);
         } catch {
@@ -171,9 +176,9 @@ export function createPanelChannel(options: PanelChannelOptions): PanelChannel {
       if (held) send(toFrame(held));
       diagnostics.event("panel_repainted", { sink: sink.kind, results: held ? 1 : 0 });
     },
-    async handle(cmd) {
+    async handle(cmd, scope) {
       if (stopped) return;
-      if (cmd.type !== "preview") return commands.handle(cmd);
+      if (cmd.type !== "preview") return commands.handle(cmd, scope);
       const answer = previews.serve(cmd);
       if (answer.ok) {
         diagnostics.event("preview_chunk", { bytes: Buffer.byteLength(answer.chunk.text, "utf8"), seq: answer.chunk.seq });
