@@ -8,7 +8,8 @@
 // `unavailable` (store closed), `store_error`.
 //
 // Idempotency: the last COMMAND_CACHE_SIZE command IDs are remembered with the command they
-// named. A retried ID gets the first attempt's ack again without touching the store (a retry
+// named, per sender (`scope`, the panel sink's id): one surface's retry never answers from
+// another surface's entry, so an id reused across surfaces never returns the other's ack. A retried ID gets the first attempt's ack again without touching the store (a retry
 // that arrives while the first attempt is still running waits for it). A failed attempt is
 // forgotten once it settles, so a retry after a failure runs again; the same ID reused for a
 // different command is `invalid`. The cache is in memory: after a core restart the store's
@@ -79,8 +80,8 @@ export interface NativeCommandsOptions {
 }
 
 export interface NativeCommands {
-  /** Run `cmd` and emit its ack. Never rejects. */
-  handle(cmd: MutationCommand): Promise<void>;
+  /** Run `cmd` and emit its ack. Never rejects. `scope` names the sender (default: one shared scope). */
+  handle(cmd: MutationCommand, scope?: string): Promise<void>;
 }
 
 type Outcome = { ack: PanelAck; cleanup?: ExportSync };
@@ -202,10 +203,11 @@ export function createNativeCommands(options: NativeCommandsOptions): NativeComm
   };
 
   return {
-    async handle(cmd) {
+    async handle(cmd, scope = "") {
       const { commandId, ...rest } = cmd;
       const fingerprint = JSON.stringify(rest);
-      const seen = cache.get(commandId);
+      const key = `${scope}\u0000${commandId}`;
+      const seen = cache.get(key);
       if (seen) {
         if (seen.fingerprint !== fingerprint) {
           emit(failed(commandId, "invalid"), cmd.type);
@@ -216,10 +218,10 @@ export function createNativeCommands(options: NativeCommandsOptions): NativeComm
       }
       const running = run(cmd).catch((): Outcome => ({ ack: failed(commandId, "store_error") }));
       const attempt = running.then((o) => o.ack);
-      cache.set(commandId, { fingerprint, result: attempt });
+      cache.set(key, { fingerprint, result: attempt });
       while (cache.size > cacheSize) cache.delete(cache.keys().next().value!);
       const { ack, cleanup } = await running;
-      if (!ack.ok && cache.get(commandId)?.result === attempt) cache.delete(commandId);
+      if (!ack.ok && cache.get(key)?.result === attempt) cache.delete(key);
       emit(ack, cmd.type);
       // The changed view follows the ack; the export outcome (conflicts) follows the sync.
       if (ack.ok && cmd.type !== "set_agent_browser_context" && cmd.type !== "refresh_capabilities" && cmd.type !== "open_link") {

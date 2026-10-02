@@ -268,6 +268,7 @@ export async function runStdio(deps: StdioDeps): Promise<StdioCore> {
     emit: emitPanel,
     results,
     resendState: () => coordinator.resendState(),
+    deliver: (sink, frame) => sinks.deliver(sink, frame),
     clock,
     diagnostics,
   });

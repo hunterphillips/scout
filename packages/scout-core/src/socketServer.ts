@@ -9,11 +9,19 @@
 // are dropped and counted, and valid observation and window-command frames reach the caller.
 //
 // Window commands (protocol 3) are what the native app may send, except STDIO_ONLY_COMMANDS
-// (frontmost, shutdown): one of those reaches the caller as a `refused_command` frame (with
-// the `commandId` it carried, if a valid one) so the coordinator can answer `not_permitted`;
-// it is never parsed as a command. A command whose JSONL line would not fit
-// NATIVE_COMMAND_MAX_BYTES is dropped, as the app's own stdin would refuse it. Frames to the
-// host go out under their per-type cap (a `panel` frame up to MAX_PANEL_FRAME_BYTES).
+// (frontmost, shutdown): a frame that is not a BridgeFrame but matches
+// StdioOnlyCommandFrameSchema reaches the caller as a `refused_command` frame (with the
+// `commandId` it carried) so the coordinator can answer `not_permitted`; it is never parsed as
+// a command. A command whose JSONL line would not fit NATIVE_COMMAND_MAX_BYTES is dropped, as
+// the app's own stdin would refuse it. Frames to the host go out under their per-type cap (a
+// `panel` frame up to MAX_PANEL_FRAME_BYTES).
+//
+// Backpressure (createClientWriter): while the socket buffers more than RELAY_HIGH_WATER_BYTES,
+// window frames other than a command's answers (`ack`, `preview`) are dropped
+// (`panel_frame_dropped {type, reason: "backpressure"}`) and the connection is marked stale;
+// once the socket drains, `panel_repaint {reason: "drained"}` and the client's `onDrained`
+// handlers run once (the coordinator repaints the side panel). Answers and bridge frames
+// (capture_policy, page_text acks) are always written.
 
 import { createServer, type Server, type Socket } from "node:net";
 import { join } from "node:path";
@@ -22,10 +30,9 @@ import {
   BRIDGE_PROTOCOL,
   BridgeFrameSchema,
   type CommandFrame,
-  CommandIdSchema,
   NATIVE_COMMAND_MAX_BYTES,
   type ObservationFrame,
-  STDIO_ONLY_COMMANDS,
+  StdioOnlyCommandFrameSchema,
   type StdioOnlyCommandType,
   type ToChromeFrame,
 } from "@scout/contracts";
@@ -45,6 +52,8 @@ export const SOCKET_NAME = "core.sock";
 export const HELLO_TIMEOUT_MS = 5_000;
 /** After upgrade_required, how long the peer gets to read it and close before we destroy the socket. */
 export const UPGRADE_CLOSE_MS = 1_000;
+/** Window frames (other than a command's answers) are dropped while the socket buffers more. */
+export const RELAY_HIGH_WATER_BYTES = 2 * 1024 * 1024;
 
 /** A native-app-only command sent over the bridge: never applied, answered `not_permitted`. */
 export interface RefusedCommandFrame {
@@ -64,7 +73,53 @@ export interface SocketClient {
   send(frame: ToChromeFrame): void;
   onFrame(handler: (frame: SocketClientFrame) => void): void;
   onClose(handler: () => void): void;
+  /** The socket drained after window frames were dropped for backpressure: repaint it. */
+  onDrained(handler: () => void): void;
   close(): void;
+}
+
+/** The parts of a net.Socket the writer uses. */
+export interface WriterSocket {
+  readonly writableLength: number;
+  readonly destroyed: boolean;
+  readonly writable: boolean;
+  write(chunk: Buffer): boolean;
+  once(event: "drain", listener: () => void): unknown;
+}
+
+/** One connection's frame writer, with the backpressure rule in the file header. */
+export function createClientWriter(options: {
+  sock: WriterSocket;
+  conn: number;
+  diagnostics: Diagnostics;
+  onDrained: () => void;
+  highWaterBytes?: number;
+}): (frame: ToChromeFrame) => void {
+  const { sock, conn, diagnostics } = options;
+  const highWater = options.highWaterBytes ?? RELAY_HIGH_WATER_BYTES;
+  let stale = false;
+  return (frame) => {
+    if (sock.destroyed || !sock.writable) return;
+    const answer = frame.type === "panel" && (frame.state.type === "ack" || frame.state.type === "preview");
+    if (frame.type === "panel" && !answer && sock.writableLength > highWater) {
+      diagnostics.event("panel_frame_dropped", { conn, type: frame.state.type, reason: "backpressure" });
+      if (!stale) {
+        stale = true;
+        sock.once("drain", () => {
+          stale = false;
+          if (sock.destroyed) return;
+          diagnostics.event("panel_repaint", { conn, reason: "drained" });
+          options.onDrained();
+        });
+      }
+      return;
+    }
+    try {
+      sock.write(encodeToChromeFrame(frame));
+    } catch {
+      diagnostics.event("bridge_send_failed", { conn, type: frame.type });
+    }
+  };
 }
 
 export interface SocketServerOptions {
@@ -100,6 +155,7 @@ export function createSocketServer(options: SocketServerOptions): SocketServer {
     const decoder = new FrameDecoder({ maxBytes: MAX_FRAME_FROM_CHROME });
     const frameHandlers: Array<(f: SocketClientFrame) => void> = [];
     const closeHandlers: Array<() => void> = [];
+    const drainHandlers: Array<() => void> = [];
     let helloDone = false;
     let rejected = false;
     const helloTimer = setTimeout(() => {
@@ -110,16 +166,17 @@ export function createSocketServer(options: SocketServerOptions): SocketServer {
 
     const client: SocketClient = {
       id,
-      send(frame) {
-        if (sock.destroyed || !sock.writable) return;
-        try {
-          sock.write(encodeToChromeFrame(frame));
-        } catch {
-          diagnostics.event("bridge_send_failed", { conn: id, type: frame.type });
-        }
-      },
+      send: createClientWriter({
+        sock,
+        conn: id,
+        diagnostics,
+        onDrained: () => {
+          for (const h of drainHandlers) h();
+        },
+      }),
       onFrame: (h) => void frameHandlers.push(h),
       onClose: (h) => void closeHandlers.push(h),
+      onDrained: (h) => void drainHandlers.push(h),
       close: () => void sock.destroy(),
     };
 
@@ -155,15 +212,17 @@ export function createSocketServer(options: SocketServerOptions): SocketServer {
           drop(r.code);
           continue;
         }
-        const refused = refusedCommand(r.value);
-        if (refused !== null) {
-          diagnostics.event("bridge_command_refused", { conn: id, type: refused.command });
-          for (const h of frameHandlers) h(refused);
-          continue;
-        }
         const parsed = BridgeFrameSchema.safeParse(r.value);
         if (!parsed.success) {
-          drop("schema");
+          const stdioOnly = StdioOnlyCommandFrameSchema.safeParse(r.value);
+          if (!stdioOnly.success) {
+            drop("schema");
+            continue;
+          }
+          const { type, commandId } = stdioOnly.data.command;
+          const refused: RefusedCommandFrame = commandId === undefined ? { type: "refused_command", command: type } : { type: "refused_command", command: type, commandId };
+          diagnostics.event("bridge_command_refused", { conn: id, type });
+          for (const h of frameHandlers) h(refused);
           continue;
         }
         if (parsed.data.type === "hello") {
@@ -221,14 +280,3 @@ export function createSocketServer(options: SocketServerOptions): SocketServer {
   };
 }
 
-/** A `command` frame naming a native-app-only command, as the refusal the coordinator answers; else null. */
-function refusedCommand(value: Record<string, unknown>): RefusedCommandFrame | null {
-  if (value["type"] !== "command") return null;
-  const command = value["command"];
-  if (typeof command !== "object" || command === null) return null;
-  const { type, commandId } = command as Record<string, unknown>;
-  const stdioOnly = STDIO_ONLY_COMMANDS.find((t) => t === type);
-  if (stdioOnly === undefined) return null;
-  const id = CommandIdSchema.safeParse(commandId);
-  return id.success ? { type: "refused_command", command: stdioOnly, commandId: id.data } : { type: "refused_command", command: stdioOnly };
-}
