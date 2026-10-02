@@ -47,11 +47,19 @@ async function repainted() {
 }
 
 describe("toolbar and panel port", () => {
-  it("the toolbar click opens the side panel (no popup)", async () => {
+  it("the toolbar click opens the side panel from onClicked (so activeTab is granted) and asks open panels to recheck their site", async () => {
     const { f } = await setup();
-    expect(f._.state.panelBehavior).toEqual({ openPanelOnActionClick: true });
+    expect(f._.state.panelBehavior).toEqual({ openPanelOnActionClick: false });
     await Promise.all(f.runtime.onInstalled.emit({}));
-    expect(f._.state.panelBehavior).toEqual({ openPanelOnActionClick: true });
+    expect(f._.state.panelBehavior).toEqual({ openPanelOnActionClick: false });
+    const p = await openPanel(f);
+    frame(f, RESULTS);
+    await flush();
+    f.action.onClicked.emit({ id: 12, windowId: 1 } as chrome.tabs.Tab);
+    await flush();
+    expect(f._.state.opened).toEqual([{ windowId: 1 }]);
+    expect(p.got.at(-1)).toEqual({ type: "site-check" });
+    expect(f._.state.badge).toBe("");
   });
 
   it("a panel that connects gets the status, then the cached frames in repaint order, at once", async () => {

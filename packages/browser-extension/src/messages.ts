@@ -68,7 +68,9 @@ export type WorkerToPanel =
   | { type: "status"; status: StatusSnapshot }
   /** One of the core's window frames (repainted from the worker's cache when the panel connects). */
   | { type: "frame"; state: PanelState }
-  | { type: "reply"; id: number; result: unknown };
+  | { type: "reply"; id: number; result: unknown }
+  /** The toolbar was clicked (activeTab may now show a tab's URL): ask for the current site again. */
+  | { type: "site-check" };
 
 export type DenialCode =
   | "sender"

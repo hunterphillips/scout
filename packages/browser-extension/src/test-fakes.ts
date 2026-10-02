@@ -320,6 +320,8 @@ export function makeChrome({
     /** What permissions.request answers (Chrome's prompt); a yes adds the pattern. */
     grantOnRequest: true,
     createFails: false,
+    /** sidePanel.open calls. */
+    opened: [] as Array<{ windowId?: number; tabId?: number }>,
   };
   const panelPorts: LinkedPort[] = [];
   const created: chrome.tabs.CreateProperties[] = [];
@@ -407,6 +409,7 @@ export function makeChrome({
       onRemoved: ev(),
     },
     action: {
+      onClicked: ev<(tab: chrome.tabs.Tab) => void>(),
       async setBadgeText({ text }: { text: string }) {
         state.badge = text;
       },
@@ -417,6 +420,9 @@ export function makeChrome({
     sidePanel: {
       async setPanelBehavior(b: unknown) {
         state.panelBehavior = b;
+      },
+      async open(o: { windowId?: number; tabId?: number }) {
+        state.opened.push(o);
       },
       onOpened: ev(),
     },

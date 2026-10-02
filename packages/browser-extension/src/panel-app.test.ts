@@ -160,8 +160,8 @@ describe("side panel page", () => {
     await h.click("nav-site");
     expect(h.text()).toContain("Click the Scout icon to check this site.");
     expect(h.text()).not.toContain("docs.example.com");
-    h.f._.state.activeTabGrant = 13; // the toolbar click
-    h.f.tabs.onActivated.emit({ tabId: 13, windowId: 1 } as never);
+    h.f._.state.activeTabGrant = 13; // Chrome's grant for the toolbar click
+    h.f.action.onClicked.emit({ id: 13, windowId: 1 } as chrome.tabs.Tab);
     await h.settle();
     expect(h.text()).toContain("Scout is not allowed on this site.");
     await h.click("site-allow");

@@ -142,6 +142,8 @@ export function createPanelApp(deps: PanelAppDeps): PanelApp {
       send(model.apply(m.state));
       verifyPreviews();
       openLinks();
+    } else if (m.type === "site-check") {
+      void refreshSite();
     } else if (m.type === "reply") {
       const r = replies.get(m.id);
       replies.delete(m.id);

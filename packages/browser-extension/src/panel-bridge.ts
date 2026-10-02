@@ -18,6 +18,13 @@
 // no connected panel port where getContexts is missing) sets a dot on the toolbar icon; a panel
 // connecting (or Chrome's sidePanel.onOpened, where present) and every `state` frame clear it.
 // The panel never opens itself: Chrome allows that only from a user gesture.
+//
+// Toolbar click: the worker opens the panel itself from action.onClicked (sidePanel.open for
+// the click's window, called synchronously inside the gesture) rather than through
+// setPanelBehavior({openPanelOnActionClick: true}). Checked in Chrome for Testing 154: with
+// openPanelOnActionClick the click opens the panel but grants no activeTab, so the panel could
+// never learn an ungranted tab's site; through onClicked the same click also grants activeTab
+// for that tab, and the worker tells open panels to look at their site again.
 
 import type { PanelState } from "@scout/contracts";
 import { type LinkState, PANEL_PORT_NAME, type PanelPortRequest, type PanelToWorker, type StatusSnapshot, type WorkerToPanel } from "./messages.js";
@@ -41,7 +48,7 @@ export interface PanelBridgeDeps {
 export interface PanelBridge {
   /** Registers runtime.onConnect (and sidePanel.onOpened where present) synchronously. */
   install(): void;
-  /** Sets the toolbar click to open the side panel. */
+  /** The toolbar click is handled by the worker (onClicked), not by Chrome's panel behaviour. */
   configureAction(): Promise<void>;
   /** One window frame from the core (port.ts onPanel). */
   onFrame(state: PanelState): void;
@@ -178,13 +185,27 @@ export function createPanelBridge(deps: PanelBridgeDeps): PanelBridge {
     for (const state of cached()) post(p, { type: "frame", state });
   }
 
+  /** The toolbar click: open the panel in the click's window (first, within the gesture), then recheck sites. */
+  function onActionClicked(tab: chrome.tabs.Tab | undefined): void {
+    if (typeof tab?.windowId === "number") {
+      try {
+        void Promise.resolve(ch.sidePanel?.open?.({ windowId: tab.windowId })).catch(() => {});
+      } catch {
+        // no side panel API: nothing to open
+      }
+    }
+    setBadge("");
+    broadcast({ type: "site-check" }); // the click granted activeTab for this tab
+  }
+
   function install(): void {
     ch.runtime.onConnect?.addListener(onConnect);
+    ch.action?.onClicked?.addListener(onActionClicked);
     ch.sidePanel?.onOpened?.addListener(() => setBadge(""));
   }
 
   async function configureAction(): Promise<void> {
-    await ch.sidePanel?.setPanelBehavior?.({ openPanelOnActionClick: true })?.catch?.(() => {});
+    await Promise.resolve(ch.sidePanel?.setPanelBehavior?.({ openPanelOnActionClick: false })).catch(() => {});
   }
 
   return {
