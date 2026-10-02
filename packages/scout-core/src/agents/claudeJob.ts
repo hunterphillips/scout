@@ -7,7 +7,7 @@
 // bridge's job file, holding the backend environment bindings but never their values, which
 // only the bridge resolves, in memory, at spawn); the CLI is spawned argv-only, detached, with the request on
 // stdin; the job dir is removed when the job ends, however it ends. The CLI itself runs from one
-// stable cwd, `SCOUT_HOME/run/agent-cwd` (AGENT_CWD_DIR: 0700, created when the adapter is built
+// stable cwd, `SCOUT_HOME/run/agent-cwd` (localSocketFiles.ts ensureAgentCwd: 0700, created when the adapter is built
 // and checked before each spawn, never swept), so the real CLI's per-cwd `~/.claude/projects`
 // folder appears once, not once per job; every path in its argv still names the job dir. From the spawn on, the job dir
 // also holds `tree.json` (0600, written atomically: the CLI's pid and group, its spawn time, and
@@ -69,7 +69,7 @@
 // tokens or URLs beyond the origin.
 
 import { spawn as nodeSpawn } from "node:child_process";
-import { chmodSync, lstatSync, mkdirSync, renameSync, writeFileSync } from "node:fs";
+import { renameSync, writeFileSync } from "node:fs";
 import { userInfo } from "node:os";
 import { isAbsolute, join } from "node:path";
 import { AgentTokenSchema, JOB_AGENT_OUTPUT_JSON_SCHEMA, JobRequestSchema, type HostJobResult, type JobRequest } from "@scout/contracts";
@@ -89,6 +89,7 @@ import { MODEL_RE, profileFingerprint, type AgentProfile } from "./profile.js";
 import { buildJobInstructions, buildJobPrompt, type PromptActivity } from "./prompt.js";
 import { JOB_TREE_FILE, type JobTreeRecord, type ProcessTracker } from "./processTree.js";
 import { createStreamMonitor } from "./streamMonitor.js";
+import { ensureAgentCwd } from "../localSocketFiles.js";
 import { checkManagedPolicy, defaultBridgeEntrypoint, managedMcpFilesFor, planJobTools, type JobManagedPaths, type ManagedPolicyResult, type ToolPlanOptions } from "./toolPolicy.js";
 
 export type { SpawnFn, SnapshotFn } from "./childSupervisor.js";
@@ -312,22 +313,6 @@ export function writeTreeRecord(jobDir: string, record: JobTreeRecord): void {
   } catch {
     // the job dir is gone or unwritable: nothing to record into
   }
-}
-
-/** The CLI's working directory under SCOUT_HOME/run: the same for every job (see the header). */
-export const AGENT_CWD_DIR = "agent-cwd";
-
-/**
- * Create (0700) or check the stable agent cwd: a real directory this user owns, group/other
- * bits cleared if set. Throws when it is a link, not a directory, or someone else's.
- */
-export function ensureAgentCwd(home: string): string {
-  const dir = join(home, "run", AGENT_CWD_DIR);
-  mkdirSync(dir, { recursive: true, mode: 0o700 });
-  const st = lstatSync(dir);
-  if (!st.isDirectory() || (process.getuid !== undefined && st.uid !== process.getuid())) throw new Error("agent cwd is not a private directory");
-  if ((st.mode & 0o077) !== 0) chmodSync(dir, 0o700);
-  return dir;
 }
 
 // ---------- the adapter ----------

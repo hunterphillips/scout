@@ -143,6 +143,29 @@ export function ensurePrivateRunDir(dir: string, uid: number = process.getuid?.(
   if ((st.mode & 0o777) !== 0o700) throw new SocketServerError("runtime-dir-not-private");
 }
 
+/** The agent CLI's working directory under the run dir: the same for every job (agents/claudeJob.ts). */
+export const AGENT_CWD_DIR = "agent-cwd";
+
+/**
+ * Create (0700) or check `<scoutHome>/run/agent-cwd`. The run dir itself is checked first, as
+ * for the sockets (a real 0700 directory we own, never a link). The agent cwd must be a real
+ * directory we own; group/other bits are cleared if set. Throws otherwise. Returns its path.
+ */
+export function ensureAgentCwd(scoutHome: string, uid: number = process.getuid?.() ?? -1): string {
+  const runDir = join(scoutHome, "run");
+  ensurePrivateRunDir(runDir, uid);
+  const dir = join(runDir, AGENT_CWD_DIR);
+  try {
+    mkdirSync(dir, { mode: 0o700 });
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
+  }
+  const st = lstatSync(dir);
+  if (st.isSymbolicLink() || !st.isDirectory() || st.uid !== uid) throw new Error("agent cwd is not a private directory");
+  if ((st.mode & 0o077) !== 0) chmodSync(dir, 0o700);
+  return dir;
+}
+
 /** Remove an existing socket only when a connect probe is refused. */
 async function clearStaleSocket(path: string, uid: number = process.getuid?.() ?? -1): Promise<void> {
   let st;
