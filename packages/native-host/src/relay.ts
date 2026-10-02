@@ -7,7 +7,7 @@
 //   - before each connect attempt, checks the core's runtime dir and socket are
 //     ours and private: missing is treated like ENOENT (retry), anything else
 //     unsafe reports core_unavailable and exits 1 without retrying;
-//   - connects to the core and sends a protocol-2 hello. The core answers with a
+//   - connects to the core and sends a protocol-3 hello. The core answers with a
 //     capture-disabled capture_policy (the negotiation ack); the relay forwards it,
 //     flushes the pre-connect buffer, then tells the extension {type:"ready"} (its
 //     signal that the link is healthy). The extension answers that policy with a
@@ -22,7 +22,16 @@
 //     handshake is done wait in a small buffer holding only the latest permissions
 //     and latest focus, flushed in that order. page_text that arrives before then is
 //     dropped and counted: it was approved under no current policy;
-//   - relays core -> Chrome: each frame validated as a ToChromeFrame and re-encoded;
+//   - relays Chrome -> core window commands (protocol 3): a frame {type:"command", command}
+//     is validated with CommandFrameSchema, so `command` is a RelayCommand: frontmost and
+//     shutdown (STDIO_ONLY_COMMANDS) are refused and counted, never forwarded, and a command
+//     whose JSONL line would not fit NATIVE_COMMAND_MAX_BYTES is dropped. Commands are never
+//     buffered: before ready they are dropped and counted (the extension already sees
+//     core_unavailable, or has not seen ready);
+//   - relays core -> Chrome: each frame validated as a ToChromeFrame and re-encoded, under
+//     its per-type cap (a `panel` frame, the window's state, up to MAX_PANEL_FRAME_BYTES;
+//     everything else MAX_FRAME_TO_CHROME), both when decoding the core's bytes and when
+//     encoding for Chrome;
 //   - when the core is unavailable, reports core_unavailable once and retries every
 //     2 s for 30 s, then exits 1;
 //   - when the core closes the socket after the handshake, reports core_unavailable
@@ -35,20 +44,25 @@ import type { Readable, Writable } from "node:stream";
 import {
   BRIDGE_PROTOCOL,
   BrowserObservationSchema,
+  type CommandFrame,
+  CommandFrameSchema,
   type CoreUnavailableReason,
   type Hello,
+  NATIVE_COMMAND_MAX_BYTES,
   type ObservationFrame,
+  STDIO_ONLY_COMMANDS,
   type ToChromeFrame,
   ToChromeFrameSchema,
 } from "@scout/contracts";
 import {
   type DropCode,
   encodeFrame,
+  encodeToChromeFrame,
   FrameDecoder,
   FrameError,
   type FrameResult,
   MAX_FRAME_FROM_CHROME,
-  MAX_FRAME_TO_CHROME,
+  toChromeDecoder,
 } from "@scout/contracts/frame";
 import type { RuntimeCheck } from "./config.js";
 
@@ -118,8 +132,16 @@ export interface HostDrops {
     backpressure: number;
     /** page_text that arrived before the handshake finished: dropped, never buffered. */
     textBeforeReady: number;
+    /** Window commands handed to the core write path (`forwarded` or `backpressure` counts the outcome). */
+    commands: number;
+    /** frontmost or shutdown sent as a command: only the native app may send them. */
+    refusedCommand: number;
+    /** A command that arrived before the handshake finished: dropped, never buffered. */
+    commandBeforeReady: number;
+    /** A command whose JSONL line would not fit NATIVE_COMMAND_MAX_BYTES. */
+    commandOversized: number;
   };
-  fromCore: { forwarded: number; invalid: number };
+  fromCore: { forwarded: number; invalid: number; oversized: number };
   decoderDrops: { fromChrome: Record<DropCode, number>; fromCore: Record<DropCode, number> };
 }
 
@@ -136,10 +158,22 @@ export function expectedOrigin(extensionId: string): string {
 
 export function createHost(deps: HostDeps): Host {
   const { stdin, stdout, timers, log } = deps;
-  const fromChrome = { forwarded: 0, invalid: 0, noCore: 0, oversized: 0, backpressure: 0, textBeforeReady: 0 };
-  const fromCore = { forwarded: 0, invalid: 0 };
+  const fromChrome = {
+    forwarded: 0,
+    invalid: 0,
+    noCore: 0,
+    oversized: 0,
+    backpressure: 0,
+    textBeforeReady: 0,
+    commands: 0,
+    refusedCommand: 0,
+    commandBeforeReady: 0,
+    commandOversized: 0,
+  };
+  const fromCore = { forwarded: 0, invalid: 0, oversized: 0 };
   const chromeDecoder = new FrameDecoder({ maxBytes: MAX_FRAME_FROM_CHROME });
-  const coreDecoder = new FrameDecoder({ maxBytes: MAX_FRAME_TO_CHROME });
+  // Panel frames up to MAX_PANEL_FRAME_BYTES; any other frame over MAX_FRAME_TO_CHROME is dropped.
+  const coreDecoder = toChromeDecoder();
 
   const drops = (): HostDrops => ({
     fromChrome: { ...fromChrome },
@@ -196,8 +230,16 @@ export function createHost(deps: HostDeps): Host {
 
   const sendToChrome = (frame: ToChromeFrame) => {
     if (finished) return;
+    let bytes: Buffer;
+    try {
+      bytes = encodeToChromeFrame(frame);
+    } catch (e) {
+      if (!(e instanceof FrameError)) throw e;
+      fromCore.oversized += 1;
+      return;
+    }
     pendingWrites += 1;
-    stdout.write(encodeFrame(frame, MAX_FRAME_TO_CHROME), () => {
+    stdout.write(bytes, () => {
       pendingWrites -= 1;
       if (finished && pendingWrites === 0) doExit();
     });
@@ -268,8 +310,36 @@ export function createHost(deps: HostDeps): Host {
     sendToChrome(frame);
   };
 
+  /** A window command from the extension: relayed (never buffered) only once ready. */
+  const onChromeCommand = (value: Record<string, unknown>) => {
+    const parsed = CommandFrameSchema.safeParse(value);
+    if (!parsed.success) {
+      const command = value["command"];
+      const type = typeof command === "object" && command !== null ? (command as Record<string, unknown>)["type"] : undefined;
+      if ((STDIO_ONLY_COMMANDS as readonly unknown[]).includes(type)) fromChrome.refusedCommand += 1;
+      else fromChrome.invalid += 1;
+      return;
+    }
+    const frame: CommandFrame = { type: "command", command: parsed.data.command };
+    // The core and the native app take a command only as one JSONL line under this limit.
+    if (Buffer.byteLength(`${JSON.stringify(frame.command)}\n`, "utf8") >= NATIVE_COMMAND_MAX_BYTES) {
+      fromChrome.commandOversized += 1;
+      return;
+    }
+    if (socket === null || !ready) {
+      fromChrome.commandBeforeReady += 1;
+      return;
+    }
+    fromChrome.commands += 1;
+    writeToCore(socket, encodeFrame(frame, MAX_FRAME_FROM_CHROME));
+  };
+
   const onChromeFrame = (r: FrameResult) => {
     if (!r.ok) return; // counted by the decoder
+    if (r.value["type"] === "command") {
+      onChromeCommand(r.value);
+      return;
+    }
     const parsed = BrowserObservationSchema.safeParse(r.value);
     if (!parsed.success) {
       fromChrome.invalid += 1;
