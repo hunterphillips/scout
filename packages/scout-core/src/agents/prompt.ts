@@ -1,7 +1,11 @@
 // What a recommendation job is told.
 //
-// Provenance: adapted from packages/personal-context-mcp/src/prompt.ts. Unchanged:
-// sanitizeField and the nonce-delimited untrusted block (parity-tested). Differences:
+// Provenance: adapted from packages/personal-context-mcp/src/prompt.ts. Unchanged: the
+// nonce-delimited untrusted block (parity-tested for marker-free text). Differences:
+//   - sanitizeField also replaces every run of three or more `<` or `>` with a space, so
+//     untrusted text can never hold anything shaped like a block marker (`<<<END UNTRUSTED SITE
+//     DATA nonce>>>`), even with a guessed nonce. Otherwise it matches the legacy copy
+//     (parity-tested).
 //   - The instructions are APPENDED to the CLI's default system prompt
 //     (`--append-system-prompt-file`), never a replacement, so the user's own user-level
 //     instructions keep loading. The legacy runner replaced the system prompt, which is not
@@ -44,12 +48,15 @@ Rules:
 }
 
 /**
- * One line of display text: no control or format characters, whitespace collapsed, capped,
- * `\` then `|` escaped (so `a\|b` cannot forge a field separator). Verbatim from the legacy copy.
+ * One line of display text: no control or format characters, no run of three or more `<` or
+ * `>` (no marker shape), whitespace collapsed, capped, `\` then `|` escaped (so `a\|b` cannot
+ * forge a field separator). Each such run becomes a space, so its neighbours never join into a
+ * new run.
  */
 export function sanitizeField(s: string, maxChars: number): string {
   const flat = s
     .replace(/\p{Cc}|\p{Cf}/gu, " ")
+    .replace(/<{3,}|>{3,}/gu, " ")
     .replace(/\s+/gu, " ")
     .trim();
   return [...flat].slice(0, maxChars).join("").replaceAll("\\", "\\\\").replaceAll("|", "\\|");
