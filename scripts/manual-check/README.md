@@ -14,7 +14,7 @@ build and a throwaway profile whose own `NativeMessagingHosts/` holds the bridge
     (cd native/Scout && swift build && env -u SCOUT_HOME .build/debug/ScoutApp &)
 
 Then drive the browser with `node scripts/manual-check/drive.mjs <cmd>` (needs
-`playwright-core`, a root devDependency): `popup <extId>`, `grant <extId>`, `text <extId>`,
+`playwright-core`, a root devDependency): `panel <extId>`, `allow <extId> <host>`, `text <extId>`,
 `goto <url>`, `front <urlSubstring>`, `click <urlSubstring> <selector>`, `back <urlSubstring>`,
 `tabs`, `shot <file>`. Bring Chrome for Testing to the front of macOS with
 `osascript -e 'tell application id "com.google.chrome.for.testing" to activate'`; the
@@ -23,5 +23,9 @@ core only counts a visit when that app is frontmost. Watch
 `screencapture -x` to see the panel. Finish with `npm run doctor` and
 `CHROME_NMH_DIR=... npm run uninstall -- --yes`, then quit the app and the browser.
 
-Under `--load-extension`, Grant sites granted all three hosts with no prompt, so the
-prompt path in stable Chrome is still unexercised.
+Under `--load-extension`, Chrome may grant a site without its confirmation prompt, so the
+prompt path in stable Chrome needs a check by hand.
+
+Since P4.1 the popup is gone: `panel` opens the side panel's page (`panel.html`) in an
+ordinary tab, because CDP cannot open the real side panel. The panel itself is covered by
+`test/side-panel.test.mjs`; this script only drives the browser around it.

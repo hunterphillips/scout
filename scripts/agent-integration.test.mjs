@@ -8,7 +8,7 @@ import { runSetup } from "./setup.mjs";
 import { runUninstall } from "./uninstall.mjs";
 import { runChecks } from "./doctor.mjs";
 import { layout } from "./lib/paths.mjs";
-import { listTree, makeFakeClaude, makeFixture } from "./lib/test-fixture.mjs";
+import { exportRealWrappers, listTree, makeFakeClaude, makeFixture } from "./lib/test-fixture.mjs";
 import { SKILL_TEMPLATE, sha256 } from "./lib/integration-skill.mjs";
 import { readInstalled } from "./lib/installed.mjs";
 import { readInstalledRecord } from "../packages/scout-core/dist/installedRecord.js";
@@ -106,7 +106,8 @@ describe("setup --agent-integration", () => {
     // The core's reader accepts what setup wrote.
     expect(readInstalledRecord(L.scoutHome)).toEqual({ skillsRoot });
     expect(r.text()).toMatch(/all of your Claude Code sessions/);
-    expect(r.text()).toMatch(/Browser context .* separate opt-in, off by default: today it is `agentBrowserContext` in ~\/\.scout\/config\.json; a Scout app toggle is coming/);
+    expect(r.text()).toMatch(/Browser context .* separate opt-in, off by default: turn it on in Scout's settings \(it is `agentBrowserContext` in ~\/\.scout\/config\.json\)/);
+    expect(r.text()).toMatch(/Start a new Claude Code session/);
     expect(r.text()).not.toMatch(/P2\.\d/);
     expect(template()).not.toMatch(/P2\.\d/);
     expect(template()).toMatch(/`agentBrowserContext` in ~\/\.scout\/config\.json/);
@@ -329,54 +330,143 @@ describe("setup --agent-integration", () => {
 });
 
 describe("uninstall and the agent integration", () => {
-  const wrapperName = "scout-llms-0123456789abcdef";
-  const installWithNeighbours = () => {
+  const foreignName = "scout-llms-0123456789abcdef";
+  /** The integration, a neighbour skill, a foreign `scout-*` dir, and two wrappers the Scout app exported. */
+  const installWithNeighbours = async () => {
     expect(setup(["--agent-integration"]).code).toBe(0);
     setRegistry({ ...registry(), other: { type: "stdio", command: "/bin/other", args: [], env: {} } });
     mkdirSync(join(skillsRoot, "someone-skill"));
     writeFileSync(join(skillsRoot, "someone-skill", "SKILL.md"), "x");
-    mkdirSync(join(skillsRoot, wrapperName));
-    writeFileSync(join(skillsRoot, wrapperName, "SKILL.md"), "runtime wrapper");
-    mkdirSync(join(L.scoutHome, "capabilities"), { recursive: true });
-    writeFileSync(L.exportsManifest, JSON.stringify({ schemaVersion: 1, skillsRoot, entries: [{ name: wrapperName }], conflicts: [] }));
+    mkdirSync(join(skillsRoot, foreignName));
+    writeFileSync(join(skillsRoot, foreignName, "SKILL.md"), "not Scout's: the manifest does not list it");
+    return exportRealWrappers(L.scoutHome, skillsRoot, ["pay", "refund"]);
   };
+  const exportsEntries = () => json(L.exportsManifest).entries.map((e) => e.name);
 
-  it("--agent-integration removes only ours, drops skillsRoot and both entries, keeps everything else", async () => {
-    installWithNeighbours();
+  it("--agent-integration removes the app's unchanged wrappers first, then only ours; drops skillsRoot and both entries", async () => {
+    const wrappers = await installWithNeighbours();
     const r = await uninstall(["--yes", "--agent-integration"]);
     expect(r.code, r.text()).toBe(0);
+    for (const w of wrappers) {
+      expect(existsSync(join(skillsRoot, w))).toBe(false);
+      expect(r.text()).toContain(`removed ${join(skillsRoot, w)} (Scout app skill wrapper, unchanged since Scout wrote it)`);
+    }
+    expect(exportsEntries()).toEqual([]);
     expect(Object.keys(registry())).toEqual(["other"]);
     expect(existsSync(join(skillsRoot, "scout-integration"))).toBe(false);
     expect(existsSync(join(skillsRoot, "someone-skill", "SKILL.md"))).toBe(true);
-    expect(existsSync(join(skillsRoot, wrapperName, "SKILL.md"))).toBe(true);
-    expect(r.text()).toMatch(/wrappers remaining in .*: 1/);
-    expect(r.text()).toMatch(/revoke those capabilities in Scout \(which removes their wrappers\) before uninstalling/);
+    expect(existsSync(join(skillsRoot, foreignName, "SKILL.md"))).toBe(true);
     const record = json(L.installed);
     expect(record.skillsRoot).toBeUndefined();
-    expect(record.files.map((f) => f.kind).sort()).toEqual(["config", "config-merged", "extension-manifest-key", "key", "nmh-manifest", "wrapper"]);
+    expect(record.files.map((f) => f.kind).sort()).toEqual(["agent-profile", "config", "extension-manifest-key", "key", "nmh-manifest", "wrapper"]);
     expect(existsSync(L.wrapper)).toBe(true);
     expect(readInstalledRecord(L.scoutHome)).toEqual({});
   });
 
-  it("--dry-run changes nothing", async () => {
-    installWithNeighbours();
+  it("keeps and lists a wrapper changed since Scout wrote it, removes the rest, and exits 2", async () => {
+    const [changed, exact] = await installWithNeighbours();
+    writeFileSync(join(skillsRoot, changed, "SKILL.md"), "my own edit");
+    const r = await uninstall(["--yes", "--agent-integration"]);
+    expect(r.code, r.text()).toBe(2);
+    expect(readFileSync(join(skillsRoot, changed, "SKILL.md"), "utf8")).toBe("my own edit");
+    expect(existsSync(join(skillsRoot, exact))).toBe(false);
+    expect(r.text()).toContain(`SKIP ${join(skillsRoot, changed)} (Scout app skill wrapper, changed since Scout wrote it; not touching`);
+    expect(r.text()).toMatch(/Scout app skill wrappers left in .*: 1 .*delete them yourself/);
+    expect(exportsEntries()).toEqual([changed]);
+    expect(existsSync(join(skillsRoot, "scout-integration"))).toBe(false);
+  });
+
+  it("stops before changing anything while Scout runs (it holds the store lock): quit Scout first", async () => {
+    const wrappers = await installWithNeighbours();
+    // A live pid in the lock: this test process stands in for the running core.
+    writeFileSync(join(L.scoutHome, "capabilities", "store.lock"), JSON.stringify({ pid: process.pid, instanceId: "core", startedAt: 1 }));
+    const before = listTree(fx.root).filter((f) => !f.startsWith("fake-bin/"));
+    const reg = registry();
+    for (const args of [["--yes", "--agent-integration"], ["--yes"]]) {
+      const r = await uninstall(args);
+      expect(r.code).toBe(1);
+      expect(r.text()).toMatch(/Scout is running \(pid \d+ holds .*capabilities\/store\.lock\); quit Scout first\. Nothing changed\./);
+    }
+    const dry = await uninstall(["--dry-run"]);
+    expect(dry.code).toBe(0);
+    expect(dry.text()).toMatch(/Scout is running \(pid \d+ holds .*store\.lock\): the real run would stop here/);
+    for (const w of wrappers) expect(dry.text()).toContain(join(skillsRoot, w));
+    expect(listTree(fx.root).filter((f) => !f.startsWith("fake-bin/"))).toEqual(before);
+    expect(registry()).toEqual(reg);
+    for (const w of wrappers) expect(existsSync(join(skillsRoot, w))).toBe(true);
+  });
+
+  it("a skills root that became a symlink: wrappers kept as unreachable, everything else removed, skillsRoot kept for a retry", async () => {
+    const wrappers = await installWithNeighbours();
+    const moved = join(fx.root, "moved-skills");
+    renameSync(skillsRoot, moved);
+    symlinkSync(moved, skillsRoot);
+    const r = await uninstall(["--yes", "--include-key"]);
+    expect(r.code, r.text()).toBe(2);
+    expect(r.text()).toMatch(/the recorded skills root .* is a symlink or sits under one; Scout never follows it/);
+    for (const w of wrappers) {
+      expect(r.text()).toContain(`SKIP ${join(skillsRoot, w)} (Scout app skill wrapper, not reachable`);
+      expect(existsSync(join(moved, w, "SKILL.md"))).toBe(true);
+    }
+    expect(existsSync(L.nmhManifest)).toBe(false);
+    expect(existsSync(L.scoutConfig)).toBe(false);
+    expect(json(L.installed).skillsRoot).toBe(skillsRoot);
+    expect(r.text()).toMatch(/kept skillsRoot .* so a later `npm run uninstall` can retry/);
+  });
+
+  it("uninstalls twice end to end: the second run finds nothing", async () => {
+    await installWithNeighbours();
+    expect((await uninstall(["--yes", "--include-key"])).code).toBe(0);
+    const again = await uninstall(["--yes", "--include-key"]);
+    expect(again.code).toBe(0);
+    expect(again.text()).toMatch(/Nothing to uninstall/);
+  });
+
+  it("lists the wrappers it will remove before asking", async () => {
+    const wrappers = await installWithNeighbours();
+    let asked = null;
+    const c = { lines: [] };
+    const code = await runUninstall([], { env, out: (l) => c.lines.push(l), err: (l) => c.lines.push(l), claudeFallbacks: [], confirm: async (q) => ((asked = { q, before: [...c.lines] }), false) });
+    expect(code).toBe(1);
+    expect(asked.q).toMatch(/and the unchanged skill wrappers\? \[y\/N\]/);
+    for (const w of wrappers) expect(asked.before.join("\n")).toContain(join(skillsRoot, w));
+    for (const w of wrappers) expect(existsSync(join(skillsRoot, w))).toBe(true);
+  });
+
+  it("stops when exports.json cannot be trusted, changing nothing", async () => {
+    await installWithNeighbours();
+    writeFileSync(L.exportsManifest, JSON.stringify({ schemaVersion: 1, skillsRoot, entries: [{ name: foreignName }], conflicts: [] }));
+    // The core CLI logs the refusal to diagnostics; nothing else may change.
+    const tree = () => listTree(fx.root).filter((f) => !f.startsWith("fake-bin/") && !f.endsWith("logs/diagnostics.jsonl"));
+    const before = tree();
+    const r = await uninstall(["--yes"]);
+    expect(r.code).toBe(1);
+    expect(r.text()).toMatch(/could not remove the Scout app's skill wrappers \(unexport-all: skill export: manifest_(schema|not_private).*\)\. Nothing changed\./);
+    expect(tree()).toEqual(before);
+  });
+
+  it("--dry-run shows the unexport step and changes nothing", async () => {
+    await installWithNeighbours();
     const before = listTree(fx.root).filter((f) => !f.startsWith("fake-bin/"));
     const reg = registry();
     const r = await uninstall(["--dry-run", "--agent-integration"]);
     expect(r.code, r.text()).toBe(0);
+    expect(r.text()).toMatch(/would run .*cli\.js capabilities unexport-all --home /);
+    expect(r.text()).toMatch(/remove each of the 2 Scout app skill wrapper\(s\) listed in .*exports\.json that is unchanged/);
     expect(r.text()).toMatch(/would remove MCP server "scout"/);
     expect(r.text()).toContain(GET_NOTE);
     expect(listTree(fx.root).filter((f) => !f.startsWith("fake-bin/"))).toEqual(before);
     expect(registry()).toEqual(reg);
   });
 
-  it("the full uninstall removes the integration too and then the record", async () => {
-    installWithNeighbours();
+  it("the full uninstall removes the wrappers, the integration, and then the record", async () => {
+    const wrappers = await installWithNeighbours();
     const r = await uninstall(["--yes", "--include-key"]);
     expect(r.code, r.text()).toBe(0);
     expect(Object.keys(registry())).toEqual(["other"]);
     expect(existsSync(join(skillsRoot, "scout-integration"))).toBe(false);
-    expect(existsSync(join(skillsRoot, wrapperName))).toBe(true);
+    for (const w of wrappers) expect(existsSync(join(skillsRoot, w))).toBe(false);
+    expect(existsSync(join(skillsRoot, foreignName))).toBe(true);
     expect(existsSync(L.installed)).toBe(false);
   });
 

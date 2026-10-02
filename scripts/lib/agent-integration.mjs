@@ -37,7 +37,9 @@ export const isIntegrationEntry = (f) => INTEGRATION_KINDS.includes(f?.kind);
 export const INTEGRATION_EXPLANATION = [
   "The `scout` MCP connection is registered at user scope: it is available in all of your Claude Code sessions, in every project.",
   "It exposes only website resources you approved in Scout (AGENTS.md, llms.txt, skills), read on demand.",
-  "Browser context (the current site and recent pages) is a separate opt-in, off by default: today it is `agentBrowserContext` in ~/.scout/config.json; a Scout app toggle is coming.",
+  "Browser context (the current site and recent pages) is a separate opt-in, off by default: turn it on in Scout's settings (it is `agentBrowserContext` in ~/.scout/config.json).",
+  "With Scout quit, the connection stays registered and its tools answer that Scout is not running.",
+  "Start a new Claude Code session to load it: running sessions do not reload MCP servers or skills.",
   "Remove it with `npm run uninstall -- --agent-integration`.",
 ];
 
@@ -320,14 +322,20 @@ export function removeIntegration(record, { env, L, dryRun, claudeFallbacks, mcp
       lines.push(`${dryRun ? "would leave" : "left"} skills root ${skillsRoot} in place: setup created it, but Claude Code shares it`);
     }
   }
-  if (skillsRoot) {
+  // Uninstall removed the unchanged wrappers first (uninstall.mjs unexportWrappers); what is
+  // left changed after Scout wrote it. In a dry run nothing was removed, so nothing is counted.
+  let rootReal = false;
+  try {
+    rootReal = !!skillsRoot && checkSkillsRoot(skillsRoot).exists;
+  } catch {
+    // a symlinked or missing root: uninstall already reported its wrappers as unreachable
+  }
+  if (skillsRoot && !dryRun && rootReal) {
     const w = countRuntimeWrappers(L.exportsManifest, skillsRoot);
-    lines.push(
-      w.count === null
-        ? `Scout app skill wrappers in ${skillsRoot}: unknown (${w.manifest} unreadable); setup never touches them`
-        : `Scout app skill wrappers remaining in ${skillsRoot}: ${w.count} (listed in ${w.manifest}; the Scout app manages them, setup never touches them)`,
-    );
-    if (w.count > 0) lines.push("To remove them, revoke those capabilities in Scout (which removes their wrappers) before uninstalling; uninstall never removes them.");
+    if (w.count === null) lines.push(`Scout app skill wrappers in ${skillsRoot}: unknown (${w.manifest} unreadable); uninstall leaves any there`);
+    else if (w.count > 0) {
+      lines.push(`Scout app skill wrappers left in ${skillsRoot}: ${w.count} (listed in ${w.manifest}): they changed after Scout wrote them, so uninstall leaves them; delete them yourself if you no longer want them.`);
+    }
   }
   return { record: next, lines, left };
 }

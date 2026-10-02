@@ -1,0 +1,5 @@
+{
+  "type": "grant",
+  "agentBrowserContext": false,
+  "destinations": ["https://docs.stripe.com", "https://www.peakdesign.com"]
+}

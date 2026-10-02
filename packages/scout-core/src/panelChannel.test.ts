@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { PREVIEW_CHUNK_MAX_BYTES, type PanelCapabilities, type PanelPreviewChunk, type PanelState } from "@scout/contracts";
+import { GRANT_DESTINATIONS_MAX, PanelStateSchema, PREVIEW_CHUNK_MAX_BYTES, type PanelCapabilities, type PanelPreviewChunk, type PanelState } from "@scout/contracts";
 import { describe, expect, it } from "vitest";
 import type { ReadAuditEntry } from "./agentApi/readAudit.js";
 import { emptyState } from "./capabilities/decisions.js";
@@ -53,7 +53,13 @@ const emptyStore = {
 } satisfies PanelStore;
 
 function setup(
-  overrides: { store?: PanelStore; isPermitted?: (origin: string) => boolean; results?: ResultRegistry; resendState?: () => void } = {},
+  overrides: {
+    store?: PanelStore;
+    isPermitted?: (origin: string) => boolean;
+    results?: ResultRegistry;
+    resendState?: () => void;
+    readDestinations?: () => readonly string[];
+  } = {},
 ) {
   const t = fakeTimers();
   const frames: PanelState[] = [];
@@ -74,6 +80,7 @@ function setup(
     emit: (f) => void frames.push(f),
     ...(overrides.results ? { results: overrides.results } : {}),
     ...(overrides.resendState ? { resendState: overrides.resendState } : {}),
+    ...(overrides.readDestinations ? { readDestinations: overrides.readDestinations } : {}),
     clock: { now: () => 0 },
     timers: t.timers,
     diagnostics,
@@ -89,6 +96,29 @@ describe("panel channel", () => {
     expect(s.frames[0]).toEqual({ type: "grant", agentBrowserContext: true });
     // An unreadable manifest shows no conflicts rather than no frame.
     expect(s.frames[1]).toMatchObject({ coreInstanceId: "core-test", revision: 1, conflicts: [], offers: [], library: [] });
+  });
+
+  it("puts the configured destinations on every grant frame as https origins, bounded, and the frame stays in the contract", async () => {
+    const hosts = ["docs.stripe.com", "www.peakdesign.com", "docs.stripe.com", "h.example:8443", ...Array.from({ length: 70 }, (_, i) => `h${i}.example`)];
+    const s = setup({ readDestinations: () => hosts });
+    s.channel.start();
+    const grant = s.frames[0] as Extract<PanelState, { type: "grant" }>;
+    expect(grant.destinations?.slice(0, 3)).toEqual(["https://docs.stripe.com", "https://www.peakdesign.com", "https://h.example:8443"]);
+    expect(grant.destinations).toHaveLength(GRANT_DESTINATIONS_MAX);
+    expect(PanelStateSchema.safeParse(grant).success).toBe(true);
+    // The toggle's grant frame and a repaint carry them too.
+    s.frames.length = 0;
+    await s.channel.handle({ type: "set_agent_browser_context", commandId: "g1", enabled: false, expectedEnabled: true });
+    expect(s.frames.find((f) => f.type === "grant")).toMatchObject({ destinations: expect.arrayContaining(["https://docs.stripe.com"]) });
+    const got: PanelState[] = [];
+    s.channel.repaint({ id: "relay-1", kind: "relay", send: (f) => void got.push(f) }, { type: "state", status: "disconnected" });
+    expect(got[0]).toMatchObject({ type: "grant", destinations: expect.arrayContaining(["https://www.peakdesign.com"]) });
+  });
+
+  it("sends an empty destinations list when none is configured", () => {
+    const s = setup({ readDestinations: () => [] });
+    s.channel.start();
+    expect(s.frames[0]).toEqual({ type: "grant", agentBrowserContext: true, destinations: [] });
   });
 
   it("sends the audit debounced, only when it changed, without any text", () => {

@@ -1,9 +1,12 @@
-// Drives a Chrome for Testing instance over CDP for the Phase 1 manual check; see README.md.
-// Drive the Chrome for Testing instance over CDP for the Phase 1 manual check.
+// Drives a Chrome for Testing instance over CDP for the manual checks; see README.md.
+// The side panel (P4.1) replaced the popup. CDP cannot open the real side panel, so `panel`
+// opens the same page, chrome-extension://<id>/panel.html, in an ordinary tab; the hermetic
+// side-panel e2e (test/side-panel.test.mjs) covers the panel itself.
 // usage: node drive.mjs <cmd> [args]
-//   popup <extId>            open chrome-extension://<id>/popup.html in a tab, print its text
-//   grant <extId>            click "Grant sites" in the popup tab (opens Chrome's native prompt)
-//   text <extId>             print the popup's text
+//   panel <extId>            open chrome-extension://<id>/panel.html in a tab, print its text
+//   allow <extId> <host>     in the panel tab, click the Sites row's "Allow" for <host>, or type
+//                            <host> into "Allow another site" and submit (Chrome's prompt)
+//   text <extId>             print the panel tab's text
 //   goto <url>               open <url> in a new tab and bring it to front
 //   front <substr>           bring the first tab whose url contains <substr> to front
 //   tabs                     list tabs
@@ -14,26 +17,31 @@ const [cmd, ...args] = process.argv.slice(2);
 const browser = await chromium.connectOverCDP("http://127.0.0.1:9333");
 const ctx = browser.contexts()[0];
 const pages = () => ctx.pages();
-const popupUrl = (id) => `chrome-extension://${id}/popup.html`;
+const panelUrl = (id) => `chrome-extension://${id}/panel.html`;
 const findPage = (sub) => pages().find((p) => p.url().includes(sub));
 
 try {
   if (cmd === "tabs") {
     for (const p of pages()) console.log(p.url());
-  } else if (cmd === "popup") {
-    let p = findPage(popupUrl(args[0]));
-    if (!p) { p = await ctx.newPage(); await p.goto(popupUrl(args[0])); }
+  } else if (cmd === "panel") {
+    let p = findPage(panelUrl(args[0]));
+    if (!p) { p = await ctx.newPage(); await p.goto(panelUrl(args[0])); }
     await p.bringToFront();
     await p.waitForTimeout(500);
     console.log(await p.innerText("body"));
   } else if (cmd === "text") {
-    const p = findPage(popupUrl(args[0]));
-    console.log(p ? await p.innerText("body") : "(no popup tab)");
-  } else if (cmd === "grant") {
-    const p = findPage(popupUrl(args[0]));
+    const p = findPage(panelUrl(args[0]));
+    console.log(p ? await p.innerText("body") : "(no panel tab)");
+  } else if (cmd === "allow") {
+    const p = findPage(panelUrl(args[0]));
+    if (!p || !args[1]) throw new Error("usage: allow <extId> <host> (open the panel tab first)");
     await p.bringToFront();
-    const box = await p.locator("#grant").boundingBox();
-    await p.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+    const row = p.locator(`[data-key="allow-${args[1]}"]`);
+    if (await row.count()) await row.first().click();
+    else {
+      await p.locator("#site-input").fill(args[1]);
+      await p.locator('[data-key="site-add"]').click();
+    }
     await p.waitForTimeout(1500);
     console.log(await p.innerText("body"));
   } else if (cmd === "goto") {

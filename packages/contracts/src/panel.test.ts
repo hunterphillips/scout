@@ -68,6 +68,8 @@ describe("panel frames (core -> app)", () => {
       { type: "audit", entries: [{ at: 1, role: "interactive", method: "current_site", outcome: "ok", origin: "https://docs.example.com" }] },
       { type: "audit", entries: [{ at: 1, role: "job", method: "current_site", outcome: "not_granted" }] },
       { type: "grant", agentBrowserContext: true },
+      { type: "grant", agentBrowserContext: false, destinations: [] },
+      { type: "grant", agentBrowserContext: false, destinations: ["https://docs.stripe.com", "https://www.peakdesign.com"] },
       { type: "state", status: "idle", visitEpoch: 2, detail: "docs.example.com", permitted: true },
     ];
     for (const f of frames) expect(PanelStateSchema.parse(f)).toEqual(f);
@@ -110,6 +112,10 @@ describe("panel frames (core -> app)", () => {
       { ...capabilities, coreInstanceId: "x".repeat(65) },
       { ...capabilities, coreInstanceId: "has space" },
       { type: "grant" },
+      { type: "grant", agentBrowserContext: true, destinations: ["docs.stripe.com"] },
+      { type: "grant", agentBrowserContext: true, destinations: ["http://docs.stripe.com"] },
+      { type: "grant", agentBrowserContext: true, destinations: ["https://docs.stripe.com/path"] },
+      { type: "grant", agentBrowserContext: true, destinations: Array.from({ length: 65 }, (_, i) => `https://h${i}.example`) },
     ];
     for (const f of bad) expect(PanelStateSchema.safeParse(f).success).toBe(false);
   });

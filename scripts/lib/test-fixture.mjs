@@ -25,7 +25,10 @@ export function makeFixture({ withClaude = true, rootPrefix = "scout setup test 
   const home = join(root, spaces ? "home dir" : "home");
   const scoutRoot = join(root, spaces ? "scout root" : "scout-root");
   const binDir = join(root, "bin");
-  for (const d of ["browser-extension", "native-host", "scout-core", "scout-mcp"]) mkdirSync(join(scoutRoot, "packages", d, "dist"), { recursive: true });
+  for (const d of ["browser-extension", "native-host", "scout-core", "scout-mcp", "contracts"]) mkdirSync(join(scoutRoot, "packages", d, "dist"), { recursive: true });
+  mkdirSync(join(scoutRoot, "packages", "scout-core", "dist", "agents"), { recursive: true });
+  writeFileSync(join(scoutRoot, "packages/contracts/dist/bridge.js"), "export const BRIDGE_PROTOCOL = 3;\n");
+  writeFileSync(join(scoutRoot, "packages/scout-core/dist/agents/claudeJob.js"), 'export const VERIFIED_CLI_VERSION = "2.1.286";\n');
   writeFileSync(join(scoutRoot, "packages/browser-extension/dist/manifest.json"), JSON.stringify(FAKE_MANIFEST, null, 2) + "\n");
   writeFileSync(join(scoutRoot, "packages/native-host/dist/host.js"), "// fake host\n");
   writeFileSync(join(scoutRoot, "packages/scout-core/dist/main.js"), "// fake core\n");
@@ -42,6 +45,8 @@ export function makeFixture({ withClaude = true, rootPrefix = "scout setup test 
     SCOUT_HOME: join(home, ".scout"),
     PERSONAL_CONTEXT_HOME: join(home, ".personal-context-mcp"),
     CHROME_NMH_DIR: join(home, "Library", "Application Support", "Google", "Chrome", "NativeMessagingHosts"),
+    // A test home never runs a claude found on PATH: setup records this one in the agent profile.
+    ...(withClaude ? { SCOUT_CLAUDE_BIN: join(binDir, "claude") } : {}),
   };
   return { root, home, scoutRoot, binDir, env, cleanup: () => rmSync(root, { recursive: true, force: true }) };
 }
@@ -92,3 +97,36 @@ export function listTree(dir) {
   return out.sort();
 }
 
+
+/**
+ * Approve `skills` in a real capability store under `scoutHome` and export their wrappers into
+ * `skillsRoot` as the core would (scout-core dist; the scripts' global setup builds it). The store
+ * is closed afterwards, so its lock is free. Returns the wrapper names.
+ */
+export async function exportRealWrappers(scoutHome, skillsRoot, skills = ["pay"]) {
+  const { createHash } = await import("node:crypto");
+  const { createCapabilityStore } = await import("../../packages/scout-core/dist/capabilities/store.js");
+  const { createSkillExporter } = await import("../../packages/scout-core/dist/capabilities/exports.js");
+  const { wrapperName } = await import("../../packages/scout-core/dist/capabilities/identity.js");
+  const sha = (s) => createHash("sha256").update(s, "utf8").digest("hex");
+  const origin = "https://s.example";
+  mkdirSync(skillsRoot, { recursive: true });
+  const exporter = createSkillExporter({ scoutHome, skillsRoot });
+  const store = await createCapabilityStore({ scoutHome, clock: { now: () => 1_800_000_000_000 }, syncExports: (state) => exporter.sync(state) });
+  const names = [];
+  for (const name of skills) {
+    const text = `---\nname: ${name}\ndescription: d\n---\n# ${name}\n`;
+    const sourceUrl = `${origin}/skills/${name}/SKILL.md`;
+    const resource = { kind: "skill", siteOrigin: origin, publisherOrigin: origin, sourceUrl, finalUrl: sourceUrl, text, sha256: sha(text), byteLength: Buffer.byteLength(text), fetchedAt: 1, skill: { name, sha256: sha(text) } };
+    const report = await store.ingest(
+      { origin, checkedAt: 1, robots: "not_fetched", items: [{ kind: "skill", sourceUrl, status: "found", source: "network", resource }], externalReferences: [], skillsOverCap: 0, acceptedBytes: 0, stats: { requests: 0, refused: 0, ms: 0 } },
+      { chromePermitted: false },
+    );
+    const { resourceId, version } = report.results[0];
+    await store.approve({ resourceId, version, expectedRevision: store.getResource(resourceId).revision });
+    names.push(wrapperName("skill", resourceId));
+  }
+  await exporter.sync(store.snapshot());
+  await store.close();
+  return names;
+}
