@@ -70,6 +70,25 @@ describe("stream monitor: job details", () => {
     expect(stop.decision).toBeUndefined();
   });
 
+  it("an error from a required user tool stops the job (tool_unavailable, required_tool_failed); Scout's own stay counted", () => {
+    const d = details();
+    const stop = new JobStop();
+    const req = { ...expected, servers: [expected.servers[0]!, { name: "scout_bridge", tools: ["mcp__scout_bridge__lookup"], required: true, optionalTools: [] }] };
+    const m = createStreamMonitor({ expected: req, allowedTools: new Set([...scoutTools, "mcp__scout_bridge__lookup"]), details: d, stop, clock: { now: () => 0 }, startedAt: 0 });
+    m.onEvent(init());
+    m.onEvent(use("t1", "mcp__scout__current_site"));
+    m.onEvent(answer("t1", true));
+    expect(stop.decision).toBeUndefined();
+    m.onEvent(use("t2", "mcp__scout_bridge__lookup"));
+    m.onEvent(answer("t2", false));
+    expect(stop.decision).toBeUndefined();
+    m.onEvent(use("t3", "mcp__scout_bridge__lookup"));
+    m.onEvent(answer("t3", true));
+    expect(stop.decision).toMatchObject({ result: { status: "error", reason: "tool_unavailable" }, termination: "tool_unavailable", detail: "required_tool_failed" });
+    expect(d.toolErrors).toEqual({ mcp__scout__current_site: 1, mcp__scout_bridge__lookup: 1 });
+    expect(d.optionalToolFailed).toBe(false);
+  });
+
   it("an optional tool that did not load flags optionalToolFailed; the job goes on", () => {
     const { m, d, stop } = monitor();
     m.onEvent(init({ mcp_servers: [{ name: "scout", status: "connected" }, { name: "scout_bridge", status: "failed" }], tools: [...scoutTools, "StructuredOutput"] }));

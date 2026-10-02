@@ -923,6 +923,39 @@ describe("claude job: selected tools through the per-job bridge", () => {
     expect(jobsLeft(e)).toEqual([]);
   });
 
+  it("a required tool that fails at runtime stops the job: tool_unavailable, required_tool_failed, nothing published", async () => {
+    const e = await setup({
+      mode: "tool-errors",
+      tools: (base) => ({ connections: [backend(base, "honest").connection], selections: [selection("notes", "lookup", true)] }),
+    });
+    const out = await e.adapter.run(request(e), { toolSurface: surface(e) });
+    expect(out.result).toMatchObject({ status: "error", reason: "tool_unavailable" });
+    expect(out.details.termination).toBe("tool_unavailable");
+    expect(out.details.detail).toBe("required_tool_failed");
+    expect(out.details.toolErrors).toEqual({ mcp__scout__current_site: 1, mcp__scout_bridge__lookup: 1 });
+    await expectAllGoneWithin([...e.fake.pids(), ...backendOf(e).pids()], 3000);
+    expect(jobsLeft(e)).toEqual([]);
+  });
+
+  it("an optional tool that fails at runtime is counted and flags optionalToolFailed; the job still answers", async () => {
+    const e = await setup({
+      mode: "tool-errors",
+      tools: (base) => ({ connections: [backend(base, "honest").connection], selections: [selection("notes", "lookup", false)] }),
+    });
+    const out = await e.adapter.run(request(e), { toolSurface: surface(e) });
+    expect(out.result).toMatchObject({ status: "ok", items: [{ id: "c1" }, { id: "c2" }] });
+    expect(out.details.toolErrors).toEqual({ mcp__scout__current_site: 1, mcp__scout_bridge__lookup: 1 });
+    expect(out.details.optionalToolFailed).toBe(true);
+  });
+
+  it("an error from Scout's own tool is only counted", async () => {
+    const e = await setup({ mode: "tool-errors" });
+    const out = await e.adapter.run(request(e), { toolSurface: surface(e) });
+    expect(out.result).toMatchObject({ status: "ok", items: [{ id: "c1" }, { id: "c2" }] });
+    expect(out.details.toolErrors).toEqual({ mcp__scout__current_site: 1 });
+    expect(out.details.optionalToolFailed).toBe(false);
+  });
+
   it("a required connection whose binding file is not private: tool_unavailable before launch", async () => {
     const e = await setup({
       tools: (base) => {

@@ -9,9 +9,12 @@
 //     recorded (`cliVersionChanged`) and reported through `onCliVersionChanged`, never a stop;
 //   - an assistant `tool_use` must name an allowed tool or the structured-output tool
 //     (`unexpected_tool_use`); names are recorded, bounded;
-//   - a user `tool_result` with `is_error` counts against its tool's name (`toolErrors`); an
-//     error from an optional tool sets `optionalToolFailed`, as does an optional tool that did
-//     not load;
+//   - a user `tool_result` with `is_error` counts against its tool's name (`toolErrors`). An
+//     error from a required tool of a non-Scout server (one the profile marks `required: true`)
+//     stops the job: tool_unavailable, `required_tool_failed`, since its answer would rest on
+//     a retrieval that failed. An error from an optional tool sets `optionalToolFailed`, as
+//     does an optional tool that did not load. Errors from Scout's own tools (a refused read,
+//     a resource not found) are only counted;
 //   - the first `result` event is kept;
 //   - a non-result event that reports an auth or quota problem: unavailable, auth_or_quota.
 //
@@ -20,7 +23,7 @@
 import type { Clock } from "../clock.js";
 import type { JobDetails, JobTermination } from "./adapter.js";
 import { checkInit, type ExpectedInit } from "./initCheck.js";
-import { STRUCTURED_OUTPUT_TOOL } from "./jobSurface.js";
+import { SCOUT_SERVER_NAME, STRUCTURED_OUTPUT_TOOL } from "./jobSurface.js";
 import type { JobStop } from "./jobStop.js";
 import { isRecord, type StreamRecord } from "./jsonLineStream.js";
 
@@ -64,6 +67,8 @@ export function createStreamMonitor(o: StreamMonitorOptions): StreamMonitor {
   /** tool_use id → tool name, for counting errored results (bounded like the names). */
   const toolUseNames = new Map<string, string>();
   const optional = new Set(expected.servers.flatMap((s) => s.optionalTools));
+  /** Required tools of the user's servers (not Scout's own): a runtime error from one stops the job. */
+  const requiredExternal = new Set(expected.servers.filter((s) => s.name !== SCOUT_SERVER_NAME).flatMap((s) => s.tools.filter((t) => !s.optionalTools.includes(t))));
   const unsupported = (detail: string): void => stop.halt({ result: { status: "error", reason: "unsupported_configuration" }, termination: "unsupported_configuration", detail });
 
   const onEvent = (ev: StreamRecord): void => {
@@ -106,6 +111,7 @@ export function createStreamMonitor(o: StreamMonitorOptions): StreamMonitor {
         const name = toolUseNames.get(c.tool_use_id);
         if (name === undefined) continue;
         details.toolErrors[name] = (details.toolErrors[name] ?? 0) + 1;
+        if (requiredExternal.has(name)) return stop.halt({ result: { status: "error", reason: "tool_unavailable" }, termination: "tool_unavailable", detail: "required_tool_failed" });
         if (optional.has(name)) details.optionalToolFailed = true;
       }
     } else if (ev.type === "result" && result === undefined) {
