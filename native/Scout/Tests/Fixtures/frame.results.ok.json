@@ -1,13 +1,22 @@
 {
   "type": "results",
+  "coreInstanceId": "core-7f3a9c",
   "visitEpoch": 3,
+  "origin": "https://docs.example.com",
+  "jobId": "job-3a",
   "status": "ok",
   "items": [
     {
       "candidateId": "c1",
       "title": "Webhooks",
-      "href": "https://docs.example.com/webhooks",
-      "reason": "matches"
+      "reason": "You were reading about retry handling.",
+      "hostname": "docs.example.com"
+    },
+    {
+      "candidateId": "c2f",
+      "title": "Testing webhooks locally",
+      "reason": "Covers the CLI you used.",
+      "hostname": "docs.example.com"
     }
   ]
 }

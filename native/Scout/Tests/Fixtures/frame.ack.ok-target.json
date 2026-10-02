@@ -1,0 +1,10 @@
+{
+  "type": "ack",
+  "commandId": "app-12",
+  "ok": true,
+  "revision": 0,
+  "approvalRevision": 5,
+  "target": {
+    "href": "https://docs.example.com/webhooks"
+  }
+}

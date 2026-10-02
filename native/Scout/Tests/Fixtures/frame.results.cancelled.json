@@ -4,6 +4,6 @@
   "visitEpoch": 3,
   "origin": "https://docs.example.com",
   "jobId": "job-3a",
-  "status": "unavailable",
-  "reason": "agent_unavailable"
+  "status": "cancelled",
+  "reason": "superseded"
 }
