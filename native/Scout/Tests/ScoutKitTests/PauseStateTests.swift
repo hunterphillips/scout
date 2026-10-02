@@ -77,6 +77,15 @@ import Testing
         #expect(state.control == Self.resume)
     }
 
+    @Test func quittingDisablesTheControlAndSendsNothing() {
+        var state = PauseState(core: .paused)
+        state.beginQuit()
+        #expect(state.control == PauseControl(title: "Resume", enabled: false, accessibilityLabel: "Resume Scout"))
+        #expect(state.request() == nil && state.pending == nil)
+        state.apply(.idle)
+        #expect(state.control == PauseControl(title: "Pause", enabled: false, accessibilityLabel: "Pause Scout"))
+    }
+
     @Test func nothingToSendWithoutACore() {
         var state = PauseState()
         #expect(state.request() == nil && state.pending == nil)

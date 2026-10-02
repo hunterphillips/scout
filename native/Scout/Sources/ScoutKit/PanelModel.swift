@@ -35,7 +35,8 @@ public struct PanelModel: Sendable, Equatable {
     public static let previewCapacity = 8
 
     public private(set) var sidecar: SidecarStatus = .starting
-    public private(set) var core: CoreStatus?
+    /// The latest `state` frame's status (held once, in `pause`); nil while no core is running.
+    public var core: CoreStatus? { pause.core }
     public private(set) var detail: String?
     public private(set) var permitted: Bool?
     /// The current visit's results and the links clicked on them.
@@ -72,7 +73,6 @@ public struct PanelModel: Sendable, Equatable {
         let wasRunning = sidecar == .running
         sidecar = status
         guard status == .running else {
-            core = nil
             detail = nil
             permitted = nil
             pause.coreStopped()
@@ -102,7 +102,6 @@ public struct PanelModel: Sendable, Equatable {
         switch state {
         case let .state(status, epoch, detail, permitted, jobId):
             resultsModel.applyState(status, epoch: epoch, jobId: jobId)
-            core = status
             pause.apply(status)
             self.detail = detail
             self.permitted = permitted
@@ -338,11 +337,19 @@ public struct PanelModel: Sendable, Equatable {
         pause.command
     }
 
-    /// The Pause/Resume control the window and the menu bar both show.
+    /// The Pause/Resume control the window and the menu bar both show; disabled while quitting.
     public var pauseControl: PauseControl { pause.control }
 
+    /// Whether the app is quitting (`beginQuit`).
+    public var quitting: Bool { pause.quitting }
+
+    /// The app began quitting: Pause and Resume stay disabled everywhere from now on.
+    public mutating func beginQuit() {
+        pause.beginQuit()
+    }
+
     /// The user clicked Pause or Resume (window or menu bar): the command to send, or nil while
-    /// one is in flight. Report the write with `pauseSent`.
+    /// one is in flight or the app is quitting. Report the write with `pauseSent`.
     public mutating func requestPauseOrResume() -> NativeCommand? {
         pause.request()
     }

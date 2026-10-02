@@ -14,7 +14,7 @@ import Testing
     }
 
     private func menu(_ model: PanelModel) -> StatusMenuModel {
-        StatusMenuModel(sidecar: model.sidecar, pause: model.pauseControl, windowVisible: true)
+        StatusMenuModel(model, windowVisible: true)
     }
 
     @Test func coreSaysPausedSoBothShowResume() throws {
@@ -67,6 +67,48 @@ import Testing
         #expect(!resent.contains(.pause) && !resent.contains(.resume))
         #expect(model.pauseControl.title == "Resume" && model.pauseControl.enabled)
         #expect(menu(model).pause == .init("Resume", enabled: true))
+    }
+
+    @Test func aRefusedWriteLeavesBothEnabled() throws {
+        var model = try running()
+        #expect(model.requestPauseOrResume() == .pause)
+        model.pauseSent(.retryLater)
+        #expect(model.pause.pending == nil)
+        #expect(model.pauseControl.title == "Pause" && model.pauseControl.enabled)
+        #expect(menu(model).pause == .init("Pause", enabled: true))
+        #expect(model.requestPauseOrResume() == .pause)  // the user clicks again
+    }
+
+    @Test func aNewCoreInstanceWhileAPauseIsInFlightFromIdle() throws {
+        var model = try running()
+        #expect(model.requestPauseOrResume() == .pause)
+        model.pauseSent(.written)
+        #expect(menu(model).pause == .init("Pausing…", enabled: false))
+        // Another core answers; the pause went to the old one and is not re-sent.
+        let resent = model.apply(.capabilities(try TestFrames.capabilities(instance: "core-2")))
+        #expect(!resent.contains(.pause) && !resent.contains(.resume))
+        #expect(model.pause.pending == nil)
+        // The last state frame still says idle until the new core reports.
+        #expect(menu(model).pause == .init("Pause", enabled: true))
+        _ = model.apply(.state(status: .paused, visitEpoch: nil, detail: nil))
+        #expect(model.pauseControl.title == "Resume" && menu(model).pause == .init("Resume", enabled: true))
+    }
+
+    @Test func quittingDisablesBothAndAClickDoesNothing() throws {
+        for core in [CoreStatus.idle, .paused] {
+            var model = try running()
+            _ = model.apply(.state(status: core, visitEpoch: nil, detail: nil))
+            let title = model.pauseControl.title
+            model.beginQuit()
+            #expect(model.quitting)
+            #expect(model.pauseControl.title == title && !model.pauseControl.enabled)
+            #expect(menu(model).pause == .init(title, enabled: false))
+            #expect(model.requestPauseOrResume() == nil)
+            #expect(model.pause.pending == nil)
+            // Frames keep arriving while the core stops; the control stays disabled.
+            _ = model.apply(.state(status: .idle, visitEpoch: nil, detail: nil))
+            #expect(!model.pauseControl.enabled && !menu(model).pause.enabled)
+        }
     }
 
     @Test func pauseCommandStillNamesWhatAClickSends() throws {

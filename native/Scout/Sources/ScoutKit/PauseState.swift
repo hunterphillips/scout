@@ -19,11 +19,13 @@ public struct PauseControl: Sendable, Equatable {
 /// core's `state` frame: `paused` is what the latest frame says, never what the app last sent.
 /// `pause` and `resume` carry no command ID and get no ack, so `CommandTracker` cannot follow
 /// them; this reducer holds the one pending request instead. It settles when a `state` frame
-/// shows its target (paused for a pause, anything else for a resume), whoever caused it; a frame
-/// the core emitted before it read the request does not settle it. A write the pipe refused
-/// settles it at once (the user clicks again). A stopped or restarted core settles it without
-/// re-sending: pause is a toggle, and the new core's own `state` frame decides what shows (the
-/// P2.5 rule for toggles).
+/// shows its target (paused for a pause, anything else for a resume): it settles on the first
+/// frame showing the target, whoever caused it, and a frame the core emitted before it read the
+/// request does not settle it. A write the pipe refused settles it at once (the user clicks
+/// again). A stopped or restarted core settles it without re-sending: the app picked `pause` or
+/// `resume` from the old core's possibly stale frame, so sending it to a new core could undo what
+/// that core reports; the new core's own `state` frame decides what shows. Once the app begins
+/// quitting the control stays disabled and nothing is sent.
 public struct PauseState: Sendable, Equatable {
     public enum Pending: Sendable, Equatable {
         case pausing
@@ -33,6 +35,7 @@ public struct PauseState: Sendable, Equatable {
     /// The latest `state` frame's status; nil while no core is running or none has reported.
     public private(set) var core: CoreStatus?
     public private(set) var pending: Pending?
+    public private(set) var quitting = false
 
     public init(core: CoreStatus? = nil, pending: Pending? = nil) {
         self.core = core
@@ -70,10 +73,15 @@ public struct PauseState: Sendable, Equatable {
         }
     }
 
+    /// The app began quitting: no pause or resume goes out after this.
+    public mutating func beginQuit() {
+        quitting = true
+    }
+
     /// The user clicked Pause or Resume: returns the command to send and marks it pending, or nil
-    /// while one is pending or there is nothing to send.
+    /// while one is pending, the app is quitting, or there is nothing to send.
     public mutating func request() -> NativeCommand? {
-        guard pending == nil, let command else { return nil }
+        guard pending == nil, !quitting, let command else { return nil }
         pending = command == .pause ? .pausing : .resuming
         return command
     }
@@ -84,6 +92,12 @@ public struct PauseState: Sendable, Equatable {
     }
 
     public var control: PauseControl {
+        let control = idleControl
+        guard quitting else { return control }
+        return PauseControl(title: control.title, enabled: false, accessibilityLabel: control.accessibilityLabel)
+    }
+
+    private var idleControl: PauseControl {
         switch pending {
         case .pausing?: return PauseControl(title: "Pausing…", enabled: false, accessibilityLabel: "Pausing Scout")
         case .resuming?: return PauseControl(title: "Resuming…", enabled: false, accessibilityLabel: "Resuming Scout")

@@ -21,9 +21,11 @@ public struct StatusMenuModel: Sendable, Equatable {
     /// Always enabled: Quit goes through `TerminationPolicy`, which never cancels a second Quit.
     public let quit: Item
 
-    public init(sidecar: SidecarStatus, pause: PauseControl, windowVisible: Bool, quitting: Bool = false) {
-        status = Item(quitting ? "Scout: quitting…" : "Scout: \(Self.describe(sidecar))", enabled: false)
-        self.pause = Item(pause.title, enabled: pause.enabled && !quitting)
+    /// Pause comes from `model.pauseControl`, the same control the window's Settings button shows.
+    public init(_ model: PanelModel, windowVisible: Bool) {
+        status = Item(model.quitting ? "Scout: quitting…" : "Scout: \(Self.describe(model.sidecar))", enabled: false)
+        let pause = model.pauseControl
+        self.pause = Item(pause.title, enabled: pause.enabled)
         pauseAccessibilityLabel = pause.accessibilityLabel
         window = Item(windowVisible ? "Hide window" : "Show window", enabled: true)
         quit = Item("Quit Scout", enabled: true)
