@@ -14,38 +14,31 @@
 // live data: `recent_activity` pages the snapshot's activity, `site_links` its candidates
 // (with the catalog hash as the version), `current_site` the job's origin and visit epoch
 // from the token's grant, and `list_resources` / `read_resource` only the versions the
-// snapshot pinned (a newer approval is not visible to it). A job whose snapshot is gone
-// answers `expired_snapshot`. The browser gate does not apply to it: what the job may see
-// was decided when its snapshot was taken, and pause or release revokes its token.
+// snapshot pinned (a newer approval is not visible to it). The scope a call reads is
+// resolved once per call: live for the interactive connection, the snapshot for a job, and
+// `expired_snapshot` for every method when a job's snapshot is gone. The browser gate does
+// not apply to a job: what it may see was decided when its snapshot was taken, and pause or
+// release revokes its token.
 //
 // Every request is checked against the connection's principal (auth.ts) and, for browser
 // context, the stored grant (grants.ts), both re-read on every call. Resource reads re-check
 // authorization and revocation on every chunk. The read audit records method, role, outcome
 // and at most an origin.
 //
-// Cursors are opaque random IDs into an in-memory table, bound to this core instance, the
-// connection and the token that received them, and the method; they expire after
-// AGENT_CURSOR_TTL_MS, and at most MAX_CURSORS live (oldest evicted first). Each pins what it
-// pages over: `recent_activity` the snapshot id or the store revision, `site_links` the
-// origin and catalog version, `list_resources` the version list
-// of the first page (later pages re-check each item, so a page may be short, or empty, and
-// still carry `nextCursor`), `read_resource` the resource and version. A revocation
-// invalidates the resource's read cursors for good: they keep answering `revoked` until they
-// expire.
-//
-// A multi-chunk read is one read session: its first chunk draws a random pin ID, every
-// cursor of the chain carries it, and every chunk with a next cursor pins the version in the
-// store under it. The pin is released on the last chunk (even while earlier cursors of the
-// chain are still live: replaying one re-pins under the same ID), on revocation, on the
-// connection closing, or once no live cursor of the chain is left (expired or evicted),
-// which also ends a re-pin from a replay. A single-chunk read pins nothing. Expired cursors are swept whenever
-// a cursor is issued or presented, and by `sweepExpired`, which main runs before each
-// collection so an abandoned read on a quiet connection does not hold its pin.
+// Cursors and their caps, TTL and pin bookkeeping live in cursors.ts. `list_resources`
+// later pages re-check each item, so a page may be short, or empty, and still carry
+// `nextCursor`. A multi-chunk read is one read session: its first chunk draws a random pin
+// ID, every cursor of the chain carries it, and every chunk with a next cursor pins the
+// version in the store under it. The pin is released on the last chunk (even while earlier
+// cursors of the chain are still live: replaying one re-pins under the same ID), on
+// revocation, on the connection closing, or once no live cursor of the chain is left
+// (expired or evicted), which also ends a re-pin from a replay. A single-chunk read pins
+// nothing. `sweepExpired`, which main runs before each collection, keeps an abandoned read on
+// a quiet connection from holding its pin.
 
 import { randomBytes } from "node:crypto";
 import {
   ActivityEntrySchema,
-  AGENT_CURSOR_TTL_MS,
   AGENT_PROTOCOL_VERSION,
   AGENT_REQUEST_MAX_BYTES,
   AGENT_RESPONSE_MAX_BYTES,
@@ -74,10 +67,11 @@ import type { CapabilityStore } from "../capabilities/store.js";
 import type { CatalogCache } from "../catalog/cache.js";
 import type { Clock } from "../clock.js";
 import type { AgentAuth, AgentPrincipal } from "./auth.js";
+import { createCursorTable, type VersionRef } from "./cursors.js";
 import { browserContextGate } from "./grants.js";
 import type { ReadAudit } from "./readAudit.js";
 
-export const MAX_CURSORS = 1000;
+export { MAX_CURSORS, MAX_JOB_CURSORS } from "./cursors.js";
 export const DEFAULT_PAGE = 20;
 /** Catalog versions longer than this are not served (the wire allows 128 characters). */
 const CATALOG_VERSION_MAX_CHARS = 128;
@@ -111,7 +105,7 @@ export interface AgentHandlerOptions {
   audit: ReadAudit;
   clock: Clock;
   /** The live activity store, for the interactive `recent_activity`. Without it that answers `unavailable`. */
-  activity?: Pick<ActivityStore, "entries" | "revision">;
+  activity?: Pick<ActivityStore, "view">;
   /** A job's snapshot by job id (the snapshot registry's `getForJob`). Without it every job read is `expired_snapshot`. */
   getSnapshot?: (jobId: string) => JobSnapshot | undefined;
 }
@@ -130,28 +124,8 @@ export interface AgentHandlers {
   sweepExpired(): void;
 }
 
-interface CursorScope {
-  coreInstanceId: string;
-  connectionId: string;
-  tokenId: string;
-  expiresAt: number;
-}
-
-interface VersionRef {
-  resourceId: string;
-  version: string;
-}
-
-type CursorState = CursorScope &
-  (
-    /** `pin` is `snap:<id>` for a job's snapshot or `rev:<n>` for the live store's revision. */
-    | { method: "recent_activity"; offset: number; pin: string }
-    | { method: "site_links"; offset: number; origin: string; catalogVersion: string }
-    | { method: "list_resources"; offset: number; entries: readonly VersionRef[] }
-    /** `revoked` is set when the resource is revoked; such a cursor only ever answers `revoked`, even after a re-approval. */
-    | { method: "read_resource"; resourceId: string; version: string; offset: number; pinId: string; revoked?: true }
-  );
-type CursorBody = CursorState extends infer S ? (S extends CursorState ? Omit<S, keyof CursorScope> : never) : never;
+/** What one call reads: live data, or a job's snapshot. */
+type CallScope = { kind: "live" } | { kind: "job"; snapshot: JobSnapshot };
 
 type Answer<M extends AgentMethod> = { ok: AgentResult<M> } | { error: AgentStatusCode };
 const fail = (error: AgentStatusCode) => ({ error });
@@ -175,8 +149,7 @@ const BROWSER_METHODS: ReadonlySet<AgentMethod> = new Set(["current_site", "rece
 
 export function createAgentHandlers(options: AgentHandlerOptions): AgentHandlers {
   const { coreInstanceId, store, clock, audit } = options;
-  const cursors = new Map<string, CursorState>();
-
+  const { issueCursor, takeCursor, dropCursors, ...cursors } = createCursorTable({ coreInstanceId, clock, releasePins: (pinId) => store.releasePins(pinId) });
   const envelope = (requestId: string) => ({ protocol: AGENT_PROTOCOL_VERSION, requestId, coreInstanceId });
   const errorResponse = (requestId: string, code: AgentStatusCode): AgentResponse => ({
     ...envelope(requestId),
@@ -185,46 +158,6 @@ export function createAgentHandlers(options: AgentHandlerOptions): AgentHandlers
   });
   const fitsResponse = (result: unknown): boolean =>
     byteLength({ ...envelope(PROBE_REQUEST_ID), status: "ok", result }) <= AGENT_RESPONSE_MAX_BYTES;
-
-  /** Delete the cursors `drop` selects, then release each read session's pin that no remaining cursor carries. */
-  function dropCursors(drop: (c: CursorState, id: string) => boolean): void {
-    const ended = new Set<string>();
-    for (const [k, c] of cursors) {
-      if (!drop(c, k)) continue;
-      cursors.delete(k);
-      if (c.method === "read_resource") ended.add(c.pinId);
-    }
-    if (ended.size === 0) return;
-    for (const c of cursors.values()) if (c.method === "read_resource") ended.delete(c.pinId);
-    for (const pinId of ended) store.releasePins(pinId);
-  }
-
-  /** Store the new cursor first, so a read session continuing from a cursor swept or evicted here keeps its pin. */
-  function issueCursor(conn: AgentConnection, body: CursorBody): string {
-    const now = clock.now();
-    const id = randomBytes(16).toString("base64url");
-    const scope: CursorScope = { coreInstanceId, connectionId: conn.id, tokenId: conn.principal!.tokenId, expiresAt: now + AGENT_CURSOR_TTL_MS };
-    cursors.set(id, { ...body, ...scope } as CursorState);
-    dropCursors((c) => c.expiresAt <= now);
-    if (cursors.size > MAX_CURSORS) {
-      // Oldest first; the new cursor is last in insertion order.
-      const evicted = new Set([...cursors.keys()].slice(0, cursors.size - MAX_CURSORS));
-      dropCursors((_c, k) => evicted.has(k));
-    }
-    return id;
-  }
-
-  /** The cursor if it was issued by this core to this connection and token for `method` and is unexpired. */
-  function takeCursor<K extends CursorState["method"]>(id: string, method: K, conn: AgentConnection): Extract<CursorState, { method: K }> | undefined {
-    const c = cursors.get(id);
-    if (c && c.expiresAt <= clock.now()) {
-      dropCursors((_c, k) => k === id);
-      return undefined;
-    }
-    if (!c || c.method !== method) return undefined;
-    if (c.coreInstanceId !== coreInstanceId || c.connectionId !== conn.id || c.tokenId !== conn.principal?.tokenId) return undefined;
-    return c as Extract<CursorState, { method: K }>;
-  }
 
   /** Largest page of `items[start..]` (at most `limit`) whose response fits the cap. */
   function page<T, M extends AgentMethod>(
@@ -280,7 +213,6 @@ export function createAgentHandlers(options: AgentHandlerOptions): AgentHandlers
     return { catalogVersion: version, links };
   }
 
-  const isJob = (conn: AgentConnection): boolean => conn.principal!.role === "job";
   /** A job's snapshot candidates as site links, paged; the catalog hash is the version. */
   function snapshotLinks(p: AgentParams<"site_links">, conn: AgentConnection, snapshot: JobSnapshot): Answer<"site_links"> {
     const { origin, catalogHash: catalogVersion } = snapshot;
@@ -304,11 +236,13 @@ export function createAgentHandlers(options: AgentHandlerOptions): AgentHandlers
     );
   }
 
-  /** A job connection's snapshot; undefined when it is gone (or never wired). */
-  const jobSnapshot = (conn: AgentConnection): JobSnapshot | undefined => {
-    const jobId = conn.principal!.jobId;
-    return jobId === undefined ? undefined : options.getSnapshot?.(jobId);
-  };
+  /** The scope this call reads, or `expired_snapshot` for a job whose snapshot is gone (or never wired). */
+  function resolveScope(conn: AgentConnection): CallScope | "expired_snapshot" {
+    const { role, jobId } = conn.principal!;
+    if (role !== "job") return { kind: "live" };
+    const snapshot = jobId === undefined ? undefined : options.getSnapshot?.(jobId);
+    return snapshot ? { kind: "job", snapshot } : "expired_snapshot";
+  }
 
   /** Wire-shaped activity entries; anything the wire cannot carry is left out. */
   const activityEntries = (entries: readonly ActivityEntry[]): ActivityEntry[] =>
@@ -334,17 +268,10 @@ export function createAgentHandlers(options: AgentHandlerOptions): AgentHandlers
     );
   }
 
-  /** The versions this connection may list or read: its snapshot's for a job (undefined once gone), null for live. */
-  const scopedVersions = (conn: AgentConnection): readonly VersionRef[] | null | undefined => {
-    if (!isJob(conn)) return null;
-    return jobSnapshot(conn)?.approved;
-  };
-
-  type Handler<M extends AgentMethod> = (p: AgentParams<M>, conn: AgentConnection) => Answer<M>;
+  type Handler<M extends AgentMethod> = (p: AgentParams<M>, conn: AgentConnection, scope: CallScope) => Answer<M>;
   const handlers: { [M in Exclude<AgentMethod, "hello">]: Handler<M> } = {
-    current_site: (_p, conn) => {
-      if (isJob(conn)) {
-        if (!jobSnapshot(conn)) return fail("expired_snapshot");
+    current_site: (_p, conn, scope) => {
+      if (scope.kind === "job") {
         const { origin, visitEpoch } = conn.principal!;
         if (origin === undefined || visitEpoch === undefined || !isHttpsOrigin(origin)) return { ok: { site: null } };
         return { ok: { site: { origin, url: origin, visitEpoch } } };
@@ -353,27 +280,18 @@ export function createAgentHandlers(options: AgentHandlerOptions): AgentHandlers
       return refused ? fail(refused) : { ok: { site: currentSite() } };
     },
 
-    recent_activity: (p, conn) => {
-      if (isJob(conn)) {
-        const snapshot = jobSnapshot(conn);
-        if (!snapshot) return fail("expired_snapshot");
-        return pageActivity(p, conn, activityEntries(snapshot.activity), `snap:${snapshot.id}`);
-      }
+    recent_activity: (p, conn, scope) => {
+      if (scope.kind === "job") return pageActivity(p, conn, activityEntries(scope.snapshot.activity), `snap:${scope.snapshot.id}`);
       const refused = gate(conn);
       if (refused) return fail(refused);
-      const live = options.activity;
-      if (!live) return fail("unavailable");
-      // Read together: entries() and revision both prune first, so they describe the same list.
-      const entries = live.entries();
-      return pageActivity(p, conn, activityEntries(entries), `rev:${live.revision}`);
+      if (!options.activity) return fail("unavailable");
+      // One prune: the revision the cursor pins is the one these entries belong to.
+      const { entries, revision } = options.activity.view();
+      return pageActivity(p, conn, activityEntries(entries), `rev:${revision}`);
     },
 
-    site_links: (p, conn) => {
-      if (isJob(conn)) {
-        const snapshot = jobSnapshot(conn);
-        if (!snapshot) return fail("expired_snapshot");
-        return snapshotLinks(p, conn, snapshot);
-      }
+    site_links: (p, conn, scope) => {
+      if (scope.kind === "job") return snapshotLinks(p, conn, scope.snapshot);
       const refused = gate(conn);
       if (refused) return fail(refused);
       const site = currentSite();
@@ -399,19 +317,17 @@ export function createAgentHandlers(options: AgentHandlerOptions): AgentHandlers
       );
     },
 
-    list_resources: (p, conn) => {
+    list_resources: (p, conn, scope) => {
       let start = 0;
       let entries: readonly VersionRef[];
-      const scoped = scopedVersions(conn);
-      if (scoped === undefined) return fail("expired_snapshot");
       if (p.cursor !== undefined) {
         const c = takeCursor(p.cursor, "list_resources", conn);
         if (!c) return fail("expired_snapshot");
         start = c.offset;
         entries = c.entries;
-      } else if (scoped !== null) {
+      } else if (scope.kind === "job") {
         // A job lists only the versions its snapshot pinned.
-        entries = scoped.filter((e) => {
+        entries = scope.snapshot.approved.filter((e) => {
           if (p.origin === undefined) return true;
           const r = store.resolveRead(e.resourceId, e.version);
           return r.ok && r.resource.siteOrigin === p.origin;
@@ -442,15 +358,13 @@ export function createAgentHandlers(options: AgentHandlerOptions): AgentHandlers
       );
     },
 
-    read_resource: (p, conn) => {
+    read_resource: (p, conn, scope) => {
       let version = p.version;
       let offset = 0;
       let pinId: string | undefined;
-      const scoped = scopedVersions(conn);
-      if (scoped === undefined) return fail("expired_snapshot");
-      if (scoped !== null) {
+      if (scope.kind === "job") {
         // A job reads only the version its snapshot pinned for the resource.
-        const pinned = scoped.find((e) => e.resourceId === p.resourceId);
+        const pinned = scope.snapshot.approved.find((e) => e.resourceId === p.resourceId);
         if (!pinned || (version !== undefined && version !== pinned.version)) return fail("not_found");
         version = pinned.version;
       }
@@ -526,7 +440,8 @@ export function createAgentHandlers(options: AgentHandlerOptions): AgentHandlers
       if (conn.principal === null || !options.auth.isCurrent(conn.principal)) return errorResponse(requestId, "not_granted");
 
       const handler = handlers[request.method] as Handler<AgentMethod>;
-      const result = answer(requestId, handler(request.params as AgentParams<AgentMethod>, conn));
+      const scope = resolveScope(conn);
+      const result = answer(requestId, scope === "expired_snapshot" ? fail(scope) : handler(request.params as AgentParams<AgentMethod>, conn, scope));
       if (BROWSER_METHODS.has(request.method)) {
         const origin = result.status === "ok" ? auditOrigin(result.result) : undefined;
         audit.record({
@@ -542,16 +457,7 @@ export function createAgentHandlers(options: AgentHandlerOptions): AgentHandlers
     endConnection(conn) {
       dropCursors((c) => c.connectionId === conn.id);
     },
-    dropResource(resourceId) {
-      for (const c of cursors.values()) {
-        if (c.method !== "read_resource" || c.resourceId !== resourceId) continue;
-        c.revoked = true;
-        store.releasePins(c.pinId);
-      }
-    },
-    sweepExpired() {
-      const now = clock.now();
-      dropCursors((c) => c.expiresAt <= now);
-    },
+    dropResource: (resourceId) => cursors.revokeResource(resourceId),
+    sweepExpired: () => cursors.sweepExpired(),
   };
 }

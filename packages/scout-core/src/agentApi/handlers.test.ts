@@ -23,7 +23,7 @@ import { type ActivityStore, createActivityStore } from "../activity/store.js";
 import { createSnapshotRegistry, type SnapshotRegistry, type TakeSnapshotInput } from "../activity/snapshots.js";
 import { cacheFileName } from "../privateCacheFile.js";
 import { type AgentAuth, createAgentAuth } from "./auth.js";
-import { type AgentConnection, type AgentHandlers, type AgentView, createAgentHandlers, MAX_CURSORS } from "./handlers.js";
+import { type AgentConnection, type AgentHandlers, type AgentView, createAgentHandlers, MAX_CURSORS, MAX_JOB_CURSORS } from "./handlers.js";
 import { createReadAudit, type ReadAudit } from "./readAudit.js";
 
 const SITE = "https://docs.example.com";
@@ -742,6 +742,27 @@ describe("job snapshots", () => {
     snapshots.release(first.snapshot.id, "cancelled");
     for (const m of ["recent_activity", "site_links", "current_site", "list_resources"] as const) expect(code(job, m, {})).toBe("not_granted");
     expect(ok(connect(second.token), "recent_activity", {}).entries).toHaveLength(2);
+  });
+
+  it("caps each job token's cursors and evicts job cursors before the interactive connection's", async () => {
+    for (const path of ["/llms.txt", "/AGENTS.md"]) {
+      const r = await ingest(path === "/llms.txt" ? "llms_txt" : "agents_md", path, `${path}\n`);
+      await approve(r.id, r.version);
+    }
+    const issue = (conn: AgentConnection, n: number) => Array.from({ length: n }, () => ok(conn, "list_resources", { limit: 1 }).nextCursor!);
+    const valid = (conn: AgentConnection, cursor: string) => code(conn, "list_resources", { limit: 1, cursor }) === "ok";
+    const interactive = connect();
+    const mine = issue(interactive, 600);
+    const a = connect(takeJob().token);
+    const aCursors = issue(a, MAX_JOB_CURSORS + 44);
+    // Its own oldest went first: it holds MAX_JOB_CURSORS.
+    expect(valid(a, aCursors[43]!)).toBe(false);
+    expect(valid(a, aCursors[44]!)).toBe(true);
+    const b = connect(takeJob().token);
+    const bCursors = issue(b, 300);
+    expect(valid(b, bCursors.at(-1)!)).toBe(true);
+    // Over the table's cap, the jobs' cursors were evicted; every interactive cursor is still live.
+    expect(mine.every((c) => valid(interactive, c))).toBe(true);
   });
 
   it("a job token is refused past its deadline, and after releaseAll", () => {
