@@ -569,4 +569,17 @@ describe("PanelModel browser additions", () => {
     expect(m.visitEpoch).toBe(5);
     expect(m.resultsDisplay).toEqual({ kind: "none" });
   });
+
+  it("a grant frame's destinations are kept; a grant without them means none; link loss clears them", () => {
+    const m = new PanelModel(tracker("t"));
+    m.applyLink("connected");
+    m.apply({ type: "grant", agentBrowserContext: false, destinations: ["https://docs.stripe.com"] });
+    expect(m.capabilities.destinations).toEqual(["https://docs.stripe.com"]);
+    m.apply({ type: "grant", agentBrowserContext: false });
+    expect(m.capabilities.destinations).toEqual([]);
+    m.apply({ type: "grant", agentBrowserContext: true, destinations: ["https://docs.stripe.com"] });
+    m.applyLink("core_unavailable");
+    expect(m.capabilities.destinations).toEqual([]);
+    expect(m.capabilities.agentBrowserContext).toBeNull();
+  });
 });

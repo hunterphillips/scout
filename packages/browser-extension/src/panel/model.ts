@@ -159,7 +159,7 @@ export class PanelModel {
         this.capabilities.applyAudit(state.entries);
         break;
       case "grant":
-        this.capabilities.applyGrant(state.agentBrowserContext);
+        this.capabilities.applyGrant(state.agentBrowserContext, state.destinations ?? []);
         this.settleMoot();
         break;
     }

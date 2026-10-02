@@ -1,11 +1,11 @@
 // The Sites list and the current tab's site, for the side panel. Pure: no `chrome.*`.
 //
-// Sites = every exact origin Chrome grants Scout (the worker's last permissions.getAll) plus
-// every origin the core names in its `capabilities` frame (`origins`: the sites it holds
-// settings or resources for). Each row can be allowed or removed; a request is always for the
-// exact match pattern `https://<host>/*` (Chrome rejects a bare origin), and only for a site
-// Scout may be allowed on at all (origin.ts). Which sites have recommendations on lives in the
-// core's `config.json` `destinations`, which no frame carries, so the panel does not show it.
+// Sites = every exact origin Chrome grants Scout (the worker's last permissions.getAll), every
+// origin the core names in its `capabilities` frame (`origins`: the sites it holds settings or
+// resources for), and every site with recommendations on (the `grant` frame's `destinations`,
+// from the core's `config.json`). Each row can be allowed or removed; a request is always for
+// the exact match pattern `https://<host>/*` (Chrome rejects a bare origin), and only for a
+// site Scout may be allowed on at all (origin.ts).
 
 import type { OriginSetting } from "@scout/contracts";
 import { checkSite, REFUSAL_TEXT, type SiteRefusal } from "../origin.js";
@@ -19,30 +19,37 @@ export interface SiteRow {
   readonly granted: boolean;
   /** The core's auto-acquire setting for it; null when the core does not list the origin. */
   readonly autoAcquire: boolean | null;
+  /** The site is one of the core's `destinations`: background recommendations are on. */
+  readonly recommendations: boolean;
 }
 
 const patternHost = (p: string): string | null => /^https:\/\/([^/*]+)\/\*$/.exec(p)?.[1] ?? null;
 
-export function siteRows(granted: readonly string[], origins: readonly OriginSetting[]): SiteRow[] {
-  const rows = new Map<string, SiteRow>();
+export function siteRows(granted: readonly string[], origins: readonly OriginSetting[], destinations: readonly string[] = []): SiteRow[] {
+  const rows = new Map<string, Omit<SiteRow, "recommendations">>();
   for (const p of granted) {
     const host = patternHost(p);
     if (host === null) continue;
     rows.set(`https://${host}`, { origin: `https://${host}`, host, pattern: p, granted: true, autoAcquire: null });
   }
-  for (const o of origins) {
-    const v = checkSite(`${o.origin}/`, false);
-    const pattern = v.ok ? v.pattern : null;
-    const prev = rows.get(o.origin);
+  const named = (origin: string, autoAcquire: boolean | null): void => {
+    const prev = rows.get(origin);
+    if (prev && autoAcquire === null) return;
+    const v = checkSite(`${origin}/`, false);
     let host: string;
     try {
-      host = new URL(o.origin).host;
+      host = new URL(origin).host;
     } catch {
-      continue;
+      return;
     }
-    rows.set(o.origin, { origin: o.origin, host, pattern, granted: prev?.granted ?? false, autoAcquire: o.autoAcquire });
-  }
-  return [...rows.values()].sort((a, b) => (a.host < b.host ? -1 : a.host > b.host ? 1 : 0));
+    rows.set(origin, { origin, host, pattern: v.ok ? v.pattern : null, granted: prev?.granted ?? false, autoAcquire });
+  };
+  for (const o of origins) named(o.origin, o.autoAcquire);
+  for (const d of destinations) named(d, null);
+  const on = new Set(destinations);
+  return [...rows.values()]
+    .map((r) => ({ ...r, recommendations: on.has(r.origin) }))
+    .sort((a, b) => (a.host < b.host ? -1 : a.host > b.host ? 1 : 0));
 }
 
 /** What the worker knows about the panel window's active tab. */

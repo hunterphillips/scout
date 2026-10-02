@@ -235,6 +235,11 @@ describe.skipIf(SKIP !== null)(SKIP ? `Scout's side panel in Chrome for Testing 
     await until(async () => (await text()).includes("Scout is allowed on this site."), "This site to show the grant");
     expect(await sw.evaluate(() => chrome.permissions.getAll().then((p) => p.origins))).toEqual([`${SITE}/*`]);
     steps.allow = "headless: the panel's Allow → permissions.request (prompt pre-answered via developerPrivate; the prompt itself is a live check)";
+    // Sites: the site is one of config.json's destinations, carried on the core's grant frame.
+    await click("nav-sites");
+    await until(async () => (await text()).includes(`${HOSTNAME}`) && (await text()).includes("Recommendations on"), "Sites to show recommendations on");
+    steps.sitesRow = await panel.evaluate((h) => [...document.querySelectorAll("ul.sites li")].find((li) => li.querySelector(".site-host").textContent === h)?.querySelector(".site-state").textContent ?? null, HOSTNAME);
+    expect(steps.sitesRow).toBe("Allowed · Recommendations on");
     frontmost();
     await click("nav-results");
 

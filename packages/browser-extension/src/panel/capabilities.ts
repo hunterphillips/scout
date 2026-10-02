@@ -2,7 +2,8 @@
 // ScoutKit's CapabilityModel (native/Scout/Sources/ScoutKit/CapabilityModel.swift).
 // `capabilities` frames replace each other whole; a frame from the same core instance with a
 // lower `revision` than the one held is stale and dropped; another `coreInstanceId` starts a
-// new revision sequence. Pure: no `chrome.*`.
+// new revision sequence. A `grant` frame also carries the sites with recommendations on
+// (`destinations`; absent from an older core, which reads as none). Pure: no `chrome.*`.
 
 import type { CapabilityConflict, CapabilityOffer, LibraryEntry, OriginSetting, PanelAudit, PanelCapabilities } from "@scout/contracts";
 import type { PreviewKey } from "./preview.js";
@@ -27,6 +28,8 @@ export class CapabilityModel {
   capabilities: PanelCapabilities | null = null;
   /** What the latest `grant` frame said; null until one arrives. */
   agentBrowserContext: boolean | null = null;
+  /** `https://host` origins with background recommendations on, from the latest `grant` frame. */
+  destinations: readonly string[] = [];
   /** Oldest first. */
   audit: PanelAudit["entries"] = [];
 
@@ -38,8 +41,9 @@ export class CapabilityModel {
     return true;
   }
 
-  applyGrant(enabled: boolean): void {
+  applyGrant(enabled: boolean, destinations: readonly string[] = []): void {
     this.agentBrowserContext = enabled;
+    this.destinations = destinations;
   }
 
   applyAudit(entries: PanelAudit["entries"]): void {
@@ -49,6 +53,7 @@ export class CapabilityModel {
   reset(): void {
     this.capabilities = null;
     this.agentBrowserContext = null;
+    this.destinations = [];
     this.audit = [];
   }
 
