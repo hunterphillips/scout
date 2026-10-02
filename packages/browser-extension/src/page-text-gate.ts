@@ -22,7 +22,7 @@ import type { ApproveRequest, ApproveResponse, BackgroundToContent, DenialCode, 
 import type { Clock } from "./reconnect.js";
 import { type IssueRoute, parseIssueRoute } from "./route.js";
 import { LIMITS } from "./selectors.js";
-import { activeTab, type Counters, githubCaptureOn, policyAllowsCapture, post, type SharedState } from "./shared-state.js";
+import { activeTab, corePaused, type Counters, githubCaptureOn, policyAllowsCapture, post, type SharedState } from "./shared-state.js";
 
 /** An approval older than the content script's longest settle (plus slack) is void. */
 export const APPROVAL_TTL_MS = LIMITS.maxWaitMs + 5_000;
@@ -92,7 +92,7 @@ export function createPageTextGate(deps: GateDeps): PageTextGate {
   }
 
   async function refreshActive(): Promise<void> {
-    if (state.paused || !state.port || !githubCaptureOn(state) || !policyAllowsCapture(state)) return;
+    if (corePaused(state) || !state.port || !githubCaptureOn(state) || !policyAllowsCapture(state)) return;
     const t = await activeTab(ch).catch(() => null);
     if (!t || t.incognito || t.id === undefined || !tabRoute(t)) return;
     sendToTab(t.id, { type: "refresh" });
@@ -143,7 +143,7 @@ export function createPageTextGate(deps: GateDeps): PageTextGate {
     const route = tabRoute(sender.tab);
     const asked = typeof msg.url === "string" ? parseIssueRoute(msg.url) : null;
     if (!route || !asked || route.key !== asked.key || !Number.isSafeInteger(msg.navCounter)) return deny("route");
-    if (state.paused) return deny("paused");
+    if (corePaused(state)) return deny("paused");
     if (!state.port) {
       deps.trigger();
       return deny("bridge-disconnected");
@@ -154,7 +154,7 @@ export function createPageTextGate(deps: GateDeps): PageTextGate {
     const fg = await foregroundTab(sender.tab.id).catch(() => null);
     if (!fg) return deny("not-foreground");
     if (tabRoute(fg)?.key !== route.key) return deny("route");
-    if (epoch !== state.cancelEpoch || state.paused || !policyAllowsCapture(state)) return deny("cancelled");
+    if (epoch !== state.cancelEpoch || corePaused(state) || !policyAllowsCapture(state)) return deny("cancelled");
     if (!state.port) {
       deps.trigger();
       return deny("bridge-disconnected");
@@ -178,7 +178,7 @@ export function createPageTextGate(deps: GateDeps): PageTextGate {
     const msgRoute = typeof msg.url === "string" ? parseIssueRoute(msg.url) : null;
     if (!msgRoute || a.navCounter !== msg.navCounter || a.routeKey !== msgRoute.key) return { reason: "stale" };
     if (tabRoute(sender.tab)?.key !== msgRoute.key) return { reason: "url-changed" };
-    if (state.paused) return { reason: "paused" };
+    if (corePaused(state)) return { reason: "paused" };
     if (!policyAllowsCapture(state)) return { reason: "policy" };
     if (!captureAllowed()) return { reason: "permission" };
     const fg = await foregroundTab(sender.tab.id).catch(() => null);
@@ -197,7 +197,7 @@ export function createPageTextGate(deps: GateDeps): PageTextGate {
     if (!validText(msg)) return drop("payload");
     const c = await checkPageText(msg, sender);
     if ("reason" in c) return drop(c.reason);
-    if (epoch !== state.cancelEpoch || state.paused || !policyAllowsCapture(state)) return drop("cancelled");
+    if (epoch !== state.cancelEpoch || corePaused(state) || !policyAllowsCapture(state)) return drop("cancelled");
     if (!state.port || !state.policy) return drop("bridge-disconnected");
     const obs: PageTextObservation = {
       kind: "page_text",

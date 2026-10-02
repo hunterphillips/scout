@@ -4,7 +4,7 @@
 // 1, 2, 4, 8, 16, 30 s between attempts, then stops ("exhausted"). Nothing
 // retries on its own after that. The next tab or focus event (`trigger`)
 // starts one fresh series, but at most one series starts per 60 s. The
-// popup's Reconnect (`manual`) starts one at once. A disconnect after a
+// side panel's Reconnect (`manual`) starts one at once. A disconnect after a
 // healthy connection starts a fresh series only under the same 60 s limit;
 // otherwise it continues the current schedule. So there is never an
 // unbounded loop: at most 7 attempts per series, one series per 60 s.
@@ -48,7 +48,7 @@ export interface ReconnectPolicy {
   disconnected(healthy: boolean): void;
   /** A tab or focus event. Starts a series only when idle and the 60 s limit allows. */
   trigger(): boolean;
-  /** The popup's Reconnect: starts a series at once. */
+  /** The side panel's Reconnect: starts a series at once. */
   manual(): void;
   /** A retry is scheduled. */
   readonly pending: boolean;

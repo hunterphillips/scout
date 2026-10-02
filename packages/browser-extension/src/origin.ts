@@ -1,7 +1,7 @@
 // Which pages Scout may be allowed on, and the one exact-origin permission
-// pattern for each. Used by the popup (to decide whether to offer "Allow
+// pattern for each. Used by the worker and the side panel (to decide whether to offer "Allow
 // Scout on this site") and by the focus observer (to send a tab's URL only
-// when its exact origin is granted). No imports, so the popup bundle stays
+// when its exact origin is granted). No imports, so the panel bundle stays
 // free of zod.
 //
 // The host rule mirrors isHttpsOrigin in @scout/contracts (RFC 1123 hostname,
@@ -16,7 +16,7 @@ export type SiteRefusal = "no-page" | "internal" | "not-https" | "credentials" |
 
 export type SiteVerdict = { ok: true; origin: string; pattern: string } | { ok: false; reason: SiteRefusal };
 
-/** Short popup text for each refusal. */
+/** Short side-panel text for each refusal. */
 export const REFUSAL_TEXT: Record<SiteRefusal, string> = {
   "no-page": "Scout can't read this tab.",
   internal: "Browser pages can't use Scout.",

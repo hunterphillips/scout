@@ -2,7 +2,7 @@ import { isExactOriginPattern } from "@scout/contracts";
 import { describe, expect, it } from "vitest";
 import { checkSite, type SiteRefusal, sitePattern } from "./origin.js";
 
-describe("checkSite (the popup's origin validation)", () => {
+describe("checkSite (the side panel and worker's origin validation)", () => {
   const allowed: Array<[string, string]> = [
     ["https://github.com/acme/widgets/issues/1", "https://github.com/*"],
     ["https://docs.stripe.com/api?x=1#y", "https://docs.stripe.com/*"],
@@ -13,7 +13,7 @@ describe("checkSite (the popup's origin validation)", () => {
   for (const [url, pattern] of allowed) {
     it(`allows ${url} as ${pattern}`, () => {
       expect(checkSite(url, false)).toEqual({ ok: true, origin: pattern.slice(0, -2), pattern });
-      // every pattern the popup can request is one the core accepts
+      // every pattern the panel can request is one the core accepts
       expect(isExactOriginPattern(pattern)).toBe(true);
     });
   }
@@ -25,7 +25,7 @@ describe("checkSite (the popup's origin validation)", () => {
     ["not a url", false, "no-page"],
     ["http://example.com/", false, "not-https"],
     ["chrome://extensions/", false, "internal"],
-    ["chrome-extension://abcdefghijklmnopabcdefghijklmnop/popup.html", false, "internal"],
+    ["chrome-extension://abcdefghijklmnopabcdefghijklmnop/panel.html", false, "internal"],
     ["about:blank", false, "internal"],
     ["file:///Users/me/notes.txt", false, "internal"],
     ["edge://settings", false, "internal"],

@@ -1,5 +1,5 @@
 // The one native port to `dev.scout.bridge`: connect, host messages, link
-// health, link state for the popup, and manual reconnect. Reconnect timing is
+// health, link state for the side panel, and manual reconnect. Reconnect timing is
 // reconnect.ts; its series state is kept in chrome.storage.session so the
 // bound survives MV3 worker restarts.
 //
@@ -30,7 +30,7 @@ export interface PortLink {
   start(): Promise<void>;
   /** Tab and focus events: may start one fresh series (the policy enforces the 60 s limit). */
   trigger(): void;
-  /** The popup's Reconnect: drop any port and start a series now. */
+  /** The side panel's Reconnect: drop any port and start a series now. */
   manualReconnect(): void;
   linkState(): LinkState;
   /**
@@ -38,7 +38,11 @@ export interface PortLink {
    * relay command, no port is ready, or the host reports the core unavailable; never queued.
    */
   sendCommand(command: RelayCommand): boolean;
+  /** sendCommand, saying why nothing was sent: `invalid` (not a relay command; never resend) or not ready. */
+  sendCommandResult(command: RelayCommand): SendResult;
 }
+
+export type SendResult = { written: true } | { written: false; invalid?: true };
 
 export interface PortDeps {
   ch: typeof chrome;
@@ -53,6 +57,11 @@ export interface PortDeps {
   onLost(): void;
   /** One of Scout's window frames from the core (protocol 3). Defaults to a no-op. */
   onPanel?(frame: PanelState): void;
+  /**
+   * linkState() changed (port opened or lost, ready, core_unavailable, a retry scheduled or the
+   * series given up). Called synchronously, once per change, so the side panel hears it at once.
+   */
+  onLinkChange?(link: LinkState): void;
 }
 
 const isSeries = (v: unknown): v is SeriesState => {
@@ -90,7 +99,23 @@ export function createPortLink(deps: PortDeps): PortLink {
   let coreUnavailable = false;
   let upgradeRequired = false;
 
-  const policy = createReconnectPolicy({ clock, attempt: () => connect(), store: sessionSeriesStore(ch) });
+  let lastLink: LinkState | null = null;
+  /** Tell deps.onLinkChange when linkState() differs from what it last heard. */
+  function notify(): void {
+    const now = linkState();
+    if (now === lastLink) return;
+    lastLink = now;
+    deps.onLinkChange?.(now);
+  }
+
+  const policy = createReconnectPolicy({
+    clock,
+    attempt: () => {
+      connect();
+      notify();
+    },
+    store: sessionSeriesStore(ch),
+  });
 
   function connect(): void {
     if (state.port) return;
@@ -99,6 +124,7 @@ export function createPortLink(deps: PortDeps): PortLink {
       p = ch.runtime.connectNative(HOST_NAME);
     } catch {
       policy.disconnected(false);
+      notify();
       return;
     }
     state.port = p;
@@ -114,8 +140,10 @@ export function createPortLink(deps: PortDeps): PortLink {
       const healthy = ready;
       deps.onLost();
       policy.disconnected(healthy);
+      notify();
     });
     deps.onOpen();
+    notify();
   }
 
   function onHostMessage(p: chrome.runtime.Port, m: unknown): void {
@@ -146,6 +174,7 @@ export function createPortLink(deps: PortDeps): PortLink {
         counters.acked++;
         break;
     }
+    notify();
   }
 
   function linkState(): LinkState {
@@ -159,6 +188,7 @@ export function createPortLink(deps: PortDeps): PortLink {
 
   function trigger(): void {
     if (!state.port) policy.trigger();
+    notify();
   }
 
   function manualReconnect(): void {
@@ -174,21 +204,37 @@ export function createPortLink(deps: PortDeps): PortLink {
       deps.onLost();
     }
     policy.manual();
+    notify();
   }
 
-  function sendCommand(command: RelayCommand): boolean {
+  function sendCommandResult(command: RelayCommand): SendResult {
+    const frame = CommandFrameSchema.safeParse({ type: "command", command });
+    if (!frame.success) return { written: false, invalid: true };
     const p = state.port;
     // The host reports the core gone (it is retrying, or exiting): nothing would reach it.
-    if (!p || !ready || coreUnavailable) return false;
-    const frame = CommandFrameSchema.safeParse({ type: "command", command });
-    if (!frame.success) return false;
+    if (!p || !ready || coreUnavailable) return { written: false };
     try {
       p.postMessage(frame.data);
-      return true;
+      return { written: true };
     } catch {
-      return false;
+      return { written: false };
     }
   }
 
-  return { policy, start: () => policy.start(), trigger, manualReconnect, linkState, sendCommand };
+  function sendCommand(command: RelayCommand): boolean {
+    return sendCommandResult(command).written;
+  }
+
+  return {
+    policy,
+    start: async () => {
+      await policy.start();
+      notify();
+    },
+    trigger,
+    manualReconnect,
+    linkState,
+    sendCommand,
+    sendCommandResult,
+  };
 }
