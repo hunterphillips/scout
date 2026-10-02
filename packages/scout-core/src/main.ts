@@ -255,7 +255,7 @@ export async function runStdio(deps: StdioDeps): Promise<StdioCore> {
   // Settled visits run the same catalog and discovery pipelines as the dev CLI, with their
   // caches under SCOUT_HOME; the coordinator owns each pass's fetch session and window. Catalog
   // files are parsed in the parse worker; cancelling a pass's session cancels its parse.
-  const parsePool = createParsePool();
+  const parsePool = createParsePool({ diagnostics });
   const catalogResolver = createCatalogResolver({ scoutHome: home, clock, diagnostics, parsers: parsePool.parsers });
   const discoverer = createSiteResourceDiscoverer({ scoutHome: home, clock, diagnostics });
   const activity = createActivityStore({ clock });

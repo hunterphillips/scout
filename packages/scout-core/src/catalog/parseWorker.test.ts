@@ -1,6 +1,9 @@
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { parseLlmsTxt } from "./llmsTxt.js";
-import { createParsePool, ParseCancelledError, type ParsePool } from "./parseWorker.js";
+import { createParsePool, ParseCancelledError, ParseWorkerUnavailableError, type ParsePool } from "./parseWorker.js";
 import { parseSitemap } from "./sitemap.js";
 
 const ORIGIN = "https://docs.example.com";
@@ -81,4 +84,44 @@ describe("parse worker", () => {
     await pool.close();
     await expect(pool.parsers.sitemap(bigSitemap(1), ORIGIN)).rejects.toBeInstanceOf(ParseCancelledError);
   }, 30_000);
+
+  describe("an unavailable worker", () => {
+    let dir: string;
+    afterEach(() => rmSync(dir, { recursive: true, force: true }));
+    const recorder = () => {
+      const events: Array<{ name: string; fields: unknown }> = [];
+      return { events, diagnostics: { event: (name: string, fields: unknown = {}) => void events.push({ name, fields }) } };
+    };
+
+    it("one that fails to start fails each parse (no inline fallback) and reports parse_worker_unavailable once", async () => {
+      dir = mkdtempSync(join(tmpdir(), "spw-"));
+      const r = recorder();
+      pool = createParsePool({ entrypoint: join(dir, "missing.mjs"), diagnostics: r.diagnostics as never });
+      const first = pool.parsers.sitemap(bigSitemap(1), ORIGIN);
+      await expect(first).rejects.toBeInstanceOf(ParseWorkerUnavailableError);
+      await expect(first).rejects.toMatchObject({ code: "parse_worker_unavailable", reason: "worker_error" });
+      await expect(pool.parsers.llmsTxt("# Docs\n", ORIGIN, `${ORIGIN}/llms.txt`)).rejects.toBeInstanceOf(ParseWorkerUnavailableError);
+      expect(r.events).toEqual([{ name: "parse_worker_unavailable", fields: { code: "worker_error" } }]);
+      expect(pool.pending).toBe(0);
+    });
+
+    it("one that dies mid-parse fails that parse; the queued parse goes to a fresh worker", async () => {
+      dir = mkdtempSync(join(tmpdir(), "spw-"));
+      const entry = join(dir, "dies.mjs");
+      // Exits on its first message; a fresh worker (a second run of this file) answers.
+      const marker = join(dir, "died");
+      writeFileSync(
+        entry,
+        `import { existsSync, writeFileSync } from "node:fs";\nimport { parentPort } from "node:worker_threads";\n` +
+          `parentPort.on("message", (m) => { if (!existsSync(${JSON.stringify(marker)})) { writeFileSync(${JSON.stringify(marker)}, ""); process.exit(1); } parentPort.postMessage({ id: m.id, ok: true, result: { kind: "urlset", entries: [] } }); });\n`,
+      );
+      const r = recorder();
+      pool = createParsePool({ entrypoint: entry, diagnostics: r.diagnostics as never });
+      const dying = pool.parsers.sitemap(bigSitemap(1), ORIGIN);
+      const queued = pool.parsers.sitemap(bigSitemap(1), ORIGIN);
+      await expect(dying).rejects.toMatchObject({ code: "parse_worker_unavailable", reason: "worker_exit" });
+      await expect(queued).resolves.toEqual({ kind: "urlset", entries: [] });
+      expect(r.events).toEqual([{ name: "parse_worker_unavailable", fields: { code: "worker_exit" } }]);
+    });
+  });
 });

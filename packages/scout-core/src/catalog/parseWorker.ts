@@ -8,9 +8,16 @@
 // ParseCancelledError; the next parse starts a fresh worker. The core calls it when a discovery
 // pass's fetch session is cancelled (pause, permission loss, disconnect, stop). A parse that
 // overruns PARSE_MAX_MS is cancelled the same way. `close()` is for shutdown.
+//
+// A worker that fails to start or dies (not a cancel) fails the parse it held with
+// ParseWorkerUnavailableError and reports `parse_worker_unavailable {code}` once per pool:
+// `start_failed` (the constructor threw), `worker_error` (an uncaught error, e.g. a missing
+// entrypoint), `worker_exit` (it exited on its own). Fail closed: there is no inline fallback,
+// so a parse never runs on the main thread; the next parse tries a fresh worker.
 
 import { createRequire } from "node:module";
 import { Worker } from "node:worker_threads";
+import type { Diagnostics } from "../diagnostics.js";
 import type { ParsedLlmsTxt } from "./llmsTxt.js";
 import type { CatalogParsers } from "./resolver.js";
 import type { ParsedSitemap } from "./sitemap.js";
@@ -23,6 +30,16 @@ export class ParseCancelledError extends Error {
   constructor() {
     super("parse cancelled");
     this.name = "ParseCancelledError";
+  }
+}
+
+export type ParseWorkerUnavailableCode = "start_failed" | "worker_error" | "worker_exit";
+
+export class ParseWorkerUnavailableError extends Error {
+  readonly code = "parse_worker_unavailable";
+  constructor(readonly reason: ParseWorkerUnavailableCode) {
+    super(`parse worker unavailable: ${reason}`);
+    this.name = "ParseWorkerUnavailableError";
   }
 }
 
@@ -49,8 +66,16 @@ interface Queued {
   reject: (e: unknown) => void;
 }
 
-export function createParsePool(options: { entrypoint?: string; maxMs?: number } = {}): ParsePool {
+export function createParsePool(options: { entrypoint?: string; maxMs?: number; diagnostics?: Pick<Diagnostics, "event"> } = {}): ParsePool {
   const maxMs = options.maxMs ?? PARSE_MAX_MS;
+  let reported = false;
+  const unavailable = (code: ParseWorkerUnavailableCode): ParseWorkerUnavailableError => {
+    if (!reported) {
+      reported = true;
+      options.diagnostics?.event("parse_worker_unavailable", { code });
+    }
+    return new ParseWorkerUnavailableError(code);
+  };
   let worker: Worker | null = null;
   let running: (Queued & { timer: ReturnType<typeof setTimeout> }) | null = null;
   const queue: Queued[] = [];
@@ -90,19 +115,22 @@ export function createParsePool(options: { entrypoint?: string; maxMs?: number }
       pump();
     });
     // A worker that dies takes its running parse with it; queued ones go to a fresh worker.
-    const died = (): void => {
+    const died = (code: ParseWorkerUnavailableCode): void => {
       if (worker !== w) return;
       worker = null;
+      w.removeAllListeners();
+      void w.terminate().catch(() => {});
       const r = running;
       running = null;
+      const err = unavailable(code);
       if (r !== null) {
         clearTimeout(r.timer);
-        r.reject(new Error("parse worker exited"));
+        r.reject(err);
       }
       pump();
     };
-    w.on("error", died);
-    w.on("exit", died);
+    w.on("error", () => died("worker_error"));
+    w.on("exit", () => died("worker_exit"));
     worker = w;
     return w;
   };
@@ -114,8 +142,8 @@ export function createParsePool(options: { entrypoint?: string; maxMs?: number }
     let w: Worker;
     try {
       w = ensureWorker();
-    } catch (e) {
-      next.reject(e);
+    } catch {
+      next.reject(unavailable("start_failed"));
       pump();
       return;
     }
