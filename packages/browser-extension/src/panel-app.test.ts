@@ -171,6 +171,29 @@ describe("side panel page", () => {
     expect(f._.state.badge).toBe("");
   });
 
+  it("a panel opened after the grant frame shows the sites with recommendations on from the worker's cache", async () => {
+    const f = makeChrome({ granted: [DOCS] });
+    const clock = fakeClock();
+    await createBackground(asChrome(f), { clock }).start();
+    await clock.advance(0);
+    for (const s of [{ type: "grant", agentBrowserContext: false, destinations: ["https://docs.example.com", "https://docs.stripe.com"] }, caps(), { type: "audit", entries: [] }, { type: "state", status: "idle", visitEpoch: 3, detail: "docs.example.com", permitted: true }])
+      lastPort(f).onMessage.emit({ type: "panel", state: s });
+    await flush();
+    const dom = new JSDOM(`<!doctype html><body><p id="header-line"></p><div id="root"></div></body>`);
+    const doc = dom.window.document;
+    const app = createPanelApp({ ch: asChrome(f), doc, root: doc.getElementById("root")!, setInterval: () => 0, setTimeout: () => 0 });
+    await app.start();
+    for (let i = 0; i < 3; i++) {
+      await flush(4);
+      await app.idle();
+    }
+    app.render();
+    doc.querySelector<HTMLElement>('[data-key="nav-sites"]')!.click();
+    app.render();
+    const states = [...doc.querySelectorAll("ul.sites li")].map((li) => li.textContent);
+    expect(states).toEqual(["docs.example.comAllowed · Recommendations onRemove", "docs.stripe.comNot allowed · Recommendations onAllow"]);
+  });
+
   it("the link going down clears the results and says so", async () => {
     const h = await harness();
     await withResults(h);

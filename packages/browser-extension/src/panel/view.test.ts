@@ -133,4 +133,17 @@ describe("panel view", () => {
     grab();
     expect(seen.size).toBe(10);
   });
+
+  it("Sites marks the sites with recommendations on, including one Chrome does not grant", () => {
+    const m = running();
+    m.apply({ type: "grant", agentBrowserContext: false, destinations: ["https://docs.example.com", "https://docs.stripe.com"] });
+    m.select("sites");
+    const { root } = view(m);
+    const row = (host: string) => [...root.querySelectorAll("ul.sites li")].find((li) => li.querySelector(".site-host")!.textContent === host)!;
+    expect(row("docs.example.com").querySelector(".site-state")!.textContent).toBe("Allowed · Recommendations on");
+    expect(row("docs.stripe.com").querySelector(".site-state")!.textContent).toBe("Not allowed · Recommendations on");
+    expect(row("docs.stripe.com").querySelector('[data-key="allow-docs.stripe.com"]')).not.toBeNull();
+    expect(root.textContent).toContain("To turn recommendations on for a site, add it to destinations in Scout's config.json.");
+    expect(root.textContent).not.toContain("Recommendations run only");
+  });
 });

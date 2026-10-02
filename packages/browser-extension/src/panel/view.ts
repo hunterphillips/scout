@@ -164,13 +164,13 @@ function resultsSection(doc: Document, v: ViewState, on: PanelHandlers): HTMLEle
 
 function sitesSection(doc: Document, v: ViewState, on: PanelHandlers): HTMLElement {
   const granted = v.status?.granted ?? [];
-  const rows = siteRows(granted, v.model.capabilities.origins);
+  const rows = siteRows(granted, v.model.capabilities.origins, v.model.capabilities.destinations);
   const box = el(doc, "div", {});
   if (rows.length === 0) box.append(el(doc, "p", { text: "No sites yet. Allow a site to let Scout see it." }));
   const list = el(doc, "ul", { class: "sites" });
   for (const r of rows) {
     const state = r.granted ? "Allowed" : "Not allowed";
-    const extra = r.autoAcquire ? " · gets resources automatically" : "";
+    const extra = (r.recommendations ? " · Recommendations on" : "") + (r.autoAcquire ? " · gets resources automatically" : "");
     const action = r.pattern === null ? el(doc, "span", { class: "note", text: "Non-standard port" }) : r.granted
       ? button(doc, `remove-${r.host}`, "Remove", () => on.remove(r.pattern!), { "aria-label": `Remove ${r.host}` })
       : button(doc, `allow-${r.host}`, "Allow", () => on.allow(r.pattern!), { "aria-label": `Allow Scout on ${r.host}` });
@@ -188,7 +188,7 @@ function sitesSection(doc: Document, v: ViewState, on: PanelHandlers): HTMLEleme
   });
   box.append(form, el(doc, "p", { id: "site-input-note", class: v.ui.siteInputError ? "error" : "note", text: v.ui.siteInputError ?? "Chrome asks you to confirm each site." }));
   if (v.status?.broadGrantIgnored) box.append(el(doc, "p", { class: "note", text: BROAD_GRANT_TEXT }));
-  box.append(el(doc, "p", { class: "note", text: "Recommendations run only on the sites listed as destinations in Scout's config.json." }));
+  box.append(el(doc, "p", { class: "note", text: "To turn recommendations on for a site, add it to destinations in Scout's config.json." }));
   return box;
 }
 
