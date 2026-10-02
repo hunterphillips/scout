@@ -369,9 +369,21 @@ export class PanelModel {
     for (const id of [...this.dismissed]) if (!this.commands.record(id)) this.dismissed.delete(id);
   }
 
+  /** Commands the core never answered (commands.ts PENDING_TIMEOUT_MS); a preview's fails it. */
+  expirePending(now: number): void {
+    for (const r of this.commands.expire(now)) {
+      if (r.request.type !== "preview") continue;
+      const id = keyId(r.request);
+      if (this.awaiting.get(id) === r.id) {
+        this.awaiting.delete(id);
+        this.previews.get(id)?.refused("unavailable");
+      }
+    }
+  }
+
   /** What became of a write; an oversize preview request fails its preview. */
-  markSent(command: PanelCommand, outcome: SendOutcome): void {
-    this.commands.markSent(command.commandId, outcome);
+  markSent(command: PanelCommand, outcome: SendOutcome, now = 0): void {
+    this.commands.markSent(command.commandId, outcome, now);
     if (outcome !== "oversize" || command.type !== "preview") return;
     const id = keyId(command);
     if (this.awaiting.get(id) === command.commandId) {

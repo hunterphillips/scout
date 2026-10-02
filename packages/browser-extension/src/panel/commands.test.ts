@@ -2,7 +2,7 @@
 // the browser rules (random `sp-` IDs, open_link never left unsent, the byte limit).
 import { CommandIdSchema, NATIVE_COMMAND_MAX_BYTES, RelayCommandSchema } from "@scout/contracts";
 import { describe, expect, it } from "vitest";
-import { COMMAND_MAX_BYTES, commandLineBytes, CommandTracker, type PanelRequest, randomCommandId } from "./commands.js";
+import { COMMAND_MAX_BYTES, commandLineBytes, CommandTracker, PENDING_TIMEOUT_MS, type PanelRequest, randomCommandId } from "./commands.js";
 import { F, tracker } from "./test-frames.js";
 
 const approve: PanelRequest = { type: "approve", resourceId: F.rid, version: F.v1, expectedRevision: 1 };
@@ -231,5 +231,27 @@ describe("browser rules", () => {
       expect(RelayCommandSchema.safeParse(c).success, JSON.stringify(c)).toBe(true);
       expect(commandLineBytes(c)).toBeLessThan(COMMAND_MAX_BYTES);
     }
+  });
+
+  it("a written command the core never answers expires after 10 s: decisions retryable, clicks Dismiss only, toggles unknown, previews failed", () => {
+    const t = tracker("p");
+    const a = t.issue(approve);
+    const click = t.issue({ type: "open_link", coreInstanceId: "core-1", visitEpoch: 1, jobId: "job-1", candidateId: "c1" });
+    const grant = t.issue({ type: "set_agent_browser_context", enabled: true, expectedEnabled: false });
+    const p = t.issue({ type: "preview", resourceId: F.rid, version: F.v1 });
+    const unsent = t.issue({ type: "refresh_capabilities" });
+    for (const c of [a, click, grant, p]) t.markSent(c.commandId, "written", 1_000);
+    expect(t.expire(1_000 + PENDING_TIMEOUT_MS - 1)).toEqual([]);
+    expect(t.expire(1_000 + PENDING_TIMEOUT_MS).map((r) => r.id)).toEqual([a.commandId, click.commandId, grant.commandId, p.commandId]);
+    expect(t.record(a.commandId)).toMatchObject({ state: "failed", code: "unavailable" });
+    expect(t.retry(a.commandId)).toEqual(a); // the same ID
+    expect(t.record(click.commandId)).toMatchObject({ state: "failed", code: "unavailable" });
+    expect(t.canRetry(click.commandId)).toBe(false);
+    expect(t.record(grant.commandId)?.state).toBe("unknown");
+    expect(t.record(p.commandId)).toMatchObject({ state: "failed", code: "unavailable" });
+    expect(t.record(unsent.commandId)?.state).toBe("pending"); // never written: the resend covers it
+    // A late ack still settles what it answers.
+    t.apply(ok(click.commandId));
+    expect(t.record(click.commandId)?.state).toBe("ok");
   });
 });

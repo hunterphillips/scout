@@ -544,4 +544,29 @@ describe("PanelModel browser additions", () => {
     m.select("results");
     expect(m.shownPreview).toEqual(key);
   });
+
+  it("a preview request the core never answers fails the preview after 10 s; Load again starts over", () => {
+    const m = new PanelModel(tracker("t"));
+    m.applyLink("connected");
+    const first = m.showPreview(key)!;
+    m.markSent(first, "written", 0);
+    m.expirePending(9_999);
+    expect(m.preview(key)?.phase).toBe("loading");
+    m.expirePending(10_000);
+    expect(m.preview(key)?.failure).toEqual({ kind: "refused", code: "unavailable" });
+    expect(m.restartPreview(key)).toMatchObject({ type: "preview", resourceId: F.rid });
+  });
+
+  it("frames dropped under backpressure: a later capabilities or state frame is taken whole", () => {
+    const m = new PanelModel(tracker("t"));
+    m.applyLink("connected");
+    m.apply(capabilities({ revision: 1, offers: [offer()] }));
+    // revisions 2..6 never arrived; the repaint carries 7.
+    m.apply(capabilities({ revision: 7, offers: [] }));
+    expect(m.capabilities.offers).toEqual([]);
+    m.apply(state("working", { epoch: 1, jobId: "job-1" }));
+    m.apply(state("idle", { epoch: 5, detail: "docs.example.com", permitted: true })); // epochs 2..4 missed
+    expect(m.visitEpoch).toBe(5);
+    expect(m.resultsDisplay).toEqual({ kind: "none" });
+  });
 });

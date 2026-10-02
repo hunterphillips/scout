@@ -9,7 +9,10 @@
 //   visible, and the panel says so ("Click the Scout icon to check this site").
 // - Commands go to the worker one at a time per ID; a command the worker could not hand to a
 //   ready port stays unsent and goes again under the same ID once a second (open_link fails
-//   instead, model rule). A line of COMMAND_MAX_BYTES or more is never sent.
+//   instead, model rule). A line of COMMAND_MAX_BYTES or more is never sent. A written command
+//   with no answer in 10 s expires (commands.ts PENDING_TIMEOUT_MS).
+// - Frames are taken as they come: the core may drop non-ack frames under backpressure and
+//   repaint later, and every `capabilities`/`state` frame replaces what the panel showed.
 // - A link opens only from an ok `open_link` ack that passed links.ts, in a new tab next to the
 //   current one (never in the current tab). That new tab is a new visit, so the results clear.
 // - Allow/Remove call permissions.request/remove as the click handler's first statement (a user
@@ -40,6 +43,7 @@ export interface PanelAppDeps {
   model?: PanelModel;
   setInterval?: (fn: () => void, ms: number) => unknown;
   setTimeout?: (fn: () => void, ms: number) => unknown;
+  now?: () => number;
 }
 
 export interface PanelApp {
@@ -57,6 +61,7 @@ export function createPanelApp(deps: PanelAppDeps): PanelApp {
   const { ch, doc, root } = deps;
   const every = deps.setInterval ?? ((fn, ms) => globalThis.setInterval(fn, ms));
   const later = deps.setTimeout ?? ((fn, ms) => globalThis.setTimeout(fn, ms));
+  const now = deps.now ?? (() => Date.now());
   const model = deps.model ?? new PanelModel();
   const ui: PanelUi = { ackSheet: null, siteInput: "", siteInputError: null };
   let status: StatusSnapshot | null = null;
@@ -115,7 +120,7 @@ export function createPanelApp(deps: PanelAppDeps): PanelApp {
       inFlight.add(c.commandId);
       void request<CommandReply>({ type: "command", command: c }).then((r) => {
         inFlight.delete(c.commandId);
-        model.markSent(c, r?.written === true ? "written" : "retryLater");
+        model.markSent(c, r?.written === true ? "written" : "retryLater", now());
         renderSoon();
       });
     }
@@ -376,7 +381,9 @@ export function createPanelApp(deps: PanelAppDeps): PanelApp {
       }
     }, PANEL_HEARTBEAT_MS);
     every(() => {
+      model.expirePending(now());
       if (model.running) send(model.commands.unsent);
+      else renderSoon();
     }, RESEND_MS);
     render();
     await refreshSite();

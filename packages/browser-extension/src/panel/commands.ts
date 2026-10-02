@@ -12,6 +12,11 @@
 // When the core restarts (or the link to it is re-established), only pending decisions
 // (approve, decline, revoke) are re-sent with the same ID; pending toggles, refreshes and clicks
 // become `unknown`; pending previews fail as `unavailable`. A retry never draws a new ID.
+//
+// A written command the core never answers (it was sent on a connection the core has since
+// replaced, or the core is wedged) expires after PENDING_TIMEOUT_MS: decisions and refreshes
+// fail as `unavailable` (Retry re-sends the same ID), a click fails the same way (Dismiss
+// only), toggles settle `unknown` (the next frame shows what took effect), previews fail.
 // Pure: no `chrome.*`.
 
 import type { AckFailureCode, PanelAck, RelayCommand } from "@scout/contracts";
@@ -33,7 +38,12 @@ export interface CommandRecord {
   code?: AckFailureCode;
   /** False until a write of this command went through. */
   sent: boolean;
+  /** When the last write went through (ms), for the pending timeout. */
+  sentAt?: number;
 }
+
+/** How long a written command may wait for its ack (or chunk). */
+export const PENDING_TIMEOUT_MS = 10_000;
 
 /** `NATIVE_COMMAND_MAX_BYTES` in @scout/contracts panel.ts (a test pins it; no zod in this bundle). */
 export const COMMAND_MAX_BYTES = 512;
@@ -94,11 +104,14 @@ export class CommandTracker {
     return undefined;
   }
 
-  /** What became of a write of `id`. */
-  markSent(id: string, outcome: SendOutcome): void {
+  /** What became of a write of `id` (`now` in ms, for the pending timeout). */
+  markSent(id: string, outcome: SendOutcome, now = 0): void {
     const r = this.record(id);
     if (!r || r.state !== "pending") return;
-    if (outcome === "written") r.sent = true;
+    if (outcome === "written") {
+      r.sent = true;
+      r.sentAt = now;
+    }
     else if (outcome === "oversize") this.fail(r, "invalid");
     else if (r.request.type === "open_link") this.fail(r, "unavailable"); // never re-sent later
   }
@@ -147,6 +160,18 @@ export class CommandTracker {
       else this.fail(r, "unavailable");
     }
     return resend;
+  }
+
+  /** Written commands with no answer after PENDING_TIMEOUT_MS: settles them and returns them. */
+  expire(now: number): CommandRecord[] {
+    const out: CommandRecord[] = [];
+    for (const r of this.records) {
+      if (r.state !== "pending" || !r.sent || r.sentAt === undefined || now - r.sentAt < PENDING_TIMEOUT_MS) continue;
+      if (isToggle(r.request)) r.state = "unknown";
+      else this.fail(r, "unavailable");
+      out.push(r);
+    }
+    return out;
   }
 
   /** Settles `id` as ok: a refusal the latest frame shows was moot. */
