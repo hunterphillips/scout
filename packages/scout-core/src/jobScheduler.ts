@@ -338,6 +338,8 @@ export function createJobScheduler(options: JobSchedulerOptions): JobScheduler {
     const toolErrors = d ? Object.values(d.toolErrors).reduce((a, n) => a + n, 0) + (d.unattributedToolErrors ?? 0) : 0;
     if (toolErrors > 0) f.toolErrors = toolErrors;
     if (d?.optionalToolFailed) f.optionalToolFailed = true;
+    // Count only: tells "every pick unknown" (N dropped) from malformed output (0) under invalid_output.
+    if (d?.droppedPicks) f.droppedPicks = d.droppedPicks;
     if (d?.cliVersionChanged) f.cliVersionChanged = true;
     if (run.verify) event("verify", { epoch: job.visit.epoch, picked: run.verify.picked, verified: run.verify.verified });
 

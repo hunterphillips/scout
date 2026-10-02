@@ -343,13 +343,16 @@ describe.skipIf(!BUILT)("Phase 3 verification e2e: B10 outcomes and B11 click au
     const { result, fin } = await runCase("invalid-shape");
     expect(result).toMatchObject({ status: "error", reason: "invalid_output" });
     expect(fin).toMatchObject({ status: "error", reason: "invalid_output", termination: "invalid_output" });
+    expect(fin.droppedPicks).toBeUndefined();
     shown.set("malformed", "error/invalid_output");
   }, 60_000);
 
   it("B10 unknown IDs: every pick unknown is error invalid_output, never empty", async () => {
     const { result, fin } = await runCase("all-invalid");
     expect(result).toMatchObject({ status: "error", reason: "invalid_output" });
+    // The window shows the same error; the diagnostics' dropped-pick count tells the two apart.
     expect(fin).toMatchObject({ status: "error", reason: "invalid_output", termination: "invalid_output" });
+    expect(fin.droppedPicks).toBeGreaterThan(0);
     shown.set("unknown_ids", "error/invalid_output");
   }, 60_000);
 
