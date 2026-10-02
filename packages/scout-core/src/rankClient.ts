@@ -1,12 +1,19 @@
 import type { ActiveVisit, PageTextObservation, SiteCatalog } from "@scout/contracts";
 import type { ActivityObservation, ContextStatus, RankResponse } from "personal-context-mcp/api";
-import type { ActivitySend } from "./activityForwarder.js";
 import type { Clock } from "./clock.js";
 import type { Diagnostics } from "./diagnostics.js";
 import type { ResumeCache } from "./resumeCache.js";
 import { type AckTracker, createAckTracker, type Sleep } from "./rankClient/ackTracker.js";
 import { createRankJob, type RankJob, type Timers } from "./rankClient/rankJob.js";
 import type { ServiceTransport } from "./rankClient/transport.js";
+
+/**
+ * Sends one observation to the personal-context service's `observe_activity`. Resolves
+ * when the service acknowledges it; rejects when the send fails. Legacy: nothing calls it
+ * since accepted page text went to the activity store (activity/store.ts); pivot Phase 4
+ * retires it with this client.
+ */
+export type ActivitySend = (obs: PageTextObservation) => Promise<void>;
 
 /** The sensor name Scout reports to `observe_activity`. */
 export const SCOUT_SENSOR = "scout-chrome";
@@ -56,7 +63,7 @@ export interface RankClient {
   /** Scout's contextRevision rose; a running rank for the current epoch becomes dirty. */
   notifyContextChanged(): void;
   /**
-   * The `ActivitySend` for the activity forwarder: maps a `page_text` observation to
+   * The legacy `ActivitySend`: maps a `page_text` observation to
    * `observe_activity`, marks a running rank dirty, and resolves only on `accepted: true`.
    */
   sendObservation: ActivitySend;

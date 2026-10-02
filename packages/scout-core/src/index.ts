@@ -24,7 +24,6 @@ export {
   type VisitTracker,
   type VisitTrackerOptions,
 } from "./visitTracker.js";
-export type { ActivitySend } from "./activityForwarder.js";
 export {
   ACTIVITY_MAX_ENTRIES,
   ACTIVITY_TTL_MS,
@@ -48,6 +47,7 @@ export {
 export {
   createRankClient,
   SCOUT_SENSOR,
+  type ActivitySend,
   type RankClient,
   type RankClientOptions,
   type RankClientResult,
