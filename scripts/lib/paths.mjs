@@ -15,7 +15,13 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 export const HOST_NAME = "dev.scout.bridge";
-export const DEFAULT_DESTINATIONS = ["docs.stripe.com", "www.peakdesign.com"];
+/**
+ * Hosts where background recommendations run (pivot P3.2). Empty by default: the plan
+ * says per-origin enablement starts off, and a destination makes the core spend the
+ * user's quota on every settled visit there. docs.stripe.com and www.peakdesign.com are
+ * the acceptance examples a user may add to ~/.scout/config.json.
+ */
+export const DEFAULT_DESTINATIONS = [];
 
 /** The scout/ directory this script lives in. */
 export const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");

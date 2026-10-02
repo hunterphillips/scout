@@ -101,7 +101,7 @@ describe("setup", () => {
       nodePath: process.execPath,
       scoutRoot: fx.scoutRoot,
       extensionId: expect.stringMatching(/^[a-p]{32}$/),
-      destinations: ["docs.stripe.com", "www.peakdesign.com"],
+      destinations: [],
     });
     expect(json(L.pcConfig)).toEqual({ x_scout_marker: installed.marker, nodePath: process.execPath, claudePath: join(fx.binDir, "claude") });
 
