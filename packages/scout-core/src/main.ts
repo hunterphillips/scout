@@ -20,6 +20,9 @@
 // Scout's window gets its capability view, previews, command acks, the context-read audit,
 // and the browser-context grant from the panel channel (panelChannel.ts), which starts right
 // after the coordinator and stops right after it, before the sockets and the store close.
+// Recommendation results live in one registry (results.ts) shared by the channel (frames,
+// `open_link`) and the coordinator (which clears them with their visit); results may be
+// published only for the coordinator's current, unpaused, permitted visit.
 //
 // The process exits 0 when stdin closes (the app quit or crashed), on SIGTERM/SIGINT/
 // SIGHUP, or on a `shutdown` command, after closing both sockets (which releases the agent
@@ -52,6 +55,7 @@ import { DWELL_MS } from "./dwell.js";
 import { createOriginFetchSession } from "./fetch/originSession.js";
 import { InstalledRecordError, readInstalledRecord } from "./installedRecord.js";
 import { createPanelChannel, type PanelChannel } from "./panelChannel.js";
+import { createResultRegistry } from "./results.js";
 import { createSocketServer, SocketServerError } from "./socketServer.js";
 
 /** Hard cap on shutdown: exit anyway if closing takes longer. */
@@ -160,7 +164,19 @@ export async function runStdio(deps: StdioDeps): Promise<StdioCore> {
   // One id per start, shared by agent.sock replies and Scout's window's capabilities frames.
   const coreInstanceId = randomBytes(16).toString("hex");
 
-  // The channel reads the coordinator's grants and visit lazily: it is first used after both exist.
+  // The registry and the channel read the coordinator's grants and visit lazily: they are
+  // first used after both exist.
+  const results = createResultRegistry({
+    coreInstanceId,
+    activeVisit: () => {
+      if (coordinator.stopped) return null;
+      const view = coordinator.agentView();
+      if (view.paused || view.currentSite === null) return null;
+      return { visitEpoch: view.currentSite.visitEpoch, origin: view.currentSite.origin };
+    },
+    isPermitted: (origin) => coordinator.permissions.isPermitted(origin),
+    diagnostics,
+  });
   panel = createPanelChannel({
     store,
     coreInstanceId,
@@ -171,6 +187,8 @@ export async function runStdio(deps: StdioDeps): Promise<StdioCore> {
     isPermitted: (origin) => coordinator.permissions.isPermitted(origin),
     currentOrigin: () => coordinator.agentView().currentSite?.origin ?? null,
     emit: emitPanel,
+    results,
+    resendState: () => coordinator.resendState(),
     clock,
     diagnostics,
   });
@@ -194,6 +212,7 @@ export async function runStdio(deps: StdioDeps): Promise<StdioCore> {
       discover: (origin, session) => discoverer.discover(origin, { session }),
     },
     panel: panelChannel,
+    results,
   });
   panelChannel.start();
   // The startup export sync may record conflicts the first frame could not show.

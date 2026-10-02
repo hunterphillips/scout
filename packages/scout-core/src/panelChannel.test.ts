@@ -10,6 +10,7 @@ import { createCapabilityStore } from "./capabilities/store.js";
 import type { Timers } from "./clock.js";
 import type { DiagnosticFields, Diagnostics } from "./diagnostics.js";
 import { createPanelChannel, type PanelStore } from "./panelChannel.js";
+import { createResultRegistry, type ResultRegistry } from "./results.js";
 
 function fakeTimers() {
   const pending = new Map<number, () => void>();
@@ -51,7 +52,9 @@ const emptyStore = {
   approvalRevision: 0,
 } satisfies PanelStore;
 
-function setup(overrides: { store?: PanelStore; isPermitted?: (origin: string) => boolean } = {}) {
+function setup(
+  overrides: { store?: PanelStore; isPermitted?: (origin: string) => boolean; results?: ResultRegistry; resendState?: () => void } = {},
+) {
   const t = fakeTimers();
   const frames: PanelState[] = [];
   const audit: ReadAuditEntry[] = [];
@@ -69,6 +72,8 @@ function setup(overrides: { store?: PanelStore; isPermitted?: (origin: string) =
     isPermitted: overrides.isPermitted ?? (() => false),
     currentOrigin: () => null,
     emit: (f) => void frames.push(f),
+    ...(overrides.results ? { results: overrides.results } : {}),
+    ...(overrides.resendState ? { resendState: overrides.resendState } : {}),
     clock: { now: () => 0 },
     timers: t.timers,
     diagnostics,
@@ -106,6 +111,62 @@ describe("panel channel", () => {
     await s.channel.handle({ type: "preview", commandId: "p1", resourceId: `res_${"a".repeat(64)}`, version: "b".repeat(64) });
     expect(s.frames).toEqual([{ type: "ack", commandId: "p1", ok: false, code: "not_found" }]);
     expect(s.events.find((e) => e.name === "native_command")?.fields).toEqual({ type: "preview", ok: false, code: "not_found" });
+  });
+
+  describe("results", () => {
+    const SITE = "https://docs.example.com";
+    const registry = () =>
+      createResultRegistry({ coreInstanceId: "core-test", activeVisit: () => ({ visitEpoch: 2, origin: SITE }), isPermitted: () => true });
+    const result = {
+      coreInstanceId: "core-test",
+      visitEpoch: 2,
+      origin: SITE,
+      jobId: "job-1",
+      status: "ok" as const,
+      items: [{ candidateId: "c1", title: "Webhooks", reason: "r", href: `${SITE}/webhooks`, hostname: "docs.example.com" }],
+    };
+
+    it("sends a published result as a frame without its href, and answers open_link from it", async () => {
+      const results = registry();
+      const s = setup({ results });
+      results.publish(result);
+      expect(s.frames).toEqual([
+        {
+          type: "results",
+          coreInstanceId: "core-test",
+          visitEpoch: 2,
+          origin: SITE,
+          jobId: "job-1",
+          status: "ok",
+          items: [{ candidateId: "c1", title: "Webhooks", reason: "r", hostname: "docs.example.com" }],
+        },
+      ]);
+      await s.channel.handle({ type: "open_link", commandId: "o1", coreInstanceId: "core-test", visitEpoch: 2, jobId: "job-1", candidateId: "c1" });
+      expect(s.frames.at(-1)).toMatchObject({ type: "ack", commandId: "o1", ok: true, target: { href: `${SITE}/webhooks` } });
+    });
+
+    it("a clear re-sends the coordinator's state instead of a stand-in empty frame", () => {
+      const results = registry();
+      let resent = 0;
+      const s = setup({ results, resendState: () => void resent++ });
+      results.clear("visit_changed"); // nothing held: nothing to say
+      expect(resent).toBe(0);
+      results.publish(result);
+      results.clear("visit_changed");
+      expect(resent).toBe(1);
+      expect(s.frames.filter((f) => f.type === "results")).toHaveLength(1);
+    });
+
+    it("stops listening when stopped", () => {
+      const results = registry();
+      let resent = 0;
+      const s = setup({ results, resendState: () => void resent++ });
+      s.channel.stop();
+      results.publish(result);
+      results.clear("stopped");
+      expect(s.frames).toEqual([]);
+      expect(resent).toBe(0);
+    });
   });
 
   it("sends nothing after stop", async () => {

@@ -182,6 +182,18 @@ describe("main --stdio", () => {
     expect((await c.exited).code).toBe(0);
   });
 
+  it("answers open_link from the result registry: with no result held, its identity is stale", async () => {
+    const c = await startReady();
+    await until(() => c.lines.some((l) => (l as { type?: string }).type === "capabilities"));
+    const caps = c.lines.find((l) => (l as { type?: string }).type === "capabilities") as { coreInstanceId: string };
+    const cmd = { type: "open_link", commandId: "o1", coreInstanceId: caps.coreInstanceId, visitEpoch: 0, jobId: "job-1", candidateId: "c1" };
+    c.child.stdin.write(`${JSON.stringify(cmd)}\n`);
+    await until(() => c.lines.some((l) => (l as { type?: string }).type === "ack"));
+    expect(c.lines.find((l) => (l as { type?: string }).type === "ack")).toEqual({ type: "ack", commandId: "o1", ok: false, code: "stale_revision" });
+    c.child.stdin.end();
+    expect((await c.exited).code).toBe(0);
+  });
+
   it("streams a stored version's preview chunk by chunk through the real core", async () => {
     // A pending llms.txt (40 000 bytes of multi-byte text) in a store seeded before start.
     const text = "aé😀".repeat(5000);

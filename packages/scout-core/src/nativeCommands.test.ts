@@ -15,6 +15,7 @@ import { readConfig } from "./config.js";
 import { type CommandStore, createNativeCommands, type NativeCommandsOptions } from "./nativeCommands.js";
 import { buildCapabilities } from "./panelCapabilities.js";
 import { createPreviewStream } from "./previewStream.js";
+import { createResultRegistry } from "./results.js";
 
 const ORIGIN = "https://s.example";
 const sha = (s: string) => createHash("sha256").update(s, "utf8").digest("hex");
@@ -405,6 +406,76 @@ describe("native commands", () => {
     await s.commands.handle({ type: "refresh_capabilities", commandId: "f1" });
     expect(s.counts.refresh).toBe(1);
     expect(s.acks[0]).toMatchObject({ ok: true, revision: 0 });
+  });
+
+  describe("open_link", () => {
+    const CORE = "core-test";
+    const SITE = "https://docs.example.com";
+    function withResults() {
+      const state = { epoch: 4, permitted: true };
+      const results = createResultRegistry({
+        coreInstanceId: CORE,
+        activeVisit: () => ({ visitEpoch: state.epoch, origin: SITE }),
+        isPermitted: () => state.permitted,
+      });
+      results.publish({
+        coreInstanceId: CORE,
+        visitEpoch: 4,
+        origin: SITE,
+        jobId: "job-1",
+        status: "ok",
+        items: [{ candidateId: "c1", title: "Webhooks", reason: "r", href: `${SITE}/webhooks`, hostname: "docs.example.com" }],
+      });
+      return { s: setup({ results }), state, results };
+    }
+    const open = (commandId: string, over: Record<string, unknown> = {}): MutationCommand =>
+      ({ type: "open_link", commandId, coreInstanceId: CORE, visitEpoch: 4, jobId: "job-1", candidateId: "c1", ...over }) as MutationCommand;
+
+    it("acks ok with the stored target and changes nothing stored", async () => {
+      const { s } = withResults();
+      await s.commands.handle(open("o1"));
+      expect(s.acks).toEqual([{ type: "ack", commandId: "o1", ok: true, revision: 0, approvalRevision: 0, target: { href: "https://docs.example.com/webhooks" } }]);
+      expect(s.counts.changed).toBe(0);
+    });
+
+    it("refuses a stale instance, visit, or job, an unknown candidate, and an unpermitted origin", async () => {
+      const { s, state } = withResults();
+      await s.commands.handle(open("o1", { coreInstanceId: "core-old" }));
+      await s.commands.handle(open("o2", { visitEpoch: 3 }));
+      await s.commands.handle(open("o3", { jobId: "job-0" }));
+      await s.commands.handle(open("o4", { candidateId: "c9" }));
+      state.permitted = false;
+      await s.commands.handle(open("o5"));
+      expect(s.acks.map((a) => (a.ok ? "ok" : a.code))).toEqual(["stale_revision", "stale_revision", "stale_revision", "not_found", "not_permitted"]);
+      expect(s.acks.some((a) => "target" in a)).toBe(false);
+    });
+
+    it("a result cleared with its visit is stale", async () => {
+      const { s, results } = withResults();
+      results.clear("visit_changed");
+      await s.commands.handle(open("o1"));
+      expect(s.acks[0]).toMatchObject({ ok: false, code: "stale_revision" });
+    });
+
+    it("is idempotent: a retried ID gets the first ack; a failed one runs again", async () => {
+      const { s, state } = withResults();
+      await s.commands.handle(open("o1"));
+      state.permitted = false;
+      await s.commands.handle(open("o1"));
+      expect(s.acks[1]).toEqual(s.acks[0]);
+      await s.commands.handle(open("o2"));
+      state.permitted = true;
+      await s.commands.handle(open("o2"));
+      expect(s.acks.slice(2).map((a) => a.ok)).toEqual([false, true]);
+      await s.commands.handle(open("o1", { candidateId: "c2" }));
+      expect(s.acks.at(-1)).toMatchObject({ ok: false, code: "invalid" });
+    });
+
+    it("without a result registry it acks unavailable", async () => {
+      const s = setup();
+      await s.commands.handle(open("o1"));
+      expect(s.acks[0]).toMatchObject({ ok: false, code: "unavailable" });
+    });
   });
 
   it("a closed store answers unavailable", async () => {
