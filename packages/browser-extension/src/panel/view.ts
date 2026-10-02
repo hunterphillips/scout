@@ -116,8 +116,7 @@ function button(doc: Document, key: string, label: string, onClick: () => void, 
 }
 
 function checkbox(doc: Document, key: string, label: string, checked: boolean, enabled: boolean, onChange: (v: boolean) => void, note?: string): HTMLElement {
-  const input = el(doc, "input", { type: "checkbox", "data-key": key, id: key, disabled: !enabled }) as HTMLInputElement;
-  input.checked = checked;
+  const input = el(doc, "input", { type: "checkbox", "data-key": key, id: key, disabled: !enabled, checked }) as HTMLInputElement;
   input.addEventListener("change", () => onChange(input.checked));
   return el(doc, "div", { class: "check" }, el(doc, "label", { for: key }, input, ` ${label}`), note ? el(doc, "p", { class: "note" }, note) : null);
 }
@@ -178,8 +177,7 @@ function sitesSection(doc: Document, v: ViewState, on: PanelHandlers): HTMLEleme
     list.append(el(doc, "li", {}, el(doc, "span", { class: "site-host", text: r.host }), el(doc, "span", { class: "site-state", text: state + extra }), action));
   }
   box.append(list);
-  const input = el(doc, "input", { type: "text", id: "site-input", "data-key": "site-input", placeholder: "docs.example.com", autocomplete: "off", spellcheck: "false", "aria-describedby": "site-input-note" }) as HTMLInputElement;
-  input.value = v.ui.siteInput;
+  const input = el(doc, "input", { type: "text", id: "site-input", "data-key": "site-input", placeholder: "docs.example.com", autocomplete: "off", spellcheck: "false", "aria-describedby": "site-input-note", value: v.ui.siteInput }) as HTMLInputElement;
   input.addEventListener("input", () => {
     v.ui.siteInput = input.value;
   });
@@ -457,10 +455,13 @@ export function renderPanel(doc: Document, root: HTMLElement, v: ViewState, on: 
   // The header line lives outside `root` (panel.html) so its live region is not re-created.
   const header = doc.getElementById("header-line");
   if (header && header.textContent !== m.headerLine) header.textContent = m.headerLine;
-  root.replaceChildren(
-    nav,
-    el(doc, "section", { id: "section", "aria-labelledby": "section-title" }, el(doc, "h2", { id: "section-title", text: title }), body),
-  );
+  const next = el(doc, "div", {}, nav, el(doc, "section", { id: "section", "aria-labelledby": "section-title" }, el(doc, "h2", { id: "section-title", text: title }), body));
+  // Nothing changed: keep the live nodes, so a click in progress (mousedown, then mouseup) on
+  // a button is never lost to a re-render that would only replace it with an identical one.
+  // (A checkbox the user flipped differs from its markup until the model answers: re-render it.)
+  const flipped = [...root.querySelectorAll<HTMLInputElement>("input[type=checkbox]")].some((i) => i.checked !== i.defaultChecked);
+  if (!flipped && next.innerHTML === root.innerHTML && root.childElementCount > 0) return;
+  root.replaceChildren(...next.childNodes);
 
   for (const [k, top] of scroll) {
     const e = root.querySelector<HTMLElement>(`[data-key="${k}"]`);
