@@ -999,6 +999,7 @@ describe("coordinator: page_text into the activity store", () => {
         return real.accept(obs, conn);
       },
       entries: () => real.entries(),
+      view: () => real.view(),
       get revision() {
         return real.revision;
       },
@@ -1072,6 +1073,47 @@ describe("coordinator: page_text into the activity store", () => {
     expect(logged).not.toContain("Issue body");
     expect(logged).not.toContain("An issue");
     expect(logged).not.toContain("issues/1");
+  });
+
+  /** A connected sensor with one issue in the store. */
+  function withIssue(extra: Partial<CoordinatorOptions> = {}) {
+    const s = setup(extra);
+    const c = s.connect();
+    s.chrome();
+    c.observe(s.focus({ tabId: 20, url: ISSUE, documentId: "doc-issue" }));
+    c.observe(s.pageText());
+    expect(s.coordinator.activity.entries()).toHaveLength(1);
+    return { ...s, c };
+  }
+  const cleared = (events: Array<{ name: string; fields: Record<string, unknown> }>) =>
+    events.filter((e) => e.name === "activity_cleared").map((e) => e.fields.reason);
+
+  it("clears captured text when GitHub capture is turned off", () => {
+    const { coordinator, events, grant, c } = withIssue();
+    grant(c, DEFAULT_GRANTS, false);
+    expect(coordinator.activity.entries()).toEqual([]);
+    expect(cleared(events)).toEqual(["capture_off"]);
+  });
+
+  it("clears captured text when the GitHub grant is lost", () => {
+    const { coordinator, events, grant, c } = withIssue();
+    grant(c, ["https://docs.stripe.com/*"], true);
+    expect(coordinator.activity.entries()).toEqual([]);
+    expect(cleared(events)).toEqual(["grant_lost"]);
+  });
+
+  it("keeps captured text on an unrelated snapshot, on pause, and on disconnect", () => {
+    const { coordinator, events, grant, c, attach } = withIssue();
+    grant(c, ["https://github.com/*"], true);
+    coordinator.handleNativeCommand({ type: "pause" });
+    coordinator.handleNativeCommand({ type: "resume" });
+    c.disconnect();
+    expect(coordinator.activity.entries()).toHaveLength(1);
+    // A new sensor's first snapshot starts from no grants: nothing is withdrawn.
+    const next = attach(2);
+    grant(next, DEFAULT_GRANTS, false);
+    expect(coordinator.activity.entries()).toHaveLength(1);
+    expect(cleared(events)).toEqual([]);
   });
 
   it("calls onPause after a pause command", () => {
