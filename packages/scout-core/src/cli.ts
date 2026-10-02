@@ -30,6 +30,8 @@ import { createOriginFetchSession } from "./fetch/originSession.js";
  * - `rank <origin>` is not available until Phase 3.
  * - `capability ...` reads and changes the capability store under `SCOUT_HOME`
  *   (`capabilities/capabilityCli.ts`); only `capability ingest` touches the network.
+ *   `capabilities` is an alias; `capability unexport-all` removes Scout's exported skill
+ *   wrappers for uninstall.
  * - `agent ...` configures the existing MCP tools Scout's jobs may call, in
  *   `agent-profile.json` under `SCOUT_HOME` (`agents/profileCli.ts`); only
  *   `agent inspect|refresh --allow-start` starts a process (the user's reviewed backend).
@@ -154,6 +156,7 @@ export async function runCli(argv: readonly string[], io: CliIo): Promise<number
         return await verifyCommand(origin.origin, positional, io);
       }
       case "capability":
+      case "capabilities": // the spelling uninstall's `capabilities unexport-all` uses
         return await capabilityCommand(rest, {
           ...io,
           discover: (origin: string) => runDiscovery(origin, false, io),
