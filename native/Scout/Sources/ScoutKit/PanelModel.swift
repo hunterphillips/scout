@@ -42,6 +42,8 @@ public struct PanelModel: Sendable, Equatable {
     public private(set) var resultsModel = ResultsModel()
     public private(set) var capabilities = CapabilityModel()
     public private(set) var commands: CommandTracker
+    /// Pause as the core's `state` frames report it, and the app's request in flight.
+    public private(set) var pause = PauseState()
 
     public private(set) var expanded = false
     public private(set) var section: PanelSection = .results
@@ -73,6 +75,7 @@ public struct PanelModel: Sendable, Equatable {
             core = nil
             detail = nil
             permitted = nil
+            pause.coreStopped()
             resultsModel.coreStopped()
             capabilities.reset()
             decidedSinceFrame = []
@@ -86,6 +89,7 @@ public struct PanelModel: Sendable, Equatable {
     /// A new core process: re-send pending mutations under their IDs and reload loading previews.
     private mutating func coreRestarted() -> [NativeCommand] {
         resultsModel.reset()
+        pause.coreRestarted()
         var out = commands.coreRestarted()
         for key in previewOrder where previews[key]?.phase == .loading {
             out += startPreview(key).map { [$0] } ?? []
@@ -99,6 +103,7 @@ public struct PanelModel: Sendable, Equatable {
         case let .state(status, epoch, detail, permitted, jobId):
             resultsModel.applyState(status, epoch: epoch, jobId: jobId)
             core = status
+            pause.apply(status)
             self.detail = detail
             self.permitted = permitted
         case let .results(frame):
@@ -330,11 +335,20 @@ public struct PanelModel: Sendable, Equatable {
 
     /// `pause` while working or idle, `resume` while paused.
     public func pauseCommand() -> NativeCommand? {
-        switch core {
-        case .paused: return .resume
-        case .idle, .working: return .pause
-        case .disconnected, nil: return nil
-        }
+        pause.command
+    }
+
+    /// The Pause/Resume control the window and the menu bar both show.
+    public var pauseControl: PauseControl { pause.control }
+
+    /// The user clicked Pause or Resume (window or menu bar): the command to send, or nil while
+    /// one is in flight. Report the write with `pauseSent`.
+    public mutating func requestPauseOrResume() -> NativeCommand? {
+        pause.request()
+    }
+
+    public mutating func pauseSent(_ outcome: SendOutcome) {
+        pause.sent(outcome)
     }
 
     /// Whether `retry(commandId)` would send something.
