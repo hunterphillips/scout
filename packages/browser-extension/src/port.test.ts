@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { createBackground, GITHUB_PATTERN } from "./background-core.js";
-import { SERIES_KEY } from "./port.js";
+import type { PanelState } from "@scout/contracts";
+import { createPortLink, SERIES_KEY } from "./port.js";
+import { createSharedState, newCounters } from "./shared-state.js";
 import { RECONNECT_DELAYS_MS, type SeriesState } from "./reconnect.js";
 import { asChrome, fakeClock, flush, makeChrome, popupSender } from "./test-fakes.js";
 import { approve, dropPort, lastPort, setup } from "./test-harness.js";
@@ -132,5 +134,71 @@ describe("reconnect across service-worker restarts", () => {
     session[SERIES_KEY] = { seriesStartedAt: 1_000, step: 2, exhausted: false, retryAt: null } satisfies SeriesState;
     const { f } = await restart(session, 5_000_000);
     expect(f._.ports).toHaveLength(1);
+  });
+});
+
+describe("window frames and commands over the port (bridge protocol 3)", () => {
+  async function link(host: "ok" | "silent" = "ok") {
+    const f = makeChrome({ granted: [GITHUB_PATTERN], host });
+    const clock = fakeClock();
+    const state = createSharedState(clock);
+    const panel: PanelState[] = [];
+    const l = createPortLink({
+      ch: asChrome(f),
+      clock,
+      state,
+      counters: newCounters(),
+      onOpen: () => {},
+      onPolicy: () => {},
+      onLost: () => {},
+      onPanel: (frame) => void panel.push(frame),
+    });
+    await l.start();
+    await flush();
+    return { f, l, panel };
+  }
+  const pause = { type: "pause" } as const;
+
+  it("hands each valid panel frame to onPanel, unwrapped, and ignores invalid ones", async () => {
+    const { f, panel } = await link();
+    const grant = { type: "grant", agentBrowserContext: true } as const;
+    f._.ports[0]!.onMessage.emit({ type: "panel", state: grant });
+    f._.ports[0]!.onMessage.emit({ type: "panel", state: { type: "results", status: "ok" } });
+    f._.ports[0]!.onMessage.emit({ type: "panel", state: { type: "ready" } });
+    expect(panel).toEqual([grant]);
+  });
+
+  it("without an onPanel hook a panel frame is ignored", async () => {
+    const f = makeChrome({ granted: [GITHUB_PATTERN], host: "ok" });
+    const clock = fakeClock();
+    const l = createPortLink({ ch: asChrome(f), clock, state: createSharedState(clock), counters: newCounters(), onOpen: () => {}, onPolicy: () => {}, onLost: () => {} });
+    await l.start();
+    await flush();
+    expect(() => f._.ports[0]!.onMessage.emit({ type: "panel", state: { type: "grant", agentBrowserContext: false } })).not.toThrow();
+    expect(l.linkState()).toBe("connected");
+  });
+
+  it("posts a validated command frame once ready, and nothing before or for an invalid command", async () => {
+    const { f, l } = await link("silent");
+    expect(l.sendCommand(pause)).toBe(false); // open, not ready: never queued
+    f._.ports[0]!.onMessage.emit({ type: "ready" });
+    expect(l.sendCommand(pause)).toBe(true);
+    const openLink = { type: "open_link", commandId: "sp-1", coreInstanceId: "core-1", visitEpoch: 2, jobId: "job-1", candidateId: "c1" } as const;
+    expect(l.sendCommand(openLink)).toBe(true);
+    expect(l.sendCommand({ type: "frontmost", bundleId: "x", at: 1 } as never)).toBe(false);
+    expect(l.sendCommand({ type: "approve", commandId: "bad id!" } as never)).toBe(false);
+    expect(f._.ports[0]!.posted).toEqual([
+      { type: "command", command: pause },
+      { type: "command", command: openLink },
+    ]);
+  });
+
+  it("refuses a command once the port is gone", async () => {
+    const { f, l } = await link();
+    expect(l.sendCommand(pause)).toBe(true);
+    const p = f._.ports[0]!;
+    p.disconnected = true;
+    p.onDisconnect.emit(p);
+    expect(l.sendCommand(pause)).toBe(false);
   });
 });
