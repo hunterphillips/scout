@@ -22,6 +22,7 @@ import {
 } from "./claudeJob.js";
 import { FORWARD_KEYS, runDirectPreflight } from "./launchProfile.js";
 import { createPreflightFacade, type PreflightReportLike } from "./preflightWorker.js";
+import { ProcessTracker } from "./processTree.js";
 import { DEFAULT_AGENT_MODEL, type AgentProfile } from "./profile.js";
 import { markerInstructionText, newInstructionMarker } from "./prompt.js";
 import { fakeBackend, selection, type FakeBackendDef } from "./testing/fakeBackend.js";
@@ -888,7 +889,7 @@ describe("claude job: selected tools through the per-job bridge", () => {
   afterEach(() => {
     for (const b of backends.splice(0)) for (const pid of b.pids()) killQuietly(pid);
   });
-  function backend(base: string, mode: string, opts: { env?: Record<string, string>; id?: string } = {}): FakeBackendDef {
+  function backend(base: string, mode: string, opts: { env?: Record<string, string>; id?: string; ignoreTerm?: boolean } = {}): FakeBackendDef {
     const b = fakeBackend(base, opts.id ?? "notes", mode, opts);
     backends.push(b);
     return b;
@@ -964,6 +965,30 @@ describe("claude job: selected tools through the per-job bridge", () => {
     const pids = [...e.fake.pids(), ...backendOf(e).pids(), ...backendOf(e, "tracker").pids()];
     expect(pids).toHaveLength(5); // the CLI, scout-mcp, the bridge, two backends
     await expectAllGoneWithin(pids, 3000);
+    expect(jobsLeft(e)).toEqual([]);
+  });
+
+  it("a cancel with no final response ends the whole job tree: a backend ignoring SIGTERM and EOF, a CLI ignoring SIGTERM, its in-group and escaped descendants; the core's tracker ends empty", async () => {
+    const processTracker = new ProcessTracker();
+    const e = await setup({
+      mode: "sleep-ignore-term",
+      deps: { processTracker },
+      tools: (base) => ({ connections: [backend(base, "honest", { ignoreTerm: true }).connection], selections: [selection("notes", "lookup", false)] }),
+    });
+    const ac = new AbortController();
+    const p = e.adapter.run(request(e), { toolSurface: surface(e), signal: ac.signal });
+    const descendants = (): number[] => e.fake.lines().flatMap((l) => l.descendantPids ?? []);
+    await waitFor(() => backendOf(e).pids().length === 1 && descendants().length === 2);
+    expect(processTracker.size).toBe(1);
+    const t0 = Date.now();
+    ac.abort("visit_changed");
+    const out = await p;
+    expect(out.result).toMatchObject({ status: "cancelled", reason: "visit_changed" });
+    expect(out.result).not.toHaveProperty("items");
+    const pids = [...e.fake.pids(), ...descendants(), ...backendOf(e).pids()];
+    expect(pids).toHaveLength(6); // the CLI, scout-mcp, the bridge, two sleeps, the backend
+    await expectAllGoneWithin(pids, Math.max(0, 3000 - (Date.now() - t0)));
+    expect(processTracker.size).toBe(0);
     expect(jobsLeft(e)).toEqual([]);
   });
 

@@ -10,9 +10,12 @@
 // never stall its event loop. The process-group signal covers the CLI and every in-group
 // descendant without ps; the polled tree only adds descendants that left the group.
 // dispose() always clears the timers and SIGKILLs the group if the CLI is still unreaped.
+// With a `tracker` (the core's ProcessTracker), the tree is registered at spawn and removed only
+// once reap() saw nothing owned alive: a straggler reap could not kill keeps it registered, so
+// the core's shutdown still waits for it and kills it.
 
 import type { ChildProcess, SpawnOptions } from "node:child_process";
-import { OwnedTree, psSnapshotAsync, type PsSnapshot } from "./processTree.js";
+import { OwnedTree, psSnapshotAsync, type ProcessTracker, type PsSnapshot } from "./processTree.js";
 
 export type SpawnFn = (command: string, args: readonly string[], options: SpawnOptions) => ChildProcess;
 export type SnapshotFn = () => PsSnapshot | Promise<PsSnapshot>;
@@ -33,6 +36,8 @@ export interface ChildSupervisorOptions {
   killGraceMs: number;
   snapshot?: SnapshotFn;
   pollMs?: number;
+  /** The core's registry of live job trees (see the header). */
+  tracker?: ProcessTracker;
 }
 
 export type ExitWait = { spawnError: boolean } | "reap_timeout";
@@ -68,6 +73,7 @@ export function startChild(o: ChildSupervisorOptions): SupervisedChild {
 
   let last: PsSnapshot = new Map();
   const tree = child.pid === undefined ? undefined : new OwnedTree(child.pid, () => last);
+  const untrack = tree && o.tracker ? o.tracker.add(tree) : () => {};
   let inFlight: Promise<PsSnapshot> | undefined;
   /** The running query, or a new one; at most one ps at a time. */
   const refresh = (): Promise<PsSnapshot> => {
@@ -159,7 +165,10 @@ export function startChild(o: ChildSupervisorOptions): SupervisedChild {
         const until = Date.now() + ms;
         for (;;) {
           const s = await fresh();
-          if (tree.alive(s).length === 0) return true;
+          if (tree.alive(s).length === 0) {
+            untrack();
+            return true;
+          }
           if (Date.now() >= until) return false;
           await delay(100);
         }

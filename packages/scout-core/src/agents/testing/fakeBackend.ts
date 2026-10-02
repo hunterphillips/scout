@@ -36,12 +36,12 @@ export interface FakeBackendDef {
  * with `env` as literal values in a 0600 definition file under `dir`, bound by pointer, and
  * `literalEnv` stored in the definition itself.
  */
-export function fakeBackend(dir: string, id: string, mode: string, opts: { env?: Record<string, string>; literalEnv?: Record<string, string>; touch?: string } = {}): FakeBackendDef {
+export function fakeBackend(dir: string, id: string, mode: string, opts: { env?: Record<string, string>; literalEnv?: Record<string, string>; touch?: string; ignoreTerm?: boolean } = {}): FakeBackendDef {
   const log = join(dir, `${id}.log`);
   const definitionFile = join(dir, `${id}-definition.json`);
   const env = opts.env ?? {};
   writeFileSync(definitionFile, JSON.stringify({ command: process.execPath, env }), { mode: 0o600 });
-  const args = [FAKE_BACKEND, "--mode", mode, "--log", log, ...(opts.touch ? ["--touch", opts.touch] : [])];
+  const args = [FAKE_BACKEND, "--mode", mode, "--log", log, ...(opts.touch ? ["--touch", opts.touch] : []), ...(opts.ignoreTerm ? ["--ignore-term"] : [])];
   const connection: Connection = {
     id,
     transport: "stdio",

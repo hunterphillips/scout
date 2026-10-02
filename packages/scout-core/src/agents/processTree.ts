@@ -7,6 +7,8 @@
 //     default and the tests; both parse through parsePsOutput().
 //   - signalAll() takes an optional snapshot, as poll() and alive() already did, so a caller
 //     holding a fresh async snapshot never falls back to the blocking default.
+//   - ProcessTracker (P3.4): the core's registry of every job tree it started, so its shutdown
+//     waits for (and kills) any descendant a job's own reap left behind.
 //
 // Track and clean up the process tree one spawned `claude` owns.
 //
@@ -148,5 +150,60 @@ export class OwnedTree {
       }
     }
     return { groupSignalled, escapedSignalled };
+  }
+}
+
+// ---------- the core's registry of every job tree it started (P3.4) ----------
+
+const delay = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * Every OwnedTree the core started that is not yet known to be gone. A job's supervisor adds its
+ * tree at spawn and removes it once its reap saw no owned process alive; a tree whose reap did
+ * not get there stays, so the core's shutdown still waits for it and kills what is left.
+ */
+export class ProcessTracker {
+  private readonly trees = new Set<OwnedTree>();
+
+  /** Track `tree`; the returned function stops tracking it. */
+  add(tree: OwnedTree): () => void {
+    this.trees.add(tree);
+    return () => void this.trees.delete(tree);
+  }
+
+  /** Trees still tracked (some may already be gone; `alive` prunes them). */
+  get size(): number {
+    return this.trees.size;
+  }
+
+  /** Live owned processes across every tracked tree in `snap`; trees with none left are dropped. */
+  alive(snap: PsSnapshot): ProcessIdentity[] {
+    const out: ProcessIdentity[] = [];
+    for (const tree of this.trees) {
+      tree.poll(snap);
+      const live = tree.alive(snap);
+      if (live.length === 0) this.trees.delete(tree);
+      else out.push(...live);
+    }
+    return out;
+  }
+
+  /**
+   * SIGKILL every live tracked process until none is left or `deadlineAt` (Date.now() time)
+   * passes. Resolves with what is still alive (empty when all are gone). ps never blocks the
+   * event loop here; `snapshot` is a test seam.
+   */
+  async killAll(deadlineAt: number, options: { snapshot?: () => Promise<PsSnapshot>; pollMs?: number } = {}): Promise<ProcessIdentity[]> {
+    const snapshot = options.snapshot ?? psSnapshotAsync;
+    const pollMs = options.pollMs ?? 100;
+    for (;;) {
+      if (this.trees.size === 0) return [];
+      const snap = await snapshot();
+      const live = this.alive(snap);
+      if (live.length === 0) return [];
+      for (const tree of this.trees) tree.signalAll("SIGKILL", snap);
+      if (Date.now() >= deadlineAt) return live;
+      await delay(Math.min(pollMs, Math.max(0, deadlineAt - Date.now())));
+    }
   }
 }

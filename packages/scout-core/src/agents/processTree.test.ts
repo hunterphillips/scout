@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { OwnedTree as LegacyOwnedTree } from "personal-context-mcp";
 import { afterEach, describe, expect, it } from "vitest";
-import { OwnedTree, parsePsOutput, psSnapshot, psSnapshotAsync, type PsEntry, type PsSnapshot } from "./processTree.js";
+import { OwnedTree, parsePsOutput, ProcessTracker, psSnapshot, psSnapshotAsync, type PsEntry, type PsSnapshot } from "./processTree.js";
 
 const cleanup: number[] = [];
 afterEach(() => {
@@ -104,5 +104,68 @@ describe("OwnedTree", () => {
     const snap = parsePsOutput("  12   1  12 Ss   Mon Sep 30 10:00:00 2026\ngarbage\n\n 13 12 12 Z+ Mon Sep 30 10:00:01 2026\n");
     expect([...snap.keys()]).toEqual([12, 13]);
     expect(snap.get(13)).toEqual({ pid: 13, ppid: 12, pgid: 12, state: "Z+", start: "Mon Sep 30 10:00:01 2026" });
+  });
+});
+
+describe("ProcessTracker (the core's registry of job trees)", () => {
+  const isAlive = (pid: number): boolean => {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch (e) {
+      return (e as NodeJS.ErrnoException).code === "EPERM";
+    }
+  };
+
+  it("killAll SIGKILLs a tracked family, the escaped child included, and empties the registry", async () => {
+    const fam = await startFamily();
+    cleanup.push(fam.inGroup, fam.escaped);
+    const tree = new OwnedTree(fam.leader).poll(await psSnapshotAsync());
+    const tracker = new ProcessTracker();
+    tracker.add(tree);
+    expect(tracker.alive(await psSnapshotAsync()).map((i) => i.pid).sort()).toEqual([fam.leader, fam.inGroup, fam.escaped].sort());
+    const left = await tracker.killAll(Date.now() + 3000);
+    expect(left).toEqual([]);
+    expect(tracker.size).toBe(0);
+    for (const pid of [fam.leader, fam.inGroup, fam.escaped]) {
+      for (let i = 0; i < 40 && isAlive(pid); i++) await sleep(25);
+      expect(isAlive(pid)).toBe(false);
+    }
+  });
+
+  it("alive() drops trees with nothing left; the untrack function removes one at once", async () => {
+    const tracker = new ProcessTracker();
+    const gone = new OwnedTree(999_999_1, () => new Map());
+    const untrack = tracker.add(gone);
+    expect(tracker.size).toBe(1);
+    expect(tracker.alive(new Map())).toEqual([]);
+    expect(tracker.size).toBe(0);
+    tracker.add(gone);
+    untrack();
+    expect(tracker.size).toBe(0);
+    expect(await tracker.killAll(Date.now() + 100, { snapshot: async () => new Map() })).toEqual([]);
+  });
+
+  it("killAll gives up at the deadline and reports what is still alive (never signals what it does not own)", async () => {
+    const entry: PsEntry = { pid: 424242, ppid: 1, pgid: 424242, state: "Ss", start: "Mon Sep 30 10:00:00 2026" };
+    const snap: PsSnapshot = new Map([[entry.pid, entry]]);
+    const tree = new OwnedTree(entry.pid, () => snap).poll(snap);
+    // The signal itself goes to a pid nobody here owns; stub kill so nothing real is touched.
+    const kill = process.kill;
+    const sent: Array<[number, string | number | undefined]> = [];
+    process.kill = ((pid: number, sig?: string | number) => {
+      sent.push([pid, sig]);
+      return true;
+    }) as typeof process.kill;
+    try {
+      const tracker = new ProcessTracker();
+      tracker.add(tree);
+      const left = await tracker.killAll(Date.now() + 150, { snapshot: async () => snap, pollMs: 50 });
+      expect(left.map((i) => i.pid)).toEqual([424242]);
+      expect(sent.every(([pid, sig]) => pid === -424242 && sig === "SIGKILL")).toBe(true);
+      expect(sent.length).toBeGreaterThan(0);
+    } finally {
+      process.kill = kill;
+    }
   });
 });

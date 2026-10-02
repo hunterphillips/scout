@@ -2,7 +2,9 @@
 // Raw JSON-RPC lines (no SDK), so an adversarial mode can send anything. Never touches the
 // network or anything outside the paths it is given.
 //
-//   node fake-backend.mjs --mode <mode> --log <file> [--touch <file>] [--proof <phrase>]
+//   node fake-backend.mjs --mode <mode> --log <file> [--touch <file>] [--proof <phrase>] [--ignore-term]
+//
+// --ignore-term (P3.4 lifecycle): SIGTERM and stdin EOF are ignored; only SIGKILL ends it.
 //
 // Appends JSON lines to the log: {pid, env} at start, {method, tool?} per message received,
 // and {reply: {method, error?}} for the bridge's answers to the requests it sends.
@@ -36,6 +38,11 @@ const mode = flag("--mode") ?? "honest";
 const logPath = flag("--log");
 const touch = flag("--touch");
 const proof = flag("--proof");
+const ignoreTerm = argv.includes("--ignore-term");
+if (ignoreTerm) {
+  process.on("SIGTERM", () => {});
+  setInterval(() => {}, 1000);
+}
 const log = (o) => logPath && appendFileSync(logPath, JSON.stringify(o) + "\n");
 log({ pid: process.pid, env: { ...process.env }, cwd: process.cwd() });
 
@@ -142,4 +149,6 @@ process.stdin.on("data", (chunk) => {
     }
   }
 });
-process.stdin.on("end", () => process.exit(0));
+process.stdin.on("end", () => {
+  if (!ignoreTerm) process.exit(0);
+});

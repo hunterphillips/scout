@@ -23,7 +23,12 @@
 // instructions are appended to the default system prompt, not a replacement; settings come
 // from the user scope only, with hooks disabled; termination reasons map onto the fixed
 // HostJobResult codes plus a finer `termination` in job details; abortAll() closes the
-// adapter, so a later job is `unavailable: agent_unavailable`.
+// adapter, so a later job is `unavailable: agent_unavailable`. The job's process tree is its
+// CLI's process group: Scout's MCP server, the per-job bridge and every backend the bridge
+// starts are spawned into it (none detaches), so a cancel's group signal reaches them all,
+// whether or not the model ever sent a final response; a descendant that left the group is
+// still tracked by ps and signalled on its own, and with `processTracker` the core's shutdown
+// waits for any the reap left behind.
 //
 // Billing gate: refreshPreflight() runs the direct preflight (blocking; the dev CLI and the
 // compatibility checks use it) and refreshPreflightAsync() runs it through `preflightAsync`
@@ -76,6 +81,7 @@ import { createLaunchProfile, LaunchProfileError, runDirectPreflight, type Direc
 import { mapOutcome, recordUsage } from "./mapOutcome.js";
 import { MODEL_RE, profileFingerprint, type AgentProfile } from "./profile.js";
 import { buildJobInstructions, buildJobPrompt, type PromptActivity } from "./prompt.js";
+import type { ProcessTracker } from "./processTree.js";
 import { createStreamMonitor } from "./streamMonitor.js";
 import { checkManagedPolicy, defaultBridgeEntrypoint, managedMcpFilesFor, planJobTools, type JobManagedPaths, type ManagedPolicyResult, type ToolPlanOptions } from "./toolPolicy.js";
 
@@ -206,6 +212,8 @@ export interface ClaudeJobDeps {
   preflightAsync?: AsyncPreflightFn;
   /** Test seam for the ps query (default: psSnapshotAsync). */
   psSnapshot?: SnapshotFn;
+  /** The core's registry of job process trees: its shutdown waits for (and kills) what a job's reap left. */
+  processTracker?: ProcessTracker;
   killGraceMs?: number;
   maxStdoutBytes?: number;
   minLaunchMs?: number;
@@ -554,6 +562,7 @@ export function createClaudeJobAdapter(deps: ClaudeJobDeps): ClaudeJobAdapter {
         options: { cwd: jobDir, env: { ...launch.env }, stdio: ["pipe", "pipe", "pipe"] },
         killGraceMs,
         ...(deps.psSnapshot ? { snapshot: deps.psSnapshot } : {}),
+        ...(deps.processTracker ? { tracker: deps.processTracker } : {}),
       });
     } catch {
       return { result: { status: "unavailable", reason: "agent_unavailable" }, termination: "agent_unavailable", detail: "spawn_failed" };

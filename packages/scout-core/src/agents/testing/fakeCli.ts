@@ -17,6 +17,8 @@ export interface FakeLogLine {
   violations?: string[];
   scoutPid?: number;
   prompt?: string;
+  /** `sleep-ignore-term`: its in-group and escaped `sleep` descendants. */
+  descendantPids?: number[];
 }
 
 export interface FakeCli {
