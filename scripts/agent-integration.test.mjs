@@ -385,15 +385,41 @@ describe("uninstall and the agent integration", () => {
     for (const args of [["--yes", "--agent-integration"], ["--yes"]]) {
       const r = await uninstall(args);
       expect(r.code).toBe(1);
-      expect(r.text()).toMatch(/Scout is running \(pid \d+\); quit Scout first\. Nothing changed\./);
+      expect(r.text()).toMatch(/Scout is running \(pid \d+ holds .*capabilities\/store\.lock\); quit Scout first\. Nothing changed\./);
     }
     const dry = await uninstall(["--dry-run"]);
     expect(dry.code).toBe(0);
-    expect(dry.text()).toMatch(/Scout is running \(pid \d+\): the real run would stop here/);
+    expect(dry.text()).toMatch(/Scout is running \(pid \d+ holds .*store\.lock\): the real run would stop here/);
     for (const w of wrappers) expect(dry.text()).toContain(join(skillsRoot, w));
     expect(listTree(fx.root).filter((f) => !f.startsWith("fake-bin/"))).toEqual(before);
     expect(registry()).toEqual(reg);
     for (const w of wrappers) expect(existsSync(join(skillsRoot, w))).toBe(true);
+  });
+
+  it("a skills root that became a symlink: wrappers kept as unreachable, everything else removed, skillsRoot kept for a retry", async () => {
+    const wrappers = await installWithNeighbours();
+    const moved = join(fx.root, "moved-skills");
+    renameSync(skillsRoot, moved);
+    symlinkSync(moved, skillsRoot);
+    const r = await uninstall(["--yes", "--include-key"]);
+    expect(r.code, r.text()).toBe(2);
+    expect(r.text()).toMatch(/the recorded skills root .* is a symlink or sits under one; Scout never follows it/);
+    for (const w of wrappers) {
+      expect(r.text()).toContain(`SKIP ${join(skillsRoot, w)} (Scout app skill wrapper, not reachable`);
+      expect(existsSync(join(moved, w, "SKILL.md"))).toBe(true);
+    }
+    expect(existsSync(L.nmhManifest)).toBe(false);
+    expect(existsSync(L.scoutConfig)).toBe(false);
+    expect(json(L.installed).skillsRoot).toBe(skillsRoot);
+    expect(r.text()).toMatch(/kept skillsRoot .* so a later `npm run uninstall` can retry/);
+  });
+
+  it("uninstalls twice end to end: the second run finds nothing", async () => {
+    await installWithNeighbours();
+    expect((await uninstall(["--yes", "--include-key"])).code).toBe(0);
+    const again = await uninstall(["--yes", "--include-key"]);
+    expect(again.code).toBe(0);
+    expect(again.text()).toMatch(/Nothing to uninstall/);
   });
 
   it("lists the wrappers it will remove before asking", async () => {

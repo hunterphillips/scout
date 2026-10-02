@@ -148,7 +148,7 @@ export function removeSkill(skillsRoot, expected) {
 }
 
 /**
- * The skills root and wrapper count scout-core's exports manifest records (shape in
+ * The skills root, wrapper count and wrapper names scout-core's exports manifest records (shape in
  * packages/scout-core/src/capabilities/exports.ts). Read-only; returns null when the manifest
  * does not exist and throws when it exists but cannot be read or has no skillsRoot / entries.
  */
@@ -161,7 +161,8 @@ export function readExportsManifest(exportsManifest) {
     throw new Error(`${exportsManifest} is unreadable`);
   }
   if (typeof data?.skillsRoot !== "string" || !Array.isArray(data.entries)) throw new Error(`${exportsManifest} has no skillsRoot or entries`);
-  return { skillsRoot: data.skillsRoot, wrappers: data.entries.length };
+  const names = data.entries.map((e) => e?.name).filter((n) => typeof n === "string" && /^scout-[a-z0-9-]+$/.test(n));
+  return { skillsRoot: data.skillsRoot, wrappers: data.entries.length, names };
 }
 
 /**

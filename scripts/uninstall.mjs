@@ -19,7 +19,10 @@
 // each only while still exactly what setup installed; lib/agent-integration.mjs), then the
 // files. --agent-integration does the first two only. With the real ~/.scout and
 // SCOUT_SKILLS_ROOT or SCOUT_CLAUDE_BIN set, it refuses before changing anything.
-// A removed login LaunchAgent stays loaded until logout; it only ever ran the app at login.
+// On the real home a matching login LaunchAgent is booted out of launchd before its plist is
+// removed (a failure is reported, not fatal); on a test home that step is skipped and said so.
+// The installed app (bundle-app --install, kind app-bundle) is removed only while its
+// Info.plist + binary hash matches the record. A failure part way records what is left.
 //
 // Usage: node scripts/uninstall.mjs [--dry-run] [--yes] [--include-key] [--agent-integration]
 // Env overrides: SCOUT_HOME, SCOUT_CLAUDE_BIN, LAUNCH_AGENTS_DIR (see lib/paths.mjs); the other
@@ -28,17 +31,17 @@
 // because its name starts with `scout-`.
 
 import { spawnSync } from "node:child_process";
-import { lstatSync, readFileSync, rmdirSync, statSync, unlinkSync } from "node:fs";
+import { lstatSync, readFileSync, rmSync, rmdirSync, statSync, unlinkSync } from "node:fs";
 import { createInterface } from "node:readline/promises";
 import { join } from "node:path";
-import { REPO_ROOT, layout } from "./lib/paths.mjs";
+import { APP_BUNDLE_ID, REPO_ROOT, isRealScoutHome, layout } from "./lib/paths.mjs";
 import { extensionIdFromPem } from "./lib/extension-key.mjs";
-import { allowedPath, readInstalled } from "./lib/installed.mjs";
+import { allowedPath, readInstalled, saveInstalled } from "./lib/installed.mjs";
 import { exists, fileMarker, readJsonObject, writeJson } from "./lib/files.mjs";
 import { isMain } from "./lib/is-main.mjs";
 import { isIntegrationEntry, overrideRefusal, removeIntegration } from "./lib/agent-integration.mjs";
 import { readExportsManifest } from "./lib/integration-skill.mjs";
-import { sha256 } from "./lib/app-bundle.mjs";
+import { appBundleHash, applicationsRefusal, launchAgentRefusal, sha256 } from "./lib/app-bundle.mjs";
 import { coreLockHolder } from "./lib/core-state.mjs";
 
 export function parseArgs(argv) {
@@ -75,7 +78,7 @@ export async function ttyConfirm(question, { input = process.stdin, output = pro
   }
 }
 
-/** Decide what to do with one entry: { action: "remove"|"strip-key"|"legacy"|"gone"|"keep"|"skip", reason }. */
+/** Decide what to do with one entry: { action: "remove"|"remove-dir"|"strip-key"|"legacy"|"gone"|"keep"|"skip", reason }. */
 export function judge(entry, marker, { includeKey }, L, record) {
   const p = entry.path;
   if (!allowedPath(entry.kind, p, L, record)) return { action: "skip", reason: `not a path setup writes for kind ${entry.kind}; not touching` };
@@ -83,6 +86,19 @@ export function judge(entry, marker, { includeKey }, L, record) {
     return { action: "legacy", reason: "legacy record: setup no longer merges into the personal-context config; uninstall never edits or deletes it or its directory" };
   }
   if (!exists(p)) return { action: "gone", reason: "already absent" };
+  if (entry.kind === "app-bundle") {
+    let dir = false;
+    try {
+      const st = lstatSync(p);
+      dir = st.isDirectory() && !st.isSymbolicLink();
+    } catch {
+      // judged below
+    }
+    if (!dir) return { action: "skip", reason: "not a real directory; not removing" };
+    return typeof entry.sha256 === "string" && appBundleHash(p) === entry.sha256
+      ? { action: "remove-dir", reason: "the app bundle-app --install copied, unchanged" }
+      : { action: "skip", reason: "changed since bundle-app --install copied it; not removing" };
+  }
   if (!isRegularFile(p)) return { action: "skip", reason: "not a regular file" };
   switch (entry.kind) {
     case "config":
@@ -148,7 +164,28 @@ function removeDirIfEmpty(dir, out, dryRun) {
   }
 }
 
-export async function runUninstall(argv, { env = process.env, out = console.log, err = console.error, confirm = ttyConfirm, claudeFallbacks, mcpTimeoutMs, realHome } = {}) {
+/** Boot the login LaunchAgent out of launchd on the real home only; failures are reported, not fatal. */
+function bootoutLine(env, realHome, dryRun, bootout, out) {
+  const target = `gui/${process.getuid()}/${APP_BUNDLE_ID}`;
+  if (!isRealScoutHome(env, realHome)) {
+    out(`skip launchctl bootout ${target} (a test home; launchd is never touched)`);
+    return;
+  }
+  if (dryRun) {
+    out(`would run launchctl bootout ${target}`);
+    return;
+  }
+  const r = bootout();
+  out(r.ok ? `booted out ${target}` : `launchctl bootout ${target} did not succeed (${r.detail}); it was probably not loaded, and it stops at logout anyway`);
+}
+
+/** `launchctl bootout gui/<uid>/dev.scout.app`: { ok, detail }. */
+function launchctlBootout() {
+  const r = spawnSync("launchctl", ["bootout", `gui/${process.getuid()}/${APP_BUNDLE_ID}`], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 10_000 });
+  return { ok: r.status === 0, detail: r.error ? r.error.message : `exit ${r.status}${r.stderr ? `: ${r.stderr.trim().split("\n").at(-1)}` : ""}` };
+}
+
+export async function runUninstall(argv, { env = process.env, out = console.log, err = console.error, confirm = ttyConfirm, claudeFallbacks, mcpTimeoutMs, realHome, bootout = launchctlBootout } = {}) {
   let opts, record;
   const L = layout({ env });
   try {
@@ -173,21 +210,33 @@ export async function runUninstall(argv, { env = process.env, out = console.log,
     err(`uninstall: agent integration: ${refusal}. Nothing changed.`);
     return 1;
   }
+  // The recorded LaunchAgent and installed app are judged against the locations the env names,
+  // so the same override rules as setup apply before anything changes.
+  for (const [kind, rule] of [["launch-agent", launchAgentRefusal], ["app-bundle", applicationsRefusal]]) {
+    const r = !opts.agentIntegration && record.files.some((f) => f.kind === kind) && rule(env, realHome);
+    if (r) {
+      err(`uninstall: ${kind}: ${r}. Nothing changed.`);
+      return 1;
+    }
+  }
   // Scout holds its store and profile locks while it runs; nothing is removed under it.
   const holder = coreLockHolder(L);
   if (holder.state === "running" && !opts.dryRun) {
-    err(`uninstall: Scout is running (pid ${holder.pid}); quit Scout first. Nothing changed.`);
+    err(`uninstall: Scout is running (pid ${holder.pid} holds ${L.storeLock}); quit Scout first. Nothing changed.`);
     return 1;
   }
   const listed = opts.agentIntegration ? record.files.filter(isIntegrationEntry) : record.files;
   out(`${opts.agentIntegration ? "Agent integration" : "Files"} listed in ${L.installed}:`);
   for (const f of listed) out(`  ${String(f.kind).padEnd(22)} ${f.path}`);
   const wrappers = exportedWrapperNames(record, L);
+  for (const f of listed.filter((x) => x.kind === "launch-agent")) {
+    if (isRealScoutHome(env, realHome)) out(`  (the LaunchAgent is also booted out of launchd: launchctl bootout gui/${process.getuid()}/${APP_BUNDLE_ID})`);
+  }
   if (wrappers.length) {
     out(`Scout app skill wrappers listed in ${L.exportsManifest} (each removed only if unchanged since Scout wrote it):`);
     for (const name of wrappers) out(`  ${"skill-wrapper".padEnd(22)} ${join(record.skillsRoot, name)}`);
   }
-  if (holder.state === "running") out(`Scout is running (pid ${holder.pid}): the real run would stop here and change nothing; quit Scout first.`);
+  if (holder.state === "running") out(`Scout is running (pid ${holder.pid} holds ${L.storeLock}): the real run would stop here and change nothing; quit Scout first.`);
   if (opts.dryRun) out(`Dry run: nothing is changed.`);
   else if (!opts.yes) {
     const answer = await confirm(
@@ -220,34 +269,51 @@ export async function runUninstall(argv, { env = process.env, out = console.log,
     for (const line of r.lines) out(line);
     skipped += r.left;
     working = r.record;
+    if (unexport.keepRoot && !("skillsRoot" in working)) {
+      working = { ...working, skillsRoot: record.skillsRoot, ...(record.skillsRootCreated ? { skillsRootCreated: true } : {}) };
+    }
   }
 
   const remaining = [];
-  for (const entry of working.files) {
+  const entries = working.files;
+  for (let i = 0; i < entries.length; i++) {
+    const entry = entries[i];
     if (opts.agentIntegration || isIntegrationEntry(entry)) {
       remaining.push(entry);
       continue;
     }
-    const { action, reason } = judge(entry, record.marker, opts, L, record);
-    const would = opts.dryRun ? "would " : "";
-    if (action === "remove") {
-      if (!opts.dryRun) unlinkSync(entry.path);
-      out(`${would}remove ${entry.path} (${reason})`);
-    } else if (action === "strip-key") {
-      if (!opts.dryRun) {
-        const m = readJsonObject(entry.path);
-        delete m.key;
-        writeJson(entry.path, m, statSync(entry.path).mode & 0o777);
+    try {
+      const { action, reason } = judge(entry, record.marker, opts, L, record);
+      const would = opts.dryRun ? "would " : "";
+      if (action === "remove") {
+        if (entry.kind === "launch-agent") bootoutLine(env, realHome, opts.dryRun, bootout, out);
+        if (!opts.dryRun) unlinkSync(entry.path);
+        out(`${would}remove ${entry.path} (${reason})`);
+      } else if (action === "remove-dir") {
+        if (!opts.dryRun) rmSync(entry.path, { recursive: true });
+        out(`${would}remove ${entry.path} (${reason})`);
+      } else if (action === "strip-key") {
+        if (!opts.dryRun) {
+          const m = readJsonObject(entry.path);
+          delete m.key;
+          writeJson(entry.path, m, statSync(entry.path).mode & 0o777);
+        }
+        out(`${would}strip "key" from ${entry.path} (${reason})`);
+      } else if (action === "legacy") {
+        out(`leave ${entry.path} (${reason}; ${would}drop the entry)`);
+      } else if (action === "gone") {
+        out(`skip ${entry.path} (${reason})`);
+      } else {
+        if (action === "skip") skipped++;
+        out(`${action === "keep" ? "keep" : "SKIP"} ${entry.path} (${reason})`);
+        remaining.push(entry);
       }
-      out(`${would}strip "key" from ${entry.path} (${reason})`);
-    } else if (action === "legacy") {
-      out(`leave ${entry.path} (${reason}; ${would}drop the entry)`);
-    } else if (action === "gone") {
-      out(`skip ${entry.path} (${reason})`);
-    } else {
-      if (action === "skip") skipped++;
-      out(`${action === "keep" ? "keep" : "SKIP"} ${entry.path} (${reason})`);
-      remaining.push(entry);
+    } catch (e) {
+      // Record what is left (this entry and every one not reached yet), so a re-run picks up here.
+      if (!opts.dryRun) saveInstalled(L.installed, { ...working, files: [...remaining, ...entries.slice(i)] });
+      err(`uninstall: failed at ${entry.path}: ${e.message}`);
+      err(`uninstall: what is not removed yet is recorded in ${L.installed}; fix the cause and re-run (re-running is safe).`);
+      return 1;
     }
   }
 
@@ -258,7 +324,7 @@ export async function runUninstall(argv, { env = process.env, out = console.log,
   } else if (JSON.stringify(final) === JSON.stringify(record)) {
     out(`${opts.dryRun ? "would leave" : "left"} ${L.installed} unchanged`);
   } else {
-    if (!opts.dryRun) writeJson(L.installed, final, 0o600);
+    if (!opts.dryRun) saveInstalled(L.installed, final);
     out(`${opts.dryRun ? "would keep" : "kept"} ${L.installed} listing the ${remaining.length} entr${remaining.length === 1 ? "y" : "ies"} not removed`);
   }
   if (opts.agentIntegration) return skipped > 0 ? 2 : 0;
@@ -281,12 +347,11 @@ function coreCli(L) {
   return installed && exists(installed) ? installed : layout({ scoutRoot: REPO_ROOT }).coreCli;
 }
 
-/** Wrapper names exports.json lists, when installed.json records a skills root; [] if unreadable. */
+/** Wrapper names exports.json lists (lib/integration-skill.mjs readExportsManifest), when a skills root is recorded. */
 function exportedWrapperNames(record, L) {
   if (!record.skillsRoot) return [];
   try {
-    const entries = JSON.parse(readFileSync(L.exportsManifest, "utf8"))?.entries;
-    return Array.isArray(entries) ? entries.map((e) => e?.name).filter((n) => typeof n === "string" && /^scout-[a-z]+-[0-9a-f]{16}$/.test(n)) : [];
+    return readExportsManifest(L.exportsManifest)?.names ?? [];
   } catch {
     return [];
   }
@@ -315,14 +380,14 @@ export function unexportWrappers(record, { env, L, dryRun }) {
     return { lines, kept: 0 };
   }
   // Checked again by the CLI itself, which holds the lock: Scout may have started since.
-  if (coreLockHolder(L).state === "running") return { lines, kept: 0, stop: "Scout is running and owns its skill wrappers; quit Scout first" };
+  if (coreLockHolder(L).state === "running") return { lines, kept: 0, stop: `Scout is running (it holds ${L.storeLock}) and owns its skill wrappers; quit Scout first` };
   const r = spawnSync(process.execPath, [cli, "capabilities", "unexport-all", "--home", L.scoutHome, "--json"], {
     env: { ...env, SCOUT_HOME: L.scoutHome },
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"],
     timeout: 60_000,
   });
-  if (r.status === 2) return { lines, kept: 0, stop: "Scout is running and owns its skill wrappers; quit Scout first" };
+  if (r.status === 2) return { lines, kept: 0, stop: `Scout is running (it holds ${L.storeLock}) and owns its skill wrappers; quit Scout first` };
   let outcome = null;
   try {
     outcome = JSON.parse(r.stdout.trim().split("\n").at(-1) ?? "");
@@ -334,6 +399,11 @@ export function unexportWrappers(record, { env, L, dryRun }) {
     return { lines, kept: 0, stop: `could not remove the Scout app's skill wrappers (${why})` };
   }
   if (outcome.note) lines.push(`Scout app skill wrappers: ${outcome.note}`);
+  if (outcome.unreachable) {
+    for (const k of outcome.kept) lines.push(`SKIP ${join(record.skillsRoot, k.name)} (Scout app skill wrapper, not reachable: the skills root is not a real directory; not touching)`);
+    lines.push(`kept skillsRoot ${record.skillsRoot} in ${L.installed} so a later \`npm run uninstall\` can retry once it is a real directory again`);
+    return { lines, kept: Math.max(1, outcome.kept.length), keepRoot: true };
+  }
   for (const name of outcome.removed) lines.push(`removed ${join(record.skillsRoot, name)} (Scout app skill wrapper, unchanged since Scout wrote it)`);
   for (const k of outcome.kept) lines.push(`SKIP ${join(record.skillsRoot, k.name)} (Scout app skill wrapper, ${k.code === "left_symlink" ? "now a symlink" : k.code === "io_error" ? "the file system refused" : "changed since Scout wrote it"}; not touching, still listed in ${L.exportsManifest})`);
   return { lines, kept: outcome.kept.length };

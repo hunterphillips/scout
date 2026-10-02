@@ -5,7 +5,8 @@
 //
 //   install record      installed.json, its marker and entries, a legacy `config-merged` entry
 //                       (noted, never acted on), the Scout config, private dirs
-//   Mac app             the bundled Scout.app (npm run bundle-app) and the login LaunchAgent
+//   Mac app             the installed Scout.app (bundle-app --install, hash-checked) and the
+//                       login LaunchAgent (FAIL when the binary it starts is missing)
 //   core                whether Scout runs (pid from capabilities/store.lock), run/core.sock,
 //                       run/agent.sock, run/agent-token ownership and modes
 //   Chrome relay        the native-messaging manifest (allowed_origins), wrapper, extension key,
@@ -22,20 +23,21 @@
 // with the real ~/.scout is a failed check.
 //
 // Usage: node scripts/doctor.mjs [--verbose]
-// Env overrides: SCOUT_HOME, CHROME_NMH_DIR, SCOUT_CLAUDE_BIN, LAUNCH_AGENTS_DIR (see lib/paths.mjs).
+// Env overrides: SCOUT_HOME, CHROME_NMH_DIR, SCOUT_CLAUDE_BIN, LAUNCH_AGENTS_DIR,
+// SCOUT_APPLICATIONS_DIR (see lib/paths.mjs); one that breaks the test-override rule is a FAIL.
 
 import { spawnSync } from "node:child_process";
 import { lstatSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
-import { HOST_NAME, REPO_ROOT, APP_BUNDLE_ID, appBinary, layout } from "./lib/paths.mjs";
+import { HOST_NAME, REPO_ROOT, layout, locationOverrideRefusal } from "./lib/paths.mjs";
 import { EXTENSION_ID_RE, extensionIdFromManifestKey, extensionIdFromPem } from "./lib/extension-key.mjs";
-import { defaultClaudeFallbacks, isExecutableFile, resolveClaude } from "./lib/executables.mjs";
+import { isExecutableFile } from "./lib/executables.mjs";
 import { allowedPath, readInstalled } from "./lib/installed.mjs";
 import { exists, readJsonObject, wrapperScript } from "./lib/files.mjs";
 import { isMain } from "./lib/is-main.mjs";
-import { checkIntegration } from "./lib/agent-integration.mjs";
-import { sha256 } from "./lib/app-bundle.mjs";
+import { checkIntegration, integrationClaude } from "./lib/agent-integration.mjs";
+import { appBundleHash, applicationsRefusal, isScoutBundle, launchAgentRefusal, sha256 } from "./lib/app-bundle.mjs";
 import { coreLockHolder, inspectPrivate, lastPreflight } from "./lib/core-state.mjs";
 
 const oct = (m) => (m & 0o777).toString(8).padStart(4, "0");
@@ -111,26 +113,48 @@ export function runReport(env = process.env, { claudeFallbacks, mcpTimeoutMs, re
   privateDir(L.binDir, "scout bin dir is a 0700 dir owned by you", false);
 
   // ---- Mac app
-  const launch = record?.files.find((f) => f.kind === "launch-agent");
-  const appPath = launch && typeof launch.program === "string" ? launch.program.replace(/\/Contents\/MacOS\/Scout$/, "") : L.appBundle;
-  const plist = tryRead(() => readFileSync(join(appPath, "Contents", "Info.plist"), "utf8")).value;
-  const bundled = plist?.includes(`<string>${APP_BUNDLE_ID}</string>`) && isExecutableFile(appBinary(appPath));
-  let loginLine = "login launch off";
   section("Mac app", "");
-  add(bundled ? "OK" : "WARN", "Scout.app is bundled", bundled ? appPath : `no bundle at ${appPath}; \`npm run bundle-app\` builds one (or run \`swift run ScoutApp\` in native/Scout)`);
+  const installedApp = record?.files.find((f) => f.kind === "app-bundle");
+  const launch = record?.files.find((f) => f.kind === "launch-agent");
+  for (const [entry, rule, name] of [[installedApp, applicationsRefusal, "SCOUT_APPLICATIONS_DIR"], [launch, launchAgentRefusal, "LAUNCH_AGENTS_DIR"]]) {
+    const r = entry && rule(env, realHome);
+    if (r) add("FAIL", `${name} test-override rule`, r);
+  }
+  let appLine;
+  if (installedApp) {
+    if (!allowedPath("app-bundle", installedApp.path, L, record)) {
+      add("FAIL", "installed Scout.app", `recorded path is not the install location: ${installedApp.path}`);
+      appLine = "install record unusable";
+    } else if (!exists(installedApp.path)) {
+      add("FAIL", "installed Scout.app", `${installedApp.path} is gone; re-run \`npm run bundle-app -- --install\``);
+      appLine = "installed app missing";
+    } else if (appBundleHash(installedApp.path) !== installedApp.sha256) {
+      add("WARN", "installed Scout.app is unchanged since bundle-app --install", `${installedApp.path} changed; uninstall will leave it`);
+      appLine = `installed at ${installedApp.path} (changed)`;
+    } else {
+      add("OK", "installed Scout.app", installedApp.path);
+      appLine = `installed at ${installedApp.path}`;
+    }
+  } else {
+    const built = isScoutBundle(L.appBundle);
+    add("WARN", "installed Scout.app", `not installed; \`npm run bundle-app -- --install\` copies it to ${L.installedApp}${built ? ` (a build exists at ${L.appBundle})` : ""}`);
+    appLine = built ? `built at ${L.appBundle}, not installed` : "not installed";
+  }
+  let loginLine = "login launch off";
   if (launch) {
     const text = tryRead(() => readFileSync(launch.path, "utf8")).value;
     if (!allowedPath("launch-agent", launch.path, L, record)) add("FAIL", "login LaunchAgent", `recorded path is not one setup writes: ${launch.path}`);
     else if (text == null) add("FAIL", "login LaunchAgent", `${launch.path} is gone; re-run \`npm run setup -- --login-launch\``);
     else if (sha256(text) !== launch.sha256) add("WARN", "login LaunchAgent is unchanged since setup", `${launch.path} changed; uninstall will leave it`);
     else {
-      check(isExecutableFile(launch.program), "login LaunchAgent starts an existing app binary", String(launch.program));
-      loginLine = "login launch on";
+      const ok = isExecutableFile(launch.program);
+      check(ok, "login LaunchAgent starts an existing app binary", ok ? String(launch.program) : `${launch.program} is missing; re-run \`npm run bundle-app -- --install\``);
+      loginLine = ok ? "login launch on" : "login launch broken";
     }
   } else if (exists(L.launchAgent)) {
     add("WARN", "login LaunchAgent", `${L.launchAgent} exists but setup did not write it`);
   } else add("OK", "login LaunchAgent", "off (optional: `npm run setup -- --login-launch`)");
-  current.summary = `${bundled ? `bundled at ${appPath}` : "not bundled"}; ${loginLine}`;
+  current.summary = `${appLine}; ${loginLine}`;
 
   // ---- core
   const holder = coreLockHolder(L);
@@ -152,6 +176,8 @@ export function runReport(env = process.env, { claudeFallbacks, mcpTimeoutMs, re
   // ---- Chrome relay
   const protocol = builtConstant(join(L.scoutRoot, "packages", "contracts", "dist", "bridge.js"), "BRIDGE_PROTOCOL");
   section("Chrome relay", "");
+  const nmhRule = locationOverrideRefusal("CHROME_NMH_DIR", env, realHome);
+  if (nmhRule) add("FAIL", "CHROME_NMH_DIR test-override rule", nmhRule);
   check(exists(L.hostJs), "scoutRoot has native-host dist/host.js", L.hostJs);
   check(protocol !== null, "the installed host's bridge protocol", protocol !== null ? `protocol ${protocol} (from the built contracts)` : "packages/contracts/dist/bridge.js missing; run `npm run build`");
   check(typeof extensionId === "string" && EXTENSION_ID_RE.test(extensionId), "extensionId is 32 chars a-p", String(extensionId));
@@ -206,7 +232,8 @@ export function runReport(env = process.env, { claudeFallbacks, mcpTimeoutMs, re
     if (recordedProfile && text != null && sha256(text) !== recordedProfile.sha256) add("OK", "agent profile", "edited since setup wrote it (yours now; uninstall leaves it)");
   } else {
     add("WARN", "agent profile", profile.error ? `${L.agentProfile} unreadable` : `${L.agentProfile} missing: background recommendations are unavailable; re-run \`npm run setup\` once claude is installed`);
-    claudePath = resolveClaude({ pathVar: env.PATH ?? "", fallbacks: claudeFallbacks ?? defaultClaudeFallbacks(env) });
+    // As setup: SCOUT_CLAUDE_BIN on a test home, never a claude found on PATH there.
+    claudePath = integrationClaude(env, claudeFallbacks, realHome).path ?? null;
   }
   const verified = builtConstant(join(L.scoutRoot, "packages", "scout-core", "dist", "agents", "claudeJob.js"), "VERIFIED_CLI_VERSION");
   let version = null;

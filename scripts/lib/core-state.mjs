@@ -55,6 +55,7 @@ export function lastPreflight(logPath, { maxBytes = 1024 * 1024 } = {}) {
   let text;
   let fd;
   try {
+    if (!lstatSync(logPath).isFile()) return null;
     fd = openSync(logPath, "r");
     const size = fstatSync(fd).size;
     const length = Math.min(size, maxBytes);
@@ -76,7 +77,7 @@ export function lastPreflight(logPath, { maxBytes = 1024 * 1024 } = {}) {
     if (!lines[i].includes('"agent_preflight"')) continue;
     try {
       const e = JSON.parse(lines[i]);
-      if (e?.event === "agent_preflight" && typeof e.verdict === "string") return { verdict: e.verdict, t: e.t, ...(typeof e.cliVersion === "string" ? { cliVersion: e.cliVersion } : {}) };
+      if (e?.event === "agent_preflight" && typeof e.verdict === "string" && Number.isFinite(e.t)) return { verdict: e.verdict, t: e.t, ...(typeof e.cliVersion === "string" ? { cliVersion: e.cliVersion } : {}) };
     } catch {
       // a torn line
     }

@@ -324,7 +324,13 @@ export function removeIntegration(record, { env, L, dryRun, claudeFallbacks, mcp
   }
   // Uninstall removed the unchanged wrappers first (uninstall.mjs unexportWrappers); what is
   // left changed after Scout wrote it. In a dry run nothing was removed, so nothing is counted.
-  if (skillsRoot && !dryRun) {
+  let rootReal = false;
+  try {
+    rootReal = !!skillsRoot && checkSkillsRoot(skillsRoot).exists;
+  } catch {
+    // a symlinked or missing root: uninstall already reported its wrappers as unreachable
+  }
+  if (skillsRoot && !dryRun && rootReal) {
     const w = countRuntimeWrappers(L.exportsManifest, skillsRoot);
     if (w.count === null) lines.push(`Scout app skill wrappers in ${skillsRoot}: unknown (${w.manifest} unreadable); uninstall leaves any there`);
     else if (w.count > 0) {

@@ -53,26 +53,21 @@ describe("doctor report", () => {
     expect(r["install record"]).toMatchObject({ status: "fail", summary: expect.stringMatching(/missing; run `npm run setup`/) });
   });
 
-  it("Mac app: warns without a bundle, ok with one; reports the login launch on, changed, or foreign", () => {
-    expect(report()["Mac app"]).toMatchObject({ status: "warn", summary: "not bundled; login launch off" });
+  it("Mac app: warns when the app is not installed, notes a build, and reports a foreign LaunchAgent", () => {
+    expect(report()["Mac app"]).toMatchObject({ status: "warn", summary: "not installed; login launch off" });
     fakeBundle(L.appBundle);
-    expect(report()["Mac app"]).toMatchObject({ status: "ok", summary: `bundled at ${L.appBundle}; login launch off` });
-
-    const agents = join(fx.root, "LaunchAgents");
-    const e = { ...env, LAUNCH_AGENTS_DIR: agents };
-    expect(runSetup(["--scout-root", fx.scoutRoot, "--login-launch"], { env: e, out: () => {}, err: () => {}, claudeFallbacks: [] })).toBe(0);
-    const La = layout({ env: e, scoutRoot: fx.scoutRoot });
-    expect(report(e)["Mac app"]).toMatchObject({ status: "ok", summary: `bundled at ${L.appBundle}; login launch on` });
-    writeFileSync(La.launchAgent, readFileSync(La.launchAgent, "utf8").replace("<true/>", "<false/>"));
-    expect(report(e)["Mac app"]).toMatchObject({ status: "warn" });
-
+    expect(report()["Mac app"]).toMatchObject({ status: "warn", summary: `built at ${L.appBundle}, not installed; login launch off` });
     const foreignDir = join(fx.root, "OtherAgents");
     mkdirSync(foreignDir);
     writeFileSync(join(foreignDir, "dev.scout.app.plist"), "<plist/>");
-    const record = json(L.installed);
-    writeFileSync(L.installed, JSON.stringify({ ...record, files: record.files.filter((f) => f.kind !== "launch-agent") }));
     const r = report({ ...env, LAUNCH_AGENTS_DIR: foreignDir })["Mac app"];
     expect(r.checks.find((c) => c.label === "login LaunchAgent")).toMatchObject({ status: "WARN", detail: expect.stringMatching(/setup did not write it/) });
+  });
+
+  it("Chrome relay: a test home without CHROME_NMH_DIR fails the override rule", () => {
+    const r = report({ ...env, CHROME_NMH_DIR: undefined })["Chrome relay"];
+    expect(r.status).toBe("fail");
+    expect(r.checks.find((c) => c.label === "CHROME_NMH_DIR test-override rule")).toMatchObject({ status: "FAIL" });
   });
 
   it("core: not running warns; a live lock with private sockets and token is ok; a loose socket fails", async () => {
@@ -149,6 +144,15 @@ describe("doctor report", () => {
     writeFileSync(L.diagnosticsLog, JSON.stringify({ t: 3, event: "agent_preflight", verdict: "api_key", reasons: 1 }) + "\n");
     expect(report().billing.status).toBe("warn");
     expect(readFileSync(argvLog, "utf8")).not.toMatch(/auth|-p|--print/);
+  });
+
+  it("billing ignores a preflight event without a finite time, and a log that is not a regular file", () => {
+    mkdirSync(L.logsDir, { recursive: true });
+    writeFileSync(L.diagnosticsLog, JSON.stringify({ event: "agent_preflight", verdict: "subscription" }) + "\n");
+    expect(report().billing).toMatchObject({ status: "warn", summary: "not yet checked" });
+    rmSync(L.diagnosticsLog);
+    mkdirSync(L.diagnosticsLog);
+    expect(lastPreflight(L.diagnosticsLog)).toBeNull();
   });
 
   it("billing reads only the log's tail", () => {
