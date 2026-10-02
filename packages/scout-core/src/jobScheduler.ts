@@ -32,7 +32,10 @@
 //     revisions, so its answer still counts.
 //   - a profile change: `cancelled: superseded`, published (a new profile needs a new adapter).
 // Every cancel aborts the adapter's signal with the reason and releases the snapshot at once
-// (its token is revoked, so the agent's next read is refused).
+// (its token is revoked, so the agent's next read is refused), with release reason
+// `cancelled`. A job that ends on its own releases its snapshot with reason `released` once
+// its last checks ran; the plan's "cancelled" wording for the release refers to the cancel
+// paths only.
 //
 // The pipeline re-checks, after the agent and after verification, and the scheduler once
 // more right before publishing: core instance, visit epoch, snapshot still live, the
