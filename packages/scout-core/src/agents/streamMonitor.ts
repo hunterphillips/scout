@@ -9,12 +9,18 @@
 //     recorded (`cliVersionChanged`) and reported through `onCliVersionChanged`, never a stop;
 //   - an assistant `tool_use` must name an allowed tool or the structured-output tool
 //     (`unexpected_tool_use`); names are recorded, bounded;
-//   - a user `tool_result` with `is_error` counts against its tool's name (`toolErrors`). An
-//     error from a required tool of a non-Scout server (one the profile marks `required: true`)
-//     stops the job: tool_unavailable, `required_tool_failed`, since its answer would rest on
-//     a retrieval that failed. An error from an optional tool sets `optionalToolFailed`, as
-//     does an optional tool that did not load. Errors from Scout's own tools (a refused read,
-//     a resource not found) are only counted;
+//   - a user `tool_result` with `is_error` counts against its tool's name (`toolErrors`); one
+//     whose call is past the recorded bound (MAX_TOOL_USES_RECORDED tool-use IDs), or was never
+//     seen, is still counted, without a name (`unattributedToolErrors`). An error from an
+//     optional tool sets `optionalToolFailed`, as does an optional tool that did not load.
+//     Errors from Scout's own tools (a refused read, a resource not found) are only counted;
+//   - required-tool rule, decided once at job end (`requiredToolFailed()`, applied by
+//     mapOutcome.ts after any stop): a required tool of a non-Scout server (one the profile
+//     marks `required: true`) fails the job (tool_unavailable, `required_tool_failed`) only
+//     when it was called and EVERY call to it errored, since the answer would then rest on a
+//     retrieval that never worked. A mix of errors and successes is only counted: the model
+//     had the retrieval. Never a mid-stream stop. A call whose ID was past the recorded bound
+//     cannot be attributed, so it never counts as errored (the rule then does not fire);
 //   - the first `result` event is kept;
 //   - a non-result event that reports an auth or quota problem: unavailable, auth_or_quota.
 //
@@ -58,6 +64,8 @@ export interface StreamMonitor {
   onEvent(ev: StreamRecord): void;
   readonly init: StreamRecord | undefined;
   readonly result: StreamRecord | undefined;
+  /** At job end: a required user tool was called and every call to it errored (see the header). */
+  requiredToolFailed(): boolean;
 }
 
 export function createStreamMonitor(o: StreamMonitorOptions): StreamMonitor {
@@ -69,6 +77,8 @@ export function createStreamMonitor(o: StreamMonitorOptions): StreamMonitor {
   const optional = new Set(expected.servers.flatMap((s) => s.optionalTools));
   /** Required tools of the user's servers (not Scout's own): a runtime error from one stops the job. */
   const requiredExternal = new Set(expected.servers.filter((s) => s.name !== SCOUT_SERVER_NAME).flatMap((s) => s.tools.filter((t) => !s.optionalTools.includes(t))));
+  /** Calls per allowed tool name (bounded by the allowed set). */
+  const calls = new Map<string, number>();
   const unsupported = (detail: string): void => stop.halt({ result: { status: "error", reason: "unsupported_configuration" }, termination: "unsupported_configuration", detail });
 
   const onEvent = (ev: StreamRecord): void => {
@@ -102,6 +112,7 @@ export function createStreamMonitor(o: StreamMonitorOptions): StreamMonitor {
         const name = typeof c.name === "string" ? c.name : "";
         if (details.toolUses.length < MAX_TOOL_USES_RECORDED && /^[A-Za-z0-9_-]{1,128}$/.test(name)) details.toolUses.push(name);
         if (name !== STRUCTURED_OUTPUT_TOOL && !o.allowedTools.has(name)) return unsupported("unexpected_tool_use");
+        calls.set(name, (calls.get(name) ?? 0) + 1);
         if (typeof c.id === "string" && toolUseNames.size < MAX_TOOL_USES_RECORDED) toolUseNames.set(c.id, name);
       }
     } else if (ev.type === "user") {
@@ -109,9 +120,11 @@ export function createStreamMonitor(o: StreamMonitorOptions): StreamMonitor {
       for (const c of content) {
         if (!isRecord(c) || c.type !== "tool_result" || c.is_error !== true || typeof c.tool_use_id !== "string") continue;
         const name = toolUseNames.get(c.tool_use_id);
-        if (name === undefined) continue;
+        if (name === undefined) {
+          details.unattributedToolErrors = (details.unattributedToolErrors ?? 0) + 1;
+          continue;
+        }
         details.toolErrors[name] = (details.toolErrors[name] ?? 0) + 1;
-        if (requiredExternal.has(name)) return stop.halt({ result: { status: "error", reason: "tool_unavailable" }, termination: "tool_unavailable", detail: "required_tool_failed" });
         if (optional.has(name)) details.optionalToolFailed = true;
       }
     } else if (ev.type === "result" && result === undefined) {
@@ -128,6 +141,13 @@ export function createStreamMonitor(o: StreamMonitorOptions): StreamMonitor {
     },
     get result() {
       return result;
+    },
+    requiredToolFailed() {
+      for (const tool of requiredExternal) {
+        const n = calls.get(tool) ?? 0;
+        if (n > 0 && (details.toolErrors[tool] ?? 0) >= n) return true;
+      }
+      return false;
     },
   };
 }

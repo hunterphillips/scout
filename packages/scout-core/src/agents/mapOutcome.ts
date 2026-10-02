@@ -1,5 +1,7 @@
 // A finished CLI run as a job outcome. Order: a spawn failure; then any stop decision
-// (cancel, timeout, a failed check: a stop always wins over output); then no init; then the
+// (cancel, timeout, a failed check: a stop always wins over output); then a required user tool
+// every call of which errored (streamMonitor.ts: tool_unavailable, `required_tool_failed`, since
+// the answer would rest on a retrieval that failed); then no init; then the
 // result event (none, max turns, error, non-success, no structured output); then the
 // structured output through validateJobOutput. Only `completed` can be `ok` or `empty`.
 // With an instruction marker, the first pick's reason loses the marker; a pick whose reason
@@ -20,6 +22,8 @@ export interface CliRun {
   stop: Out | undefined;
   init: StreamRecord | undefined;
   result: StreamRecord | undefined;
+  /** A required user tool was called and every call to it errored (streamMonitor.ts). */
+  requiredToolFailed?: boolean;
 }
 
 const num = (v: unknown): number | undefined => (typeof v === "number" && Number.isFinite(v) ? v : undefined);
@@ -47,6 +51,7 @@ export function mapOutcome(run: CliRun, req: Pick<JobRequest, "candidates" | "ma
 
   if (run.spawnError) return { result: { status: "unavailable", reason: "agent_unavailable" }, termination: "agent_unavailable", detail: "spawn_failed" };
   if (run.stop !== undefined) return run.stop;
+  if (run.requiredToolFailed) return { result: { status: "error", reason: "tool_unavailable" }, termination: "tool_unavailable", detail: "required_tool_failed" };
   if (run.init === undefined) {
     if (resultEv && isAuthOrQuota(resultEv)) return authOrQuota;
     return { result: { status: "error", reason: "unsupported_configuration" }, termination: "malformed_startup", detail: "no_init" };

@@ -50,4 +50,10 @@ describe("mapOutcome: order", () => {
     expect(mapOutcome({ ...run([{ id: "c1", reason: "Fits" }]), stop }, req, details()).result).toEqual(stop.result);
     expect(mapOutcome({ ...run([{ id: "c1", reason: "Fits" }]), stop, spawnError: true }, req, details())).toMatchObject({ termination: "agent_unavailable", detail: "spawn_failed" });
   });
+  it("a required tool every call of which errored fails a valid answer (tool_unavailable); a stop still wins", () => {
+    const failedTool = { ...run([{ id: "c1", reason: "Fits" }]), requiredToolFailed: true };
+    expect(mapOutcome(failedTool, req, details())).toEqual({ result: { status: "error", reason: "tool_unavailable" }, termination: "tool_unavailable", detail: "required_tool_failed" });
+    const stop = { result: { status: "cancelled" as const, reason: "paused" as const }, termination: "cancelled" as const };
+    expect(mapOutcome({ ...failedTool, stop }, req, details()).result).toEqual(stop.result);
+  });
 });

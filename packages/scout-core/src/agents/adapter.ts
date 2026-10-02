@@ -49,6 +49,9 @@ export type JobTermination =
   | "busy"
   | "agent_unavailable";
 
+/** Do not launch inference with less than this left (plan: common limits). */
+export const MIN_LAUNCH_MS = 5000;
+
 export interface JobUsage {
   turns?: number;
   inputTokens?: number;
@@ -89,9 +92,12 @@ export interface JobDetails {
   permissionDenials?: number;
   /** Tool calls whose result was an error, by full tool name (names only, bounded). */
   toolErrors: Record<string, number>;
+  /** Errored tool results whose call was past the recorded bound (or never seen): counted, not named. */
+  unattributedToolErrors?: number;
   /**
    * An optional selected tool was unavailable or returned an error: the answer, if any, rests on
-   * Scout's browser context alone. A required tool's failure never yields an answer.
+   * Scout's browser context alone. A required tool every call of which failed never yields an
+   * answer (streamMonitor.ts).
    */
   optionalToolFailed: boolean;
   timings: { totalMs: number; cliMs?: number; initMs?: number; /** The result event's `duration_api_ms`. */ apiMs?: number };

@@ -66,27 +66,66 @@ describe("stream monitor: job details", () => {
     m.onEvent(answer("t3", true));
     m.onEvent(answer("unknown-id", true));
     expect(d.toolErrors).toEqual({ mcp__scout__current_site: 1, mcp__scout_bridge__lookup: 1 });
+    expect(d.unattributedToolErrors).toBe(1);
     expect(d.optionalToolFailed).toBe(true);
     expect(stop.decision).toBeUndefined();
   });
 
-  it("an error from a required user tool stops the job (tool_unavailable, required_tool_failed); Scout's own stay counted", () => {
+  function requiredMonitor() {
     const d = details();
     const stop = new JobStop();
     const req = { ...expected, servers: [expected.servers[0]!, { name: "scout_bridge", tools: ["mcp__scout_bridge__lookup"], required: true, optionalTools: [] }] };
     const m = createStreamMonitor({ expected: req, allowedTools: new Set([...scoutTools, "mcp__scout_bridge__lookup"]), details: d, stop, clock: { now: () => 0 }, startedAt: 0 });
     m.onEvent(init());
-    m.onEvent(use("t1", "mcp__scout__current_site"));
+    return { m, d, stop };
+  }
+
+  it("a required user tool every call of which errored fails the job at its end, never mid-stream", () => {
+    const { m, d, stop } = requiredMonitor();
+    m.onEvent(use("t1", "mcp__scout_bridge__lookup"));
     m.onEvent(answer("t1", true));
+    m.onEvent(use("t2", "mcp__scout_bridge__lookup"));
+    m.onEvent(answer("t2", true));
     expect(stop.decision).toBeUndefined();
+    expect(m.requiredToolFailed()).toBe(true);
+    expect(d.toolErrors).toEqual({ mcp__scout_bridge__lookup: 2 });
+    expect(d.optionalToolFailed).toBe(false);
+  });
+
+  it("a required user tool with one success among its errors is only counted; an uncalled one never fails the job", () => {
+    const { m, d, stop } = requiredMonitor();
+    expect(m.requiredToolFailed()).toBe(false);
+    m.onEvent(use("t1", "mcp__scout_bridge__lookup"));
+    m.onEvent(answer("t1", true));
     m.onEvent(use("t2", "mcp__scout_bridge__lookup"));
     m.onEvent(answer("t2", false));
-    expect(stop.decision).toBeUndefined();
     m.onEvent(use("t3", "mcp__scout_bridge__lookup"));
     m.onEvent(answer("t3", true));
-    expect(stop.decision).toMatchObject({ result: { status: "error", reason: "tool_unavailable" }, termination: "tool_unavailable", detail: "required_tool_failed" });
-    expect(d.toolErrors).toEqual({ mcp__scout__current_site: 1, mcp__scout_bridge__lookup: 1 });
-    expect(d.optionalToolFailed).toBe(false);
+    expect(stop.decision).toBeUndefined();
+    expect(m.requiredToolFailed()).toBe(false);
+    expect(d.toolErrors).toEqual({ mcp__scout_bridge__lookup: 2 });
+  });
+
+  it("Scout's own tools never fail the job, even when every call errored", () => {
+    const { m, d, stop } = requiredMonitor();
+    m.onEvent(use("t1", "mcp__scout__current_site"));
+    m.onEvent(answer("t1", true));
+    m.onEvent(use("t2", "mcp__scout__recent_activity"));
+    m.onEvent(answer("t2", true));
+    expect(stop.decision).toBeUndefined();
+    expect(m.requiredToolFailed()).toBe(false);
+    expect(d.toolErrors).toEqual({ mcp__scout__current_site: 1, mcp__scout__recent_activity: 1 });
+  });
+
+  it("errors past the recorded tool-use bound are still counted, without names; such calls never prove a required tool failed", () => {
+    const { m, d } = requiredMonitor();
+    for (let i = 0; i < 70; i++) {
+      m.onEvent(use(`t${i}`, "mcp__scout_bridge__lookup"));
+      m.onEvent(answer(`t${i}`, true));
+    }
+    expect(d.toolErrors).toEqual({ mcp__scout_bridge__lookup: 64 });
+    expect(d.unattributedToolErrors).toBe(6);
+    expect(m.requiredToolFailed()).toBe(false);
   });
 
   it("an optional tool that did not load flags optionalToolFailed; the job goes on", () => {

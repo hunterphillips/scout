@@ -14,6 +14,7 @@ import {
   buildJobArgv,
   createClaudeJobAdapter,
   JobRequestError,
+  MIN_LAUNCH_MS,
   VERIFIED_CLI_VERSION,
   type ClaudeJobAdapter,
   type ClaudeJobDeps,
@@ -412,11 +413,12 @@ describe("claude job: the init event and the stream stop a misconfigured job", (
     expect((await job).result).toMatchObject({ status: "ok" });
   });
 
-  it("a preflight still in flight at the deadline: timeout, never spawns; a cancel while waiting: cancelled", async () => {
+  it("a preflight still in flight at the deadline: preflight_failed (preflight_pending), never spawns; a cancel while waiting: cancelled", async () => {
     const e = await setup({ deps: { preflightAsync: () => new Promise(() => {}) } });
     void e.adapter.refreshPreflightAsync();
     const timedOut = await e.adapter.run(request(e, { deadlineMs: 50 }), { toolSurface: surface(e) });
-    expect(timedOut.result).toMatchObject({ status: "error", reason: "timeout" });
+    expect(timedOut.result).toMatchObject({ status: "error", reason: "preflight_failed" });
+    expect(timedOut.details.termination).toBe("preflight_failed");
     expect(timedOut.details.detail).toBe("preflight_pending");
     const ac = new AbortController();
     const job = e.adapter.run(request(e, { requestId: "job-2" }), { toolSurface: surface(e), signal: ac.signal });
@@ -658,12 +660,18 @@ describe("claude job: lifecycle edges", () => {
 // ---------- gates before launch ----------
 
 describe("claude job: gates before launch", () => {
-  it("no preflight yet: preflight_failed, never spawns", async () => {
+  it("no preflight yet: the job starts one and waits for it; an ambiguous verdict is preflight_failed and never spawns", async () => {
     const e = await setup();
+    let runs = 0;
     const fresh = createClaudeJobAdapter({
       home: e.scoutHome,
       profile: { schemaVersion: 1, adapter: "claude-code", claudePath: e.fake.path, model: DEFAULT_AGENT_MODEL },
       parentEnv: gatewayParentEnv(e.userHome),
+      preflightAsync: async () => {
+        runs += 1;
+        await new Promise((r) => setTimeout(r, 20));
+        return { verdict: "ambiguous", reasons: ["auth: api key login"], cliVersion: VERIFIED_CLI_VERSION };
+      },
       spawn: () => {
         throw new Error("must not spawn");
       },
@@ -671,6 +679,43 @@ describe("claude job: gates before launch", () => {
     expect(fresh.preflight.verdict).toBe("unchecked");
     const out = await fresh.run(request(e), { toolSurface: surface(e) });
     expect(out.result).toMatchObject({ status: "error", reason: "preflight_failed" });
+    expect(out.details.detail).toBe("unverified");
+    expect(runs).toBe(1);
+    expect(fresh.preflight).toMatchObject({ verdict: "ambiguous" });
+    // A verdict exists now (with a version): the next job reuses it.
+    await fresh.run(request(e, { requestId: "job-2" }), { toolSurface: surface(e) });
+    expect(runs).toBe(1);
+  });
+
+  it("a retried preflight that cannot finish within the job's deadline (a broken CLI): preflight_failed, preflight_pending, never timeout", async () => {
+    let runs = 0;
+    const e = await setup({
+      deps: {
+        preflightAsync: (_o) => {
+          runs += 1;
+          // The first verdict could not read the version (arming a retry); the retry hangs.
+          return runs === 1 ? Promise.resolve({ verdict: "ambiguous", reasons: ["cli: claude not reachable"] }) : new Promise(() => {});
+        },
+      },
+    });
+    await e.adapter.refreshPreflightAsync();
+    expect(e.adapter.preflight.cliVersion).toBeUndefined();
+    const out = await e.adapter.run(request(e, { deadlineMs: 80 }), { toolSurface: surface(e) });
+    expect(runs).toBe(2);
+    expect(out.result).toMatchObject({ status: "error", reason: "preflight_failed" });
+    expect(out.details).toMatchObject({ termination: "preflight_failed", detail: "preflight_pending" });
+    expect(e.spawnCalls).toBe(0);
+  });
+
+  it("the launch floor at the boundary: exactly MIN_LAUNCH_MS left launches; one millisecond less is no_time_left without a spawn", async () => {
+    const clock = { now: () => 1_000_000 };
+    const e = await setup({ deps: { minLaunchMs: MIN_LAUNCH_MS, clock } });
+    const short = await e.adapter.run(request(e), { toolSurface: surface(e), clock, deadline: clock.now() + MIN_LAUNCH_MS - 1 });
+    expect(short.result).toMatchObject({ status: "unavailable", reason: "no_time_left" });
+    expect(e.spawnCalls).toBe(0);
+    const enough = await e.adapter.run(request(e, { requestId: "job-2" }), { toolSurface: surface(e), clock, deadline: clock.now() + MIN_LAUNCH_MS });
+    expect(enough.result).toMatchObject({ status: "ok" });
+    expect(e.spawnCalls).toBe(1);
   });
 
   it("a bad billing route in user settings: preflight ambiguous, preflight_failed, never spawns, no secrets logged", async () => {
