@@ -9,6 +9,7 @@ import { SECTIONS, runDoctor, runReport } from "./doctor.mjs";
 import { layout } from "./lib/paths.mjs";
 import { infoPlist } from "./lib/app-bundle.mjs";
 import { makeFixture } from "./lib/test-fixture.mjs";
+import { lastPreflight } from "./lib/core-state.mjs";
 
 let fx, L, env, argvLog;
 beforeEach(() => {
@@ -148,6 +149,14 @@ describe("doctor report", () => {
     writeFileSync(L.diagnosticsLog, JSON.stringify({ t: 3, event: "agent_preflight", verdict: "api_key", reasons: 1 }) + "\n");
     expect(report().billing.status).toBe("warn");
     expect(readFileSync(argvLog, "utf8")).not.toMatch(/auth|-p|--print/);
+  });
+
+  it("billing reads only the log's tail", () => {
+    mkdirSync(L.logsDir, { recursive: true });
+    const early = JSON.stringify({ t: 1, event: "agent_preflight", verdict: "subscription", reasons: 0 }) + "\n";
+    writeFileSync(L.diagnosticsLog, early + `${JSON.stringify({ t: 2, event: "visit_change" })}\n`.repeat(100));
+    expect(lastPreflight(L.diagnosticsLog)).toMatchObject({ verdict: "subscription" });
+    expect(lastPreflight(L.diagnosticsLog, { maxBytes: 1024 })).toBeNull();
   });
 
   it("recommendations: empty destinations is off; listed hosts are on", () => {

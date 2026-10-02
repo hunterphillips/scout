@@ -13,7 +13,8 @@
 // skill wrappers, the Scout app's wrappers go through the core's one-shot
 // `cli.js capabilities unexport-all` (it holds the store lock, removes only wrappers still
 // hashing to their recorded ownership, and keeps changed ones, which are listed). While Scout
-// runs it holds that lock, and uninstall stops before changing anything: quit Scout first.
+// runs it holds that lock (and the agent profile's), so a real uninstall stops before changing
+// anything while Scout runs, wrappers or not: quit Scout first. The prompt lists the wrappers.
 // Then the agent integration (the `scout` MCP registration and the scout-integration skill,
 // each only while still exactly what setup installed; lib/agent-integration.mjs), then the
 // files. --agent-integration does the first two only. With the real ~/.scout and
@@ -172,15 +173,27 @@ export async function runUninstall(argv, { env = process.env, out = console.log,
     err(`uninstall: agent integration: ${refusal}. Nothing changed.`);
     return 1;
   }
+  // Scout holds its store and profile locks while it runs; nothing is removed under it.
+  const holder = coreLockHolder(L);
+  if (holder.state === "running" && !opts.dryRun) {
+    err(`uninstall: Scout is running (pid ${holder.pid}); quit Scout first. Nothing changed.`);
+    return 1;
+  }
   const listed = opts.agentIntegration ? record.files.filter(isIntegrationEntry) : record.files;
   out(`${opts.agentIntegration ? "Agent integration" : "Files"} listed in ${L.installed}:`);
   for (const f of listed) out(`  ${String(f.kind).padEnd(22)} ${f.path}`);
+  const wrappers = exportedWrapperNames(record, L);
+  if (wrappers.length) {
+    out(`Scout app skill wrappers listed in ${L.exportsManifest} (each removed only if unchanged since Scout wrote it):`);
+    for (const name of wrappers) out(`  ${"skill-wrapper".padEnd(22)} ${join(record.skillsRoot, name)}`);
+  }
+  if (holder.state === "running") out(`Scout is running (pid ${holder.pid}): the real run would stop here and change nothing; quit Scout first.`);
   if (opts.dryRun) out(`Dry run: nothing is changed.`);
   else if (!opts.yes) {
     const answer = await confirm(
       opts.agentIntegration
-        ? "Remove the MCP registration and skill above if they are still exactly what setup installed? [y/N] "
-        : "Remove the files above that still carry this install's marker? [y/N] ",
+        ? `Remove the MCP registration and skill above if they are still exactly what setup installed${wrappers.length ? ", and the unchanged skill wrappers" : ""}? [y/N] `
+        : `Remove the files above that are still exactly what setup wrote${wrappers.length ? ", and the unchanged skill wrappers" : ""}? [y/N] `,
     );
     if (answer === null) {
       err("uninstall: stdin is not a terminal; re-run with --yes to confirm. Nothing changed.");
@@ -268,6 +281,17 @@ function coreCli(L) {
   return installed && exists(installed) ? installed : layout({ scoutRoot: REPO_ROOT }).coreCli;
 }
 
+/** Wrapper names exports.json lists, when installed.json records a skills root; [] if unreadable. */
+function exportedWrapperNames(record, L) {
+  if (!record.skillsRoot) return [];
+  try {
+    const entries = JSON.parse(readFileSync(L.exportsManifest, "utf8"))?.entries;
+    return Array.isArray(entries) ? entries.map((e) => e?.name).filter((n) => typeof n === "string" && /^scout-[a-z]+-[0-9a-f]{16}$/.test(n)) : [];
+  } catch {
+    return [];
+  }
+}
+
 /**
  * Step one: remove the Scout app's exported skill wrappers through the core's one-shot CLI.
  * Returns { lines, kept, stop? }: `stop` is a reason to change nothing at all.
@@ -284,15 +308,14 @@ export function unexportWrappers(record, { env, L, dryRun }) {
   if (!listed || listed.wrappers === 0) return { lines, kept: 0 };
   const cli = coreCli(L);
   const command = `${process.execPath} ${cli} capabilities unexport-all --home ${L.scoutHome}`;
-  const holder = coreLockHolder(L);
   if (dryRun) {
     lines.push(`would run ${command}`);
     if (listed.error) lines.push(`  (${listed.error}; the real run would stop here and change nothing)`);
     else lines.push(`  it would remove each of the ${listed.wrappers} Scout app skill wrapper(s) listed in ${L.exportsManifest} that is unchanged, and keep and list any you changed`);
-    if (holder.state === "running") lines.push(`  Scout is running (pid ${holder.pid}): the real run would stop here and change nothing; quit Scout first`);
     return { lines, kept: 0 };
   }
-  if (holder.state === "running") return { lines, kept: 0, stop: `Scout is running (pid ${holder.pid}) and owns its skill wrappers; quit Scout first` };
+  // Checked again by the CLI itself, which holds the lock: Scout may have started since.
+  if (coreLockHolder(L).state === "running") return { lines, kept: 0, stop: "Scout is running and owns its skill wrappers; quit Scout first" };
   const r = spawnSync(process.execPath, [cli, "capabilities", "unexport-all", "--home", L.scoutHome, "--json"], {
     env: { ...env, SCOUT_HOME: L.scoutHome },
     encoding: "utf8",

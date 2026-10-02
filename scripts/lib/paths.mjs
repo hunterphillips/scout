@@ -6,7 +6,7 @@
 //   CHROME_NMH_DIR         replaces ~/Library/Application Support/Google/Chrome/NativeMessagingHosts
 //   SCOUT_SKILLS_ROOT      replaces the Claude Code skills root (agent integration only)
 //   SCOUT_CLAUDE_BIN       the `claude` executable the agent integration runs (lib/agent-integration.mjs)
-//   LAUNCH_AGENTS_DIR      replaces ~/Library/LaunchAgents (setup --login-launch only; lib/launch-agent.mjs)
+//   LAUNCH_AGENTS_DIR      replaces ~/Library/LaunchAgents (setup --login-launch only; lib/app-bundle.mjs)
 // Each override moves only its own location. A Scout home that is not the real ~/.scout
 // (isRealScoutHome) never authorizes touching the real Claude Code configuration, and the
 // agent integration refuses SCOUT_SKILLS_ROOT / SCOUT_CLAUDE_BIN on the real ~/.scout.

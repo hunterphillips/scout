@@ -385,13 +385,25 @@ describe("uninstall and the agent integration", () => {
     for (const args of [["--yes", "--agent-integration"], ["--yes"]]) {
       const r = await uninstall(args);
       expect(r.code).toBe(1);
-      expect(r.text()).toMatch(/Scout is running \(pid \d+\) and owns its skill wrappers; quit Scout first\. Nothing changed\./);
+      expect(r.text()).toMatch(/Scout is running \(pid \d+\); quit Scout first\. Nothing changed\./);
     }
     const dry = await uninstall(["--dry-run"]);
     expect(dry.code).toBe(0);
     expect(dry.text()).toMatch(/Scout is running \(pid \d+\): the real run would stop here/);
+    for (const w of wrappers) expect(dry.text()).toContain(join(skillsRoot, w));
     expect(listTree(fx.root).filter((f) => !f.startsWith("fake-bin/"))).toEqual(before);
     expect(registry()).toEqual(reg);
+    for (const w of wrappers) expect(existsSync(join(skillsRoot, w))).toBe(true);
+  });
+
+  it("lists the wrappers it will remove before asking", async () => {
+    const wrappers = await installWithNeighbours();
+    let asked = null;
+    const c = { lines: [] };
+    const code = await runUninstall([], { env, out: (l) => c.lines.push(l), err: (l) => c.lines.push(l), claudeFallbacks: [], confirm: async (q) => ((asked = { q, before: [...c.lines] }), false) });
+    expect(code).toBe(1);
+    expect(asked.q).toMatch(/and the unchanged skill wrappers\? \[y\/N\]/);
+    for (const w of wrappers) expect(asked.before.join("\n")).toContain(join(skillsRoot, w));
     for (const w of wrappers) expect(existsSync(join(skillsRoot, w))).toBe(true);
   });
 

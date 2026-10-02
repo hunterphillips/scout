@@ -5,7 +5,7 @@
 // capabilities/storeLock.ts) for its lifetime, so a lock whose pid is alive means Scout is
 // running. A pid we may not signal (EPERM) is not ours, which the core itself treats as stale.
 
-import { lstatSync, readFileSync } from "node:fs";
+import { closeSync, fstatSync, lstatSync, openSync, readFileSync, readSync } from "node:fs";
 
 /** { state: "absent" | "running" | "stale" | "unreadable", pid? } for the store lock. */
 export function coreLockHolder(L, { probe = (pid) => process.kill(pid, 0) } = {}) {
@@ -53,11 +53,23 @@ export function inspectPrivate(path, kind, mode) {
  */
 export function lastPreflight(logPath, { maxBytes = 1024 * 1024 } = {}) {
   let text;
+  let fd;
   try {
-    const buf = readFileSync(logPath);
-    text = buf.subarray(Math.max(0, buf.length - maxBytes)).toString("utf8");
+    fd = openSync(logPath, "r");
+    const size = fstatSync(fd).size;
+    const length = Math.min(size, maxBytes);
+    const buf = Buffer.alloc(length);
+    let got = 0;
+    while (got < length) {
+      const n = readSync(fd, buf, got, length - got, size - length + got);
+      if (n === 0) break;
+      got += n;
+    }
+    text = buf.subarray(0, got).toString("utf8");
   } catch {
     return null;
+  } finally {
+    if (fd !== undefined) closeSync(fd);
   }
   const lines = text.split("\n");
   for (let i = lines.length - 1; i >= 0; i--) {

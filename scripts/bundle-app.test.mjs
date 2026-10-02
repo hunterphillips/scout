@@ -82,8 +82,10 @@ describe("bundle-app", () => {
     expect(runBundle(["--out", join(root, "o2"), "--binary", plain], c2)).toBe(1);
     expect(c2.text()).toMatch(/not an executable file/);
   });
+});
 
-  it.skipIf(!HAS_SWIFT || !process.env.SCOUT_BUNDLE_SWIFT)("builds the real app with swift (SCOUT_BUNDLE_SWIFT=1)", () => {
+describe.skipIf(!HAS_SWIFT || !process.env.SCOUT_BUNDLE_SWIFT)("bundle-app with the real Swift build (opt-in: SCOUT_BUNDLE_SWIFT=1 and swift on PATH)", () => {
+  it("builds the real app with swift build -c release", () => {
     const c = capture();
     expect(runBundle(["--out", out], c), c.text()).toBe(0);
     checkBundle(join(out, "Scout.app"));

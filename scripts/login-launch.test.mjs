@@ -147,6 +147,17 @@ describe("uninstall and the LaunchAgent", () => {
     expect(r.text()).toMatch(/SKIP .*victim\.plist \(not a path setup writes for kind launch-agent/);
   });
 
+  it("stops while Scout runs even with no wrappers, leaving the agent profile", async () => {
+    expect(setup().code).toBe(0);
+    mkdirSync(join(L.scoutHome, "capabilities"), { recursive: true, mode: 0o700 });
+    writeFileSync(L.storeLock, JSON.stringify({ pid: process.pid, instanceId: "core", startedAt: 1 }));
+    const r = await uninstall(["--yes", "--include-key"]);
+    expect(r.code).toBe(1);
+    expect(r.text()).toMatch(/Scout is running \(pid \d+\); quit Scout first\. Nothing changed\./);
+    expect(existsSync(L.agentProfile)).toBe(true);
+    expect(existsSync(L.installed)).toBe(true);
+  });
+
   it("removes an unchanged agent profile but keeps an edited one", async () => {
     expect(setup().code).toBe(0);
     writeFileSync(L.agentProfile, readFileSync(L.agentProfile, "utf8").replace("claude-sonnet-5-5", "claude-opus-5-5"));
