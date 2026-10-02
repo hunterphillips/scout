@@ -41,7 +41,10 @@
 //   displayed identity against the result it holds and re-checks the stored target and the
 //   origin's grant; `ok` carries `target: { href }` (only this command's ack does). Codes:
 //   `stale_revision`, `not_found`, `not_permitted`, `unavailable` (also without a registry).
-//   It changes no stored state. A retried ID gets the first ok ack (and target) again.
+//   It changes no stored state. A retried ID gets the first ok ack (and target) again from the
+//   cache, without resolving again, even if the result has since been cleared: the duplicate
+//   carries the href resolved for the original click. The app opens a link only for the ack
+//   that settles a pending `open_link` it issued, so a duplicate ack opens nothing more.
 // Acks for commands not about one resource carry `revision: 0`.
 
 import type { MutationCommand, PanelAck } from "@scout/contracts";

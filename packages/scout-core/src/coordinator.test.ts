@@ -1004,8 +1004,10 @@ describe("coordinator results", () => {
     s.chrome();
     c.observe(s.focus());
     const epoch = s.coordinator.tracker.epoch;
-    const publish = (visitEpoch = epoch) =>
-      results.publish({
+    /** Begin job-1 for the current visit (if any), then publish its result for `visitEpoch`. */
+    const publish = (visitEpoch = epoch) => {
+      results.beginJob("job-1");
+      return results.publish({
         coreInstanceId: "core-test",
         visitEpoch,
         origin: SITE,
@@ -1013,6 +1015,7 @@ describe("coordinator results", () => {
         status: "ok",
         items: [{ candidateId: "c1", title: "Checkout", reason: "r", href: `${SITE}/payments/checkout`, hostname: "docs.stripe.com" }],
       });
+    };
     return { ...s, c, results, epoch, publish };
   }
 
@@ -1051,6 +1054,29 @@ describe("coordinator results", () => {
     s.c.disconnect();
     expect(s.results.current()).toBeNull();
     expect(s.panel.at(-1)).toEqual({ type: "state", status: "disconnected" });
+  });
+
+  it("a disconnect sends exactly the disconnected state: no idle for the old visit first", () => {
+    const s = withResults();
+    s.publish();
+    const before = s.panel.length;
+    s.c.disconnect();
+    expect(s.panel.slice(before)).toEqual([{ type: "state", status: "disconnected" }]);
+  });
+
+  it("the coordinator's clears are silent: each sends only its own state frame", () => {
+    const s = withResults();
+    s.publish();
+    let before = s.panel.length;
+    s.coordinator.handleNativeCommand({ type: "pause" });
+    expect(s.panel.slice(before)).toEqual([{ type: "state", status: "paused" }]);
+    s.coordinator.handleNativeCommand({ type: "resume" });
+    s.publish(s.coordinator.tracker.epoch);
+    before = s.panel.length;
+    s.c.observe(s.focus({ url: "https://www.peakdesign.com/" }));
+    expect(s.panel.slice(before)).toEqual([
+      expect.objectContaining({ type: "state", status: "idle", visitEpoch: s.coordinator.tracker.epoch }),
+    ]);
   });
 
   it("a replacing sensor clears the result", () => {

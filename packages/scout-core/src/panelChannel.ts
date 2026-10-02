@@ -10,9 +10,15 @@
 // toggles it. A `preview` command answers with a chunk, or with a failure ack.
 //
 // Recommendation results (results.ts): a publish goes out as a `results` frame (hrefs
-// stripped); a clear that dropped a result asks the coordinator to send its current state
-// again (`resendState`), which the window reads as "this visit's results are gone". No
-// stand-in `empty` frame is ever sent. `open_link` is answered from the same registry.
+// stripped); a non-silent clear that dropped a result asks the coordinator to send its current
+// state again (`resendState`), which the window reads as "this visit's results are gone". The
+// coordinator's own clears are silent: the state frame it sends next resets the window anyway.
+// No stand-in `empty` frame is ever sent. `open_link` is answered from the same registry.
+//
+// Ordering: the window drops a visit's results on any `state` frame for that visit other than
+// `working` for the same job. So the coordinator (or P3.2's job scheduler) emits a job's
+// `working{jobId}` and then the visit's `idle` before the result is published; an `idle` or
+// `resendState` for the same visit after the publish wipes the window's results.
 
 import type { PanelAck, PanelCommand, PanelState } from "@scout/contracts";
 import type { GrantWrite } from "./agentApi/grants.js";

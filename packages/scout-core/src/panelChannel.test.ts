@@ -129,6 +129,7 @@ describe("panel channel", () => {
     it("sends a published result as a frame without its href, and answers open_link from it", async () => {
       const results = registry();
       const s = setup({ results });
+      results.beginJob("job-1");
       results.publish(result);
       expect(s.frames).toEqual([
         {
@@ -151,10 +152,22 @@ describe("panel channel", () => {
       const s = setup({ results, resendState: () => void resent++ });
       results.clear("visit_changed"); // nothing held: nothing to say
       expect(resent).toBe(0);
+      results.beginJob("job-1");
       results.publish(result);
       results.clear("visit_changed");
       expect(resent).toBe(1);
       expect(s.frames.filter((f) => f.type === "results")).toHaveLength(1);
+    });
+
+    it("a silent clear (the coordinator's own) re-sends nothing", () => {
+      const results = registry();
+      let resent = 0;
+      setup({ results, resendState: () => void resent++ });
+      results.beginJob("job-1");
+      results.publish(result);
+      expect(results.clear("paused", { silent: true })).toBe(true);
+      expect(results.current()).toBeNull();
+      expect(resent).toBe(0);
     });
 
     it("stops listening when stopped", () => {
@@ -162,6 +175,7 @@ describe("panel channel", () => {
       let resent = 0;
       const s = setup({ results, resendState: () => void resent++ });
       s.channel.stop();
+      results.beginJob("job-1");
       results.publish(result);
       results.clear("stopped");
       expect(s.frames).toEqual([]);

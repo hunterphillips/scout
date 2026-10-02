@@ -7,8 +7,9 @@
 // Results: a `results` frame names the core instance, visit, origin, and job it answers and
 // never carries a URL. A `state` frame resets the window's results for the visit it names (a
 // new `visitEpoch`, `paused`, `disconnected`, or `idle` for the same visit when the core
-// cleared them); `working` with a `jobId` starts a new job's spinner. So the core sends the
-// state back to `idle` before it publishes a job's results, never after.
+// cleared them); `working` with a `jobId` starts a new job's spinner. So the core sends
+// `working{jobId}` and then the visit's `idle` before it publishes a job's results, never
+// after: a later `idle` for the same visit (a re-sent state included) wipes them.
 //
 // App -> core commands must each fit in one atomic pipe write (NATIVE_COMMAND_MAX_BYTES, the
 // platform's PIPE_BUF): the app drops a larger write rather than splitting it. So commands

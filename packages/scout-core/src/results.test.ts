@@ -1,6 +1,7 @@
 import { PanelStateSchema } from "@scout/contracts";
 import { describe, expect, it } from "vitest";
 import type { DiagnosticFields, Diagnostics } from "./diagnostics.js";
+import { verifyTargets } from "./catalog/verifyTargets.js";
 import { checkTarget, createResultRegistry, type PublishedResult, type ResultsEvent, toFrame } from "./results.js";
 
 const ORIGIN = "https://docs.example.com";
@@ -34,6 +35,8 @@ function setup() {
   });
   const heard: ResultsEvent[] = [];
   registry.subscribe((e) => void heard.push(e));
+  // The job every `ok()` result names, begun for visit 4.
+  registry.beginJob("job-1");
   return { registry, state, events, heard };
 }
 
@@ -68,6 +71,7 @@ describe("result registry", () => {
       { ...id, status: "error", reason: "timeout" },
       { ...id, status: "cancelled", reason: "superseded" },
     ];
+    registry.beginJob("job-2");
     for (const r of results) {
       expect(registry.publish(r)).toEqual({ ok: true });
       expect(PanelStateSchema.parse(toFrame(r))).toEqual(toFrame(r));
@@ -91,6 +95,7 @@ describe("result registry", () => {
   it("a late job's result never overwrites a newer visit's", () => {
     const { registry, state } = setup();
     state.visit = { visitEpoch: 5, origin: ORIGIN };
+    registry.beginJob("job-new");
     expect(registry.publish(ok({ visitEpoch: 5, jobId: "job-new" }))).toEqual({ ok: true });
     expect(registry.publish(ok({ visitEpoch: 4, jobId: "job-old" }))).toEqual({ ok: false, code: "stale_visit" });
     expect(registry.current()?.jobId).toBe("job-new");
@@ -111,17 +116,77 @@ describe("result registry", () => {
       ok({ items: [{ ...item, candidateId: "https://evil.example/" }] } as Partial<PublishedResult>),
       ok({ jobId: "has space" }),
     ];
-    for (const r of bad) expect(registry.publish(r), JSON.stringify(r)).toEqual({ ok: false, code: "invalid" });
+    for (const r of bad) {
+      registry.beginJob(r.jobId);
+      expect(registry.publish(r), JSON.stringify(r)).toEqual({ ok: false, code: "invalid" });
+    }
+  });
+
+  it("a replaced job's result is refused, whether the replacement answered or is still running", () => {
+    const { registry, heard } = setup();
+    // job-1 (A) is begun by setup; B replaces it and answers.
+    expect(registry.beginJob("job-2")).toEqual({ ok: true });
+    expect(registry.publish(ok({ jobId: "job-2" }))).toEqual({ ok: true });
+    expect(registry.publish(ok())).toEqual({ ok: false, code: "stale_job" });
+    expect(registry.current()?.jobId).toBe("job-2");
+    expect(heard).toHaveLength(1);
+
+    // A refused while B is still running, and nothing held changes.
+    const second = setup();
+    expect(second.registry.beginJob("job-2")).toEqual({ ok: true });
+    expect(second.registry.publish(ok())).toEqual({ ok: false, code: "stale_job" });
+    expect(second.registry.current()).toBeNull();
+  });
+
+  it("stale_job is checked after stale_visit, and before the origin and grant", () => {
+    const { registry, state } = setup();
+    expect(registry.publish(ok({ visitEpoch: 3, jobId: "job-9" }))).toEqual({ ok: false, code: "stale_visit" });
+    expect(registry.publish(ok({ jobId: "job-9", origin: "https://other.example.com" }))).toEqual({ ok: false, code: "stale_job" });
+    state.permitted = false;
+    expect(registry.publish(ok({ jobId: "job-9" }))).toEqual({ ok: false, code: "stale_job" });
+  });
+
+  it("beginJob needs a current visit; a clear or a new visit forgets the job", () => {
+    const { registry, state, events } = setup();
+    state.visit = null;
+    expect(registry.beginJob("job-2")).toEqual({ ok: false, code: "stale_visit" });
+    expect(events.at(-1)).toEqual({ name: "results_job_refused", fields: { code: "stale_visit" } });
+
+    state.visit = { visitEpoch: 4, origin: ORIGIN };
+    registry.clear("job_replaced");
+    expect(registry.publish(ok())).toEqual({ ok: false, code: "stale_job" });
+
+    registry.beginJob("job-1");
+    state.visit = { visitEpoch: 5, origin: ORIGIN };
+    expect(registry.publish(ok({ visitEpoch: 5 }))).toEqual({ ok: false, code: "stale_job" });
+  });
+
+  it("a held result stops resolving links once a newer job begins", () => {
+    const { registry } = setup();
+    registry.publish(ok());
+    expect(registry.resolveLink(link())).toMatchObject({ ok: true });
+    registry.beginJob("job-2");
+    expect(registry.resolveLink(link())).toEqual({ ok: false, code: "stale_revision" });
   });
 
   it("clear drops the result once and tells listeners", () => {
     const { registry, heard } = setup();
     expect(registry.clear("visit_changed")).toBe(false);
+    registry.beginJob("job-1"); // the clear forgot the job
     registry.publish(ok());
     expect(registry.clear("paused")).toBe(true);
     expect(registry.clear("paused")).toBe(false);
     expect(registry.current()).toBeNull();
     expect(heard.at(-1)).toEqual({ kind: "cleared", visitEpoch: 4, reason: "paused" });
+  });
+
+  it("a silent clear drops the result and logs it but tells no listener", () => {
+    const { registry, heard, events } = setup();
+    registry.publish(ok());
+    expect(registry.clear("disconnected", { silent: true })).toBe(true);
+    expect(registry.current()).toBeNull();
+    expect(heard.map((e) => e.kind)).toEqual(["published"]);
+    expect(events.at(-1)).toEqual({ name: "results_cleared", fields: { epoch: 4, reason: "disconnected" } });
   });
 
   it("resolves a displayed link to its stored, re-checked target", () => {
@@ -215,5 +280,26 @@ describe("checkTarget", () => {
     [`${ORIGIN}/${"a".repeat(2048)}`, false],
   ])("%s -> %s", (href, accepted) => {
     expect(checkTarget(href, ORIGIN) !== null).toBe(accepted);
+  });
+
+  it("accepts every humanHref verifyTargets keeps, including ones the parser normalized", async () => {
+    const paths = ["/Guides/Start Here.md", "/a/../b/%7Euser?q=ü#frag", "/payments/subscriptions.md"];
+    const candidates = paths.map((path, i) => ({
+      id: `c${i}`,
+      sourceUrl: `${ORIGIN}${path}`,
+      title: path,
+      labelQuality: "published" as const,
+      provenance: "llms.txt" as const,
+    }));
+    const { verified } = await verifyTargets(candidates, {
+      origin: ORIGIN,
+      fetch: async (url) => ({ kind: "ok", status: 200, body: "<html></html>", bytes: new Uint8Array(), contentType: "text/html", finalUrl: url }),
+    });
+    expect(verified).toHaveLength(paths.length);
+    for (const { humanHref } of verified) {
+      expect(checkTarget(humanHref, ORIGIN)?.href, humanHref).toBe(humanHref);
+    }
+    // The raw source strings themselves are not in the parser's form, so only the normalized ones pass.
+    expect(checkTarget(`${ORIGIN}/Guides/Start Here.md`, ORIGIN)).toBeNull();
   });
 });

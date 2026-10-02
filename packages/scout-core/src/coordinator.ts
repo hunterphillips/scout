@@ -46,8 +46,9 @@
 //
 // Recommendation results (results.ts) live only as long as their visit: a visit change (which
 // includes losing the origin's grant, which clears them first), pause, disconnect (or a
-// replacing sensor), and stop clear them. A clear that dropped a result is followed by the
-// current state, sent again even when unchanged (`resendState`), so the window drops them too.
+// replacing sensor), and stop clear them. These clears are silent: the state frame each sends
+// next (the new visit's idle, paused, disconnected) is what makes the window drop them, and
+// stop sends nothing. `resendState` is for P3.2's job clears within one visit.
 
 import type {
   ActiveVisit,
@@ -146,7 +147,11 @@ export function createCoordinator(options: CoordinatorOptions): Coordinator {
   const permissions = createPermissionState({ diagnostics });
   const caps = options.capabilities;
   const panelChanged = (): void => options.panel?.capabilitiesChanged();
-  const clearResults = (reason: string): void => void options.results?.clear(reason);
+  // Silent: every caller sends a state frame next (a new visit's idle, paused, disconnected),
+  // or none at all (stop), so a `resendState` here would only add a stray frame (an idle for the
+  // old epoch before `disconnected`). The non-silent clear is for P3.2's job clears within one
+  // visit, where no other state frame follows.
+  const clearResults = (reason: string): void => void options.results?.clear(reason, { silent: true });
 
   let paused = false;
   let stopped = false;

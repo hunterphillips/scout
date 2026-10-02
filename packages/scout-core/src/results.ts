@@ -1,10 +1,19 @@
 // The recommendation result Scout's window shows, and the only way a click becomes a URL.
 //
 // The pipeline publishes one result per job; the registry holds at most one, for the current
-// visit. It refuses a result for another core instance, a visit that is no longer current (a
-// late job, a paused or disconnected core), another origin than the visit's, or an origin
-// Chrome no longer grants, so a late job can never overwrite a newer visit's result. A result
-// for the current visit replaces the one held (a replacement job's answer).
+// visit. Each job is announced first (`beginJob`), which makes it the visit's current job; a
+// newer `beginJob` replaces it, and a `clear` or a new visit forgets it. The registry refuses a
+// result for another core instance, a visit that is no longer current (a late job, a paused or
+// disconnected core), a job that is not the current one (a replaced job, or none begun), another
+// origin than the visit's, or an origin Chrome no longer grants, so neither a late job nor a
+// replaced one can overwrite a newer answer. A result of the current job replaces the one held.
+//
+// Ordering (the scheduler's contract with the window): the window resets a visit's results on
+// every `state` frame for that visit except `working` for the same job, so a job's state frames
+// must all go out before its result. For a job the scheduler emits `working{jobId}`, then the
+// visit's `idle` when the job ends, and only then calls `publish`. Any `idle` (or `resendState`)
+// for the same visit after the publish wipes the window's results while the registry still
+// holds them, and a later click on one is answered from the registry only if it is still held.
 //
 // Each `ok` item carries the verified target (catalog/verifyTargets.ts `humanHref`, the HTML
 // twin when one was verified). The registry keeps it; the window's frame never carries it
@@ -14,8 +23,10 @@
 // The registry never fetches.
 //
 // The coordinator clears the result when its visit ends, on pause, on loss of the origin's
-// grant, on disconnect, and on stop. Listeners hear every publish and every clear that dropped
-// a result; the panel channel turns them into frames.
+// grant, on disconnect, and on stop, silently: the state frame that follows each of those
+// already resets the window. Listeners hear every publish and every non-silent clear that
+// dropped a result; the panel channel sends a publish as a `results` frame and answers a
+// non-silent clear (a job clear within the same visit) with `resendState`.
 //
 // Diagnostics carry status, counts, epochs, and codes only: never titles, reasons, or hrefs.
 
@@ -26,6 +37,7 @@ import {
   type PanelResults,
   PanelStateSchema,
 } from "@scout/contracts";
+import { exactSameOriginHttpsUrl } from "./catalog/sameOrigin.js";
 import type { Diagnostics } from "./diagnostics.js";
 
 export interface PublishedItem {
@@ -63,6 +75,8 @@ export type PublishRefusal =
   | "stale_instance"
   /** Not the current visit, or no visit is current (paused, disconnected, stopped). */
   | "stale_visit"
+  /** Not the visit's current job: a newer `beginJob` replaced it, or none was begun since the last clear. */
+  | "stale_job"
   /** Not the current visit's origin. */
   | "wrong_origin"
   /** Chrome no longer grants the origin. */
@@ -84,13 +98,34 @@ export interface ResultRegistryOptions {
   diagnostics?: Diagnostics;
 }
 
+export interface ClearOptions {
+  /**
+   * Tell no listener: the caller sends a state frame anyway (the coordinator's clears on a visit
+   * change, permission loss, pause, disconnect, and stop). Without it a clear that dropped a
+   * result is heard, and the panel channel re-sends the current state so the window drops it
+   * (a job clear within the same visit).
+   */
+  silent?: boolean;
+}
+
 export interface ResultRegistry {
-  /** Hold `result` as the current one and tell listeners; returns why not when refused. */
+  /**
+   * Make `jobId` the current visit's job, replacing any earlier one: from now on only its result
+   * may be published, and only a held result of it resolves links. Refused (`stale_visit`) when
+   * no visit is current. The job is forgotten on `clear` and when the visit changes.
+   */
+  beginJob(jobId: string): { ok: true } | { ok: false; code: "stale_visit" };
+  /**
+   * Hold `result` as the current one and tell listeners; returns why not when refused. Checks,
+   * in order: `stale_instance`, `stale_visit`, `stale_job`, `wrong_origin`, `not_permitted`,
+   * `invalid`. Call it only after the job's state frames (`working`, then the visit's `idle`):
+   * a later `idle` or `resendState` for the visit wipes the window's results (see the header).
+   */
   publish(result: PublishedResult): { ok: true } | { ok: false; code: PublishRefusal };
   /** The result held, hrefs included (a copy). */
   current(): PublishedResult | null;
-  /** Drop the result held; returns whether there was one. */
-  clear(reason: string): boolean;
+  /** Drop the result held and forget the current job; returns whether a result was held. */
+  clear(reason: string, options?: ClearOptions): boolean;
   /** The re-checked target for a clicked candidate. */
   resolveLink(request: LinkRequest): LinkResolution;
   /** Hear publishes and clears; returns an unsubscribe. */
@@ -125,28 +160,20 @@ export function toFrame(result: PublishedResult): PanelResults {
 }
 
 /**
- * `href` as a URL Scout may open for `origin`, or null: https, no credentials, no explicit
- * port (so only origins on the default port qualify), and exactly `origin`. Any path, query,
- * or fragment on that origin passes, so a verified HTML twin does.
+ * `href` as a URL Scout may open for `origin`, or null. The rule is catalog/sameOrigin.ts's
+ * `exactSameOriginHttpsUrl`: https, no credentials, the default port, the same origin, and the
+ * string exactly as the parser writes it. Any path, query, or fragment on that origin passes, so
+ * a verified HTML twin does.
  */
 export function checkTarget(href: string, origin: string): URL | null {
-  if (typeof href !== "string" || href.length > 2048) return null;
-  let url: URL;
-  try {
-    url = new URL(href);
-  } catch {
-    return null;
-  }
-  if (url.protocol !== "https:" || url.username !== "" || url.password !== "" || url.port !== "") return null;
-  // The parsed URL must be the string itself: no whitespace, backslashes, or other forms the
-  // parser rewrites (and the app's parser might read differently).
-  if (url.href !== href) return null;
-  return url.origin === origin ? url : null;
+  return exactSameOriginHttpsUrl(href, origin);
 }
 
 export function createResultRegistry(options: ResultRegistryOptions): ResultRegistry {
   const { diagnostics } = options;
   let held: PublishedResult | null = null;
+  /** The current job and the visit it was begun for; it counts only while that visit is current. */
+  let job: { jobId: string; visitEpoch: number } | null = null;
   const listeners = new Set<(event: ResultsEvent) => void>();
 
   const notify = (event: ResultsEvent): void => {
@@ -166,6 +193,7 @@ export function createResultRegistry(options: ResultRegistryOptions): ResultRegi
     if (r.coreInstanceId !== options.coreInstanceId) return "stale_instance";
     const visit = options.activeVisit();
     if (visit === null || visit.visitEpoch !== r.visitEpoch) return "stale_visit";
+    if (job === null || job.visitEpoch !== visit.visitEpoch || job.jobId !== r.jobId) return "stale_job";
     if (visit.origin !== r.origin) return "wrong_origin";
     if (!options.isPermitted(r.origin)) return "not_permitted";
     if (!PanelStateSchema.safeParse(toFrame(r)).success) return "invalid";
@@ -184,6 +212,8 @@ export function createResultRegistry(options: ResultRegistryOptions): ResultRegi
     if (r.visitEpoch !== request.visitEpoch || r.jobId !== request.jobId) return { ok: false, code: "stale_revision" };
     // The result should have been cleared with its visit; check anyway.
     if (options.activeVisit()?.visitEpoch !== r.visitEpoch) return { ok: false, code: "stale_revision" };
+    // A newer job has begun for this visit: the held answer is no longer the visit's.
+    if (job === null || job.visitEpoch !== r.visitEpoch || job.jobId !== r.jobId) return { ok: false, code: "stale_revision" };
     const item = r.status === "ok" ? r.items.find((i) => i.candidateId === request.candidateId) : undefined;
     if (item === undefined) return { ok: false, code: "not_found" };
     if (!options.isPermitted(r.origin)) return { ok: false, code: "not_permitted" };
@@ -193,6 +223,15 @@ export function createResultRegistry(options: ResultRegistryOptions): ResultRegi
   };
 
   return {
+    beginJob(jobId) {
+      const visit = options.activeVisit();
+      if (visit === null) {
+        diagnostics?.event("results_job_refused", { code: "stale_visit" });
+        return { ok: false, code: "stale_visit" };
+      }
+      job = { jobId, visitEpoch: visit.visitEpoch };
+      return { ok: true };
+    },
     publish(result) {
       const code = refusal(result);
       if (code !== null) {
@@ -209,12 +248,13 @@ export function createResultRegistry(options: ResultRegistryOptions): ResultRegi
       return { ok: true };
     },
     current: () => (held === null ? null : copy(held)),
-    clear(reason) {
+    clear(reason, clearOptions = {}) {
+      job = null;
       if (held === null) return false;
       const { visitEpoch } = held;
       held = null;
       diagnostics?.event("results_cleared", { epoch: visitEpoch, reason });
-      notify({ kind: "cleared", visitEpoch, reason });
+      if (clearOptions.silent !== true) notify({ kind: "cleared", visitEpoch, reason });
       return true;
     },
     resolveLink(request) {

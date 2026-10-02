@@ -418,6 +418,7 @@ describe("native commands", () => {
         activeVisit: () => ({ visitEpoch: state.epoch, origin: SITE }),
         isPermitted: () => state.permitted,
       });
+      results.beginJob("job-1");
       results.publish({
         coreInstanceId: CORE,
         visitEpoch: 4,
@@ -455,6 +456,15 @@ describe("native commands", () => {
       results.clear("visit_changed");
       await s.commands.handle(open("o1"));
       expect(s.acks[0]).toMatchObject({ ok: false, code: "stale_revision" });
+    });
+
+    it("a retried ID after the result was cleared gets the cached ack and href, not a new resolve", async () => {
+      const { s, results } = withResults();
+      await s.commands.handle(open("o1"));
+      results.clear("visit_changed");
+      await s.commands.handle(open("o1"));
+      expect(s.acks[1]).toEqual(s.acks[0]);
+      expect(s.acks[1]).toMatchObject({ ok: true, target: { href: "https://docs.example.com/webhooks" } });
     });
 
     it("is idempotent: a retried ID gets the first ack; a failed one runs again", async () => {
