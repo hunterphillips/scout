@@ -62,19 +62,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// `applicationWillTerminate` no supported way to wait that long without freezing the app's
     /// run loop, so the wait happens here instead: `.terminateLater` keeps the app running (in the
     /// modal-panel run-loop mode, which the main queue still serves) until
-    /// `reply(toApplicationShouldTerminate:)` once the sidecar is gone.
+    /// `reply(toApplicationShouldTerminate:)` once the sidecar is gone. The decision is
+    /// ScoutKit's `TerminationPolicy`: a second Quit while one is pending waits for the same reply
+    /// (never `.terminateCancel`, which left Quit stuck); with no sidecar running, quit at once.
     private var terminating = false
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        // A second request while the first is pending: the first reply ends the app.
-        guard !terminating else { return .terminateCancel }
-        terminating = true
-        resendTimer?.invalidate()
-        frontmost.stop()
-        sidecar.beginShutdown {
-            NSApp.reply(toApplicationShouldTerminate: true)
+        let decision = TerminationPolicy.decide(shutdownPending: terminating, sidecarRunning: sidecar.isRunning)
+        if decision.beginShutdown {
+            terminating = true
+            resendTimer?.invalidate()
+            frontmost.stop()
+            sidecar.beginShutdown {
+                NSApp.reply(toApplicationShouldTerminate: true)
+            }
         }
-        return .terminateLater
+        switch decision.reply {
+        case .now: return .terminateNow
+        case .later: return .terminateLater
+        }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
