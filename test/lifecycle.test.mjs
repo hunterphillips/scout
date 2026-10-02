@@ -4,10 +4,12 @@
 // `sleep` descendant that also ignore SIGTERM) with an optional retrieval tool whose backend
 // ignores SIGTERM and stdin EOF. Each shutdown trigger is tested on its own: the core exits 0
 // within SHUTDOWN_DEADLINE_MS, and no `claude`, Scout MCP server, bridge, backend or descendant
-// is left, nor the job dir, the sockets or the token. Builds nothing; run `npm run build` first.
+// is left, nor the job dir, the sockets or the token. A hard-killed core leaves the job running; the
+// next start kills it from the job dir's tree.json and sweeps the dir. A profile edit mid-job
+// cancels the job `superseded` and reaps its tree. Builds nothing; run `npm run build` first.
 
 import { spawn } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { endianness, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -158,7 +160,7 @@ async function startWithRunningJob(children) {
   const pids = [...fake().flatMap((l) => [l.pid, l.scoutPid].filter((p) => typeof p === "number")), ...descendants(), ...backend()];
   expect(pids).toHaveLength(6);
   expect(pids.every(alive)).toBe(true);
-  return { home, core, exited, pids, jobsRoot, stderr: () => coreErr };
+  return { home, core, exited, pids, jobsRoot, stdout: () => coreOut, stderr: () => coreErr };
 }
 
 const timings = [];
@@ -213,20 +215,25 @@ describe.skipIf(!BUILT)("core shutdown with a job running (each trigger on its o
     }, 60_000);
   }
 
-  it("a hard-killed core leaves its job dir; the next start sweeps it before agent.sock", async () => {
+  it("a hard-killed core leaves its job running; the next start kills that tree from tree.json and sweeps the dir", async () => {
     const run = await startWithRunningJob(children);
     home = run.home;
+    const [jobDir] = readdirSync(run.jobsRoot);
+    const treeFile = join(run.jobsRoot, jobDir, "tree.json");
+    const recorded = () => (existsSync(treeFile) ? JSON.parse(readFileSync(treeFile, "utf8")).members.map((m) => m.pid) : []);
+    // The poll (1 s) has recorded the whole tree, the escaped sleep included.
+    await until(() => run.pids.every((p) => recorded().includes(p)), "tree.json to name every process of the job");
+    expect((statSync(treeFile).mode & 0o777).toString(8)).toBe("600");
+    const record = JSON.parse(readFileSync(treeFile, "utf8"));
+    expect(Object.keys(record).sort()).toEqual(["members", "pgid", "pid", "schemaVersion", "startedAt"]);
+    expect(record.pid).toBe(run.pids[0]); // the CLI
     run.core.kill("SIGKILL");
     await run.exited;
-    // The job tree was never told; clean it up here (that is what the Swift hard stop is for).
-    for (const pid of run.pids) {
-      try {
-        process.kill(pid, "SIGKILL");
-      } catch {
-        // gone
-      }
-    }
+    // Nobody told the job: the CLI and its tree keep running (and would keep spending quota).
+    await new Promise((r) => setTimeout(r, 300));
+    expect(run.pids.every(alive)).toBe(true);
     expect(readdirSync(run.jobsRoot)).toHaveLength(1);
+
     const env = { PATH: "/usr/bin:/bin", HOME: join(run.home, "u"), SCOUT_HOME: run.home, SCOUT_DWELL_MS: "600000" };
     const core = spawn(process.execPath, [CORE, "--stdio"], { env, cwd: ROOT, stdio: ["pipe", "pipe", "pipe"] });
     children.push(core);
@@ -235,9 +242,36 @@ describe.skipIf(!BUILT)("core shutdown with a job running (each trigger on its o
     core.stdout.resume();
     await until(() => err.includes("listening on"), "the second core to listen");
     expect(readdirSync(run.jobsRoot)).toEqual([]);
+    await until(() => !run.pids.some(alive), "the old job's tree to be gone", 2_000);
     const events = readLines(join(run.home, "logs", "diagnostics.jsonl"));
-    expect(events.find((e) => e.event === "jobs_swept")).toMatchObject({ count: 1 });
+    const swept = events.find((e) => e.event === "jobs_swept");
+    expect(swept).toMatchObject({ count: 1 });
+    expect(swept.killed).toBeGreaterThanOrEqual(run.pids.length);
     core.stdin.end();
     expect(await new Promise((r) => core.once("exit", r))).toBe(0);
   }, 60_000);
+
+  it("a profile edit while a job runs: the job is cancelled `superseded` (published) and its whole tree reaped", async () => {
+    const run = await startWithRunningJob(children);
+    home = run.home;
+    const profilePath = join(run.home, "agent-profile.json");
+    const profile = JSON.parse(readFileSync(profilePath, "utf8"));
+    profile.tools.revision = 2;
+    const tmp = join(run.home, ".agent-profile.tmp");
+    writeFileSync(tmp, JSON.stringify(profile), { mode: 0o600 });
+    renameSync(tmp, profilePath);
+    await until(() => readLines(join(run.home, "logs", "diagnostics.jsonl")).some((e) => e.event === "job_finished"), "the job to finish", 10_000);
+    const events = readLines(join(run.home, "logs", "diagnostics.jsonl"));
+    expect(events.find((e) => e.event === "agent_profile_changed")).toMatchObject({ usable: true, toolsRevision: 2 });
+    expect(events.find((e) => e.event === "job_cancelled")).toMatchObject({ reason: "superseded" });
+    expect(events.filter((e) => e.event === "job_finished").map((e) => [e.status, e.reason])).toEqual([["cancelled", "superseded"]]);
+    // Published to the window, unlike a shutdown's cancel.
+    expect(run.stdout()).toContain('"superseded"');
+    await until(() => !run.pids.some(alive), "the old job's tree to be reaped", 5_000);
+    expect(readdirSync(run.jobsRoot)).toEqual([]);
+    run.core.stdin.end();
+    const { code } = await run.exited;
+    expect(code).toBe(0);
+  }, 60_000);
 });
+
