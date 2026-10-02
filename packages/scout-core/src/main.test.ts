@@ -1,6 +1,6 @@
 // Drives the built dist/main.js as the native app would: a child process on pipes.
 import { type ChildProcessWithoutNullStreams, execFileSync, spawn } from "node:child_process";
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { connect, Server } from "node:net";
 import { tmpdir } from "node:os";
@@ -17,7 +17,7 @@ import { type CapabilityStore, createCapabilityStore } from "./capabilities/stor
 import { DEFAULT_DESTINATIONS, readConfig, readDestinations } from "./config.js";
 import type { Diagnostics } from "./diagnostics.js";
 import { DWELL_MS } from "./dwell.js";
-import { dwellMsFromEnv, runStdio } from "./main.js";
+import { dwellMsFromEnv, runStdio, SHUTDOWN_DEADLINE_MS } from "./main.js";
 
 const pkgDir = join(dirname(fileURLToPath(import.meta.url)), "..");
 const mainJs = join(pkgDir, "dist", "main.js");
@@ -652,6 +652,57 @@ describe("runStdio (in process)", () => {
     h.stdin.end();
     await until(() => h.exits.length > 0);
   });
+
+  it("removes leftover run/jobs dirs before agent.sock is published, never following a link out of the jobs root", async () => {
+    const jobs = join(home, "run", "jobs");
+    mkdirSync(join(jobs, "j-stale", "nested"), { recursive: true, mode: 0o700 });
+    chmodSync(join(home, "run"), 0o700);
+    writeFileSync(join(jobs, "j-stale", "mcp.json"), "{}");
+    const outside = join(home, "outside");
+    mkdirSync(outside);
+    writeFileSync(join(outside, "keep"), "x");
+    symlinkSync(outside, join(jobs, "j-link"));
+    const h = harness();
+    await h.run();
+    expect(readdirSync(jobs)).toEqual([]);
+    expect(readFileSync(join(outside, "keep"), "utf8")).toBe("x");
+    const swept = h.fields.findIndex((f) => f.name === "jobs_swept");
+    expect(h.fields[swept]?.fields).toEqual({ count: 2 });
+    expect(swept).toBeLessThan(h.events.indexOf("agent_socket_listening"));
+    h.stdin.end();
+    await until(() => h.exits.length > 0);
+  });
+
+  it("holds agent-profile.lock while running; shutdown releases it and reports each step's duration", async () => {
+    const h = harness();
+    await h.run();
+    expect(existsSync(join(home, "agent-profile.lock"))).toBe(true);
+    h.stdin.end();
+    await until(() => h.exits.length > 0);
+    expect(existsSync(join(home, "agent-profile.lock"))).toBe(false);
+    expect(h.fields.find((f) => f.name === "shutdown_begin")?.fields).toEqual({ reason: "stdin-closed" });
+    const done = h.fields.find((f) => f.name === "shutdown")!.fields;
+    expect(Object.keys(done).sort()).toEqual(["descendantsMs", "jobsMs", "parsersMs", "reason", "socketsMs", "stopMs", "storeMs", "totalMs"]);
+    expect(Object.values(done).every((v) => typeof v === "number" || v === "stdin-closed")).toBe(true);
+    expect(h.events).not.toContain("shutdown_deadline");
+  });
+
+  it("a step that never finishes: exit 0 at the 5 s deadline, the pending step named", async () => {
+    const h = harness();
+    await h.run();
+    h.agent.store.close = () => new Promise<void>(() => {});
+    const t0 = Date.now();
+    h.stdin.end();
+    await until(() => h.exits.length > 0, 8_000);
+    const took = Date.now() - t0;
+    expect(took).toBeGreaterThanOrEqual(SHUTDOWN_DEADLINE_MS - 50);
+    expect(took).toBeLessThan(SHUTDOWN_DEADLINE_MS + 1_000);
+    expect(h.exits.map((e) => e.code)).toEqual([0]);
+    expect(h.fields.find((f) => f.name === "shutdown_deadline")?.fields).toEqual({ pending: "store" });
+    // The lock and the token went before the store's close.
+    expect(existsSync(join(home, "agent-profile.lock"))).toBe(false);
+    expect(existsSync(join(home, "run", "agent-token"))).toBe(false);
+  }, 15_000);
 
   it("a stdout error (EPIPE) shuts down with 0 after removing the socket", async () => {
     const h = harness();
