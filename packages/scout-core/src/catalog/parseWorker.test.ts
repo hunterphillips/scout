@@ -148,3 +148,56 @@ describe("parse worker", () => {
     });
   });
 });
+
+describe("parse worker: per-pass scopes (P3.4)", () => {
+  it("a scope whose session is cancelled refuses new parses before they reach the queue", async () => {
+    pool = createParsePool();
+    let cancelled = false;
+    const scope = pool.scope(() => cancelled);
+    expect((await scope.parsers.sitemap(bigSitemap(1), ORIGIN)).kind).toBe("urlset");
+    cancelled = true;
+    const refused = scope.parsers.sitemap(bigSitemap(1), ORIGIN);
+    expect(pool.pending).toBe(0);
+    await expect(refused).rejects.toBeInstanceOf(ParseCancelledError);
+    await expect(scope.parsers.llmsTxt("# x\n", ORIGIN, `${ORIGIN}/llms.txt`)).rejects.toBeInstanceOf(ParseCancelledError);
+  });
+
+  it("cancelling one pass's scope fails only its parses: another pass's running parse finishes", async () => {
+    pool = createParsePool();
+    const a = pool.scope();
+    const b = pool.scope();
+    const bRunning = b.parsers.sitemap(bigSitemap(2_000), ORIGIN);
+    const aQueued = a.parsers.sitemap(bigSitemap(1), ORIGIN);
+    const bQueued = b.parsers.sitemap(bigSitemap(3), ORIGIN);
+    a.cancel();
+    await expect(aQueued).rejects.toBeInstanceOf(ParseCancelledError);
+    const [r1, r2] = await Promise.all([bRunning, bQueued]);
+    expect(r1.kind === "urlset" && r1.entries.length).toBe(2_000);
+    expect(r2.kind === "urlset" && r2.entries.length).toBe(3);
+    await expect(a.parsers.sitemap(bigSitemap(1), ORIGIN)).rejects.toBeInstanceOf(ParseCancelledError);
+  }, 30_000);
+
+  it("cancelling the scope whose parse is running frees the worker at once: the next pass's parse runs in a fresh one", async () => {
+    pool = createParsePool();
+    const a = pool.scope();
+    const b = pool.scope();
+    const aRunning = a.parsers.sitemap(bigSitemap(50_000), ORIGIN);
+    const bQueued = b.parsers.sitemap(bigSitemap(2), ORIGIN);
+    const t0 = performance.now();
+    a.cancel();
+    await expect(aRunning).rejects.toBeInstanceOf(ParseCancelledError);
+    const r = await bQueued;
+    expect(r.kind === "urlset" && r.entries.length).toBe(2);
+    expect(performance.now() - t0).toBeLessThan(2_000);
+  }, 30_000);
+
+  it("close() refuses every scope and resolves once the worker has stopped", async () => {
+    pool = createParsePool();
+    const s = pool.scope();
+    const running = expect(s.parsers.sitemap(bigSitemap(50_000), ORIGIN)).rejects.toBeInstanceOf(ParseCancelledError);
+    await pool.close();
+    await running;
+    await expect(s.parsers.sitemap(bigSitemap(1), ORIGIN)).rejects.toBeInstanceOf(ParseCancelledError);
+    expect(pool.pending).toBe(0);
+  }, 30_000);
+});
