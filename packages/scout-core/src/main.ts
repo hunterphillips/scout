@@ -31,18 +31,18 @@
 // `open_link`) and the coordinator (which clears them with their visit); results may be
 // published only for the coordinator's current, unpaused, permitted visit.
 //
-// Recommendation jobs (jobScheduler.ts) run the user's agent (agents/claudeJob.ts) through the
-// profile in `agent-profile.json`; without a usable profile every job is `unavailable`. The
-// billing preflight runs off the event loop (agents/preflightWorker.ts), started once at start;
-// jobs wait for it. Catalog parsing runs in a one-thread parse worker (catalog/parseWorker.ts)
-// that a cancelled discovery pass cancels too. The scheduler hears the browser-context grant
-// through the `grant` frames the panel channel emits (the same signal the window gets), and
-// revoked resources through the store's revocation hook, after agent.sock released the
-// snapshots that pinned them.
+// Recommendation jobs: wiring/jobs.ts builds the adapter for `agent-profile.json` (without a
+// usable profile every job is `unavailable`), its billing preflight in a killable child process
+// (started at once only when some host is recommendation-enabled), the catalog parse worker a
+// cancelled discovery pass cancels too, and the scheduler. Every panel frame passes through it,
+// so the scheduler hears the browser-context grant as the window does; revoked resources reach
+// it through the store's revocation hook, after agent.sock released the snapshots that pinned
+// them.
 //
-// Shutdown order: the coordinator stops (its scheduler cancels the running job with
-// `shutdown`), then `adapter.abortAll()` waits for the job's process tree, then every snapshot
-// is released and the sockets close. The whole close is still bounded by
+// Shutdown order: a running preflight child is killed first, before anything is awaited; the
+// coordinator stops (its scheduler cancels the running job with `shutdown`); the job wiring
+// waits for the job's process tree (`adapter.abortAll()`) and closes the parse pool; then every
+// snapshot is released and the sockets close. The whole close is still bounded by
 // SHUTDOWN_DEADLINE_MS (2 s), which is the adapter's kill grace: a job that ignores SIGTERM may
 // outlive the core by that grace (P3.4 raises the deadline).
 //
@@ -59,14 +59,7 @@ import type { Readable, Writable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { NATIVE_COMMAND_MAX_BYTES, NativeCommandSchema, type PanelState } from "@scout/contracts";
 import type { AgentJobAdapter } from "./agents/adapter.js";
-import { createClaudeJobAdapter, type ClaudeJobAdapter } from "./agents/claudeJob.js";
-import { createPreflightFacade } from "./agents/preflightWorker.js";
-import { AgentProfileError, loadAgentProfile, type AgentProfile } from "./agents/profile.js";
-import { createParsePool } from "./catalog/parseWorker.js";
-import { verifyTargets } from "./catalog/verifyTargets.js";
-import { createJobScheduler, type JobScheduler } from "./jobScheduler.js";
-import type { JobAnswer } from "./pipeline.js";
-import { createJobResumeCache } from "./resumeCache.js";
+import type { JobScheduler } from "./jobScheduler.js";
 import { createActivityStore } from "./activity/store.js";
 import { createSnapshotRegistry, type SnapshotRegistry } from "./activity/snapshots.js";
 import { createAgentAuth, type InteractiveTokenFile, writeInteractiveTokenFile } from "./agentApi/auth.js";
@@ -85,11 +78,11 @@ import { ConfigError, type CoreConfig, readConfig } from "./config.js";
 import { type Coordinator, createCoordinator } from "./coordinator.js";
 import { createDiagnostics, defaultDiagnosticsPath, type Diagnostics, scoutHome } from "./diagnostics.js";
 import { DWELL_MS } from "./dwell.js";
-import { createOriginFetchSession } from "./fetch/originSession.js";
 import { InstalledRecordError, readInstalledRecord } from "./installedRecord.js";
 import { createPanelChannel, type PanelChannel } from "./panelChannel.js";
 import { createResultRegistry } from "./results.js";
 import { createSocketServer, SocketServerError } from "./socketServer.js";
+import { createJobWiring, type JobWiring } from "./wiring/jobs.js";
 
 /** Hard cap on shutdown: exit anyway if closing takes longer. */
 export const SHUTDOWN_DEADLINE_MS = 2000;
@@ -156,7 +149,7 @@ export async function runStdio(deps: StdioDeps): Promise<StdioCore> {
   // Built with the agent auth; job snapshots exist only once agent.sock can serve them.
   let snapshots: SnapshotRegistry | null = null;
   // Built after the store and the coordinator's inputs; the store's revocation hook and the grant frames reach it then.
-  let scheduler: JobScheduler | null = null;
+  let jobs: JobWiring | null = null;
   let store: CapabilityStore;
   try {
     store = await createCapabilityStore({
@@ -166,7 +159,7 @@ export async function runStdio(deps: StdioDeps): Promise<StdioCore> {
       onRevoked: (resourceId) => {
         // agent.sock first: it releases the snapshots that pinned the resource.
         agentServer?.resourceRevoked(resourceId);
-        scheduler?.onResourceRevoked(resourceId);
+        jobs?.scheduler.onResourceRevoked(resourceId);
       },
       ...(exporter ? { syncExports: (state) => exporter.sync(state) } : {}),
     });
@@ -192,19 +185,8 @@ export async function runStdio(deps: StdioDeps): Promise<StdioCore> {
   gcTimer.unref();
 
   let stdoutOpen = true;
-  // The browser-context grant as the window was last told it; every change bumps the revision
-  // job requests carry and reaches the scheduler.
-  let shownGrant: boolean | null = null;
-  let grantRevision = 0;
   const emitPanel = (state: PanelState): void => {
-    if (state.type === "grant" && state.agentBrowserContext !== shownGrant) {
-      const first = shownGrant === null;
-      shownGrant = state.agentBrowserContext;
-      if (!first) {
-        grantRevision += 1;
-        scheduler?.onGrantChanged(state.agentBrowserContext);
-      }
-    }
+    jobs?.observePanel(state);
     if (!stdoutOpen) return;
     deps.stdout.write(`${JSON.stringify(state)}\n`);
   };
@@ -252,53 +234,28 @@ export async function runStdio(deps: StdioDeps): Promise<StdioCore> {
   });
   const panelChannel = panel;
 
-  // Settled visits run the same catalog and discovery pipelines as the dev CLI, with their
-  // caches under SCOUT_HOME; the coordinator owns each pass's fetch session and window. Catalog
-  // files are parsed in the parse worker; cancelling a pass's session cancels its parse.
-  const parsePool = createParsePool({ diagnostics });
-  const catalogResolver = createCatalogResolver({ scoutHome: home, clock, diagnostics, parsers: parsePool.parsers });
-  const discoverer = createSiteResourceDiscoverer({ scoutHome: home, clock, diagnostics });
   const activity = createActivityStore({ clock });
-
-  const agentProfile = openAgentProfile(home, diagnostics);
-  const adapter: ClaudeJobAdapter | null =
-    agentProfile === null
-      ? null
-      : createClaudeJobAdapter({ home, profile: agentProfile, parentEnv: deps.env, preflightAsync: createPreflightFacade(), clock, diagnostics });
-  // Off the event loop; the first job waits for it.
-  void adapter?.refreshPreflightAsync();
-  const jobs = createJobScheduler({
+  // The adapter, preflight, parse pool and scheduler; it reads the coordinator only once a job runs.
+  const jobWiring = createJobWiring({
+    home,
+    env: deps.env,
+    destinations: config.destinations,
     coreInstanceId,
     clock,
     diagnostics,
-    destinations: config.destinations,
     results,
     snapshots: () => snapshots,
-    view: {
-      visit: () => (coordinator.stopped || coordinator.agentView().paused ? null : coordinator.tracker.current()),
-      permissionsRevision: () => coordinator.permissions.revision,
-      isPermitted: (origin) => coordinator.permissions.isPermitted(origin),
-      captureAllowed: () => coordinator.captureAllowed(),
-    },
-    window: {
-      working: (visitEpoch, jobId) => coordinator.showWorking(visitEpoch, jobId),
-      idle: (visitEpoch) => coordinator.showIdle(visitEpoch),
-    },
-    activity: () => activity.entries(),
-    browserContextGranted: () => readBrowserContextGrant(home),
-    grantRevision: () => grantRevision,
-    approvalRevision: () => store.approvalRevision,
-    agent: adapter,
-    profile: {
-      fingerprint: adapter?.profileFingerprint ?? "none",
-      toolsRevision: agentProfile?.tools?.revision ?? 0,
-      hasUserTools: (agentProfile?.tools?.selections.length ?? 0) > 0,
-    },
-    socketPath: join(runDir, "agent.sock"),
-    verify: (candidates, o) => verifyTargets(candidates, { origin: o.origin, budgetMs: o.budgetMs, clock: o.clock }),
-    resumeCache: createJobResumeCache<JobAnswer>({ clock, diagnostics }),
+    coordinator: () => coordinator,
+    activity,
+    store,
   });
-  scheduler = jobs;
+  jobs = jobWiring;
+  const scheduler = jobWiring.scheduler;
+  // Settled visits run the same catalog and discovery pipelines as the dev CLI, with their
+  // caches under SCOUT_HOME; the coordinator owns each pass's fetch session and window. Catalog
+  // files are parsed in the parse worker; cancelling a pass's session cancels its parse.
+  const catalogResolver = createCatalogResolver({ scoutHome: home, clock, diagnostics, parsers: jobWiring.parsers });
+  const discoverer = createSiteResourceDiscoverer({ scoutHome: home, clock, diagnostics });
   const coordinator: Coordinator = createCoordinator({
     config,
     clock,
@@ -310,24 +267,15 @@ export async function runStdio(deps: StdioDeps): Promise<StdioCore> {
     onPause: () => snapshots?.releaseAll("paused"),
     capabilities: {
       store,
-      createFetchSession: (origin) => {
-        const session = createOriginFetchSession({ origin, clock });
-        return {
-          ...session,
-          cancel: () => {
-            session.cancel();
-            parsePool.cancel();
-          },
-        };
-      },
+      createFetchSession: (origin) => jobWiring.createFetchSession(origin),
       resolveCatalog: (origin, session) => catalogResolver.resolve(origin, { session }),
       discover: (origin, session) => discoverer.discover(origin, { session }),
     },
     panel: panelChannel,
     results,
-    jobs,
+    jobs: scheduler,
   });
-  deps.onJobsStarted?.({ scheduler: jobs, adapter });
+  deps.onJobsStarted?.({ scheduler, adapter: jobWiring.adapter });
   panelChannel.start();
   // The startup export sync may record conflicts the first frame could not show.
   void store.startupExportSync.then(() => panelChannel.capabilitiesChanged());
@@ -345,9 +293,7 @@ export async function runStdio(deps: StdioDeps): Promise<StdioCore> {
     (closing ??= (async () => {
       clearInterval(gcTimer);
       // The scheduler already cancelled its job (`shutdown`); wait for the job's process tree.
-      jobs.stop();
-      await adapter?.abortAll();
-      void parsePool.close();
+      await jobWiring.close();
       // No job reads past shutdown, even on a connection agent.sock has not closed yet.
       snapshots?.releaseAll("shutdown");
       await Promise.all([server.close(), agentServer?.close()]);
@@ -370,6 +316,8 @@ export async function runStdio(deps: StdioDeps): Promise<StdioCore> {
     // otherwise re-enter here as a second, stdin-closed shutdown with its own exit.
     let finished!: () => void;
     shuttingDown = new Promise<void>((resolve) => (finished = resolve));
+    // Before anything else: a preflight child blocked on `claude` must never hold the exit.
+    jobWiring.killPreflight();
     diagnostics.event("shutdown", { reason });
     deps.log(`scout-core: shutdown (${reason})`);
     coordinator.stop();
@@ -459,6 +407,7 @@ export async function runStdio(deps: StdioDeps): Promise<StdioCore> {
     // Claim shutdown first: rl.close() emits "close" synchronously, and that must not
     // start a second, stdin-closed shutdown with its own exit.
     shuttingDown = Promise.resolve();
+    jobWiring.killPreflight();
     coordinator.stop();
     panelChannel.stop();
     rl.close();
@@ -476,16 +425,6 @@ class StartError extends Error {
   constructor(readonly code: string) {
     super(code);
     this.name = "StartError";
-  }
-}
-
-/** The agent profile, or null (reported to diagnostics) when it is missing or unusable: jobs are then `unavailable`. */
-function openAgentProfile(home: string, diagnostics: Diagnostics): AgentProfile | null {
-  try {
-    return loadAgentProfile(home);
-  } catch (e) {
-    diagnostics.event("agent_profile_unavailable", { code: e instanceof AgentProfileError ? e.code : "profile: unreadable" });
-    return null;
   }
 }
 

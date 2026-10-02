@@ -36,9 +36,9 @@ interface Core {
   exited: Promise<{ code: number | null; signal: NodeJS.Signals | null; at: number }>;
 }
 
-function spawnCore(home: string): Core {
+function spawnCore(home: string, env: NodeJS.ProcessEnv = process.env): Core {
   // A 10-minute dwell: the real visits these tests form never settle into real fetches.
-  const child = spawn(process.execPath, [mainJs, "--stdio"], { env: { ...process.env, SCOUT_HOME: home, SCOUT_DWELL_MS: "600000" } });
+  const child = spawn(process.execPath, [mainJs, "--stdio"], { env: { ...env, SCOUT_HOME: home, SCOUT_DWELL_MS: "600000" } });
   const lines: unknown[] = [];
   let out = "";
   let err = "";
@@ -363,6 +363,63 @@ describe("main --stdio", () => {
     const { code } = await core.exited;
     expect(code).toBe(1);
     expect(core.stderr()).toContain("config-invalid-destinations");
+  });
+
+  describe("with an agent profile whose CLI hangs (the billing preflight's `claude` never answers)", () => {
+    /** A temp user home, a profile, and a `claude` that records its PID and sleeps: the preflight blocks on it. */
+    const hangingAgent = (destinations: string[]) => {
+      const userHome = join(home, "u");
+      mkdirSync(join(userHome, ".claude"), { recursive: true });
+      mkdirSync(join(home, "bin"));
+      const pids = join(home, "claude-pids");
+      const claudePath = join(home, "bin", "claude");
+      writeFileSync(claudePath, `#!/bin/sh\necho $$ >> '${pids}'\nexec sleep 30\n`);
+      chmodSync(claudePath, 0o755);
+      writeFileSync(join(home, "config.json"), JSON.stringify({ destinations }));
+      writeFileSync(join(home, "agent-profile.json"), JSON.stringify({ schemaVersion: 1, adapter: "claude-code", claudePath, model: "claude-sonnet-5-5" }), { mode: 0o600 });
+      // Only what the launch profile and the preflight read: no gateway, a throwaway HOME.
+      const env = { PATH: "/usr/bin:/bin", HOME: userHome, USER: "someone", LOGNAME: "someone", LANG: "en_US.UTF-8", TMPDIR: tmpdir() };
+      const started = (): number[] => (existsSync(pids) ? readFileSync(pids, "utf8").split("\n").filter(Boolean).map(Number) : []);
+      return { env, started };
+    };
+    const alive = (pid: number): boolean => {
+      try {
+        process.kill(pid, 0);
+        return true;
+      } catch (e) {
+        return (e as NodeJS.ErrnoException).code === "EPERM";
+      }
+    };
+
+    it("shutdown with the preflight in flight kills it first and exits well within the deadline", async () => {
+      const agent = hangingAgent(["docs.example.com"]);
+      core = spawnCore(home, agent.env);
+      const c = core;
+      await until(() => c.stderr().includes("listening on"));
+      // The eager preflight (an enabled host exists) is blocked on the hanging CLI.
+      await until(() => agent.started().length > 0);
+      const closedAt = Date.now();
+      c.child.stdin.end();
+      const { code, at } = await c.exited;
+      expect(code).toBe(0);
+      // SHUTDOWN_DEADLINE_MS is 2 s; a preflight that held the exit would take the CLI's 20 s.
+      expect(at - closedAt).toBeLessThan(1_000);
+      await until(() => !agent.started().some(alive), 2_000);
+    }, 20_000);
+
+    it("with no enabled host, no `claude` runs at start", async () => {
+      const agent = hangingAgent([]);
+      core = spawnCore(home, agent.env);
+      const c = core;
+      await until(() => c.stderr().includes("listening on"));
+      await new Promise((r) => setTimeout(r, 1_000));
+      expect(agent.started()).toEqual([]);
+      c.child.stdin.end();
+      expect((await c.exited).code).toBe(0);
+      const log = existsSync(join(home, "logs", "diagnostics.jsonl")) ? readFileSync(join(home, "logs", "diagnostics.jsonl"), "utf8") : "";
+      expect(log).not.toContain('"event":"agent_preflight"');
+      expect(log).not.toContain('"event":"agent_profile_unavailable"');
+    }, 20_000);
   });
 
   it("exits 2 without --stdio", async () => {
