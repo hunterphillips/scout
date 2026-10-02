@@ -185,6 +185,8 @@ describe.skipIf(SKIP !== null)(SKIP ? `Scout's side panel in Chrome for Testing 
       panel = await panelTarget.asPage();
       steps.panelOpenedByToolbar = "headless";
     } else {
+      // A tab is not the side panel: only a live check without one may stand in for it.
+      if (process.env.SCOUT_E2E_ALLOW_TAB_PANEL !== "1") throw new Error("the toolbar click opened no side panel target (SCOUT_E2E_ALLOW_TAB_PANEL=1 allows panel.html in a tab)");
       panel = await browser.newPage();
       await panel.goto(`chrome-extension://${extId}/panel.html`);
       await site.bringToFront();
@@ -195,6 +197,7 @@ describe.skipIf(SKIP !== null)(SKIP ? `Scout's side panel in Chrome for Testing 
     expect(urlBefore).toBeNull();
     expect(urlAfter).toBe(`${SITE}/docs/billing`);
     steps.sidePanelContexts = await sw.evaluate(() => chrome.runtime.getContexts({ contextTypes: ["SIDE_PANEL"] }).then((c) => c.length));
+    if (panelTarget) expect(steps.sidePanelContexts).toBe(1);
 
     const text = () => panel.evaluate(() => document.body.innerText);
     /** A trusted click (CDP input), as a user's: permissions.request needs the gesture. */
@@ -263,11 +266,26 @@ describe.skipIf(SKIP !== null)(SKIP ? `Scout's side panel in Chrome for Testing 
     expect(await site.url()).toBe(`${SITE}/docs/billing`); // the current tab never navigates
     steps.openLink = "headless";
 
-    // 5. Pause from the panel reaches the core and the extension.
+    // 5. Pause from the panel pauses the core; the extension follows the core's policy.
     await click("nav-settings");
     await click("pause");
     await until(() => app().some((f) => f.type === "state" && f.status === "paused"), "the core to pause");
-    expect(await sw.evaluate(() => chrome.storage.local.get("paused").then((s) => s.paused))).toBe(true);
+    const workerStatus = () =>
+      panel.evaluate(
+        (name) =>
+          new Promise((resolve) => {
+            const p = chrome.runtime.connect({ name });
+            p.onMessage.addListener((m) => {
+              if (m.type !== "reply" || m.id !== 1) return;
+              p.disconnect();
+              resolve(m.result);
+            });
+            p.postMessage({ type: "request", id: 1, request: { type: "status" } });
+          }),
+        "scout-panel",
+      );
+    await until(async () => (await workerStatus())?.paused === true, "the worker to follow the core's paused policy");
+    expect(await sw.evaluate(() => chrome.storage.local.get("paused").then((s) => s.paused ?? null))).toBeNull();
     await until(async () => (await text()).includes("Resume"), "the control to offer Resume");
     steps.pause = "headless";
 
