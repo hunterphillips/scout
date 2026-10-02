@@ -669,6 +669,48 @@ describe("job scheduler: resume cache", () => {
     expect(h.frames.some((f) => f.type === "results" && f.jobId === "job2")).toBe(false);
   });
 
+  // Phase 3 verification: the key alone keeps the answers apart. The profile watcher also clears
+  // the cache on a change; this cache is never cleared, so only the tools dimension can cause the miss.
+  it("a job with extra user tools never reuses a browser-only answer, even with the cache never cleared and the same fingerprint", async () => {
+    const cache = createJobResumeCache<JobAnswer>({ clock: { now: () => 0 } });
+    const h = harness({ resumeCache: cache });
+    // A browser-only job (no user tools) answers and is cached.
+    h.settle();
+    h.agent.calls[0]!.answer(ok(["c0"]));
+    await flush();
+    expect(cache.size).toBe(1);
+    // The user adds a retrieval tool: only the tools revision changes (fingerprint kept on purpose).
+    h.scheduler.onProfileChanged({ fingerprint: "fp-1", toolsRevision: 1, hasUserTools: true });
+    expect(cache.size).toBe(1);
+    h.world.visit = { ...h.world.visit!, epoch: 4 } as ActiveVisit;
+    h.scheduler.onVisitChanged();
+    h.settle();
+    // Same page, same activity, same catalog: still a fresh model call.
+    expect(h.agent.calls).toHaveLength(2);
+    expect(h.named("job_finished").some((f) => f.cached === true)).toBe(false);
+    // That job's optional tool failed: its answer is browser-only, cached under the tools revision.
+    h.agent.calls[1]!.answer(ok(["c1"]), { optionalToolFailed: true });
+    await flush();
+    expect(h.frames.at(-1)).toMatchObject({ type: "results", status: "ok", items: [{ candidateId: "c1" }] });
+    // Back to the same page with the same tools: the browser-only entry is refused, the model runs again.
+    h.world.visit = { ...h.world.visit!, epoch: 5 } as ActiveVisit;
+    h.scheduler.onVisitChanged();
+    h.settle();
+    expect(h.agent.calls).toHaveLength(3);
+    expect(h.named("job_finished").some((f) => f.cached === true)).toBe(false);
+    // Back to no user tools (revision 0): the first browser-only answer is reused.
+    h.agent.calls[2]!.answer(ok(["c2"]));
+    await flush();
+    h.scheduler.onProfileChanged({ fingerprint: "fp-1", toolsRevision: 0, hasUserTools: false });
+    h.world.visit = { ...h.world.visit!, epoch: 6 } as ActiveVisit;
+    h.scheduler.onVisitChanged();
+    h.settle();
+    await flush();
+    expect(h.agent.calls).toHaveLength(3);
+    expect(h.frames.at(-1)).toMatchObject({ type: "results", status: "ok", items: [{ candidateId: "c0" }] });
+    expect(h.named("job_finished").at(-1)).toMatchObject({ cached: true });
+  });
+
   it("an answer is reused within 30 s for the same key, through the same order; extra user tools never reuse a browser-only answer", async () => {
     const cache = createJobResumeCache<JobAnswer>({ clock: { now: () => 0 } });
     const h = harness({ resumeCache: cache });

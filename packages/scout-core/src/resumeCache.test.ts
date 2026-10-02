@@ -248,7 +248,9 @@ describe("job resume cache", () => {
     expect(cache.restore(key({ url: "https://docs.example.com/billing" }), { hasUserTools: false })).toBe("answer");
     for (const changed of [
       { coreInstanceId: "core-2" },
+      { origin: "https://docs2.example.com" },
       { url: "https://docs.example.com/other" },
+      { url: "https://docs.example.com/billing?tab=2" },
       { catalogHash: "cat-2" },
       { activityHash: activityHash([]) },
       { approvalRevision: 2 },
