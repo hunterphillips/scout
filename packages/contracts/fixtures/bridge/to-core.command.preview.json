@@ -1,0 +1,9 @@
+{
+  "type": "command",
+  "command": {
+    "type": "preview",
+    "commandId": "app-1",
+    "resourceId": "res_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "version": "1111111111111111111111111111111111111111111111111111111111111111"
+  }
+}

@@ -1,0 +1,9 @@
+{
+  "type": "panel",
+  "state": {
+    "type": "state",
+    "status": "working",
+    "visitEpoch": 3,
+    "jobId": "job-3a"
+  }
+}

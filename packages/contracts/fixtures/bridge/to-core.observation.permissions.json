@@ -1,0 +1,12 @@
+{
+  "type": "observation",
+  "observation": {
+    "kind": "permissions",
+    "revision": 1,
+    "at": 1759400000000,
+    "granted": [
+      "https://github.com/*"
+    ],
+    "githubCapture": true
+  }
+}

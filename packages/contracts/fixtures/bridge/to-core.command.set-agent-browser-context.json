@@ -1,0 +1,9 @@
+{
+  "type": "command",
+  "command": {
+    "type": "set_agent_browser_context",
+    "commandId": "app-10",
+    "enabled": false,
+    "expectedEnabled": true
+  }
+}

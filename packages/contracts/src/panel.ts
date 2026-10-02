@@ -293,6 +293,11 @@ export const PanelResultsSchema = z.discriminatedUnion("status", [
 ]);
 
 // Five members share type "results" (by `status`) and two share "ack" (by `ok`).
+//
+// Panel sinks: since bridge protocol 3 the core sends these frames to more than the native
+// app. Every frame goes to every attached sink (the app's stdout, and the browser side panel
+// through the relay as a bridge `panel` frame), except the answers to one command (`ack`, and
+// `preview` chunks), which go only to the sink that sent that command.
 export const PanelStateSchema = z.discriminatedUnion("type", [
   PanelStatusStateSchema,
   PanelResultsSchema,
@@ -344,11 +349,20 @@ export const OpenLinkCommandSchema = cmd("open_link", {
   candidateId: PanelCandidateIdSchema,
 });
 
+/** The app's frontmost application changed. Only the native app may send it (bridge.ts STDIO_ONLY_COMMANDS). */
+export const FrontmostCommandSchema = z.object({ type: z.literal("frontmost"), bundleId: z.string(), at: z.number() });
+export const PauseCommandSchema = z.object({ type: z.literal("pause") });
+export const ResumeCommandSchema = z.object({ type: z.literal("resume") });
+/** Quit the core. Only the native app may send it (bridge.ts STDIO_ONLY_COMMANDS). */
+export const ShutdownCommandSchema = z.object({ type: z.literal("shutdown") });
+
+// A new command must also be classified in bridge.ts: relayed from the browser
+// (RelayCommandSchema) or native-app only (STDIO_ONLY_COMMANDS). A test enforces it.
 export const NativeCommandSchema = z.discriminatedUnion("type", [
-  z.object({ type: z.literal("frontmost"), bundleId: z.string(), at: z.number() }),
-  z.object({ type: z.literal("pause") }),
-  z.object({ type: z.literal("resume") }),
-  z.object({ type: z.literal("shutdown") }),
+  FrontmostCommandSchema,
+  PauseCommandSchema,
+  ResumeCommandSchema,
+  ShutdownCommandSchema,
   PreviewCommandSchema,
   ApproveCommandSchema,
   DeclineCommandSchema,

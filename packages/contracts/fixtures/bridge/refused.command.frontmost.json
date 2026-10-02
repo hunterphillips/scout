@@ -1,0 +1,8 @@
+{
+  "type": "command",
+  "command": {
+    "type": "frontmost",
+    "bundleId": "com.google.Chrome",
+    "at": 1759300000123
+  }
+}
