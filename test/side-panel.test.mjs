@@ -200,16 +200,14 @@ describe.skipIf(SKIP !== null)(SKIP ? `Scout's side panel in Chrome for Testing 
     if (panelTarget) expect(steps.sidePanelContexts).toBe(1);
 
     const text = () => panel.evaluate(() => document.body.innerText);
-    /** A trusted click (CDP input), as a user's: permissions.request needs the gesture. */
+    /**
+     * A trusted click (CDP input), as a user's: permissions.request needs the gesture. No retry:
+     * the panel's keyed patch keeps an unchanged button the same node across renders (P4.4).
+     */
     const click = async (key) => {
-      for (let i = 0; ; i++) {
-        try {
-          return await panel.click(`[data-key="${key}"]`);
-        } catch (e) {
-          if (i >= 5 || !/detached|not clickable|No element/.test(String(e))) throw e;
-          await new Promise((r) => setTimeout(r, 100)); // a frame re-rendered the panel under the pointer
-        }
-      }
+      const selector = `[data-key="${key}"]`;
+      await panel.waitForSelector(selector, { timeout: 10_000 });
+      await panel.click(selector);
     };
     await until(async () => (await text()).includes("Idle"), "the panel to connect to the core", 20_000);
     await click("nav-site");

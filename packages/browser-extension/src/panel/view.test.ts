@@ -146,4 +146,81 @@ describe("panel view", () => {
     expect(root.textContent).toContain("To turn recommendations on for a site, add it to destinations in Scout's config.json.");
     expect(root.textContent).not.toContain("Recommendations run only");
   });
+
+  // P4.4: one delegated listener per event type on the root, and a keyed patch.
+  it("a re-render between mousedown and mouseup keeps the pressed button, so the click lands", () => {
+    const m = running();
+    m.apply(results(1, { status: "ok", items: [{ candidateId: "c1", title: "A", reason: "r", hostname: "docs.example.com" }] }));
+    const { doc, root, on, render } = view(m);
+    const pressed = root.querySelector<HTMLButtonElement>('[data-key="open-c1"]')!;
+    pressed.dispatchEvent(new doc.defaultView!.MouseEvent("mousedown", { bubbles: true }));
+    // A frame arrives mid-click and changes the panel around the button.
+    m.apply(results(1, { status: "ok", items: [{ candidateId: "c1", title: "A", reason: "r", hostname: "docs.example.com" }, { candidateId: "c2", title: "B", reason: "r2", hostname: "docs.example.com" }] }));
+    render();
+    expect(root.querySelector('[data-key="open-c2"]')).not.toBeNull();
+    expect(root.querySelector('[data-key="open-c1"]')).toBe(pressed);
+    pressed.dispatchEvent(new doc.defaultView!.MouseEvent("mouseup", { bubbles: true }));
+    pressed.click();
+    expect(on.open).toHaveBeenCalledWith("c1");
+  });
+
+  it("a render keeps every unchanged element and updates changed text in place", () => {
+    const m = running();
+    m.apply(results(1, { status: "ok", items: [{ candidateId: "c1", title: "A", reason: "first", hostname: "docs.example.com" }] }));
+    const { root, render } = view(m);
+    const nav = root.querySelector("nav")!;
+    const results0 = root.querySelector("#nav-results, [data-key='nav-results']")!;
+    const reason = root.querySelector("p.reason")!;
+    m.apply(results(1, { status: "ok", items: [{ candidateId: "c1", title: "A", reason: "second", hostname: "docs.example.com" }] }));
+    render();
+    expect(root.querySelector("nav")).toBe(nav);
+    expect(root.querySelector("[data-key='nav-results']")).toBe(results0);
+    expect(root.querySelector("p.reason")).toBe(reason);
+    expect(reason.textContent).toBe("second");
+  });
+
+  it("no rendered node carries its own listener: clicks dispatch from the root to the latest render's handlers", () => {
+    const m = running();
+    const first = view(m);
+    const next = handlers();
+    renderPanel(first.doc, first.root, first.v, next);
+    first.root.querySelector<HTMLButtonElement>('[data-key="nav-sites"]')!.click();
+    expect(next.select).toHaveBeenCalledWith("sites");
+    expect(first.on.select).not.toHaveBeenCalled();
+    // A button moved out of the root no longer reaches any handler.
+    const b = first.root.querySelector<HTMLButtonElement>('[data-key="nav-settings"]')!;
+    first.doc.body.append(b);
+    b.click();
+    expect(next.select).toHaveBeenCalledTimes(1);
+  });
+
+  it("a checkbox the user flipped shows the model's value again after a render; the typed site and its caret are kept", () => {
+    const m = running();
+    m.select("site");
+    const { doc, root, on, render, v } = view(m);
+    const box = root.querySelector<HTMLInputElement>("#auto-acquire")!;
+    expect(box.disabled).toBe(false);
+    const before = box.checked;
+    box.click();
+    expect(on.autoAcquire).toHaveBeenCalledWith(F.origin, !before, false);
+    render();
+    expect(root.querySelector("#auto-acquire")).toBe(box);
+    expect(box.checked).toBe(before);
+
+    m.select("sites");
+    render();
+    const input = root.querySelector<HTMLInputElement>("#site-input")!;
+    input.focus();
+    input.value = "docs.stri";
+    input.dispatchEvent(new doc.defaultView!.Event("input", { bubbles: true }));
+    expect(v.ui.siteInput).toBe("docs.stri");
+    input.setSelectionRange(4, 4);
+    render();
+    expect(root.querySelector("#site-input")).toBe(input);
+    expect(doc.activeElement).toBe(input);
+    expect(input.value).toBe("docs.stri");
+    expect(input.selectionStart).toBe(4);
+    root.querySelector("form")!.dispatchEvent(new doc.defaultView!.Event("submit", { bubbles: true, cancelable: true }));
+    expect(on.allowTyped).toHaveBeenCalledWith("docs.stri");
+  });
 });
