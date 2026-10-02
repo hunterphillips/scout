@@ -31,7 +31,9 @@ Phase 2's seven tasks are built, reviewed, merged, and live-checked against real
 sites from throwaway locations (evidence in
 `../thoughts/shared/research/2026-10-01-scout-phase2-live-check/`); the gate
 passed on 2026-10-01 (the Swift window's live checklist moved to P4.1). Phase 3
-(background recommendations) is in progress: P3.1 and P3.3 merged, P3.2 building. The old
+(background recommendations) is in progress: P3.1, P3.2, P3.3 merged, P3.4 building.
+Recommendations run only for hosts listed in `config.json` `destinations` (empty by
+default); a destination spends Hunter's quota on every settled visit there. The old
 build above is still intact and still not wired into the app; the legacy
 `personal-context-mcp` package stays untouched until pivot Phase 4.
 
@@ -58,8 +60,14 @@ the plan's phase log):
   `initCheck.ts`, `outputValidation.ts`, `prompt.ts`, `childSupervisor.ts`,
   `streamMonitor.ts`, `jobStop.ts`, `mapOutcome.ts`, `jsonLineStream.ts`,
   `exactEnvTransport.ts`, `privateFile.ts`, and provenance-tagged copies of
-  `launchProfile.ts` / `authPreflight.ts` / `processTree.ts`. `testing/` holds the fake
-  `claude` CLI (`fake-claude.mjs`, `fake-claude-session.mjs`) and fake backend.
+  `launchProfile.ts` / `authPreflight.ts` / `processTree.ts`. Since pivot P3.2 the billing
+  preflight runs in a detached forked child (`preflightWorker.ts` facade,
+  `preflightChildMain.ts`; SIGKILL on cancel/timeout/shutdown; verdicts cached per env
+  fingerprint + CLI version; started lazily when no destination is configured), the CLI
+  version is advisory (drift → one async re-preflight; a job proceeds only on
+  `subscription`), and a required non-Scout tool stops a job only when every call to it
+  errored. `testing/` holds the fake `claude` CLI (`fake-claude.mjs`,
+  `fake-claude-session.mjs`) and fake backend.
 - `packages/scout-core/src/capabilities/{identity,wrapper}.ts`: managed skill-wrapper
   names (`scout-<kind>-<16 hex>`), tagged ownership hash, and the `SKILL.md` renderer
   (frontmatter is exactly `name` + `description`; body is fixed Scout text).
@@ -159,9 +167,16 @@ the plan's phase log):
   list and feeds nothing yet), `panelCapabilities.ts` / `nativeCommands.ts` /
   `previewStream.ts` / `panelChannel.ts` (pivot P2.5: the window's capability view,
   acknowledged idempotent mutation commands, 16 KiB preview chunks, and the wiring; one
-  `coreInstanceId` per start shared with the agent API), `resumeCache.ts`
-  (keyed map, 30 s TTL; constructed but not read until Phase 4 wires visit → resume
-  cache → catalog → rank), `results.ts` (pivot P3.3: the job-aware result registry the
+  `coreInstanceId` per start shared with the agent API), `discoveryRunner.ts` (pivot
+  P3.2: the per-visit discovery pass — one at a time, latest-wins queue, cancelled by a
+  visit change, catalog handed on as soon as it resolves), `jobScheduler.ts` (one
+  recommendation job per core, one replacement per visit on an activity accept, cancel
+  codes per trigger, `beginJob → working → take → run → idle → publish`), `pipeline.ts`
+  (explicit `JobRequest` mapping with no links, pick validation, ≤3 verified targets,
+  `stillCurrent()` at every stage; `MIN_JOB_MS` is the single launch threshold),
+  `wiring/jobs.ts` (adapter, preflight child, parse pool, scheduler construction),
+  `resumeCache.ts` (`createJobResumeCache`, 30 s, keyed incl. tools revision; the legacy
+  cache goes in Phase 4), `results.ts` (pivot P3.3: the job-aware result registry the
   window's Results section and `open_link` resolve against; hrefs never leave it in a
   frame; `catalog/sameOrigin.ts` holds the shared https/origin rule), `activity/store.ts`
   and `activity/snapshots.ts` (pivot P3.1: ≤10 issue entries, 15 min TTL, cleared when
