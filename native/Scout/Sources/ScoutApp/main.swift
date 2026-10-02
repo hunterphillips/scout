@@ -25,6 +25,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private let statusLine = NSMenuItem(title: "", action: nil, keyEquivalent: "")
     private let pauseItem = NSMenuItem(title: "Pause", action: #selector(pauseFromMenu), keyEquivalent: "")
     private let windowItem = NSMenuItem(title: "Show window", action: #selector(toggleWindow), keyEquivalent: "")
+    /// ⌘Q works only while the status menu is open: an accessory app has no main menu.
     private let quitItem = NSMenuItem(title: "Quit Scout", action: #selector(quit), keyEquivalent: "q")
 
     /// Opens only links the core authorized for a click, never anything on its own, and only in
@@ -89,12 +90,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         let decision = TerminationPolicy.decide(shutdownPending: terminating, sidecarRunning: sidecar.isRunning)
         if decision.beginShutdown {
             terminating = true
+            // Pause and Resume go disabled in the window and the menu alike.
+            model.beginQuit()
             resendTimer?.invalidate()
             frontmost.stop()
             sidecar.beginShutdown {
                 NSApp.reply(toApplicationShouldTerminate: true)
             }
-            updateMenu()
+            render()
         }
         switch decision.reply {
         case .now: return .terminateNow
@@ -149,8 +152,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     }
 
     private func updateMenu() {
-        let menu = StatusMenuModel(
-            sidecar: model.sidecar, pause: model.pauseControl, windowVisible: panel?.isVisible ?? false, quitting: terminating)
+        let menu = StatusMenuModel(model, windowVisible: panel?.isVisible ?? false)
         statusLine.title = menu.status.title
         pauseItem.title = menu.pause.title
         pauseItem.isEnabled = menu.pause.enabled
@@ -248,12 +250,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     }
 
     /// Opens what the core authorized for the user's clicks (open_link acks), each checked again.
-    /// Only the window sends open_link from this app, so without a window there is nothing to open;
-    /// the Chrome side panel's clicks never reach this app.
+    /// Only the window sends open_link from this app; the Chrome side panel's clicks never reach
+    /// it. Without a window the queue is drained and dropped, so a link authorized while there was
+    /// no window can never open on a later Show window.
     private func openAuthorizedLinks() {
-        guard panel != nil else { return }
         let requests = model.takeLinksToOpen()
-        guard !requests.isEmpty else { return }
+        guard panel != nil, !requests.isEmpty else { return }
         for request in requests {
             let commandId = request.commandId
             // The opener may answer from another thread; Problems lists a refusal.

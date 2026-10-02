@@ -40,17 +40,46 @@ import Testing
         let main = try #require(try sources()["main.swift"])
         #expect(main.contains("setActivationPolicy(.accessory)"))
         #expect(main.contains("TerminationPolicy.decide("))
-        // The only terminate call is the menu's Quit, which AppKit routes to applicationShouldTerminate.
-        #expect(main.components(separatedBy: "NSApp.terminate(").count == 2)
-        #expect(!main.contains("exit("))
+        // The only terminate call in the app is the menu's Quit, `NSApp.terminate(nil)`, which
+        // AppKit routes to applicationShouldTerminate; no process or app is terminated elsewhere.
+        for (name, code) in try sources() {
+            let calls = code.components(separatedBy: ".terminate(").count - 1
+            #expect(calls == (name == "main.swift" ? 1 : 0), "\(name) has \(calls) terminate call(s)")
+            #expect(!code.contains("exit("), "\(name) calls exit")
+        }
+        #expect(main.contains("NSApp.terminate(nil)"))
     }
 
     @Test func closingTheWindowHidesIt() throws {
         let main = try #require(try sources()["main.swift"])
-        let close = try #require(main.range(of: "func windowShouldClose"))
-        let body = main[close.lowerBound...].prefix(200)
+        let body = try #require(Self.body(of: "func windowShouldClose", in: main))
         #expect(body.contains("return false") && body.contains("hide()"))
         #expect(!body.contains("terminate"))
         #expect(!main.contains("func windowWillClose"))
+    }
+
+    /// The text between the first `{` after `signature` and its matching `}`.
+    static func body(of signature: String, in code: String) -> String? {
+        guard let start = code.range(of: signature),
+              let open = code[start.upperBound...].firstIndex(of: "{") else { return nil }
+        var depth = 0
+        var i = open
+        while i < code.endIndex {
+            switch code[i] {
+            case "{": depth += 1
+            case "}":
+                depth -= 1
+                if depth == 0 { return String(code[code.index(after: open)..<i]) }
+            default: break
+            }
+            i = code.index(after: i)
+        }
+        return nil
+    }
+
+    @Test func braceMatchingFindsTheWholeBody() {
+        let code = "func a() { if x { y() } else { z() }; return false }\nfunc b() { terminate() }"
+        #expect(Self.body(of: "func a", in: code) == " if x { y() } else { z() }; return false ")
+        #expect(Self.body(of: "func missing", in: code) == nil)
     }
 }
