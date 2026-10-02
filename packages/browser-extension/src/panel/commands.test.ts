@@ -175,6 +175,16 @@ describe("CommandTracker (CommandTrackerTests.swift)", () => {
     expect(t.canRetry(b.commandId)).toBe(false);
   });
 
+  it("aCommandTheWorkerRefusesAsInvalidFailsAndIsNeverResent", () => {
+    const t = tracker("p");
+    const a = t.issue(approve);
+    t.markSent(a.commandId, "invalid");
+    expect(t.record(a.commandId)).toMatchObject({ state: "failed", code: "invalid" });
+    expect(t.unsent).toEqual([]);
+    expect(t.canRetry(a.commandId)).toBe(false);
+    expect(t.coreRestarted()).toEqual([]);
+  });
+
   it("canRetryMatchesRetry", () => {
     const t = tracker("p");
     const a = t.issue(approve);

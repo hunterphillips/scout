@@ -43,3 +43,15 @@ export function dropPort(f: FakeChrome): void {
   p.disconnected = true;
   p.onDisconnect.emit(p);
 }
+
+const policyRevisions = new WeakMap<FakeChrome, number>();
+
+/**
+ * The core's capture_policy after a pause or resume from anywhere (the panel, the Mac menu, the
+ * window): each call carries a newer revision than the last (the fake core's own starts at 2).
+ */
+export function corePolicy(f: FakeChrome, paused: boolean, captureEnabled = true): void {
+  const revision = (policyRevisions.get(f) ?? 9) + 1;
+  policyRevisions.set(f, revision);
+  lastPort(f).onMessage.emit({ type: "capture_policy", revision, paused, captureEnabled });
+}

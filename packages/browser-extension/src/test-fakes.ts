@@ -319,7 +319,8 @@ export function makeChrome({
     panelBehavior: null as unknown,
     /** What permissions.request answers (Chrome's prompt); a yes adds the pattern. */
     grantOnRequest: true,
-    createFails: false,
+    /** tabs.create rejects: always (true), or only when it places the tab (openerTabId or index). */
+    createFails: false as boolean | "placed",
     /** sidePanel.open calls. */
     opened: [] as Array<{ windowId?: number; tabId?: number }>,
   };
@@ -460,7 +461,8 @@ export function makeChrome({
         tabMessages.push({ tabId, msg });
       },
       async create(props: chrome.tabs.CreateProperties) {
-        if (state.createFails) throw new Error("No tab with id");
+        const placed = props.openerTabId !== undefined || props.index !== undefined;
+        if (state.createFails === true || (state.createFails === "placed" && placed)) throw new Error("No tab with id");
         created.push(props);
         const id = 100 + created.length;
         tabs.set(id, { id, windowId: props.windowId ?? 1, active: props.active !== false, url: props.url ?? "", title: "", incognito: false });
@@ -494,6 +496,10 @@ export function makeChrome({
         async set(o: Record<string, unknown>) {
           if (state.storageSetFails) throw new Error("storage unavailable");
           Object.assign(store, o);
+        },
+        async remove(key: string | string[]) {
+          if (state.storageSetFails) throw new Error("storage unavailable");
+          for (const k of Array.isArray(key) ? key : [key]) delete store[k];
         },
       },
       session: {

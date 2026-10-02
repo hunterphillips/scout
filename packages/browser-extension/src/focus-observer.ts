@@ -1,5 +1,5 @@
 // Focus observations: debounced to one per burst of tab/window events, read
-// from the browser-owned active tab, never sent while paused. Each carries the
+// from the browser-owned active tab, never sent while the core is paused. Each carries the
 // revision of the last permissions snapshot sent, and a tab's url and title
 // only when its exact origin is in that snapshot: Chrome also exposes them
 // under a temporary activeTab grant, which must not leave the extension.
@@ -7,7 +7,7 @@
 import type { FocusObservation } from "@scout/contracts";
 import { sitePattern } from "./origin.js";
 import type { Clock } from "./reconnect.js";
-import { activeTab, type Counters, post, type SharedState } from "./shared-state.js";
+import { activeTab, corePaused, type Counters, post, type SharedState } from "./shared-state.js";
 
 export const FOCUS_DEBOUNCE_MS = 150;
 
@@ -26,7 +26,7 @@ export interface FocusDeps {
   state: SharedState;
   counters: Counters;
   windowIdNone: number;
-  /** Resolves once the stored paused flag is loaded. */
+  /** Resolves once the stored settings are loaded. */
   loaded(): Promise<void>;
 }
 
@@ -67,9 +67,9 @@ export function createFocusObserver(deps: FocusDeps): FocusObserver {
 
   async function emitFocus(): Promise<void> {
     await deps.loaded();
-    if (state.paused) return;
+    if (corePaused(state)) return;
     const obs = await readFocus();
-    if (state.paused) return;
+    if (corePaused(state)) return;
     if (post(state, obs)) counters.focus++;
   }
 

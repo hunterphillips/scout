@@ -7,7 +7,7 @@ import { createBackground } from "./background-core.js";
 import { createPanelApp } from "./panel-app.js";
 import { chunks, F } from "./panel/test-frames.js";
 import { activate, asChrome, type FakeChrome, fakeClock, flush, makeChrome } from "./test-fakes.js";
-import { commandsPosted, lastPort } from "./test-harness.js";
+import { commandsPosted, corePolicy, lastPort } from "./test-harness.js";
 
 const DOCS = "https://docs.example.com/*";
 const ITEMS = [
@@ -28,7 +28,9 @@ async function harness({ granted = [DOCS], host = "ok" as "ok" | "silent" | "mis
   const dom = new JSDOM(`<!doctype html><body><p id="header-line"></p><div id="root"></div></body>`, { pretendToBeVisual: true });
   const doc = dom.window.document;
   const intervals: Array<{ fn: () => void; ms: number }> = [];
+  const time = { now: 0 };
   const app = createPanelApp({
+    now: () => time.now,
     ch: asChrome(f),
     doc,
     root: doc.getElementById("root")!,
@@ -57,7 +59,13 @@ async function harness({ granted = [DOCS], host = "ok" as "ok" | "silent" | "mis
     await settle();
   };
   const text = () => doc.body.textContent ?? "";
-  return { f, bg, app, doc, dom, core, settle, $, byKey, click, text, intervals, clock };
+  /** Moves the panel's clock on and runs its resend tick (pending expiry, resends). */
+  const tick = async (ms: number) => {
+    time.now += ms;
+    for (const i of intervals) if (i.ms === 1000) i.fn();
+    await settle();
+  };
+  return { f, bg, app, doc, dom, core, settle, $, byKey, click, text, intervals, clock, tick };
 }
 
 async function withResults(h: Awaited<ReturnType<typeof harness>>) {
@@ -113,6 +121,14 @@ describe("side panel page", () => {
     expect(h.f._.created).toEqual([]);
     expect(h.byKey(`problem-retry-${id2}`)).toBeNull();
 
+    // The site's tab went away: the new tab opens once more, plainly, in the panel's window.
+    h.f._.state.createFails = "placed";
+    await h.click("open-c2");
+    const id4 = lastCommand(h.f)["commandId"] as string;
+    await h.core({ type: "ack", commandId: id4, ok: true, revision: 0, approvalRevision: 0, target: { href: "https://docs.example.com/testing" } });
+    expect(h.f._.created).toEqual([{ url: "https://docs.example.com/testing", active: true, windowId: 1 }]);
+    expect(h.text()).not.toContain("Chrome could not open it");
+
     h.f._.state.createFails = true;
     await h.click("open-c2");
     const id3 = lastCommand(h.f)["commandId"] as string;
@@ -120,6 +136,17 @@ describe("side panel page", () => {
     await h.click("nav-problems");
     expect(h.text()).toContain("Chrome could not open it");
     expect(h.byKey(`problem-dismiss-${id3}`)).not.toBeNull();
+  });
+
+  it("the host reporting the core gone reaches the panel's Problems as 'Scout isn't running'", async () => {
+    const h = await harness();
+    await withResults(h);
+    lastPort(h.f).onMessage.emit({ type: "core_unavailable", reason: "unreachable" });
+    await h.settle();
+    expect(h.$("#header-line")!.textContent).toContain("Scout isn't running");
+    expect(h.byKey("open-c1")).toBeNull();
+    await h.click("nav-problems");
+    expect(h.text()).toContain("Scout isn't running. Start the Scout app; the panel reconnects on its own.");
   });
 
   it("repaints at once from the worker's cache when the panel opens after the frames", async () => {
@@ -260,20 +287,19 @@ describe("side panel page", () => {
     expect(lastCommand(h.f)).toMatchObject({ type: "set_auto_acquire", origin: "https://docs.example.com", enabled: true, acknowledgeRisk: true, expectedEnabled: false });
   });
 
-  it("Settings: one Pause control for the extension and the core; agent context carries expectedEnabled", async () => {
+  it("Settings: Pause sends only the core's pause; agent context carries expectedEnabled", async () => {
     const h = await harness();
     await withResults(h);
     await h.click("nav-settings");
     expect(h.byKey("pause")!.textContent).toBe("Pause");
     await h.click("pause");
     expect(lastCommand(h.f)).toEqual({ type: "pause" });
-    expect(h.f._.store["paused"]).toBe(true);
+    expect(h.f._.store["paused"]).toBeUndefined();
     expect(h.byKey("pause")!.textContent).toBe("Pausing…");
     await h.core({ type: "state", status: "paused" });
     expect(h.byKey("pause")!.textContent).toBe("Resume");
     await h.click("pause");
     expect(lastCommand(h.f)).toEqual({ type: "resume" });
-    expect(h.f._.store["paused"]).toBe(false);
     const ctx = h.$("#agent-context") as HTMLInputElement;
     expect(ctx.checked).toBe(true); // the grant fixture says on
     ctx.checked = false;
@@ -281,6 +307,75 @@ describe("side panel page", () => {
     await h.settle();
     expect(lastCommand(h.f)).toMatchObject({ type: "set_agent_browser_context", enabled: false, expectedEnabled: true });
   });
+
+  it("paused in the panel, resumed from the Mac menu: the panel shows Pause again", async () => {
+    const h = await harness();
+    await withResults(h);
+    await h.click("nav-settings");
+    await h.click("pause");
+    await h.core({ type: "state", status: "paused" });
+    corePolicy(h.f, true);
+    await h.settle();
+    expect(h.byKey("pause")!.textContent).toBe("Resume");
+    // The Mac menu resumes the core: the panel sent nothing.
+    const sent = commandsPosted(h.f).length;
+    corePolicy(h.f, false);
+    await h.core({ type: "state", status: "idle", visitEpoch: 4, detail: "docs.example.com", permitted: true });
+    expect(commandsPosted(h.f)).toHaveLength(sent);
+    expect(h.byKey("pause")!.textContent).toBe("Pause");
+    expect(h.byKey("pause")!.disabled).toBe(false);
+  });
+
+  it("paused from the Mac menu: the panel shows Resume and Results says Scout is paused", async () => {
+    const h = await harness();
+    await withResults(h);
+    corePolicy(h.f, true);
+    await h.core({ type: "state", status: "paused" });
+    expect(commandsPosted(h.f)).toEqual([]);
+    expect(h.text()).toContain("Scout is paused. Resume it to get links.");
+    expect(h.byKey("open-c1")).toBeNull();
+    await h.click("nav-settings");
+    expect(h.byKey("pause")!.textContent).toBe("Resume");
+    await h.click("pause");
+    expect(lastCommand(h.f)).toEqual({ type: "resume" });
+  });
+
+  it("a core that starts paused: the panel opens on Resume and a paused Results", async () => {
+    const f = makeChrome({ granted: [DOCS], host: "silent" });
+    const clock = fakeClock();
+    await createBackground(asChrome(f), { clock }).start();
+    lastPort(f).onMessage.emit({ type: "capture_policy", revision: 1, paused: true, captureEnabled: true });
+    lastPort(f).onMessage.emit({ type: "ready" });
+    for (const s of [F.raw("frame.grant.json"), caps(), { type: "audit", entries: [] }, { type: "state", status: "paused" }])
+      lastPort(f).onMessage.emit({ type: "panel", state: s });
+    await clock.advance(0);
+    expect(lastPort(f).posted).toEqual([]);
+    const dom = new JSDOM(`<!doctype html><body><p id="header-line"></p><div id="root"></div></body>`);
+    const doc = dom.window.document;
+    const app = createPanelApp({ ch: asChrome(f), doc, root: doc.getElementById("root")!, setInterval: () => 0, setTimeout: () => 0 });
+    await app.start();
+    await flush(6);
+    await app.idle();
+    app.render();
+    expect(doc.body.textContent).toContain("Scout is paused. Resume it to get links.");
+    expect(app.model.pauseState.control).toMatchObject({ title: "Resume", enabled: true });
+  });
+
+  it("a pause no frame confirms settles back to the core's state after 10 s", async () => {
+    const h = await harness();
+    await withResults(h);
+    await h.click("nav-settings");
+    await h.click("pause");
+    expect(lastCommand(h.f)).toEqual({ type: "pause" });
+    await h.tick(9_999);
+    expect(h.byKey("pause")!.textContent).toBe("Pausing…");
+    expect(h.byKey("pause")!.disabled).toBe(true);
+    await h.tick(1);
+    expect(h.byKey("pause")!.textContent).toBe("Pause");
+    expect(h.byKey("pause")!.disabled).toBe(false);
+    expect(commandsPosted(h.f).filter((c) => c["type"] === "pause")).toHaveLength(1); // never re-sent
+  });
+
 
   it("a command refused for now is re-sent under the same ID; a click refused for now fails with Dismiss only", async () => {
     const h = await harness();

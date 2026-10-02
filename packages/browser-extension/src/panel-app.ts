@@ -121,10 +121,12 @@ export function createPanelApp(deps: PanelAppDeps): PanelApp {
       void request<CommandReply>({ type: "command", command: c }).then((r) => {
         inFlight.delete(c.commandId);
         const written = r?.written === true;
-        model.markSent(c, written ? "written" : "retryLater", now());
+        // Invalid (not a relay command): failed for good, never resent.
+        const invalid = !written && r?.invalid === true;
+        model.markSent(c, written ? "written" : invalid ? "invalid" : "retryLater", now());
         // Not sent (no ready port, or the host reports the core unavailable): nothing is queued
         // in the worker; learn the link state so the panel says why and stops resending.
-        if (!written) void refreshStatus();
+        if (!written && !invalid) void refreshStatus();
         renderSoon();
       });
     }
@@ -133,7 +135,6 @@ export function createPanelApp(deps: PanelAppDeps): PanelApp {
 
   function onStatus(s: StatusSnapshot): void {
     status = s;
-    model.setExtPaused(s.paused);
     send(model.applyLink(s.link));
   }
 
@@ -206,13 +207,20 @@ export function createPanelApp(deps: PanelAppDeps): PanelApp {
 
   function openLinks(): void {
     for (const link of model.takeLinksToOpen()) {
-      const props: chrome.tabs.CreateProperties = { url: link.href, active: true };
-      if (windowId !== null) props.windowId = windowId;
+      const plain: chrome.tabs.CreateProperties = { url: link.href, active: true };
+      if (windowId !== null) plain.windowId = windowId;
+      const props: chrome.tabs.CreateProperties = { ...plain };
       if (site.kind !== "none" && site.tabId !== null) props.openerTabId = site.tabId;
       if (site.kind !== "none" && site.index !== null) props.index = site.index + 1;
+      const placed = props.openerTabId !== undefined || props.index !== undefined;
       void track(
         Promise.resolve()
           .then(() => ch.tabs.create(props))
+          // The site's tab can close or move between the frame and the click: open it plainly once.
+          .catch((e: unknown) => {
+            if (!placed) throw e;
+            return ch.tabs.create(plain);
+          })
           .then(
             (tab) => {
               if (!tab) model.linkRefused(link.commandId, "open_failed");
@@ -327,7 +335,7 @@ export function createPanelApp(deps: PanelAppDeps): PanelApp {
       void request<PauseReply>({ type: "pause", paused: pause }).then((r) => {
         if (r) {
           onStatus(r.status);
-          model.pauseState.sent(pause, r.written);
+          model.pauseState.sent(pause, r.written, now());
         }
         renderSoon();
       });

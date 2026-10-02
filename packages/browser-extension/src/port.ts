@@ -38,7 +38,11 @@ export interface PortLink {
    * relay command, no port is ready, or the host reports the core unavailable; never queued.
    */
   sendCommand(command: RelayCommand): boolean;
+  /** sendCommand, saying why nothing was sent: `invalid` (not a relay command; never resend) or not ready. */
+  sendCommandResult(command: RelayCommand): SendResult;
 }
+
+export type SendResult = { written: true } | { written: false; invalid?: true };
 
 export interface PortDeps {
   ch: typeof chrome;
@@ -203,18 +207,22 @@ export function createPortLink(deps: PortDeps): PortLink {
     notify();
   }
 
-  function sendCommand(command: RelayCommand): boolean {
+  function sendCommandResult(command: RelayCommand): SendResult {
+    const frame = CommandFrameSchema.safeParse({ type: "command", command });
+    if (!frame.success) return { written: false, invalid: true };
     const p = state.port;
     // The host reports the core gone (it is retrying, or exiting): nothing would reach it.
-    if (!p || !ready || coreUnavailable) return false;
-    const frame = CommandFrameSchema.safeParse({ type: "command", command });
-    if (!frame.success) return false;
+    if (!p || !ready || coreUnavailable) return { written: false };
     try {
       p.postMessage(frame.data);
-      return true;
+      return { written: true };
     } catch {
-      return false;
+      return { written: false };
     }
+  }
+
+  function sendCommand(command: RelayCommand): boolean {
+    return sendCommandResult(command).written;
   }
 
   return {
@@ -227,5 +235,6 @@ export function createPortLink(deps: PortDeps): PortLink {
     manualReconnect,
     linkState,
     sendCommand,
+    sendCommandResult,
   };
 }

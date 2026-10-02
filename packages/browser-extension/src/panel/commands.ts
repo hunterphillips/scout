@@ -28,7 +28,8 @@ type Omit2<T, K extends PropertyKey> = T extends unknown ? Omit<T, K> : never;
 export type PanelRequest = Omit2<PanelCommand, "commandId">;
 
 export type CommandState = "pending" | "ok" | "failed" | "unknown" | "superseded";
-export type SendOutcome = "written" | "retryLater" | "oversize";
+/** `oversize`: the line is too long; `invalid`: not a relay command. Both fail as `invalid`, for good. */
+export type SendOutcome = "written" | "retryLater" | "oversize" | "invalid";
 
 export interface CommandRecord {
   readonly id: string;
@@ -112,7 +113,7 @@ export class CommandTracker {
       r.sent = true;
       r.sentAt = now;
     }
-    else if (outcome === "oversize") this.fail(r, "invalid");
+    else if (outcome === "oversize" || outcome === "invalid") this.fail(r, "invalid");
     else if (r.request.type === "open_link") this.fail(r, "unavailable"); // never re-sent later
   }
 

@@ -60,6 +60,8 @@ export interface PauseReply {
 
 export interface CommandReply {
   written: boolean;
+  /** Not a relay command at all: the panel marks it invalid and never resends it. */
+  invalid?: true;
 }
 
 export type PanelToWorker = { type: "hb" } | { type: "request"; id: number; request: PanelPortRequest };
@@ -95,6 +97,7 @@ export interface PolicyState {
 /** Metadata-only status for the side panel. Never carries page text or URLs. */
 export interface StatusSnapshot {
   link: LinkState;
+  /** The core's latest capture_policy says paused (the extension keeps no pause of its own). */
   paused: boolean;
   /** Exact-origin patterns Chrome has granted. */
   granted: string[];

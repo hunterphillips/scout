@@ -4,8 +4,8 @@ import { CONTENT_SCRIPT_FILE, CONTENT_SCRIPT_ID, createBackground, GITHUB_PATTER
 import { FOCUS_DEBOUNCE_MS } from "./focus-observer.js";
 import type { StatusSnapshot } from "./messages.js";
 import { BROAD_GRANT_TEXT, statusRows } from "./panel/view.js";
-import { activate, asChrome, DISABLED_POLICY, fakeClock, makeChrome, sender } from "./test-fakes.js";
-import { approve, dropPort, lastPort, observations, pageText, setup } from "./test-harness.js";
+import { activate, asChrome, DISABLED_POLICY, fakeClock, flush, makeChrome, sender } from "./test-fakes.js";
+import { approve, commandsPosted, corePolicy, dropPort, lastPort, observations, pageText, setup } from "./test-harness.js";
 
 const STRIPE = "https://docs.stripe.com/*";
 const EXAMPLE = "https://example.com/*";
@@ -297,7 +297,7 @@ describe("capture policy", () => {
     await clock.advance(0);
     expect(f._.tabMessages).toEqual([{ tabId: 10, msg: { type: "cancel", stop: false } }]);
     expect(await pageText(bg, f)).toMatchObject({ ok: false });
-    expect(await approve(bg, f)).toEqual({ approved: false, reason: "policy" });
+    expect(await approve(bg, f)).toEqual({ approved: false, reason: "paused" });
     expect(observations(f, "page_text")).toEqual([]);
     expect(bg.snapshot().policy).toEqual({ revision: 3, captureEnabled: true, paused: true });
     lastPort(f).onMessage.emit(ENABLED(4));
@@ -336,12 +336,16 @@ describe("capture policy", () => {
 });
 
 describe("pause", () => {
-  it("is persisted, denies approval, stops focus observations, and tells the core the visit ended", async () => {
+  it("the panel's Pause only asks the core; nothing changes in the extension until the core's policy says paused", async () => {
     const { f, clock, bg } = await setup();
-    const s = ((await bg.panelRequest({ type: "pause", paused: true })) as { status: StatusSnapshot }).status;
-    expect(s.paused).toBe(true);
-    expect(f._.store["paused"]).toBe(true);
-    expect(observations(f, "focus").at(-1)).toMatchObject({ browserFocused: false, windowId: -1 });
+    const r = (await bg.panelRequest({ type: "pause", paused: true })) as { status: StatusSnapshot; written: boolean };
+    expect(r).toMatchObject({ written: true, status: { paused: false } });
+    expect(commandsPosted(f)).toEqual([{ type: "pause" }]);
+    expect(f._.store["paused"]).toBeUndefined();
+    expect((await approve(bg, f)).approved).toBe(true);
+
+    corePolicy(f, true);
+    expect(bg.snapshot().paused).toBe(true);
     const n = observations(f).length;
     expect(await approve(bg, f)).toEqual({ approved: false, reason: "paused" });
     f.tabs.onActivated.emit({ tabId: 10, windowId: 1 } as never);
@@ -349,9 +353,25 @@ describe("pause", () => {
     expect(observations(f)).toHaveLength(n);
   });
 
-  it("holds permission changes while paused and reports them on resume", async () => {
+  it("a pause from the Mac menu (the core's policy alone) stops posting the same way, and its resume restarts it", async () => {
+    const { f, clock, bg } = await setup();
+    corePolicy(f, true);
+    const n = observations(f).length;
+    f.tabs.onActivated.emit({ tabId: 10, windowId: 1 } as never);
+    await clock.advance(1000);
+    expect(observations(f)).toHaveLength(n);
+    expect(commandsPosted(f)).toEqual([]);
+    corePolicy(f, false);
+    await clock.advance(FOCUS_DEBOUNCE_MS);
+    expect(observations(f).at(n)).toMatchObject({ kind: "permissions" });
+    expect(observations(f, "focus").at(-1)).toMatchObject({ browserFocused: true, tabId: 10 });
+    expect((await approve(bg, f)).approved).toBe(true);
+  });
+
+  it("holds permission changes while the core is paused and reports them on its resume", async () => {
     const { f, clock, bg } = await setup();
     await bg.panelRequest({ type: "pause", paused: true });
+    corePolicy(f, true);
     const n = observations(f).length;
     f._.state.granted = [GITHUB_PATTERN, STRIPE];
     await Promise.all(f.permissions.onAdded.emit({ origins: [STRIPE] } as never));
@@ -359,37 +379,46 @@ describe("pause", () => {
     await Promise.all(f.permissions.onRemoved.emit({ origins: [STRIPE] } as never));
     await clock.advance(1000);
     expect(observations(f)).toHaveLength(n);
-    await bg.panelRequest({ type: "pause", paused: false });
+    const r = (await bg.panelRequest({ type: "pause", paused: false })) as { written: boolean };
+    expect(r.written).toBe(true);
+    expect(commandsPosted(f)).toEqual([{ type: "pause" }, { type: "resume" }]);
+    expect(observations(f)).toHaveLength(n); // still paused until the core says otherwise
+    corePolicy(f, false);
     expect(observations(f).at(n)).toMatchObject({ kind: "permissions", granted: [GITHUB_PATTERN], githubCapture: true });
     await clock.advance(0);
     expect(observations(f).at(n + 1)).toMatchObject({ kind: "focus", permissionsRevision: observations(f).at(n)!["revision"] });
   });
 
-  it("does not answer content requests until the stored paused flag is loaded", async () => {
-    const f = makeChrome({ granted: [GITHUB_PATTERN] });
-    f._.store["paused"] = true;
-    const bg = createBackground(asChrome(f), { clock: fakeClock() });
+  it("a core that starts paused: nothing but the core's policy is waited on, and nothing is posted", async () => {
+    const { f, clock, bg } = await setup({ granted: [GITHUB_PATTERN], local: { githubCapture: true }, host: "silent", autoEnable: false });
+    lastPort(f).onMessage.emit({ type: "capture_policy", revision: 1, paused: true, captureEnabled: true });
+    lastPort(f).onMessage.emit({ type: "ready" });
+    await clock.advance(FOCUS_DEBOUNCE_MS);
+    expect(lastPort(f).posted).toEqual([]);
+    expect(bg.snapshot()).toMatchObject({ link: "connected", paused: true });
     expect(await approve(bg, f)).toEqual({ approved: false, reason: "paused" });
+    lastPort(f).onMessage.emit({ type: "capture_policy", revision: 2, paused: false, captureEnabled: true });
+    await clock.advance(0);
+    expect(kinds(lastPort(f).posted)).toEqual(["permissions", "focus"]);
   });
 
-  it("fails closed (paused) when storage cannot be read", async () => {
-    const f = makeChrome({ granted: [GITHUB_PATTERN] });
-    f._.state.storageFails = true;
-    const bg = createBackground(asChrome(f), { clock: fakeClock() });
-    expect(await approve(bg, f)).toEqual({ approved: false, reason: "paused" });
+  it("drops the old stored paused flag on load and never reads it", async () => {
+    const { f, bg } = await setup({ granted: [GITHUB_PATTERN], local: { githubCapture: true, paused: true } });
+    await flush();
+    expect(f._.store["paused"]).toBeUndefined();
+    expect(bg.snapshot().paused).toBe(false);
+    expect((await approve(bg, f)).approved).toBe(true);
+  });
+
+  it("a pause with no core to reach sends nothing and changes nothing", async () => {
+    const { f, bg } = await setup({ granted: [GITHUB_PATTERN], host: "missing" });
+    expect(await bg.panelRequest({ type: "pause", paused: true })).toMatchObject({ written: false, status: { paused: false } });
+    expect(commandsPosted(f)).toEqual([]);
   });
 
   it("ignores panel requests sent as content messages", async () => {
     const { f, bg } = await setup();
     expect(await bg.handleMessage({ type: "pause", paused: true }, sender(f))).toEqual({ ok: false });
-    expect(f._.store["paused"]).toBeUndefined();
-  });
-
-  it("resuming schedules a fresh focus observation", async () => {
-    const { f, clock, bg } = await setup();
-    await bg.panelRequest({ type: "pause", paused: true });
-    await bg.panelRequest({ type: "pause", paused: false });
-    await clock.advance(FOCUS_DEBOUNCE_MS);
-    expect(observations(f, "focus").at(-1)).toMatchObject({ browserFocused: true, tabId: 10 });
+    expect(commandsPosted(f)).toEqual([]);
   });
 });

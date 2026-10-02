@@ -99,10 +99,6 @@ export class PanelModel {
     return wasRunning ? [] : this.coreRestarted();
   }
 
-  setExtPaused(paused: boolean): void {
-    this.pauseState.extPaused = paused;
-  }
-
   private coreRestarted(): PanelCommand[] {
     this.resultsModel.reset();
     this.pauseState.coreRestarted();
@@ -369,8 +365,9 @@ export class PanelModel {
     for (const id of [...this.dismissed]) if (!this.commands.record(id)) this.dismissed.delete(id);
   }
 
-  /** Commands the core never answered (commands.ts PENDING_TIMEOUT_MS); a preview's fails it. */
+  /** Commands the core never answered (commands.ts PENDING_TIMEOUT_MS); a preview's fails it. A pause or resume no frame confirmed settles to the core's state. */
   expirePending(now: number): void {
+    this.pauseState.expire(now);
     for (const r of this.commands.expire(now)) {
       if (r.request.type !== "preview") continue;
       const id = keyId(r.request);
@@ -384,7 +381,7 @@ export class PanelModel {
   /** What became of a write; an oversize preview request fails its preview. */
   markSent(command: PanelCommand, outcome: SendOutcome, now = 0): void {
     this.commands.markSent(command.commandId, outcome, now);
-    if (outcome !== "oversize" || command.type !== "preview") return;
+    if ((outcome !== "oversize" && outcome !== "invalid") || command.type !== "preview") return;
     const id = keyId(command);
     if (this.awaiting.get(id) === command.commandId) {
       this.awaiting.delete(id);

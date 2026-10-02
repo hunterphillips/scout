@@ -6,14 +6,16 @@
 // - focus-observer.ts: debounced focus observations;
 // - page-text-gate.ts: the approval gate for GitHub issue text.
 // It also owns the host-permission lifecycle (the GitHub content script's
-// registration), the persisted paused flag and GitHub-capture toggle, the
-// permissions snapshot, the core's capture policy, and the side panel
+// registration), the persisted GitHub-capture toggle, the permissions snapshot, the core's capture policy, and the side panel
 // (panel-bridge.ts: the panel's port, the window frames' cache, the badge; the
 // toolbar click opens the panel, there is no popup).
 //
-// The paused flag is read from storage before any content message is
-// answered, and storage failure means paused. Nothing is posted to the port
-// while paused except the one focus-lost observation that ends the visit.
+// Pause belongs to the core alone (its capture_policy `paused`): the side panel's
+// Pause/Resume sends the core's pause/resume, and the Mac menu or window pausing
+// the core stops the extension too. While the core is paused nothing is posted;
+// when it resumes, the permissions snapshot (holding back any grant change made
+// meanwhile) and a focus follow. The extension's old stored `paused` key is
+// removed on load and never read.
 //
 // Handshake: on each port nothing is posted until the core's first
 // capture_policy arrives (the native host delivers it before `ready`). That
@@ -37,7 +39,7 @@ import type { CurrentSite } from "./panel/sites.js";
 import { type Approval, createPageTextGate } from "./page-text-gate.js";
 import { createPortLink } from "./port.js";
 import type { Clock, ReconnectPolicy } from "./reconnect.js";
-import { activeTab, createSharedState, defaultClock, githubCaptureOn, githubGranted, newCounters, policyAllowsCapture, post } from "./shared-state.js";
+import { activeTab, corePaused, createSharedState, defaultClock, githubCaptureOn, githubGranted, newCounters, policyAllowsCapture, post } from "./shared-state.js";
 
 export { FOCUS_DEBOUNCE_MS, GITHUB_PATTERN, HOST_NAME };
 
@@ -86,20 +88,24 @@ export function createBackground(ch: typeof chrome, deps: BackgroundDeps = {}): 
   let loaded: Promise<void> | null = null;
   let chain: Promise<boolean> = Promise.resolve(false);
 
-  /** Load persisted state once; every content message waits for it. Fails closed (paused, capture off). */
+  /** Load persisted state once; every content message waits for it. Fails closed (capture off). */
   function loadState(): Promise<void> {
     loaded ??= Promise.resolve()
-      .then(() => ch.storage.local.get({ paused: false, githubCapture: false }))
+      .then(() => ch.storage.local.get({ githubCapture: false }))
       .then(
         (stored) => {
-          state.paused = stored?.["paused"] === true;
           state.githubCapture = stored?.["githubCapture"] === true;
         },
         () => {
-          state.paused = true;
           state.githubCapture = false;
         },
-      );
+      )
+      .then(() => {
+        // Before P4.1 the extension kept its own paused flag; the core is the one source now.
+        void Promise.resolve()
+          .then(() => ch.storage.local.remove?.("paused"))
+          .catch(() => {});
+      });
     return loaded;
   }
 
@@ -129,21 +135,23 @@ export function createBackground(ch: typeof chrome, deps: BackgroundDeps = {}): 
     // The first policy after (re)connect is a transition from "no policy": treated
     // as disabling (any read still in flight stops) even if it already enables.
     const wasAllowed = prev !== null && policyAllowsCapture(state);
+    const wasPaused = prev?.paused === true;
     state.policy = { revision: p.revision, captureEnabled: p.captureEnabled, paused: p.paused };
     const allowed = policyAllowsCapture(state);
     if (!allowed || prev === null) gate.cancelTabs(); // stop in-flight reads; content waits for a fresh refresh
-    if (prev === null) sendSnapshot(); // first policy on this port: the core needs our snapshot
+    // First policy on this port: the core needs our snapshot. A resume: it gets what was held back.
+    if (prev === null || (wasPaused && !p.paused)) sendSnapshot();
     if (allowed && !wasAllowed) void gate.refreshActive(); // after the snapshot, so capture follows it
     panel.pushStatus();
   }
 
   /**
    * Post a full permissions snapshot with a new revision, then a fresh focus.
-   * Held while paused or before the core's policy: resume and the next policy
-   * send it.
+   * Held while the core is paused or before its policy: resume and the next
+   * policy send it.
    */
   function sendSnapshot(): void {
-    if (state.paused || !state.policy || !state.port) return;
+    if (corePaused(state) || !state.policy || !state.port) return;
     const revision = state.permissionsRevision + 1;
     const ok = post(state, {
       kind: "permissions",
@@ -230,36 +238,13 @@ export function createBackground(ch: typeof chrome, deps: BackgroundDeps = {}): 
   function snapshot(): StatusSnapshot {
     return {
       link: link.linkState(),
-      paused: state.paused,
+      paused: corePaused(state),
       granted: [...state.granted],
       githubCapture: githubCaptureOn(state),
       broadGrantIgnored: state.broadGrantIgnored,
       policy: state.policy ? { ...state.policy } : null,
       counters: { ...counters },
     };
-  }
-
-  async function setPaused(next: boolean): Promise<void> {
-    state.paused = next;
-    if (state.paused) {
-      gate.cancelTabs();
-      // Tell the core the visit is over. Nothing else is posted while paused.
-      post(state, { kind: "focus", seq: ++state.seq, at: clock.now(), browserFocused: false, windowId: windowIdNone });
-    }
-    // A failed write still takes effect in memory (and resume still sends what it held back);
-    // the error is rethrown afterwards for the caller to report.
-    const saved = Promise.resolve()
-      .then(() => ch.storage.local.set({ paused: state.paused }))
-      .then(
-        () => null,
-        (e: unknown) => e,
-      );
-    const failure = await saved;
-    if (!state.paused) {
-      sendSnapshot(); // any grant change while paused was held back; follows with focus
-      void gate.refreshActive();
-    }
-    if (failure !== null) throw failure;
   }
 
   /** The side panel's checkbox (a user gesture). Turning it on needs the GitHub grant. */
@@ -276,27 +261,13 @@ export function createBackground(ch: typeof chrome, deps: BackgroundDeps = {}): 
   }
 
   /**
-   * The panel's one Pause/Resume control: the extension's own pause (nothing posted but the
-   * focus-lost that ends the visit) and the core's pause/resume, sent only on a ready port.
-   * Pausing stops posting first; resuming tells the core first, so the snapshot and focus that
-   * follow reach a resumed core.
+   * The panel's Pause/Resume: the core's pause or resume, sent only on a ready port. What the
+   * extension posts follows the core's next capture_policy (paused or not), wherever the pause
+   * came from.
    */
-  async function onPause(paused: boolean): Promise<PauseReply> {
-    // A failed storage write still pauses in memory (setPaused sets it first); the core is told
-    // either way, and the panel always gets a reply.
-    const persist = (p: Promise<void>) =>
-      p.catch((e: unknown) => {
-        console.warn("scout: the paused flag was not saved", e instanceof Error ? e.message : "");
-      });
-    let written: boolean;
-    if (paused) {
-      await persist(setPaused(true));
-      written = link.sendCommand({ type: "pause" });
-    } else {
-      written = link.sendCommand({ type: "resume" });
-      await persist(setPaused(false));
-    }
-    return { status: snapshot(), written };
+  function onPause(paused: boolean): PauseReply {
+    const r = link.sendCommandResult({ type: paused ? "pause" : "resume" });
+    return { status: snapshot(), written: r.written };
   }
 
   /**
@@ -321,11 +292,8 @@ export function createBackground(ch: typeof chrome, deps: BackgroundDeps = {}): 
     switch (req.type) {
       case "status":
         return snapshot();
-      case "pause": {
-        const r = await onPause(req.paused === true);
-        panel.pushStatus();
-        return r;
-      }
+      case "pause":
+        return onPause(req.paused === true);
       case "reconnect":
         link.manualReconnect();
         panel.pushStatus();
@@ -337,7 +305,7 @@ export function createBackground(ch: typeof chrome, deps: BackgroundDeps = {}): 
       case "site":
         return currentSite(req.windowId);
       case "command":
-        return { written: link.sendCommand(req.command) } satisfies CommandReply;
+        return link.sendCommandResult(req.command) satisfies CommandReply;
       default:
         return null;
     }

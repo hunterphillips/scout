@@ -1,13 +1,14 @@
-// Ported from ScoutKit's PauseStateTests.swift (P4.2, on main). Browser differences: the control
-// also pauses the extension's own posting, so it stays enabled with no core to reach (the app's
-// is disabled then), and there is no quitting state.
+// Ported from ScoutKit's PauseStateTests.swift (P4.2, on main). The core is the one source of
+// truth, as in the app; browser differences: no quitting state, and a pending request expires
+// after PAUSE_PENDING_MS.
 import { describe, expect, it } from "vitest";
-import { PauseState } from "./pause.js";
+import { PAUSE_PENDING_MS, PauseState } from "./pause.js";
 
 const PAUSE = { title: "Pause", enabled: true, label: "Pause Scout", pause: true };
 const RESUME = { title: "Resume", enabled: true, label: "Resume Scout", pause: false };
 const PAUSING = { title: "Pausing…", enabled: false, label: "Pausing Scout", pause: true };
 const RESUMING = { title: "Resuming…", enabled: false, label: "Resuming Scout", pause: false };
+const OFF = { ...PAUSE, enabled: false };
 
 const at = (core: PauseState["core"]) => {
   const s = new PauseState();
@@ -18,7 +19,8 @@ const at = (core: PauseState["core"]) => {
 describe("PauseState (PauseStateTests.swift)", () => {
   it("followsTheCoresStateFrame", () => {
     const s = new PauseState();
-    expect(s.control).toEqual(PAUSE); // the extension can always pause itself
+    expect(s.control).toEqual(OFF); // no core has reported: nothing to pause
+    expect(s.request()).toBeNull();
     s.apply("idle");
     expect(s.control).toEqual(PAUSE);
     s.apply("working");
@@ -27,7 +29,7 @@ describe("PauseState (PauseStateTests.swift)", () => {
     expect(s.control).toEqual(RESUME);
     expect(s.request()).toBe(false);
     s.apply("disconnected");
-    expect(s.control).toEqual(PAUSE);
+    expect(s.control).toEqual(OFF);
   });
 
   it("aRequestIsPendingUntilAFrameShowsItsTarget", () => {
@@ -48,7 +50,7 @@ describe("PauseState (PauseStateTests.swift)", () => {
     expect(s.control).toEqual(RESUMING);
     s.apply("disconnected");
     expect(s.pending).toBeNull();
-    expect(s.control).toEqual(PAUSE);
+    expect(s.control).toEqual(OFF);
   });
 
   it("aChangeMadeElsewhereSettlesTheRequest", () => {
@@ -85,27 +87,28 @@ describe("PauseState (PauseStateTests.swift)", () => {
     expect(s.control).toEqual(RESUME);
   });
 
-  it("with no core, a click still pauses and resumes the extension, and nothing is pending", () => {
-    const s = new PauseState();
-    expect(s.request()).toBe(true);
-    s.sent(true, false); // no ready port: the core was not told
-    s.extPaused = true; // the worker's reply
-    expect(s.pending).toBeNull();
+  it("shows only the core's state: paused anywhere shows Resume, resumed anywhere shows Pause", () => {
+    const s = at("idle");
+    s.sent(true, true); // the panel paused
+    s.apply("paused");
+    expect(s.paused).toBe(true);
     expect(s.control).toEqual(RESUME);
-    expect(s.request()).toBe(false);
+    s.apply("idle"); // the Mac menu resumed
+    expect(s.paused).toBe(false);
+    expect(s.control).toEqual(PAUSE);
   });
 
-  it("either side paused shows Resume; resuming targets both", () => {
+  it("a pending request no frame confirms expires to the core's state", () => {
     const s = at("idle");
-    s.extPaused = true;
-    expect(s.control).toEqual(RESUME);
-    s.extPaused = false;
-    s.apply("paused");
-    expect(s.control).toEqual(RESUME);
-    // A resume to a core that is already running settles at once.
-    const r = at("idle");
-    r.extPaused = true;
-    r.sent(false, true);
-    expect(r.pending).toBeNull();
+    s.sent(true, true, 5_000);
+    s.expire(5_000 + PAUSE_PENDING_MS - 1);
+    expect(s.control).toEqual(PAUSING);
+    s.expire(5_000 + PAUSE_PENDING_MS);
+    expect(s.pending).toBeNull();
+    expect(s.control).toEqual(PAUSE);
+    const r = at("paused");
+    r.sent(false, true, 0);
+    r.expire(PAUSE_PENDING_MS);
+    expect(r.control).toEqual(RESUME);
   });
 });

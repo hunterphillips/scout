@@ -121,8 +121,9 @@ export function createPanelBridge(deps: PanelBridgeDeps): PanelBridge {
         cache.set("results", state);
         if (state.status === "ok") {
           void panelOpen().then((open) => {
-            // Still the shown result (no state frame since), and no panel to show it.
-            if (!open && cache.get("results") === state) setBadge(BADGE_TEXT);
+            // Still the shown result (no state frame since), and no panel to show it (none
+            // connected while Chrome was asked: a panel that connected meanwhile shows it).
+            if (!open && ports.size === 0 && cache.get("results") === state) setBadge(BADGE_TEXT);
           });
         }
         break;

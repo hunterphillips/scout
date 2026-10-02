@@ -6,7 +6,7 @@ import { PANEL_PORT_NAME, type StatusSnapshot, type WorkerToPanel } from "./mess
 import { BADGE_TEXT } from "./panel-bridge.js";
 import { F } from "./panel/test-frames.js";
 import { activate, asChrome, EXT_ID, type FakeChrome, fakeClock, flush, makeChrome } from "./test-fakes.js";
-import { commandsPosted, dropPort, lastPort, setup } from "./test-harness.js";
+import { commandsPosted, corePolicy, dropPort, lastPort, setup } from "./test-harness.js";
 
 const GRANT = F.frame("frame.grant.json");
 const CAPS = F.frame("frame.capabilities.minimal.json");
@@ -36,7 +36,15 @@ async function openPanel(f: FakeChrome, sender?: chrome.runtime.MessageSender) {
     }
     throw new Error("no reply");
   };
-  return { port, got, request, frames: () => got.filter((m) => m.type === "frame").map((m) => (m as { state: { type: string } }).state) };
+  return {
+    port,
+    got,
+    request,
+    frames: () => got.filter((m) => m.type === "frame").map((m) => (m as { state: { type: string } }).state),
+    get statuses() {
+      return got.filter((m) => m.type === "status").map((m) => (m as { status: StatusSnapshot }).status);
+    },
+  };
 }
 
 async function repainted() {
@@ -167,6 +175,18 @@ describe("badge", () => {
     expect(f._.state.badge).toBe("");
   });
 
+  it("a panel that connects while Chrome is still being asked gets no dot", async () => {
+    const { f } = await setup();
+    let answer: (c: unknown[]) => void = () => {};
+    f.runtime.getContexts = (() => new Promise((r) => (answer = r))) as never;
+    frame(f, RESULTS);
+    await flush();
+    await openPanel(f); // connects before getContexts answers
+    answer([]); // Chrome's answer predates the panel
+    await flush();
+    expect(f._.state.badge).toBe("");
+  });
+
   it("other results never set it; a panel connecting clears it", async () => {
     const { f } = await setup();
     frame(f, F.frame("frame.results.empty.json"));
@@ -215,35 +235,33 @@ describe("panel requests", () => {
     lastPort(f).onMessage.emit({ type: "ready" });
     expect(await p.request({ type: "command", command: cmd })).toEqual({ written: true });
     expect(commandsPosted(f)).toEqual([cmd]);
-    // frontmost and shutdown are not relay commands: refused before the port.
-    expect(await p.request({ type: "command", command: { type: "shutdown" } })).toEqual({ written: false });
+    // frontmost and shutdown are not relay commands: refused before the port, as invalid.
+    expect(await p.request({ type: "command", command: { type: "shutdown" } })).toEqual({ written: false, invalid: true });
     expect(commandsPosted(f)).toEqual([cmd]);
   });
 
-  it("pause pauses the extension and the core; resume tells the core first", async () => {
+  it("pause and resume send only the core's command; the status follows the core's policy", async () => {
     const { f } = await setup();
     const p = await openPanel(f);
     const r = (await p.request({ type: "pause", paused: true })) as { status: StatusSnapshot; written: boolean };
-    expect(r.written).toBe(true);
-    expect(r.status.paused).toBe(true);
-    expect(f._.store["paused"]).toBe(true);
-    const posted = lastPort(f).posted;
-    const focusLost = posted.findIndex((m) => m["kind"] === "focus" && m["browserFocused"] === false);
-    const pause = posted.findIndex((m) => m["type"] === "command");
-    expect(focusLost).toBeGreaterThan(-1);
-    expect(pause).toBeGreaterThan(focusLost);
+    expect(r).toMatchObject({ written: true, status: { paused: false } });
     expect(commandsPosted(f)).toEqual([{ type: "pause" }]);
-    const before = posted.length;
+    expect(lastPort(f).posted.at(-1)).toEqual({ type: "command", command: { type: "pause" } });
+    corePolicy(f, true);
+    await flush();
+    expect(p.statuses.at(-1)).toMatchObject({ paused: true });
     const r2 = (await p.request({ type: "pause", paused: false })) as { status: StatusSnapshot; written: boolean };
-    expect(r2).toMatchObject({ written: true, status: { paused: false } });
-    expect(posted[before]).toEqual({ type: "command", command: { type: "resume" } });
-    expect(posted[before + 1]).toMatchObject({ kind: "permissions" });
+    expect(r2).toMatchObject({ written: true, status: { paused: true } });
+    expect(commandsPosted(f)).toEqual([{ type: "pause" }, { type: "resume" }]);
+    corePolicy(f, false);
+    await flush();
+    expect(p.statuses.at(-1)).toMatchObject({ paused: false });
   });
 
-  it("pause with no core to reach still pauses the extension", async () => {
+  it("pause with no core to reach sends nothing", async () => {
     const { f } = await setup({ host: "missing" });
     const p = await openPanel(f);
-    expect(await p.request({ type: "pause", paused: true })).toMatchObject({ written: false, status: { paused: true } });
+    expect(await p.request({ type: "pause", paused: true })).toMatchObject({ written: false, status: { paused: false } });
   });
 
   it("the current site: only an origin, and only for a tab whose URL Chrome shows", async () => {
@@ -318,17 +336,12 @@ describe("link changes reach open panels at once", () => {
     expect(pushed(f).at(-1)).toBe("connected");
   });
 
-  it("pause answers even when storage refuses the write, and the core still hears it", async () => {
+  it("pause never touches storage: it answers when storage refuses writes", async () => {
     const { f } = await setup();
     const p = await openPanel(f);
     f._.state.storageSetFails = true;
-    const r = (await p.request({ type: "pause", paused: true })) as { status: StatusSnapshot; written: boolean } | null;
-    expect(r).toMatchObject({ written: true, status: { paused: true } });
+    expect(await p.request({ type: "pause", paused: true })).toMatchObject({ written: true });
     expect(commandsPosted(f)).toEqual([{ type: "pause" }]);
-    const r2 = (await p.request({ type: "pause", paused: false })) as { status: StatusSnapshot; written: boolean } | null;
-    expect(r2).toMatchObject({ written: true, status: { paused: false } });
-    const posted = lastPort(f).posted;
-    const resume = posted.findIndex((m) => m["type"] === "command" && (m["command"] as { type: string }).type === "resume");
-    expect(posted.slice(resume + 1).some((m) => m["kind"] === "permissions")).toBe(true); // resume still sends what it held back
   });
+
 });

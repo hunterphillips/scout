@@ -4,7 +4,7 @@ import { GITHUB_PATTERN } from "./hosts.js";
 import { APPROVAL_TTL_MS, createPageTextGate } from "./page-text-gate.js";
 import { createSharedState, newCounters } from "./shared-state.js";
 import { activate, EXT_ID, fakeClock } from "./test-fakes.js";
-import { approve, ISSUE1, ISSUE2, observations, pageText, setup } from "./test-harness.js";
+import { approve, corePolicy, ISSUE1, ISSUE2, observations, pageText, setup } from "./test-harness.js";
 
 describe("page_text gate (through the background)", () => {
   it("forwards when the sender tab is the active tab of the focused window and its URL equals the message URL; attaches documentId", async () => {
@@ -100,11 +100,11 @@ describe("page_text gate (through the background)", () => {
     expect(await pageText(bg, f)).toEqual({ ok: false, reason: "no-approval" });
   });
 
-  it("a pause landing during the approval's awaits cancels it (cancel epoch)", async () => {
+  it("the core pausing during the approval's awaits cancels it (cancel epoch)", async () => {
     const { f, bg } = await setup();
     const orig = f.windows.get;
     f.windows.get = async (id) => {
-      await bg.panelRequest({ type: "pause", paused: true });
+      corePolicy(f, true);
       return orig(id);
     };
     expect((await approve(bg, f)).approved).toBe(false);
