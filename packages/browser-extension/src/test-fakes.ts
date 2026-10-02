@@ -234,7 +234,7 @@ export const DISABLED_POLICY = { type: "capture_policy", revision: 1, paused: fa
 
 /**
  * Fake chrome. `host` decides how a new native port behaves: "ok" (stays
- * open; like the native host with a protocol-2 core, it sends the core's
+ * open; like the native host with a protocol-3 core, it sends the core's
  * capture-disabled policy, then ready), "silent" (stays open, says nothing)
  * or "missing" (disconnects at once with the host-not-found error). With
  * `autoEnable` (default on), the fake core answers the first permissions

@@ -13,7 +13,8 @@
 // Bridge protocol 3 carries Scout's window over the same port: each `panel` frame
 // from the core (validated with ToChromeFrameSchema) goes to onPanel, and
 // sendCommand posts a window command ({type:"command", command}) once the port is
-// ready. Commands are never queued: with no ready port, sendCommand returns false.
+// ready and the core is not reported unavailable. Commands are never queued: otherwise
+// sendCommand returns false.
 
 import { type CapturePolicy, CommandFrameSchema, type PanelState, type RelayCommand, ToChromeFrameSchema } from "@scout/contracts";
 import { HOST_NAME } from "./hosts.js";
@@ -34,7 +35,7 @@ export interface PortLink {
   linkState(): LinkState;
   /**
    * Post one window command to the core. False (nothing sent) when the command is not a valid
-   * relay command or no port is ready; never queued.
+   * relay command, no port is ready, or the host reports the core unavailable; never queued.
    */
   sendCommand(command: RelayCommand): boolean;
 }
@@ -177,7 +178,8 @@ export function createPortLink(deps: PortDeps): PortLink {
 
   function sendCommand(command: RelayCommand): boolean {
     const p = state.port;
-    if (!p || !ready) return false;
+    // The host reports the core gone (it is retrying, or exiting): nothing would reach it.
+    if (!p || !ready || coreUnavailable) return false;
     const frame = CommandFrameSchema.safeParse({ type: "command", command });
     if (!frame.success) return false;
     try {
