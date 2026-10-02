@@ -7,7 +7,9 @@
 // - page-text-gate.ts: the approval gate for GitHub issue text.
 // It also owns the host-permission lifecycle (the GitHub content script's
 // registration), the persisted paused flag and GitHub-capture toggle, the
-// permissions snapshot, the core's capture policy, and the popup's requests.
+// permissions snapshot, the core's capture policy, and the side panel
+// (panel-bridge.ts: the panel's port, the window frames' cache, the badge; the
+// toolbar click opens the panel, there is no popup).
 //
 // The paused flag is read from storage before any content message is
 // answered, and storage failure means paused. Nothing is posted to the port
@@ -28,7 +30,10 @@
 import { type CapturePolicy, isExactOriginPattern } from "@scout/contracts";
 import { GITHUB_PATTERN, HOST_NAME } from "./hosts.js";
 import { createFocusObserver, FOCUS_DEBOUNCE_MS } from "./focus-observer.js";
-import type { ApproveRequest, PageTextMessage, PopupRequest, StatusSnapshot } from "./messages.js";
+import type { ApproveRequest, CommandReply, PageTextMessage, PanelPortRequest, PauseReply, StatusSnapshot } from "./messages.js";
+import { checkSite } from "./origin.js";
+import { createPanelBridge } from "./panel-bridge.js";
+import type { CurrentSite } from "./panel/sites.js";
 import { type Approval, createPageTextGate } from "./page-text-gate.js";
 import { createPortLink } from "./port.js";
 import type { Clock, ReconnectPolicy } from "./reconnect.js";
@@ -60,8 +65,12 @@ export interface BackgroundDeps {
 export interface Background {
   /** Registers every listener synchronously, then loads state and connects. */
   start(): Promise<void>;
+  /** Content-script messages (approve, page_text). */
   handleMessage(msg: unknown, sender: Sender): Promise<unknown>;
+  /** One request from the side panel (over its port; tests call it directly). */
+  panelRequest(req: PanelPortRequest): Promise<unknown>;
   snapshot(): StatusSnapshot;
+  readonly panel: ReturnType<typeof createPanelBridge>;
   readonly port: chrome.runtime.Port | null;
   readonly policy: ReconnectPolicy;
   readonly approvals: Map<number, Approval>;
@@ -104,8 +113,13 @@ export function createBackground(ch: typeof chrome, deps: BackgroundDeps = {}): 
     // Nothing is posted until the core's policy arrives (post() checks it).
     onOpen: () => {},
     onPolicy,
-    onLost: () => gate.cancelTabs(),
+    onLost: () => {
+      gate.cancelTabs();
+      panel.onLinkLost();
+    },
+    onPanel: (frame) => panel.onFrame(frame),
   });
+  const panel = createPanelBridge({ ch, status: () => snapshot(), linkState: () => link.linkState(), handle: (r) => panelRequest(r) });
 
   // ---------- capture policy and permissions snapshot ----------
   function onPolicy(p: CapturePolicy): void {
@@ -119,6 +133,7 @@ export function createBackground(ch: typeof chrome, deps: BackgroundDeps = {}): 
     if (!allowed || prev === null) gate.cancelTabs(); // stop in-flight reads; content waits for a fresh refresh
     if (prev === null) sendSnapshot(); // first policy on this port: the core needs our snapshot
     if (allowed && !wasAllowed) void gate.refreshActive(); // after the snapshot, so capture follows it
+    panel.pushStatus();
   }
 
   /**
@@ -210,14 +225,7 @@ export function createBackground(ch: typeof chrome, deps: BackgroundDeps = {}): 
     }
   }
 
-  // ---------- popup ----------
-  function popupSender(sender: Sender | undefined): boolean {
-    // Our own popup page (as the action popup, or opened in a tab). Content
-    // scripts report the web page URL here, never a chrome-extension:// URL.
-    if (!sender || sender.id !== ch.runtime.id || typeof sender.url !== "string") return false;
-    return sender.url.split(/[?#]/)[0] === ch.runtime.getURL("popup.html");
-  }
-
+  // ---------- side panel ----------
   function snapshot(): StatusSnapshot {
     return {
       link: link.linkState(),
@@ -244,7 +252,7 @@ export function createBackground(ch: typeof chrome, deps: BackgroundDeps = {}): 
     }
   }
 
-  /** The popup's checkbox (a user gesture). Turning it on needs the GitHub grant. */
+  /** The side panel's checkbox (a user gesture). Turning it on needs the GitHub grant. */
   async function onGithubToggle(enabled: boolean): Promise<void> {
     if (enabled && !githubGranted(state)) return;
     if (enabled === state.githubCapture) return;
@@ -257,18 +265,72 @@ export function createBackground(ch: typeof chrome, deps: BackgroundDeps = {}): 
     }
   }
 
-  async function onPopup(msg: PopupRequest): Promise<StatusSnapshot> {
-    if (msg.type === "popup-pause") await setPaused(msg.paused === true);
-    else if (msg.type === "popup-reconnect") link.manualReconnect();
-    else if (msg.type === "popup-github-capture") await onGithubToggle(msg.enabled === true);
-    return snapshot();
+  /**
+   * The panel's one Pause/Resume control: the extension's own pause (nothing posted but the
+   * focus-lost that ends the visit) and the core's pause/resume, sent only on a ready port.
+   * Pausing stops posting first; resuming tells the core first, so the snapshot and focus that
+   * follow reach a resumed core.
+   */
+  async function onPause(paused: boolean): Promise<PauseReply> {
+    let written: boolean;
+    if (paused) {
+      await setPaused(true);
+      written = link.sendCommand({ type: "pause" });
+    } else {
+      written = link.sendCommand({ type: "resume" });
+      await setPaused(false);
+    }
+    return { status: snapshot(), written };
+  }
+
+  /**
+   * The active tab of the panel's window. Without the `tabs` permission Chrome shows a tab's
+   * URL only for a granted origin or the tab holding the toolbar click's activeTab grant; any
+   * other tab is `unknown` ("Click the Scout icon to check this site"). Only the origin leaves.
+   */
+  async function currentSite(windowId: number): Promise<CurrentSite> {
+    if (!Number.isInteger(windowId)) return { kind: "none" };
+    const [t] = await ch.tabs.query({ active: true, windowId }).catch(() => [] as Tab[]);
+    if (!t) return { kind: "none" };
+    const ids = { tabId: t.id ?? null, index: t.index ?? null };
+    if (t.incognito) return { kind: "refused", reason: "incognito", ...ids };
+    if (typeof t.url !== "string" || t.url === "") return { kind: "unknown", ...ids };
+    const v = checkSite(t.url, false);
+    if (!v.ok) return { kind: "refused", reason: v.reason, ...ids };
+    return { kind: "ok", origin: v.origin, pattern: v.pattern, host: new URL(v.origin).hostname, ...ids };
+  }
+
+  async function panelRequest(req: PanelPortRequest): Promise<unknown> {
+    await loadState();
+    switch (req.type) {
+      case "status":
+        return snapshot();
+      case "pause": {
+        const r = await onPause(req.paused === true);
+        panel.pushStatus();
+        return r;
+      }
+      case "reconnect":
+        link.manualReconnect();
+        panel.pushStatus();
+        return snapshot();
+      case "github-capture":
+        await onGithubToggle(req.enabled === true);
+        panel.pushStatus();
+        return snapshot();
+      case "site":
+        return currentSite(req.windowId);
+      case "command":
+        return { written: link.sendCommand(req.command) } satisfies CommandReply;
+      default:
+        return null;
+    }
   }
 
   async function handleMessage(msg: unknown, sender: Sender): Promise<unknown> {
     if (!isObj(msg) || typeof msg["type"] !== "string") return { ok: false };
     await loadState();
     const type = msg["type"];
-    if (type.startsWith("popup-")) return popupSender(sender) ? onPopup(msg as unknown as PopupRequest) : { ok: false };
     if (type === "approve" || type === "page_text") gate.noteContentTab(sender);
     if (type === "approve") return gate.onApprove(msg as unknown as ApproveRequest, sender);
     if (type === "page_text") return gate.onPageText(msg as unknown as PageTextMessage, sender);
@@ -277,16 +339,19 @@ export function createBackground(ch: typeof chrome, deps: BackgroundDeps = {}): 
 
   // ---------- browser events ----------
   function install(): void {
+    panel.install();
     ch.runtime.onMessage.addListener((msg: unknown, sender: Sender, sendResponse: (r: unknown) => void) => {
       handleMessage(msg, sender).then(sendResponse, () => sendResponse({ ok: false }));
       return true;
     });
     ch.runtime.onInstalled?.addListener(async () => {
+      await panel.configureAction();
       if (await reconcile()) await injectIntoOpenGithubTabs();
     });
     ch.permissions.onAdded.addListener(async () => {
       const gh = await reconcile();
       sendSnapshot();
+      panel.pushStatus();
       if (gh) {
         await injectIntoOpenGithubTabs();
         void gate.refreshActive();
@@ -301,6 +366,7 @@ export function createBackground(ch: typeof chrome, deps: BackgroundDeps = {}): 
       state.sentGranted = new Set([...state.sentGranted].filter((o) => !gone.has(o)));
       await reconcile();
       sendSnapshot();
+      panel.pushStatus();
     });
     ch.tabs.onActivated.addListener((info) => {
       gate.cancelTabs({ except: info?.tabId ?? null });
@@ -331,6 +397,7 @@ export function createBackground(ch: typeof chrome, deps: BackgroundDeps = {}): 
 
   async function start(): Promise<void> {
     install();
+    void panel.configureAction();
     await loadState();
     try {
       const w = await ch.windows.getLastFocused();
@@ -345,7 +412,9 @@ export function createBackground(ch: typeof chrome, deps: BackgroundDeps = {}): 
   return {
     start,
     handleMessage,
+    panelRequest,
     snapshot,
+    panel,
     get port() {
       return state.port;
     },

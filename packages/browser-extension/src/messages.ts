@@ -1,6 +1,8 @@
-// Messages between the content script, the popup, and the background.
+// Messages between the content script, the side panel, and the background.
 // Chrome-internal only; what leaves the extension is a @scout/contracts
-// BrowserObservation.
+// BrowserObservation or a relay command.
+
+import type { PanelState, RelayCommand } from "@scout/contracts";
 
 /** Content -> background: may this document read the issue now? */
 export interface ApproveRequest {
@@ -30,11 +32,43 @@ export type ContentToBackground = ApproveRequest | PageTextMessage;
 /** Background -> content. */
 export type BackgroundToContent = { type: "refresh" } | { type: "cancel"; stop: boolean };
 
-export type PopupRequest =
-  | { type: "popup-status" }
-  | { type: "popup-pause"; paused: boolean }
-  | { type: "popup-reconnect" }
-  | { type: "popup-github-capture"; enabled: boolean };
+/** The side panel's runtime.Port to the worker. */
+export const PANEL_PORT_NAME = "scout-panel";
+/** How often the panel posts a heartbeat on its port (the plan allows at most 20 s). */
+export const PANEL_HEARTBEAT_MS = 15_000;
+
+/** What the side panel asks the worker; each gets one `reply` with the same id. */
+export type PanelPortRequest =
+  /** Reply: StatusSnapshot. */
+  | { type: "status" }
+  /** One control: the extension's own pause and the core's pause/resume. Reply: PauseReply. */
+  | { type: "pause"; paused: boolean }
+  /** Reply: StatusSnapshot. */
+  | { type: "reconnect" }
+  /** Reply: StatusSnapshot. */
+  | { type: "github-capture"; enabled: boolean }
+  /** The active tab of the panel's window. Reply: CurrentSite (panel/sites.ts). */
+  | { type: "site"; windowId: number }
+  /** A window command for the core, never queued. Reply: CommandReply. */
+  | { type: "command"; command: RelayCommand };
+
+export interface PauseReply {
+  status: StatusSnapshot;
+  /** The core's pause/resume went to a ready port. */
+  written: boolean;
+}
+
+export interface CommandReply {
+  written: boolean;
+}
+
+export type PanelToWorker = { type: "hb" } | { type: "request"; id: number; request: PanelPortRequest };
+
+export type WorkerToPanel =
+  | { type: "status"; status: StatusSnapshot }
+  /** One of the core's window frames (repainted from the worker's cache when the panel connects). */
+  | { type: "frame"; state: PanelState }
+  | { type: "reply"; id: number; result: unknown };
 
 export type DenialCode =
   | "sender"
@@ -56,13 +90,13 @@ export interface PolicyState {
   paused: boolean;
 }
 
-/** Metadata-only status for the popup. Never carries page text or URLs. */
+/** Metadata-only status for the side panel. Never carries page text or URLs. */
 export interface StatusSnapshot {
   link: LinkState;
   paused: boolean;
   /** Exact-origin patterns Chrome has granted. */
   granted: string[];
-  /** The popup's "Capture GitHub issue text" toggle, as it takes effect (off without the exact GitHub grant). */
+  /** The panel's "Capture GitHub issue text" toggle, as it takes effect (off without the exact GitHub grant). */
   githubCapture: boolean;
   /** Chrome also holds a broad grant (e.g. all sites), which Scout ignores. */
   broadGrantIgnored: boolean;

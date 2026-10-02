@@ -209,6 +209,51 @@ export interface FakeTab {
   url: string;
   title: string;
   incognito: boolean;
+  index?: number;
+}
+
+/** One end of a runtime.Port between two extension contexts (the side panel and the worker). */
+export interface LinkedPort {
+  name: string;
+  sender?: chrome.runtime.MessageSender;
+  /** Messages this end posted. */
+  posted: unknown[];
+  onMessage: ReturnType<typeof ev<(m: unknown) => void>>;
+  onDisconnect: ReturnType<typeof ev<(p: unknown) => void>>;
+  postMessage(m: unknown): void;
+  disconnect(): void;
+  disconnected: boolean;
+  peer: LinkedPort | null;
+}
+
+function linkedPort(name: string): LinkedPort {
+  const port: LinkedPort = {
+    name,
+    posted: [],
+    onMessage: ev(),
+    onDisconnect: ev(),
+    disconnected: false,
+    peer: null,
+    postMessage(m) {
+      if (port.disconnected) throw new Error("Attempting to use a disconnected port object");
+      const copy = JSON.parse(JSON.stringify(m)) as unknown;
+      port.posted.push(copy);
+      const peer = port.peer;
+      queueMicrotask(() => {
+        if (peer && !peer.disconnected) peer.onMessage.emit(copy);
+      });
+    },
+    disconnect() {
+      if (port.disconnected) return;
+      port.disconnected = true;
+      const peer = port.peer;
+      if (peer && !peer.disconnected) {
+        peer.disconnected = true;
+        queueMicrotask(() => peer.onDisconnect.emit(peer));
+      }
+    },
+  };
+  return port;
 }
 
 /**
@@ -250,6 +295,7 @@ export function makeChrome({
   session = {} as Record<string, unknown>,
   local = {} as Record<string, unknown>,
   autoEnable = true,
+  getContexts = true,
 } = {}) {
   const tabs = new Map<number, FakeTab>();
   const windows = new Map<number, { id: number; focused: boolean }>();
@@ -266,7 +312,19 @@ export function makeChrome({
     lastFocusedWindow: 1,
     autoEnable,
     activeTabGrant: null as number | null,
+    /** Open side-panel contexts runtime.getContexts reports. */
+    sidePanels: 0,
+    badge: "",
+    badgeColor: null as string | null,
+    panelBehavior: null as unknown,
+    /** What permissions.request answers (Chrome's prompt); a yes adds the pattern. */
+    grantOnRequest: true,
+    createFails: false,
   };
+  const panelPorts: LinkedPort[] = [];
+  const created: chrome.tabs.CreateProperties[] = [];
+  const requested: string[][] = [];
+  const removedPerms: string[][] = [];
   const visible = (u: string) => state.granted.some((p) => patternCovers(p, u));
   const enabledOn = new Set<FakePort>();
   /** The fake core: answer the first permissions snapshot on a port with an enabling policy. */
@@ -278,7 +336,7 @@ export function makeChrome({
     });
   };
   const view = (t: FakeTab) => {
-    const o: Record<string, unknown> = { id: t.id, windowId: t.windowId, active: t.active, incognito: t.incognito };
+    const o: Record<string, unknown> = { id: t.id, windowId: t.windowId, active: t.active, incognito: t.incognito, index: t.index ?? t.id - 10 };
     if (visible(t.url) || state.activeTabGrant === t.id) {
       o["url"] = t.url;
       o["title"] = t.title;
@@ -286,12 +344,28 @@ export function makeChrome({
     return o as unknown as chrome.tabs.Tab;
   };
   const fake = {
-    _: { tabs, windows, registered, executeCalls, tabMessages, store, session, ports, state },
+    _: { tabs, windows, registered, executeCalls, tabMessages, store, session, ports, state, panelPorts, created, requested, removedPerms },
     runtime: {
       id: EXT_ID,
       lastError: undefined as { message: string } | undefined,
       onMessage: ev(),
+      onConnect: ev<(p: chrome.runtime.Port) => void>(),
       getURL: (p: string) => `chrome-extension://${EXT_ID}/${p}`,
+      /** The panel page's runtime.connect: the worker gets the other end through onConnect. */
+      connect({ name = "" }: { name?: string } = {}, sender: chrome.runtime.MessageSender = { id: EXT_ID, url: `chrome-extension://${EXT_ID}/panel.html` }) {
+        const panelSide = linkedPort(name);
+        const workerSide = linkedPort(name);
+        panelSide.peer = workerSide;
+        workerSide.peer = panelSide;
+        workerSide.sender = sender;
+        panelPorts.push(workerSide);
+        queueMicrotask(() => fake.runtime.onConnect.emit(workerSide as unknown as chrome.runtime.Port));
+        return panelSide as unknown as chrome.runtime.Port;
+      },
+      getContexts: getContexts
+        ? async ({ contextTypes }: { contextTypes?: string[] }) =>
+            contextTypes?.includes("SIDE_PANEL") ? Array.from({ length: state.sidePanels }, () => ({ contextType: "SIDE_PANEL" })) : []
+        : undefined,
       connectNative(name: string) {
         const port = makePort(name, onPost);
         ports.push(port);
@@ -316,8 +390,35 @@ export function makeChrome({
     permissions: {
       contains: async ({ origins }: { origins: string[] }) => origins.every((o) => state.granted.some((p) => patternCovers(p, o))),
       getAll: async () => ({ origins: [...state.granted], permissions: [] }),
+      async request({ origins }: { origins: string[] }) {
+        requested.push(origins);
+        if (!state.grantOnRequest) return false;
+        for (const o of origins) if (!state.granted.includes(o)) state.granted.push(o);
+        await Promise.all(fake.permissions.onAdded.emit({ origins } as never));
+        return true;
+      },
+      async remove({ origins }: { origins: string[] }) {
+        removedPerms.push(origins);
+        state.granted = state.granted.filter((g) => !origins.includes(g));
+        await Promise.all(fake.permissions.onRemoved.emit({ origins } as never));
+        return true;
+      },
       onAdded: ev(),
       onRemoved: ev(),
+    },
+    action: {
+      async setBadgeText({ text }: { text: string }) {
+        state.badge = text;
+      },
+      async setBadgeBackgroundColor({ color }: { color: string }) {
+        state.badgeColor = color;
+      },
+    },
+    sidePanel: {
+      async setPanelBehavior(b: unknown) {
+        state.panelBehavior = b;
+      },
+      onOpened: ev(),
     },
     scripting: {
       async registerContentScripts(arr: chrome.scripting.RegisteredContentScript[]) {
@@ -342,14 +443,22 @@ export function makeChrome({
       },
     },
     tabs: {
-      async query(q: { active?: boolean; lastFocusedWindow?: boolean; url?: string }) {
+      async query(q: { active?: boolean; lastFocusedWindow?: boolean; url?: string; windowId?: number }) {
         return [...tabs.values()]
           .filter((t) => (!q.active || t.active) && (!q.lastFocusedWindow || t.windowId === state.lastFocusedWindow))
+          .filter((t) => q.windowId === undefined || t.windowId === q.windowId)
           .filter((t) => q.url === undefined || (visible(t.url) && patternCovers(q.url, t.url)))
           .map(view);
       },
       async sendMessage(tabId: number, msg: unknown) {
         tabMessages.push({ tabId, msg });
+      },
+      async create(props: chrome.tabs.CreateProperties) {
+        if (state.createFails) throw new Error("No tab with id");
+        created.push(props);
+        const id = 100 + created.length;
+        tabs.set(id, { id, windowId: props.windowId ?? 1, active: props.active !== false, url: props.url ?? "", title: "", incognito: false });
+        return { id, windowId: props.windowId ?? 1 } as chrome.tabs.Tab;
       },
       onActivated: ev(),
       onUpdated: ev(),
@@ -360,6 +469,9 @@ export function makeChrome({
       async get(id: number) {
         const w = windows.get(id);
         return w ? { id: w.id, focused: w.focused, incognito: false } : undefined;
+      },
+      async getCurrent() {
+        return { id: state.lastFocusedWindow, focused: true };
       },
       async getLastFocused() {
         const w = windows.get(state.lastFocusedWindow);
@@ -429,4 +541,3 @@ function fakeView(f: FakeChrome, t: FakeTab): chrome.tabs.Tab {
   return o as unknown as chrome.tabs.Tab;
 }
 
-export const popupSender = (): chrome.runtime.MessageSender => ({ id: EXT_ID, url: `chrome-extension://${EXT_ID}/popup.html` });

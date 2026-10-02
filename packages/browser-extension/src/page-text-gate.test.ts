@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import { GITHUB_PATTERN } from "./hosts.js";
 import { APPROVAL_TTL_MS, createPageTextGate } from "./page-text-gate.js";
 import { createSharedState, newCounters } from "./shared-state.js";
-import { activate, EXT_ID, fakeClock, popupSender } from "./test-fakes.js";
+import { activate, EXT_ID, fakeClock } from "./test-fakes.js";
 import { approve, ISSUE1, ISSUE2, observations, pageText, setup } from "./test-harness.js";
 
 describe("page_text gate (through the background)", () => {
@@ -104,7 +104,7 @@ describe("page_text gate (through the background)", () => {
     const { f, bg } = await setup();
     const orig = f.windows.get;
     f.windows.get = async (id) => {
-      await bg.handleMessage({ type: "popup-pause", paused: true }, popupSender());
+      await bg.panelRequest({ type: "pause", paused: true });
       return orig(id);
     };
     expect((await approve(bg, f)).approved).toBe(false);
@@ -132,7 +132,7 @@ describe("page_text gate: capture toggle and core policy", () => {
   it("drops text approved before the toggle went off", async () => {
     const { f, bg } = await setup();
     expect((await approve(bg, f)).approved).toBe(true);
-    await bg.handleMessage({ type: "popup-github-capture", enabled: false }, popupSender());
+    await bg.panelRequest({ type: "github-capture", enabled: false });
     expect(await pageText(bg, f)).toMatchObject({ ok: false });
     expect(observations(f, "page_text")).toEqual([]);
   });

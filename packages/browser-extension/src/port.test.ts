@@ -4,7 +4,7 @@ import type { PanelState } from "@scout/contracts";
 import { createPortLink, SERIES_KEY } from "./port.js";
 import { createSharedState, newCounters } from "./shared-state.js";
 import { RECONNECT_DELAYS_MS, type SeriesState } from "./reconnect.js";
-import { asChrome, fakeClock, flush, makeChrome, popupSender } from "./test-fakes.js";
+import { asChrome, fakeClock, flush, makeChrome } from "./test-fakes.js";
 import { approve, dropPort, lastPort, setup } from "./test-harness.js";
 
 const LONG = 10 * 60_000;
@@ -54,13 +54,13 @@ describe("bounded reconnect (fake port and clock)", () => {
     expect(bg.policy.step).toBe(1);
   });
 
-  it("the popup's Reconnect starts a series at once, even within 60 s", async () => {
+  it("the panel's Reconnect starts a series at once, even within 60 s", async () => {
     const { f, clock, bg } = await setup({ granted: [GITHUB_PATTERN], host: "missing" });
     await clock.advance(LONG);
     f.tabs.onActivated.emit({ tabId: 10, windowId: 1 } as never);
     await clock.advance(0);
     const n = f._.ports.length;
-    await bg.handleMessage({ type: "popup-reconnect" }, popupSender());
+    await bg.panelRequest({ type: "reconnect" });
     expect(f._.ports).toHaveLength(n + 1);
   });
 

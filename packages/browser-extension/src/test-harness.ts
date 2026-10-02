@@ -21,8 +21,12 @@ export async function setup(opts: Parameters<typeof makeChrome>[0] = { granted: 
 
 export const lastPort = (f: FakeChrome) => f._.ports.at(-1)!;
 
+/** Browser observations posted on any native port (window commands are not observations). */
 export const observations = (f: FakeChrome, kind?: string) =>
-  f._.ports.flatMap((p) => p.posted).filter((m) => kind === undefined || m["kind"] === kind);
+  f._.ports.flatMap((p) => p.posted).filter((m) => m["kind"] !== undefined && (kind === undefined || m["kind"] === kind));
+
+/** Window commands posted on any native port. */
+export const commandsPosted = (f: FakeChrome) => f._.ports.flatMap((p) => p.posted).filter((m) => m["type"] === "command").map((m) => m["command"] as Record<string, unknown>);
 
 export const approve = (bg: Bg, f: FakeChrome, s: Parameters<typeof sender>[1] = {}, navCounter = 3, url = ISSUE1) =>
   bg.handleMessage({ type: "approve", navCounter, url }, sender(f, s)) as Promise<{ approved: boolean; reason?: string }>;

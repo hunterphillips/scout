@@ -3,8 +3,8 @@ import { describe, expect, it } from "vitest";
 import { CONTENT_SCRIPT_FILE, CONTENT_SCRIPT_ID, createBackground, GITHUB_PATTERN, HOST_NAME } from "./background-core.js";
 import { FOCUS_DEBOUNCE_MS } from "./focus-observer.js";
 import type { StatusSnapshot } from "./messages.js";
-import { BROAD_GRANT_TEXT, statusRows } from "./popup-view.js";
-import { activate, asChrome, DISABLED_POLICY, fakeClock, makeChrome, popupSender, sender } from "./test-fakes.js";
+import { BROAD_GRANT_TEXT, statusRows } from "./panel/view.js";
+import { activate, asChrome, DISABLED_POLICY, fakeClock, makeChrome, sender } from "./test-fakes.js";
 import { approve, dropPort, lastPort, observations, pageText, setup } from "./test-harness.js";
 
 const STRIPE = "https://docs.stripe.com/*";
@@ -58,7 +58,7 @@ describe("manifest-level wiring", () => {
   it("a tab whose origin is not granted is sent without url, title or documentId, even when activeTab exposes it", async () => {
     const { f, clock } = await setup();
     activate(f, 12);
-    f._.state.activeTabGrant = 12; // the popup was opened on example.com
+    f._.state.activeTabGrant = 12; // the panel was opened from the toolbar on example.com
     f.tabs.onActivated.emit({ tabId: 12, windowId: 1 } as never);
     await clock.advance(FOCUS_DEBOUNCE_MS);
     const obs = observations(f, "focus").at(-1)!;
@@ -78,7 +78,7 @@ describe("manifest-level wiring", () => {
     expect(f._.registered).toEqual([]); // a grant alone does not turn capture on
     expect(observations(f, "permissions").at(-1)).toMatchObject({ granted: [GITHUB_PATTERN], githubCapture: false });
 
-    const s = (await bg.handleMessage({ type: "popup-github-capture", enabled: true }, popupSender())) as StatusSnapshot;
+    const s = (await bg.panelRequest({ type: "github-capture", enabled: true })) as StatusSnapshot;
     expect(s.githubCapture).toBe(true);
     expect(f._.store["githubCapture"]).toBe(true);
     expect(f._.registered).toEqual([
@@ -87,17 +87,17 @@ describe("manifest-level wiring", () => {
     await clock.advance(0);
     expect(observations(f, "permissions").at(-1)).toMatchObject({ githubCapture: true });
 
-    await bg.handleMessage({ type: "popup-github-capture", enabled: false }, popupSender());
+    await bg.panelRequest({ type: "github-capture", enabled: false });
     expect(f._.registered).toEqual([]);
     expect(observations(f, "permissions").at(-1)).toMatchObject({ githubCapture: false });
   });
 
   it("the toggle cannot turn on without the GitHub grant, or from a content script; losing the grant turns it off", async () => {
     const { bg } = await setup({ granted: [STRIPE] });
-    expect(((await bg.handleMessage({ type: "popup-github-capture", enabled: true }, popupSender())) as StatusSnapshot).githubCapture).toBe(false);
+    expect(((await bg.panelRequest({ type: "github-capture", enabled: true })) as StatusSnapshot).githubCapture).toBe(false);
 
     const g = await setup();
-    expect(await g.bg.handleMessage({ type: "popup-github-capture", enabled: false }, sender(g.f))).toEqual({ ok: false });
+    expect(await g.bg.handleMessage({ type: "github-capture", enabled: false }, sender(g.f))).toEqual({ ok: false });
     expect(g.bg.snapshot().githubCapture).toBe(true);
     g.f._.state.granted = [];
     await Promise.all(g.f.permissions.onRemoved.emit({ origins: [GITHUB_PATTERN] } as never));
@@ -142,7 +142,7 @@ describe("granted list: the one source of truth", () => {
     expect(s).toMatchObject({ granted: [], githubCapture: false, broadGrantIgnored: true });
     expect(f._.store["githubCapture"]).toBe(false); // toggle forced off
     expect(statusRows(s)).toContainEqual(["Site access", BROAD_GRANT_TEXT]);
-    const after = (await bg.handleMessage({ type: "popup-github-capture", enabled: true }, popupSender())) as StatusSnapshot;
+    const after = (await bg.panelRequest({ type: "github-capture", enabled: true })) as StatusSnapshot;
     expect(after.githubCapture).toBe(false);
     expect(f._.registered).toEqual([]);
   });
@@ -175,7 +175,7 @@ describe("granted list: the one source of truth", () => {
       return orig();
     };
     f._.state.granted = [GITHUB_PATTERN];
-    f._.state.activeTabGrant = 12; // the popup's Remove click: Chrome still shows this tab's URL
+    f._.state.activeTabGrant = 12; // the panel's Remove click: Chrome still shows this tab's URL
     const removed = Promise.all(f.permissions.onRemoved.emit({ origins: [EXAMPLE] } as never));
     lastPort(f).onMessage.emit({ ...DISABLED_POLICY });
     await clock.advance(0);
@@ -208,17 +208,17 @@ describe("granted list: the one source of truth", () => {
   it("turning the toggle on persists first (a failed write leaves it off); turning it off takes effect even when the write fails", async () => {
     const { f, bg } = await setup({ granted: [GITHUB_PATTERN] });
     f._.state.storageSetFails = true;
-    await expect(bg.handleMessage({ type: "popup-github-capture", enabled: true }, popupSender())).rejects.toThrow();
+    await expect(bg.panelRequest({ type: "github-capture", enabled: true })).rejects.toThrow();
     expect(bg.snapshot().githubCapture).toBe(false);
     expect(f._.registered).toEqual([]);
     expect(await approve(bg, f)).toEqual({ approved: false, reason: "permission" });
     f._.state.storageSetFails = false;
-    await bg.handleMessage({ type: "popup-github-capture", enabled: true }, popupSender());
+    await bg.panelRequest({ type: "github-capture", enabled: true });
     expect(f._.store["githubCapture"]).toBe(true);
     expect(bg.snapshot().githubCapture).toBe(true);
     expect(f._.registered).toHaveLength(1);
     f._.state.storageSetFails = true;
-    const s = (await bg.handleMessage({ type: "popup-github-capture", enabled: false }, popupSender())) as StatusSnapshot;
+    const s = (await bg.panelRequest({ type: "github-capture", enabled: false })) as StatusSnapshot;
     expect(s.githubCapture).toBe(false);
     expect(bg.snapshot().githubCapture).toBe(false);
     expect(await approve(bg, f)).toEqual({ approved: false, reason: "permission" });
@@ -328,7 +328,7 @@ describe("capture policy", () => {
     expect(bg.snapshot().link).toBe("upgrade_required");
     dropPort(f);
     expect(bg.snapshot().link).toBe("upgrade_required");
-    await bg.handleMessage({ type: "popup-reconnect" }, popupSender());
+    await bg.panelRequest({ type: "reconnect" });
     lastPort(f).onMessage.emit({ ...DISABLED_POLICY });
     lastPort(f).onMessage.emit({ type: "ready" });
     expect(bg.snapshot().link).toBe("connected");
@@ -338,7 +338,7 @@ describe("capture policy", () => {
 describe("pause", () => {
   it("is persisted, denies approval, stops focus observations, and tells the core the visit ended", async () => {
     const { f, clock, bg } = await setup();
-    const s = (await bg.handleMessage({ type: "popup-pause", paused: true }, popupSender())) as StatusSnapshot;
+    const s = ((await bg.panelRequest({ type: "pause", paused: true })) as { status: StatusSnapshot }).status;
     expect(s.paused).toBe(true);
     expect(f._.store["paused"]).toBe(true);
     expect(observations(f, "focus").at(-1)).toMatchObject({ browserFocused: false, windowId: -1 });
@@ -351,7 +351,7 @@ describe("pause", () => {
 
   it("holds permission changes while paused and reports them on resume", async () => {
     const { f, clock, bg } = await setup();
-    await bg.handleMessage({ type: "popup-pause", paused: true }, popupSender());
+    await bg.panelRequest({ type: "pause", paused: true });
     const n = observations(f).length;
     f._.state.granted = [GITHUB_PATTERN, STRIPE];
     await Promise.all(f.permissions.onAdded.emit({ origins: [STRIPE] } as never));
@@ -359,7 +359,7 @@ describe("pause", () => {
     await Promise.all(f.permissions.onRemoved.emit({ origins: [STRIPE] } as never));
     await clock.advance(1000);
     expect(observations(f)).toHaveLength(n);
-    await bg.handleMessage({ type: "popup-pause", paused: false }, popupSender());
+    await bg.panelRequest({ type: "pause", paused: false });
     expect(observations(f).at(n)).toMatchObject({ kind: "permissions", granted: [GITHUB_PATTERN], githubCapture: true });
     await clock.advance(0);
     expect(observations(f).at(n + 1)).toMatchObject({ kind: "focus", permissionsRevision: observations(f).at(n)!["revision"] });
@@ -379,16 +379,16 @@ describe("pause", () => {
     expect(await approve(bg, f)).toEqual({ approved: false, reason: "paused" });
   });
 
-  it("ignores popup commands from content scripts", async () => {
+  it("ignores panel requests sent as content messages", async () => {
     const { f, bg } = await setup();
-    expect(await bg.handleMessage({ type: "popup-pause", paused: true }, sender(f))).toEqual({ ok: false });
+    expect(await bg.handleMessage({ type: "pause", paused: true }, sender(f))).toEqual({ ok: false });
     expect(f._.store["paused"]).toBeUndefined();
   });
 
   it("resuming schedules a fresh focus observation", async () => {
     const { f, clock, bg } = await setup();
-    await bg.handleMessage({ type: "popup-pause", paused: true }, popupSender());
-    await bg.handleMessage({ type: "popup-pause", paused: false }, popupSender());
+    await bg.panelRequest({ type: "pause", paused: true });
+    await bg.panelRequest({ type: "pause", paused: false });
     await clock.advance(FOCUS_DEBOUNCE_MS);
     expect(observations(f, "focus").at(-1)).toMatchObject({ browserFocused: true, tabId: 10 });
   });
