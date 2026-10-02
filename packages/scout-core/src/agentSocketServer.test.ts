@@ -251,16 +251,17 @@ describe("read sessions over the socket", () => {
     store = await createCapabilityStore({ scoutHome: root, clock: { now: () => now }, onRevoked: (id) => agent?.resourceRevoked(id) });
   });
 
-  async function ingestApproved(text: string, resourceId?: string): Promise<{ id: string; version: string }> {
+  async function ingestApproved(text: string, resourceId?: string, path = "/llms.txt"): Promise<{ id: string; version: string }> {
     const sha256 = createHash("sha256").update(text, "utf8").digest("hex");
-    const sourceUrl = `${SITE}/llms.txt`;
+    const sourceUrl = `${SITE}${path}`;
+    const kind = path === "/llms.txt" ? ("llms_txt" as const) : ("agents_md" as const);
     const found = {
-      kind: "llms_txt" as const, siteOrigin: SITE, publisherOrigin: SITE, sourceUrl, finalUrl: sourceUrl,
+      kind, siteOrigin: SITE, publisherOrigin: SITE, sourceUrl, finalUrl: sourceUrl,
       text, sha256, byteLength: Buffer.byteLength(text), fetchedAt: now,
     };
     const discovery: DiscoveryResult = {
       origin: SITE, checkedAt: now, robots: "not_fetched",
-      items: [{ kind: "llms_txt", sourceUrl, status: "found", source: "network", resource: found }],
+      items: [{ kind, sourceUrl, status: "found", source: "network", resource: found }],
       externalReferences: [], skillsOverCap: 0, acceptedBytes: 0, stats: { requests: 0, refused: 0, ms: 0 },
     };
     const r = (await store.ingest(discovery, { chromePermitted: false })).results[0]!;
@@ -290,6 +291,56 @@ describe("read sessions over the socket", () => {
     await until(() => c.frames.length === 3);
     expect(c.frames[2]).toMatchObject({ status: "error", error: { code: "revoked" } });
     expect(c.closed).toBe(false);
+  });
+
+  it("a revocation refuses a connected job and releases its snapshot's pins on other resources", async () => {
+    const token = writeInteractiveTokenFile(runDir);
+    const fakeClock = { now: () => now };
+    const auth = createAgentAuth({ interactiveToken: token.token, clock: fakeClock });
+    const audit = createReadAudit();
+    const registry = createSnapshotRegistry({ store, auth, clock: fakeClock });
+    const handlers = createAgentHandlers({
+      coreInstanceId: "core-a",
+      auth,
+      store,
+      view: () => ({ currentSite: null, paused: false }),
+      catalog: createCatalogCache({ clock: fakeClock, dir: join(root, "cache", "catalog") }),
+      browserContextGranted: () => true,
+      audit,
+      clock: fakeClock,
+      getSnapshot: (jobId) => registry.getForJob(jobId),
+    });
+    const server = createAgentSocketServer({ runDir, handlers, auth, audit, diagnostics, snapshots: registry });
+    await server.start();
+    running.push({ server, token });
+    agent = server;
+
+    const kept = await ingestApproved("guide v1\n");
+    const revoked = await ingestApproved("other\n", undefined, "/AGENTS.md");
+    const job = registry.take({
+      jobId: "job-1", origin: SITE, visitEpoch: 1, activity: [], candidates: [], catalogHash: "cat",
+      permissionsRevision: 1, profileFingerprint: "fp", deadline: now + 30_000,
+    });
+    // Supersede the kept resource's first version past what collection retains: only the snapshot's pin keeps it.
+    for (let i = 2; i <= 8; i++) {
+      now += 1000;
+      await ingestApproved(`guide v${i}\n`, kept.id);
+    }
+    const c = await rawClient(server.socketPath);
+    c.send(hello(job.token));
+    c.send(list());
+    await until(() => c.frames.length === 2);
+    expect(c.frames[1]).toMatchObject({ status: "ok" });
+    await store.collectGarbage();
+    expect(store.resolveRead(kept.id, kept.version).ok).toBe(true);
+
+    await store.revoke(revoked.id);
+    c.send(list());
+    await until(() => c.frames.length === 3);
+    expect(c.frames[2]).toMatchObject({ status: "error", error: { code: "not_granted" } });
+    expect(registry.size).toBe(0);
+    await store.collectGarbage();
+    expect(store.resolveRead(kept.id, kept.version)).toEqual({ ok: false, code: "not_found" });
   });
 
   it("sweepExpired releases an abandoned read's pin on a quiet open connection, so collection takes the version", async () => {

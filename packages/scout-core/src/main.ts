@@ -20,7 +20,9 @@
 // Accepted GitHub issue text lives in the in-memory activity store; each background job reads
 // only its own immutable snapshot (activity/snapshots.ts), built once the agent auth exists.
 // Pause and shutdown release every snapshot and revoke every job token (shutdown does it
-// before closing agent.sock); expired snapshots are released before each collection.
+// before closing agent.sock, and no snapshot is taken after it or while paused); a revoked
+// resource releases the snapshots that pinned it; expired snapshots are released before
+// each collection.
 //
 // Scout's window gets its capability view, previews, command acks, the context-read audit,
 // and the browser-context grant from the panel channel (panelChannel.ts), which starts right
@@ -296,7 +298,7 @@ export async function runStdio(deps: StdioDeps): Promise<StdioCore> {
       throw new StartError("agent-token-write-failed");
     }
     const auth = createAgentAuth({ interactiveToken: tokenFile.token, clock });
-    const registry = createSnapshotRegistry({ store, auth, clock, diagnostics });
+    const registry = createSnapshotRegistry({ store, auth, clock, diagnostics, paused: () => coordinator.agentView().paused });
     snapshots = registry;
     const handlers = createAgentHandlers({
       coreInstanceId,
@@ -310,7 +312,7 @@ export async function runStdio(deps: StdioDeps): Promise<StdioCore> {
       activity,
       getSnapshot: (jobId) => registry.getForJob(jobId),
     });
-    agentServer = createAgentSocketServer({ runDir, handlers, auth, audit, diagnostics });
+    agentServer = createAgentSocketServer({ runDir, handlers, auth, audit, diagnostics, snapshots: registry });
     try {
       await agentServer.start();
     } catch (e) {

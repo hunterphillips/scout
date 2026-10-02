@@ -9,11 +9,16 @@
 // answered and then the connection is closed. After it, every frame is answered by the
 // handlers, in order; an undecodable one gets `limit_exceeded` or `protocol_mismatch`, and a
 // second `hello` closes the connection. Closing a connection drops its cursors and pins.
+//
+// A revoked resource (`resourceRevoked`, the store's `onRevoked`) drops its read cursors,
+// releases every job snapshot that pinned it (its token and its pins on other resources go
+// with it), and revokes any other job token that named it.
 
 import { createServer, type Server, type Socket } from "node:net";
 import { join } from "node:path";
 import { AGENT_REQUEST_MAX_BYTES, AGENT_RESPONSE_MAX_BYTES, type AgentResponse } from "@scout/contracts";
 import { encodeFrame, FrameDecoder } from "@scout/contracts/frame";
+import type { SnapshotRegistry } from "./activity/snapshots.js";
 import type { AgentAuth, JobTokenGrant } from "./agentApi/auth.js";
 import type { AgentConnection, AgentHandlers } from "./agentApi/handlers.js";
 import type { ReadAudit, ReadAuditEntry } from "./agentApi/readAudit.js";
@@ -30,6 +35,8 @@ export interface AgentSocketServerOptions {
   auth: AgentAuth;
   audit: ReadAudit;
   diagnostics: Diagnostics;
+  /** The job snapshots; a revocation releases the ones that pinned the resource. */
+  snapshots?: Pick<SnapshotRegistry, "releasePinning">;
   helloTimeoutMs?: number;
   /** Test seam for the post-listen chmod of the temp socket; defaults to fs.chmodSync. */
   chmod?: (path: string, mode: number) => void;
@@ -47,7 +54,7 @@ export interface AgentSocketServer {
   revokeJobToken(jobId: string): void;
   /** Invalidate every job token (pause, shutdown). */
   revokeAllJobTokens(): void;
-  /** For the store's `onRevoked`: drop the resource's cursors and the job tokens that pinned it. Synchronous. */
+  /** For the store's `onRevoked`: drop the resource's cursors, release the snapshots that pinned it, and revoke their job tokens. Synchronous. */
   resourceRevoked(resourceId: string): void;
   /** Drop expired cursors and release their read pins; main runs it before each capability GC. */
   sweepExpired(): void;
@@ -173,6 +180,8 @@ export function createAgentSocketServer(options: AgentSocketServerOptions): Agen
     revokeAllJobTokens: () => auth.revokeAllJobTokens(),
     resourceRevoked(resourceId) {
       handlers.dropResource(resourceId);
+      options.snapshots?.releasePinning(resourceId, "revoked");
+      // Job tokens issued outside the registry go too.
       auth.revokeJobTokensPinning(resourceId);
     },
     sweepExpired: () => handlers.sweepExpired(),

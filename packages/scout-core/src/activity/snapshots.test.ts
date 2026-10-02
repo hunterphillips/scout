@@ -186,6 +186,46 @@ describe("snapshot registry", () => {
     expect(registry.size).toBe(1);
   });
 
+  it("releasePinning releases only the snapshots that pinned the resource, with their pins on every other resource", async () => {
+    const a = await approved("/llms.txt", "guide v1\n");
+    const kept = registry.take(input({ jobId: "kept" }));
+    const other = await approved("/AGENTS.md", "agents\n");
+    const pinning = registry.take(input({ jobId: "pinning", activity: [] }));
+    expect(kept.snapshot.approved.map((v) => v.resourceId)).toEqual([a.id]);
+    expect(pinning.snapshot.approved.map((v) => v.resourceId).sort()).toEqual([a.id, other.id].sort());
+    // Supersede a's first version past what collection retains: only pins keep it.
+    for (let i = 2; i <= 8; i++) {
+      now += 1000;
+      await approved("/llms.txt", `guide v${i}\n`);
+    }
+    registry.releasePinning(other.id, "revoked");
+    expect(registry.get(pinning.snapshot.id)).toBeUndefined();
+    expect(auth.verify(pinning.token)).toBeNull();
+    expect(registry.get(kept.snapshot.id)).toBeDefined();
+    expect(auth.verify(kept.token)).not.toBeNull();
+    expect(events.at(-1)).toEqual({ name: "job_token_revoked", fields: { reason: "revoked" } });
+
+    await store.collectGarbage();
+    expect(store.resolveRead(a.id, a.version).ok).toBe(true);
+    // Once the surviving snapshot goes too, nothing pins a's first version.
+    registry.release(kept.snapshot.id);
+    await store.collectGarbage();
+    expect(store.resolveRead(a.id, a.version)).toEqual({ ok: false, code: "not_found" });
+  });
+
+  it("take refuses while paused and for good after releaseAll(shutdown)", () => {
+    let paused = true;
+    const guarded = createSnapshotRegistry({ store, auth, clock: { now: () => now }, paused: () => paused });
+    expect(() => guarded.take(input({ jobId: "p" }))).toThrow("paused");
+    paused = false;
+    guarded.take(input({ jobId: "p" }));
+    guarded.releaseAll("paused");
+    guarded.take(input({ jobId: "q" }));
+    guarded.releaseAll("shutdown");
+    expect(() => guarded.take(input({ jobId: "r" }))).toThrow("shut down");
+    expect(guarded.size).toBe(0);
+  });
+
   it("releaseAll revokes every job token and releases every snapshot; sweepExpired only the expired ones", () => {
     const a = registry.take(input({ jobId: "a", deadline: now + 1_000 }));
     const b = registry.take(input({ jobId: "b", deadline: now + 60_000 }));

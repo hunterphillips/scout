@@ -7,10 +7,15 @@
 // A replacement job takes a new snapshot (new id, new token); the old one stays readable
 // until it is released.
 //
+// `take` refuses (throws) while Scout is paused (the injected `paused`) and for good after
+// `releaseAll("shutdown")`. Those are its only checks: whether the visit is still current and
+// the job may see browser context is the caller's to decide before it calls `take`.
+//
 // `release` revokes the job's token (its connected adapter is refused on the next read) and
-// drops the pins. `releaseAll` does that for every snapshot (pause, shutdown), and
-// `sweepExpired` for every snapshot past its deadline (main runs it before each collection).
-// Diagnostics carry counts and reason codes only.
+// drops the pins. `releaseAll` does that for every snapshot (pause, shutdown),
+// `releasePinning` for every snapshot that pinned a revoked resource (the agent socket's
+// `resourceRevoked`), and `sweepExpired` for every snapshot past its deadline (main runs it
+// before each collection). Diagnostics carry counts and reason codes only.
 
 import { randomBytes } from "node:crypto";
 import type { ActivityEntry, Candidate, JobCandidate } from "@scout/contracts";
@@ -60,10 +65,14 @@ export interface TakeSnapshotInput {
   deadline: number;
 }
 
-export type SnapshotReleaseReason = "released" | "cancelled" | "paused" | "shutdown" | "expired";
+export type SnapshotReleaseReason = "released" | "cancelled" | "paused" | "shutdown" | "expired" | "revoked";
 
 export interface SnapshotRegistry {
-  /** Take a snapshot and issue its job token. Throws when `jobId` already holds a snapshot. */
+  /**
+   * Take a snapshot and issue its job token. Throws when `jobId` already holds a snapshot,
+   * while paused, or after `releaseAll("shutdown")`. The caller owns the visit and
+   * permission checks.
+   */
   take(input: TakeSnapshotInput): { snapshot: JobSnapshot; token: string };
   get(id: string): JobSnapshot | undefined;
   /** The live snapshot of a job, for the agent handlers. */
@@ -72,6 +81,8 @@ export interface SnapshotRegistry {
   release(id: string, reason?: SnapshotReleaseReason): void;
   /** Release every snapshot and revoke every job token (pause, shutdown). */
   releaseAll(reason: SnapshotReleaseReason): void;
+  /** Release every snapshot that pinned `resourceId` (it was revoked). Synchronous and idempotent. */
+  releasePinning(resourceId: string, reason: SnapshotReleaseReason): void;
   /** Release every snapshot whose deadline has passed. */
   sweepExpired(): void;
   readonly size: number;
@@ -81,6 +92,8 @@ export interface SnapshotRegistryOptions {
   store: Pick<CapabilityStore, "listApproved" | "pinVersion" | "releasePins" | "approvalRevision">;
   auth: Pick<AgentAuth, "issueJobToken" | "revokeJobToken" | "revokeAllJobTokens">;
   clock: Clock;
+  /** Scout is paused: no snapshot may be taken. Defaults to never paused. */
+  paused?: () => boolean;
   diagnostics?: Diagnostics;
 }
 
@@ -110,6 +123,8 @@ export function createSnapshotRegistry(options: SnapshotRegistryOptions): Snapsh
   const snapshots = new Map<string, JobSnapshot>();
   const byJob = new Map<string, string>();
   let revision = 0;
+  /** Set by `releaseAll("shutdown")`: no snapshot is taken from then on. */
+  let shutDown = false;
 
   const drop = (snapshot: JobSnapshot): void => {
     snapshots.delete(snapshot.id);
@@ -120,6 +135,8 @@ export function createSnapshotRegistry(options: SnapshotRegistryOptions): Snapsh
 
   return {
     take(input) {
+      if (shutDown) throw new Error("scout: snapshot registry is shut down");
+      if (options.paused?.()) throw new Error("scout: paused");
       if (byJob.has(input.jobId)) throw new Error("scout: job already holds a snapshot");
       const id = randomBytes(16).toString("base64url");
       const approved: SnapshotVersion[] = [];
@@ -189,11 +206,19 @@ export function createSnapshotRegistry(options: SnapshotRegistryOptions): Snapsh
       diagnostics?.event("job_token_revoked", { reason });
     },
     releaseAll(reason) {
+      if (reason === "shutdown") shutDown = true;
       const count = snapshots.size;
       for (const snapshot of [...snapshots.values()]) drop(snapshot);
       // Tokens issued outside the registry go too.
       auth.revokeAllJobTokens();
       if (count > 0) diagnostics?.event("job_token_revoked", { reason, count });
+    },
+    releasePinning(resourceId, reason) {
+      for (const snapshot of [...snapshots.values()]) {
+        if (!snapshot.approved.some((a) => a.resourceId === resourceId)) continue;
+        drop(snapshot);
+        diagnostics?.event("job_token_revoked", { reason });
+      }
     },
     sweepExpired() {
       const now = clock.now();
