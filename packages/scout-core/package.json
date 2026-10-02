@@ -18,9 +18,9 @@
       "types": "./dist/agents/bridgeMain.d.ts",
       "default": "./dist/agents/bridgeMain.js"
     },
-    "./agents/preflight-worker": {
-      "types": "./dist/agents/preflightWorkerMain.d.ts",
-      "default": "./dist/agents/preflightWorkerMain.js"
+    "./agents/preflight-child": {
+      "types": "./dist/agents/preflightChildMain.d.ts",
+      "default": "./dist/agents/preflightChildMain.js"
     },
     "./catalog/parse-worker": {
       "types": "./dist/catalog/parseWorkerMain.d.ts",
