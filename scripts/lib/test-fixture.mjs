@@ -45,6 +45,8 @@ export function makeFixture({ withClaude = true, rootPrefix = "scout setup test 
     SCOUT_HOME: join(home, ".scout"),
     PERSONAL_CONTEXT_HOME: join(home, ".personal-context-mcp"),
     CHROME_NMH_DIR: join(home, "Library", "Application Support", "Google", "Chrome", "NativeMessagingHosts"),
+    // A test home never runs a claude found on PATH: setup records this one in the agent profile.
+    ...(withClaude ? { SCOUT_CLAUDE_BIN: join(binDir, "claude") } : {}),
   };
   return { root, home, scoutRoot, binDir, env, cleanup: () => rmSync(root, { recursive: true, force: true }) };
 }

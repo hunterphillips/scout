@@ -11,6 +11,11 @@
 //                     with the absolute claude path setup resolved; removed only while unchanged
 // launch-agent  { path: "<LaunchAgents>/dev.scout.app.plist", sha256, program }: the optional
 //                     login launch (setup --login-launch); removed only while unchanged
+// app-bundle    { path: "<Applications>/Scout.app", sha256 }: the installed app (bundle-app
+//                     --install); sha256 is appBundleHash (Info.plist + binary); removed only
+//                     while it matches
+// `kinds` (P4.3): the sorted kind names present, rewritten on every save (saveInstalled), so a
+// later reader can tell a record written since P4.3 from an older one. `version` stays 1.
 // The agent integration (setup --agent-integration, lib/agent-integration.mjs) adds:
 //   skillsRoot        the Claude Code skills root; scout-core reads it (installedRecord.ts)
 //                     to export runtime skill wrappers there
@@ -23,12 +28,13 @@
 
 import { randomBytes } from "node:crypto";
 import { readFileSync } from "node:fs";
+import { writeJson } from "./files.mjs";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 
-export const KINDS = ["config", "config-merged", "wrapper", "nmh-manifest", "key", "extension-manifest-key", "mcp-registration", "skill", "agent-profile", "launch-agent"];
+export const KINDS = ["config", "config-merged", "wrapper", "nmh-manifest", "key", "extension-manifest-key", "mcp-registration", "skill", "agent-profile", "launch-agent", "app-bundle"];
 
 /** Kinds that may appear at most once; a new entry replaces the old one whatever its path. */
-const SINGLETON_KINDS = ["mcp-registration", "skill", "agent-profile", "launch-agent"];
+const SINGLETON_KINDS = ["mcp-registration", "skill", "agent-profile", "launch-agent", "app-bundle"];
 
 export const INTEGRATION_SERVER_NAME = "scout";
 export const INTEGRATION_SKILL_DIR = "scout-integration";
@@ -55,7 +61,14 @@ export function readInstalled(path) {
   }
   if ("skillsRoot" in data && !isCleanAbsolute(data.skillsRoot)) throw new Error(`${path} has an invalid skillsRoot`);
   if ("skillsRootCreated" in data && typeof data.skillsRootCreated !== "boolean") throw new Error(`${path} has an invalid skillsRootCreated`);
+  if ("kinds" in data && (!Array.isArray(data.kinds) || !data.kinds.every((k) => typeof k === "string"))) throw new Error(`${path} has an invalid kinds list`);
   return data;
+}
+
+/** Write the record (0600) with `kinds` set to the kind names its entries use. */
+export function saveInstalled(path, record) {
+  const kinds = [...new Set(record.files.map((f) => f.kind))].sort();
+  writeJson(path, { ...record, kinds }, 0o600);
 }
 
 /** Adds or replaces the entry for `entry.path`; never duplicates. */
@@ -111,6 +124,8 @@ export function allowedPath(kind, path, L, record) {
       return path === L.agentProfile;
     case "launch-agent":
       return path === L.launchAgent;
+    case "app-bundle":
+      return path === L.installedApp;
     default:
       return false;
   }

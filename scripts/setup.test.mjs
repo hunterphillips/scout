@@ -36,8 +36,7 @@ const setup = (args = [], env = fx.env, extra = {}) => {
 describe("setup --dry-run", () => {
   it("prints every path, including ones with spaces, and writes nothing (subprocess)", () => {
     const before = listTree(fx.root);
-    // CHROME_NMH_DIR unset: the default location under the (temp) HOME, which has a space.
-    const env = { ...fx.env, CHROME_NMH_DIR: undefined };
+    const env = fx.env;
     const r = spawnSync(process.execPath, [join(HERE, "setup.mjs"), "--dry-run", "--scout-root", fx.scoutRoot], { env, encoding: "utf8" });
     expect(r.status, r.stderr).toBe(0);
     const L = layout({ env: fx.env, scoutRoot: fx.scoutRoot });
@@ -197,13 +196,41 @@ describe("setup", () => {
     expect(mode(L.scoutConfig)).toBe(0o600);
   });
 
-  it("writes no agent profile, with a warning, when claude is not found", () => {
-    const r = setup([], { ...fx.env, PATH: join(fx.root, "no-bin") }, { claudeFallbacks: [] });
+  it("records SCOUT_CLAUDE_BIN in the agent profile, never a different claude on PATH", () => {
+    const other = join(fx.root, "other-bin");
+    mkdirSync(other);
+    writeFileSync(join(other, "claude"), "#!/bin/sh\nexit 0\n");
+    chmodSync(join(other, "claude"), 0o755);
+    const r = setup([], { ...fx.env, PATH: other });
+    expect(r.code, r.text()).toBe(0);
+    const L = layout({ env: fx.env, scoutRoot: fx.scoutRoot });
+    expect(json(L.agentProfile).claudePath).toBe(fx.env.SCOUT_CLAUDE_BIN);
+  });
+
+  it("on a test home without SCOUT_CLAUDE_BIN writes no agent profile, with a warning, even with claude on PATH", () => {
+    const r = setup([], { ...fx.env, SCOUT_CLAUDE_BIN: undefined });
     expect(r.code, r.text()).toBe(0);
     const L = layout({ env: fx.env, scoutRoot: fx.scoutRoot });
     expect(existsSync(L.agentProfile)).toBe(false);
     expect(json(L.installed).files.some((f) => f.kind === "agent-profile")).toBe(false);
-    expect(r.text()).toMatch(/claude not found.*no agent profile is written/);
+    expect(r.text()).toMatch(/no agent profile is written \(the Scout home is not the real ~\/\.scout, so SCOUT_CLAUDE_BIN must name the claude to run\)/);
+  });
+
+  it("CHROME_NMH_DIR is required with a test home and refused with the real one", () => {
+    let r = setup([], { ...fx.env, CHROME_NMH_DIR: undefined });
+    expect(r.code).toBe(1);
+    expect(r.text()).toMatch(/so CHROME_NMH_DIR must name a test location/);
+    r = setup([], { ...fx.env, SCOUT_CLAUDE_BIN: undefined }, { realHome: fx.home });
+    expect(r.code).toBe(1);
+    expect(r.text()).toMatch(/CHROME_NMH_DIR is for test installs only and refused with the real ~\/\.scout/);
+    expect(existsSync(layout({ env: fx.env }).scoutHome)).toBe(false);
+  });
+
+  it("records the kinds present, and keeps version 1", () => {
+    expect(setup().code).toBe(0);
+    const rec = json(layout({ env: fx.env, scoutRoot: fx.scoutRoot }).installed);
+    expect(rec.version).toBe(1);
+    expect(rec.kinds).toEqual(["agent-profile", "config", "extension-manifest-key", "key", "nmh-manifest", "wrapper"]);
   });
 
   it("never touches the personal-context home or config, even when one exists", () => {

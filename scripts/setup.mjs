@@ -5,8 +5,8 @@
 // --agent-integration also registers the user-scope `scout` MCP server through `claude mcp add`
 // and installs the static scout-integration skill (lib/agent-integration.mjs); without it,
 // setup never touches Claude Code's configuration.
-// --login-launch [--app <Scout.app>] writes the login LaunchAgent for a bundled app
-// (`npm run bundle-app`; lib/app-bundle.mjs).
+// --login-launch [--app <Scout.app>] writes the login LaunchAgent; it starts the installed
+// ~/Applications/Scout.app (`npm run bundle-app -- --install`) unless --app names another bundle.
 // Setup registers nothing for the side panel: the extension bundle carries it. It no longer
 // touches ~/.personal-context-mcp (legacy `config-merged` records are only read, by uninstall).
 // <SCOUT_HOME>/agent-profile.json is written only when absent, with the absolute claude path
@@ -15,22 +15,23 @@
 // Usage: node scripts/setup.mjs [--dry-run] [--scout-root <dir>] [--agent-integration]
 //                               [--login-launch [--app <Scout.app>]]
 // Env overrides: SCOUT_HOME, CHROME_NMH_DIR, SCOUT_SKILLS_ROOT, SCOUT_CLAUDE_BIN,
-// LAUNCH_AGENTS_DIR (see lib/paths.mjs). The last three are for test installs; with the real
-// ~/.scout they are refused, and with a test home they are required.
+// LAUNCH_AGENTS_DIR, SCOUT_APPLICATIONS_DIR (see lib/paths.mjs). All but SCOUT_HOME are for
+// test installs: refused with the real ~/.scout, required with a test home where they apply
+// (without SCOUT_CLAUDE_BIN a test install writes no agent profile).
 // When the Scout home is not the real ~/.scout (SCOUT_HOME or HOME overridden),
 // --scout-root is required so a test install cannot re-key the real built extension.
 // Never touches ~/.rook or any process.
 
 import { chmodSync, lstatSync, mkdirSync, readFileSync, statSync } from "node:fs";
 import { resolve } from "node:path";
-import { DEFAULT_DESTINATIONS, HOST_NAME, REPO_ROOT, appBinary, isRealScoutHome, layout, scoutHome } from "./lib/paths.mjs";
+import { APP_BUNDLE_ID, DEFAULT_DESTINATIONS, HOST_NAME, REPO_ROOT, appBinary, isRealScoutHome, layout, locationOverrideRefusal, scoutHome } from "./lib/paths.mjs";
 import { extensionIdFromPem, generateKeyPem, manifestKey } from "./lib/extension-key.mjs";
-import { defaultClaudeFallbacks, isExecutableFile, resolveClaude, resolveNode } from "./lib/executables.mjs";
-import { newMarker, readInstalled, upsertEntry } from "./lib/installed.mjs";
+import { isExecutableFile, resolveNode } from "./lib/executables.mjs";
+import { newMarker, readInstalled, saveInstalled, upsertEntry } from "./lib/installed.mjs";
 import { checkPrivateDir, ensurePrivateDir, exists, fileMarker, readJsonObject, shDoubleQuote, wrapperScript, writeFileMode, writeJson } from "./lib/files.mjs";
 import { isMain } from "./lib/is-main.mjs";
-import { INTEGRATION_EXPLANATION, applyIntegration, describeIntegration, planIntegration, recordedIntegration } from "./lib/agent-integration.mjs";
-import { launchAgentPlist, launchAgentRefusal, sha256 } from "./lib/app-bundle.mjs";
+import { INTEGRATION_EXPLANATION, applyIntegration, describeIntegration, integrationClaude, planIntegration, recordedIntegration } from "./lib/agent-integration.mjs";
+import { applicationsRefusal, bundleIdOf, launchAgentPlist, launchAgentRefusal, sha256 } from "./lib/app-bundle.mjs";
 
 /** The core's agent profile defaults (packages/scout-core/src/agents/profile.ts). */
 export const AGENT_PROFILE_DEFAULTS = Object.freeze({ schemaVersion: 1, adapter: "claude-code", model: "claude-sonnet-5-5" });
@@ -77,6 +78,8 @@ function validDestinations(v) {
 export function planSetup({ env = process.env, scoutRoot = REPO_ROOT, dryRun = false, claudeFallbacks, loginLaunch = false, app = null, realHome } = {}) {
   const L = layout({ env, scoutRoot });
   const warnings = [];
+  const nmhRefusal = locationOverrideRefusal("CHROME_NMH_DIR", env, realHome);
+  if (nmhRefusal) throw new Error(nmhRefusal);
 
   // Run the private-dir checks up front, so a dry run fails the same way a real run would.
   const dirs = [L.scoutHome, L.binDir].map((path) => ({ path, private: true, ...checkPrivateDir(path) }));
@@ -99,8 +102,11 @@ export function planSetup({ env = process.env, scoutRoot = REPO_ROOT, dryRun = f
   if (env.SCOUT_HOME) {
     warnings.push(`SCOUT_HOME is set (${L.scoutHome}); the native app only reads ~/.scout, so this install is for testing`);
   }
-  const claudePath = resolveClaude({ pathVar: env.PATH ?? "", fallbacks: claudeFallbacks ?? defaultClaudeFallbacks(env) });
-  if (!claudePath) warnings.push("claude not found on PATH, ~/.local/bin, or /opt/homebrew/bin; no agent profile is written, so background recommendations stay unavailable until you re-run setup");
+  // The same claude the agent integration runs: SCOUT_CLAUDE_BIN on a test home (never the real
+  // one found on PATH), PATH and the usual places on the real home.
+  const claude = integrationClaude(env, claudeFallbacks, realHome);
+  const claudePath = claude.path ?? null;
+  if (!claudePath) warnings.push(`no agent profile is written (${claude.error}), so background recommendations stay unavailable until you re-run setup`);
 
   // Refuse to overwrite any Scout-owned file that exists without this install's marker.
   const foreign = [
@@ -190,7 +196,7 @@ export function planSetup({ env = process.env, scoutRoot = REPO_ROOT, dryRun = f
   const profile = agentProfileStep({ L, record, claudePath });
   if (profile.step) steps.splice(3, 0, profile.step);
   if (profile.note) warnings.push(profile.note);
-  if (loginLaunch) steps.push(launchAgentStep({ L, record, app: app ?? L.appBundle, env, realHome }));
+  if (loginLaunch) steps.push(launchAgentStep({ L, record, app, env, realHome }));
   return { L, marker, record, extensionId, nodePath, claudePath, warnings, dirs, steps };
 }
 
@@ -231,8 +237,17 @@ function agentProfileStep({ L, record, claudePath }) {
 function launchAgentStep({ L, record, app, env, realHome }) {
   const refusal = launchAgentRefusal(env, realHome);
   if (refusal) throw new Error(refusal);
+  // Default: the installed copy (bundle-app --install), never a build directory; --app may name
+  // any bundle explicitly, a .build one included.
+  if (!app) {
+    const appsRefusal = applicationsRefusal(env, realHome);
+    if (appsRefusal) throw new Error(`--login-launch without --app starts the installed app: ${appsRefusal}`);
+    app = L.installedApp;
+  }
   const program = appBinary(app);
-  if (!isExecutableFile(program)) throw new Error(`--login-launch: no bundled app at ${app} (missing ${program}); run \`npm run bundle-app\` first, or pass --app <Scout.app>`);
+  if (!isExecutableFile(program)) throw new Error(`--login-launch: no app at ${app} (missing ${program}); run \`npm run bundle-app -- --install\` first, or pass --app <Scout.app>`);
+  const id = bundleIdOf(app);
+  if (id !== APP_BUNDLE_ID) throw new Error(`--login-launch: ${app} is not a Scout bundle (CFBundleIdentifier ${id ?? "unreadable"}, expected ${APP_BUNDLE_ID})`);
   const text = launchAgentPlist({ program });
   const recorded = record?.files.find((f) => f.kind === "launch-agent" && f.path === L.launchAgent);
   if (exists(L.launchAgent)) {
@@ -308,13 +323,13 @@ export function runSetup(argv, { env = process.env, out = console.log, err = con
     }
     // Record the marker before writing any file that carries it, so a crash leaves a re-runnable install.
     current = L.installed;
-    writeJson(L.installed, record, 0o600);
+    saveInstalled(L.installed, record);
     for (const s of steps) {
       current = s.path;
       s.write();
       record = upsertEntry(record, s.entry);
       current = L.installed;
-      writeJson(L.installed, record, 0o600);
+      saveInstalled(L.installed, record);
       out(`${s.keep ? "kept " : "wrote"} ${s.path} (${mode(s.mode)})`);
     }
   } catch (e) {
@@ -324,7 +339,7 @@ export function runSetup(argv, { env = process.env, out = console.log, err = con
   }
   if (integration) {
     try {
-      record = applyIntegration(integration, record, { env, mcpTimeoutMs, out, save: (r) => writeJson(L.installed, r, 0o600) });
+      record = applyIntegration(integration, record, { env, mcpTimeoutMs, out, save: (r) => saveInstalled(L.installed, r) });
     } catch (e) {
       err(`setup: agent integration failed: ${e.message}`);
       err(`setup: what was done is recorded in ${L.installed}; re-run, or remove it with \`npm run uninstall -- --agent-integration\`.`);
