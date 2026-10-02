@@ -396,6 +396,7 @@ describe("runStdio (in process)", () => {
     };
     const socketPath = join(home, "run", "core.sock");
     let agent: { store: CapabilityStore; snapshots: SnapshotRegistry } | null = null;
+    let jobs: Parameters<NonNullable<Parameters<typeof runStdio>[0]["onJobsStarted"]>>[0] | null = null;
     const run = () =>
       runStdio({
         stdin,
@@ -405,6 +406,7 @@ describe("runStdio (in process)", () => {
         exit: (code) => void exits.push({ code, socketLeft: existsSync(socketPath) }),
         diagnostics,
         onAgentStarted: (a) => void (agent = a),
+        onJobsStarted: (j) => void (jobs = j),
       });
     return {
       stdin,
@@ -417,6 +419,9 @@ describe("runStdio (in process)", () => {
       fields,
       get agent() {
         return agent!;
+      },
+      get jobs() {
+        return jobs!;
       },
     };
   };
@@ -557,6 +562,22 @@ describe("runStdio (in process)", () => {
     expect(h.events).toContain("installed_record_invalid");
     expect(h.events).not.toContain("capability_export");
     expect(h.exits.map((e) => e.code)).toEqual([0]);
+  });
+
+  it("without an agent profile jobs are wired but have no agent; a browser-context grant toggle reaches the scheduler", async () => {
+    const h = harness();
+    await h.run();
+    expect(h.fields.find((f) => f.name === "agent_profile_unavailable")?.fields).toEqual({ code: "profile: missing" });
+    expect(h.jobs.adapter).toBeNull();
+    const seen: boolean[] = [];
+    h.jobs.scheduler.onGrantChanged = (enabled) => void seen.push(enabled);
+    h.stdin.write(`${JSON.stringify({ type: "set_agent_browser_context", commandId: "g1", enabled: true, expectedEnabled: false })}\n`);
+    await until(() => seen.length > 0);
+    h.stdin.write(`${JSON.stringify({ type: "set_agent_browser_context", commandId: "g2", enabled: false, expectedEnabled: true })}\n`);
+    await until(() => seen.length > 1);
+    expect(seen).toEqual([true, false]);
+    h.stdin.end();
+    await until(() => h.exits.length > 0);
   });
 
   it("a stdout error (EPIPE) shuts down with 0 after removing the socket", async () => {
