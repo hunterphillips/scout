@@ -261,6 +261,7 @@ export async function runStdio(deps: StdioDeps): Promise<StdioCore> {
     coreInstanceId,
     exportConflicts: () => exporter?.manifest().conflicts ?? [],
     readBrowserContextGrant: () => readBrowserContextGrant(home),
+    readDestinations: () => config.destinations,
     writeBrowserContextGrant: (enabled) => writeBrowserContextGrant(home, enabled),
     getAudit: () => audit.entries(),
     isPermitted: (origin) => coordinator.permissions.isPermitted(origin),

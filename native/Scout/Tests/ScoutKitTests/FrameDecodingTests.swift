@@ -102,6 +102,8 @@ import Testing
         ]))
         #expect(try F.frame("frame.audit.empty.json") == .audit([]))
         #expect(try F.frame("frame.grant.json") == .grant(agentBrowserContext: true))
+        // P4.3: the side panel reads `destinations`; the app ignores it.
+        #expect(try F.frame("frame.grant.destinations.json") == .grant(agentBrowserContext: false))
     }
 
     /// Mutates one fixture and expects the line to be refused.

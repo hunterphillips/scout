@@ -28,7 +28,7 @@
 // `working{jobId}` and then the visit's `idle` before the result is published; an `idle` or
 // `resendState` for the same visit after the publish wipes the window's results.
 
-import type { PanelAck, PanelAudit, PanelCommand, PanelState } from "@scout/contracts";
+import { GRANT_DESTINATIONS_MAX, isHttpsOrigin, type PanelAck, type PanelAudit, type PanelCommand, type PanelState } from "@scout/contracts";
 import type { GrantWrite } from "./agentApi/grants.js";
 import type { ReadAuditEntry } from "./agentApi/readAudit.js";
 import type { StoreState } from "./capabilities/decisions.js";
@@ -53,6 +53,12 @@ export interface PanelChannelOptions {
   /** The exporter's last recorded conflicts; empty when there is no exporter. */
   exportConflicts: () => readonly ExportConflict[];
   readBrowserContextGrant: () => boolean;
+  /**
+   * `config.json` `destinations` (bare hosts), sent on every `grant` frame as `https://<host>`
+   * origins (at most GRANT_DESTINATIONS_MAX) so the side panel can show where recommendations
+   * are on. Without it the frame carries no `destinations`.
+   */
+  readDestinations?: () => readonly string[];
   writeBrowserContextGrant: (enabled: boolean) => GrantWrite;
   getAudit: () => readonly ReadAuditEntry[];
   isPermitted: (origin: string) => boolean;
@@ -127,7 +133,12 @@ export function createPanelChannel(options: PanelChannelOptions): PanelChannel {
     lastAudit = key;
     emit(frame);
   };
-  const grantFrame = (): PanelState => ({ type: "grant", agentBrowserContext: options.readBrowserContextGrant() });
+  const destinations = (): { destinations?: string[] } => {
+    if (!options.readDestinations) return {};
+    const origins = options.readDestinations().map((host) => `https://${host}`).filter(isHttpsOrigin);
+    return { destinations: origins.slice(0, GRANT_DESTINATIONS_MAX) };
+  };
+  const grantFrame = (enabled = options.readBrowserContextGrant()): PanelState => ({ type: "grant", agentBrowserContext: enabled, ...destinations() });
 
   /** The start/restart paint: grant, capabilities (always to every sink), audit. */
   const paint = (send: (frame: PanelState) => void, sendAuditFrame: () => void): void => {
@@ -145,7 +156,7 @@ export function createPanelChannel(options: PanelChannelOptions): PanelChannel {
     readBrowserContextGrant: options.readBrowserContextGrant,
     emitAck: emit,
     onStoreChanged: () => capabilities.changed(),
-    onGrantChanged: (enabled) => emit({ type: "grant", agentBrowserContext: enabled }),
+    onGrantChanged: (enabled) => emit(grantFrame(enabled)),
     refreshCapabilities: () => capabilities.refresh(),
     ...(options.results ? { results: options.results } : {}),
     diagnostics,

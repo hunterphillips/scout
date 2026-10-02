@@ -278,10 +278,18 @@ export const PanelAuditSchema = z.object({
   entries: z.array(AuditEntrySchema).max(PANEL_AUDIT_MAX),
 });
 
-/** Whether the user's interactive agent may read browser context. */
+/** Most `destinations` one `grant` frame carries. */
+export const GRANT_DESTINATIONS_MAX = 64;
+
+/**
+ * Whether the user's interactive agent may read browser context, and (optional, P4.3) the
+ * sites with background recommendations on: `config.json` `destinations` as `https://<host>`
+ * origins, for the side panel's Sites section. Absent from older cores; the Swift app ignores it.
+ */
 export const PanelGrantSchema = z.object({
   type: z.literal("grant"),
   agentBrowserContext: z.boolean(),
+  destinations: z.array(HostOriginSchema).max(GRANT_DESTINATIONS_MAX).optional(),
 });
 
 export const PanelResultsSchema = z.discriminatedUnion("status", [
