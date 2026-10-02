@@ -330,12 +330,13 @@ export function createCoordinator(options: CoordinatorOptions): Coordinator {
 
   const applyPermissions = (obs: Extract<BrowserObservation, { kind: "permissions" }>): void => {
     const before = tracker.current();
-    const capturing = permissions.githubCapture && permissions.isPermitted(GITHUB_ORIGIN);
     if (!permissions.applySnapshot(obs)) return;
-    // Consent withdrawn: the captured issue text goes with it (pause and disconnect keep it).
-    if (capturing && !(permissions.githubCapture && permissions.isPermitted(GITHUB_ORIGIN))) {
+    // No consent to capture: no captured issue text is kept, even if the consent went while
+    // Chrome was disconnected (pause and disconnect alone keep it).
+    if (!permissions.githubCapture || !permissions.isPermitted(GITHUB_ORIGIN)) {
+      const revision = activity.revision;
       activity.clear();
-      diagnostics.event("activity_cleared", { reason: permissions.githubCapture ? "grant_lost" : "capture_off" });
+      if (activity.revision !== revision) diagnostics.event("activity_cleared", { reason: permissions.githubCapture ? "grant_lost" : "capture_off" });
     }
     if (before !== null && !permissions.isPermitted(before.origin)) {
       dwell.cancel("permission_lost");

@@ -1102,17 +1102,30 @@ describe("coordinator: page_text into the activity store", () => {
     expect(cleared(events)).toEqual(["grant_lost"]);
   });
 
-  it("keeps captured text on an unrelated snapshot, on pause, and on disconnect", () => {
+  it("keeps captured text on a snapshot that still allows capture, on pause, and on disconnect", () => {
     const { coordinator, events, grant, c, attach } = withIssue();
     grant(c, ["https://github.com/*"], true);
     coordinator.handleNativeCommand({ type: "pause" });
     coordinator.handleNativeCommand({ type: "resume" });
     c.disconnect();
     expect(coordinator.activity.entries()).toHaveLength(1);
-    // A new sensor's first snapshot starts from no grants: nothing is withdrawn.
-    const next = attach(2);
-    grant(next, DEFAULT_GRANTS, false);
+    grant(attach(2), DEFAULT_GRANTS, true);
     expect(coordinator.activity.entries()).toHaveLength(1);
+    expect(cleared(events)).toEqual([]);
+  });
+
+  it("clears captured text when the reconnect snapshot arrives with capture already off", () => {
+    const { coordinator, events, grant, c, attach } = withIssue();
+    c.disconnect();
+    expect(coordinator.activity.entries()).toHaveLength(1);
+    grant(attach(2), DEFAULT_GRANTS, false);
+    expect(coordinator.activity.entries()).toEqual([]);
+    expect(cleared(events)).toEqual(["capture_off"]);
+  });
+
+  it("reports nothing when capture is off and the store is already empty", () => {
+    const { events, grant, connect } = setup();
+    grant(connect(), DEFAULT_GRANTS, false);
     expect(cleared(events)).toEqual([]);
   });
 
