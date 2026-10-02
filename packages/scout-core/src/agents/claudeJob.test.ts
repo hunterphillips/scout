@@ -3,7 +3,7 @@
 // No model, no network, no real claude; every path is under a temp dir.
 
 import { spawn as nodeSpawn } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, symlinkSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -11,8 +11,10 @@ import type { JobRequest } from "@scout/contracts";
 import { systemClock } from "../clock.js";
 import { createDiagnostics } from "../diagnostics.js";
 import {
+  AGENT_CWD_DIR,
   buildJobArgv,
   createClaudeJobAdapter,
+  ensureAgentCwd,
   JobRequestError,
   MIN_LAUNCH_MS,
   VERIFIED_CLI_VERSION,
@@ -212,10 +214,13 @@ describe("claude job: happy path", () => {
     expect(call!.violations).toEqual([]);
     // argv exactly the verified flag set, with the explicit profile model.
     const allowed = ["current_site", "recent_activity", "site_links", "list_resources", "read_resource"].map((t) => `mcp__scout__${t}`).join(",");
-    expect(call!.argv).toEqual(buildJobArgv(DEFAULT_AGENT_MODEL, call!.cwd!, allowed));
-    // The private cwd was SCOUT_HOME/run/jobs/<request id>, and it is gone.
-    expect(call!.cwd).toBe(join(e.scoutHome, "run", "jobs", "job-1"));
-    expect(existsSync(call!.cwd!)).toBe(false);
+    // The argv names the private job dir SCOUT_HOME/run/jobs/<request id>, which is gone.
+    const jobDir = join(e.scoutHome, "run", "jobs", "job-1");
+    expect(call!.argv).toEqual(buildJobArgv(DEFAULT_AGENT_MODEL, jobDir, allowed));
+    expect(existsSync(jobDir)).toBe(false);
+    // The CLI ran from the one stable cwd, SCOUT_HOME/run/agent-cwd (0700), which stays.
+    expect(call!.cwd).toBe(join(e.scoutHome, "run", AGENT_CWD_DIR));
+    expect(lstatSync(call!.cwd!).mode & 0o777).toBe(0o700);
     expect(jobsLeft(e)).toEqual([]);
     // Child env: allowlisted names only.
     const keys = call!.envKeys!.filter((k) => !AMBIENT_KEYS.has(k));
@@ -818,7 +823,9 @@ describe("claude job: launch-profile failures by cause", () => {
   it.skipIf(process.getuid?.() === 0)("a run dir that cannot be written (EACCES): agent_failed", async () => {
     const e = await setup();
     const run = join(e.scoutHome, "run");
-    mkdirSync(run, { mode: 0o500 });
+    // The adapter already made run/ (for the agent cwd); take its write bit away.
+    mkdirSync(run, { recursive: true });
+    chmodSync(run, 0o500);
     try {
       const out = await e.adapter.run(request(e), { toolSurface: surface(e) });
       expect(out.result).toMatchObject({ status: "error", reason: "agent_failed" });
@@ -1148,5 +1155,27 @@ describe("claude job: managed policy that would defeat the job's restrictions", 
     const out = await e.adapter.run(request(e), { toolSurface: surface(e) });
     expect(out.details).toMatchObject({ termination: "unsupported_configuration", detail: "managed_not_inspected" });
     expect(e.spawnCalls).toBe(0);
+  });
+});
+
+describe("the stable agent cwd", () => {
+  it("is created 0700 under run/, tightened if loosened, kept across calls, and refused as a link or a file", () => {
+    const home = mkdtempSync(join(tmpdir(), "scout-cwd-"));
+    try {
+      const dir = ensureAgentCwd(home);
+      expect(dir).toBe(join(home, "run", AGENT_CWD_DIR));
+      expect(lstatSync(dir).mode & 0o777).toBe(0o700);
+      chmodSync(dir, 0o755);
+      expect(ensureAgentCwd(home)).toBe(dir);
+      expect(lstatSync(dir).mode & 0o777).toBe(0o700);
+      rmSync(dir, { recursive: true });
+      symlinkSync(home, dir);
+      expect(() => ensureAgentCwd(home)).toThrow();
+      rmSync(dir);
+      writeFileSync(dir, "");
+      expect(() => ensureAgentCwd(home)).toThrow();
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
   });
 });

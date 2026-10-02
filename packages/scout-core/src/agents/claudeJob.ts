@@ -6,7 +6,10 @@
 // instructions.md, agent-token), plus bridge.json when the profile selects user tools (the
 // bridge's job file, holding the backend environment bindings but never their values, which
 // only the bridge resolves, in memory, at spawn); the CLI is spawned argv-only, detached, with the request on
-// stdin; the job dir is removed when the job ends, however it ends. From the spawn on, the job dir
+// stdin; the job dir is removed when the job ends, however it ends. The CLI itself runs from one
+// stable cwd, `SCOUT_HOME/run/agent-cwd` (AGENT_CWD_DIR: 0700, created when the adapter is built
+// and checked before each spawn, never swept), so the real CLI's per-cwd `~/.claude/projects`
+// folder appears once, not once per job; every path in its argv still names the job dir. From the spawn on, the job dir
 // also holds `tree.json` (0600, written atomically: the CLI's pid and group, its spawn time, and
 // every owned process ps has shown, pid and start time only): a core hard-killed mid-job cannot
 // stop the tree, so the next start kills what still matches it (main.ts sweepJobDirs).
@@ -66,7 +69,7 @@
 // tokens or URLs beyond the origin.
 
 import { spawn as nodeSpawn } from "node:child_process";
-import { renameSync, writeFileSync } from "node:fs";
+import { chmodSync, lstatSync, mkdirSync, renameSync, writeFileSync } from "node:fs";
 import { userInfo } from "node:os";
 import { isAbsolute, join } from "node:path";
 import { AgentTokenSchema, JOB_AGENT_OUTPUT_JSON_SCHEMA, JobRequestSchema, type HostJobResult, type JobRequest } from "@scout/contracts";
@@ -311,6 +314,22 @@ export function writeTreeRecord(jobDir: string, record: JobTreeRecord): void {
   }
 }
 
+/** The CLI's working directory under SCOUT_HOME/run: the same for every job (see the header). */
+export const AGENT_CWD_DIR = "agent-cwd";
+
+/**
+ * Create (0700) or check the stable agent cwd: a real directory this user owns, group/other
+ * bits cleared if set. Throws when it is a link, not a directory, or someone else's.
+ */
+export function ensureAgentCwd(home: string): string {
+  const dir = join(home, "run", AGENT_CWD_DIR);
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const st = lstatSync(dir);
+  if (!st.isDirectory() || (process.getuid !== undefined && st.uid !== process.getuid())) throw new Error("agent cwd is not a private directory");
+  if ((st.mode & 0o077) !== 0) chmodSync(dir, 0o700);
+  return dir;
+}
+
 // ---------- the adapter ----------
 
 export function createClaudeJobAdapter(deps: ClaudeJobDeps): ClaudeJobAdapter {
@@ -320,6 +339,11 @@ export function createClaudeJobAdapter(deps: ClaudeJobDeps): ClaudeJobAdapter {
   const maxStdout = deps.maxStdoutBytes ?? MAX_STDOUT_BYTES;
   const minLaunchMs = deps.minLaunchMs ?? MIN_LAUNCH_MS;
   const jobsRoot = join(deps.home, "run", "jobs");
+  try {
+    ensureAgentCwd(deps.home);
+  } catch {
+    deps.diagnostics?.event("agent_cwd_unusable", {}); // each job checks again before its spawn
+  }
   const profile = deps.profile;
   const fingerprint = profileFingerprint(profile);
   let preflight: PreflightState = { verdict: "unchecked", reasons: [] };
@@ -567,13 +591,19 @@ export function createClaudeJobAdapter(deps: ClaudeJobDeps): ClaudeJobAdapter {
     stop: JobStop,
   ): Promise<Out> {
     const startedAt = clock.now();
+    let cwd: string;
+    try {
+      cwd = ensureAgentCwd(deps.home);
+    } catch {
+      return { result: { status: "error", reason: "agent_failed" }, termination: "process_error", detail: "setup_failed" };
+    }
     let sup: SupervisedChild;
     try {
       sup = startChild({
         spawn,
         command: launch.claudePath,
         args: buildJobArgv(launch.model, jobDir, surface.allowedToolsArg),
-        options: { cwd: jobDir, env: { ...launch.env }, stdio: ["pipe", "pipe", "pipe"] },
+        options: { cwd, env: { ...launch.env }, stdio: ["pipe", "pipe", "pipe"] },
         killGraceMs,
         ...(deps.psSnapshot ? { snapshot: deps.psSnapshot } : {}),
         ...(deps.processTracker ? { tracker: deps.processTracker } : {}),
