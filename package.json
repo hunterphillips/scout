@@ -23,7 +23,7 @@
     "test:scripts": "vitest run --root scripts --exclude 'spikes/**'",
     "test:e2e": "vitest run --root test",
     "test:agent-contract": "vitest run --root packages/scout-core src/agents src/capabilities && vitest run --root packages/scout-mcp && vitest run --root scripts agent-check",
-    "test:pivot": "npm run test:agent-contract && npm run test:e2e",
+    "test:pivot": "npm run build && npm run test:agent-contract && npm run test:e2e",
     "test:swift": "cd native/Scout && swift build && swift test",
     "verify:agent": "node scripts/agent-check/run.mjs",
     "test:all": "npm run build && npm test && npm run test:e2e",

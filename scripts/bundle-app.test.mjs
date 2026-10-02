@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { runBundle } from "./bundle-app.mjs";
 import { listTree } from "./lib/test-fixture.mjs";
+import { infoPlist } from "./lib/app-bundle.mjs";
 
 const has = (cmd) => !spawnSync(cmd, ["--help"], { stdio: "ignore" }).error;
 const HAS_SWIFT = !spawnSync("swift", ["--version"], { stdio: "ignore" }).error;
@@ -75,6 +76,14 @@ describe("bundle-app", () => {
     expect(runBundle(["--out", out, "--binary", standIn()], c)).toBe(1);
     expect(c.text()).toMatch(/is not a Scout bundle/);
     expect(readFileSync(join(foreign, "Info.plist"), "utf8")).toBe("<plist>someone else</plist>");
+
+    // dev.scout.app appears in the plist, but not as its CFBundleIdentifier.
+    const lookalike = infoPlist({ version: "0.0.0" }).replace("<string>dev.scout.app</string>", "<string>com.example.other</string>").replace("<string>Scout</string>", "<string>dev.scout.app</string>");
+    writeFileSync(join(foreign, "Info.plist"), lookalike);
+    const c3 = capture();
+    expect(runBundle(["--out", out, "--binary", standIn()], c3)).toBe(1);
+    expect(c3.text()).toMatch(/its CFBundleIdentifier is not dev\.scout\.app/);
+    expect(readFileSync(join(foreign, "Info.plist"), "utf8")).toBe(lookalike);
 
     const plain = join(root, "plain");
     writeFileSync(plain, "x");

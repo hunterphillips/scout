@@ -7,12 +7,17 @@
 //
 // The LaunchAgent (setup --login-launch) is `<LaunchAgents>/dev.scout.app.plist`: RunAtLoad,
 // ProgramArguments = the bundled binary's absolute path, no KeepAlive. Setup records it with its
-// SHA-256; uninstall removes it only while the hash matches. LAUNCH_AGENTS_DIR moves it for
-// tests; like the agent integration's overrides, a test home (not the real ~/.scout) must set
-// it and the real ~/.scout refuses it.
+// SHA-256; uninstall removes it only while the hash matches, and on the real home boots it out
+// of launchd. LAUNCH_AGENTS_DIR moves it for tests (lib/paths.mjs locationOverrideRefusal).
+//
+// The installed copy (bundle-app --install) is `~/Applications/Scout.app`
+// (SCOUT_APPLICATIONS_DIR for tests), recorded as kind `app-bundle` with appBundleHash.
 
+import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { APP_BUNDLE_ID, isRealScoutHome } from "./paths.mjs";
+import { lstatSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+import { APP_BUNDLE_ID, appBinary, locationOverrideRefusal } from "./paths.mjs";
 
 export const APP_NAME = "Scout";
 export const APP_EXECUTABLE = "Scout";
@@ -68,8 +73,45 @@ export function launchAgentPlist({ program }) {
 
 /** The refusal for LAUNCH_AGENTS_DIR, or null: required with a test home, refused with the real ~/.scout. */
 export function launchAgentRefusal(env, realHome) {
-  const real = isRealScoutHome(env, realHome);
-  if (real && env.LAUNCH_AGENTS_DIR) return "LAUNCH_AGENTS_DIR is for test installs only and refused with the real ~/.scout; unset it and re-run";
-  if (!real && !env.LAUNCH_AGENTS_DIR) return "--login-launch with a Scout home that is not the real ~/.scout needs LAUNCH_AGENTS_DIR, so a test install cannot touch ~/Library/LaunchAgents";
-  return null;
+  return locationOverrideRefusal("LAUNCH_AGENTS_DIR", env, realHome);
+}
+
+/** The refusal for SCOUT_APPLICATIONS_DIR (bundle-app --install, the login launch's default app), or null. */
+export function applicationsRefusal(env, realHome) {
+  return locationOverrideRefusal("SCOUT_APPLICATIONS_DIR", env, realHome);
+}
+
+/** The bundle's CFBundleIdentifier, read with `plutil -extract` (null when absent or unreadable). */
+export function bundleIdOf(app) {
+  const r = spawnSync("plutil", ["-extract", "CFBundleIdentifier", "raw", "-o", "-", join(app, "Contents", "Info.plist")], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+  return r.status === 0 ? r.stdout.trim() : null;
+}
+
+/** True when `app` is a real directory (not a symlink) whose Info.plist names dev.scout.app. */
+export function isScoutBundle(app) {
+  try {
+    if (!lstatSync(app).isDirectory()) return false;
+  } catch {
+    return false;
+  }
+  return bundleIdOf(app) === APP_BUNDLE_ID;
+}
+
+/**
+ * The installed bundle's ownership hash: SHA-256 over its Info.plist and its binary (each
+ * length-prefixed), or null when either cannot be read as a regular file.
+ */
+export function appBundleHash(app) {
+  const h = createHash("sha256");
+  for (const p of [join(app, "Contents", "Info.plist"), appBinary(app)]) {
+    let bytes;
+    try {
+      if (!lstatSync(p).isFile()) return null;
+      bytes = readFileSync(p);
+    } catch {
+      return null;
+    }
+    h.update(`${bytes.length}:`).update(bytes);
+  }
+  return h.digest("hex");
 }
