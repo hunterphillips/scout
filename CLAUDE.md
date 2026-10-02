@@ -7,8 +7,9 @@ site, and opens a page only when he clicks.
 **Status (2026-09-30): Phases 1, 2, and 3 are built, reviewed, and passed their live
 checks; Phase 4 (wiring the native companion end to end) is next and not started.**
 Phase 1 is the plumbing: the extension senses the focused tab, the native host relays
-it to the core over a Unix socket, the core tracks visits and forwards GitHub issue
-text to a no-op activity forwarder, and the Mac app shows the core's status. Phase 2
+it to the core over a Unix socket, the core tracks visits and (since pivot P3.1) keeps
+captured GitHub issue text in a bounded in-memory activity store, and the Mac app shows
+the core's status. Phase 2
 is catalog discovery: a site origin becomes up to 500 candidate links (llms.txt,
 sitemaps, robots), cached on disk, with a dev CLI. Phase 3 is the personal-context
 service: a standalone local MCP server that runs a fresh headless `claude` per rank
@@ -26,11 +27,11 @@ branch ceremony for the PoC; merge and move on).
 `../thoughts/shared/plans/2026-10-01-scout-website-agent-design.md`). Its "Implementation
 progress" section is the new phase log. **Pivot Phase 1 (prove the agent connection)
 passed its gate the same day**; Phase 2 (website capabilities) is in progress: P2.2, P2.3,
-all seven tasks (P2.1–P2.7) are built, reviewed, merged, and live-checked against real
+Phase 2's seven tasks are built, reviewed, merged, and live-checked against real
 sites from throwaway locations (evidence in
 `../thoughts/shared/research/2026-10-01-scout-phase2-live-check/`); the gate review is
-pending Hunter (the Swift window's live checklist and the inference-backed skill check
-are the open items). The old
+passed on 2026-10-01 (the Swift window's live checklist moved to P4.1). Phase 3
+(background recommendations) is in progress: P3.1 and P3.3 merged, P3.2 building. The old
 build above is still intact and still not wired into the app; the legacy
 `personal-context-mcp` package stays untouched until pivot Phase 4.
 
@@ -160,8 +161,13 @@ the plan's phase log):
   acknowledged idempotent mutation commands, 16 KiB preview chunks, and the wiring; one
   `coreInstanceId` per start shared with the agent API), `resumeCache.ts`
   (keyed map, 30 s TTL; constructed but not read until Phase 4 wires visit → resume
-  cache → catalog → rank), `activityForwarder.ts` (Phase 1: counts only),
-  `diagnostics.ts` (JSONL, scalar fields, forbidden-name filter), `config.ts`,
+  cache → catalog → rank), `results.ts` (pivot P3.3: the job-aware result registry the
+  window's Results section and `open_link` resolve against; hrefs never leave it in a
+  frame; `catalog/sameOrigin.ts` holds the shared https/origin rule), `activity/store.ts`
+  and `activity/snapshots.ts` (pivot P3.1: ≤10 issue entries, 15 min TTL, cleared when
+  GitHub capture or its grant is withdrawn; deep-frozen per-job snapshots that pin
+  approved versions and issue deadline-bound job tokens), `agentApi/cursors.ts` (the
+  cursor table; job tokens capped at 256), `diagnostics.ts` (JSONL, scalar fields, forbidden-name filter), `config.ts`,
   `version.ts` (`SCOUT_VERSION`, must track package.json).
   - `fetch/`: the outbound HTTPS boundary. `guardedFetch.ts` and `ipAddressPolicy.ts`
     are adapted from Rook (attribution headers list the changes): HTTPS only, same-host
