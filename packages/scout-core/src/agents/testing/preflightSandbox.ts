@@ -1,6 +1,6 @@
 // Test-only: a temp HOME with a user config dir, a temp SCOUT_HOME, a stand-in `claude`
 // that is never executed (spawnSync is faked), and a gateway-shaped parent env. Adapted
-// from packages/personal-context-mcp/src/test-support/preflightSandbox.ts.
+// from packages/personal-context-mcp/src/test-support/preflightSandbox.ts (removed in P4.4).
 
 import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";

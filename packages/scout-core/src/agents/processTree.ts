@@ -1,7 +1,7 @@
 // Provenance: copied from packages/personal-context-mcp/src/processTree.ts (itself lifted
-// from scripts/spikes/process-tree.mjs). Temporary duplicate until Phase 4 removes the
-// legacy service. OwnedTree's tracking and signalling rules are unchanged, and
-// processTree.test.ts checks them against the legacy copy. Differences, all additive:
+// from scripts/spikes/process-tree.mjs); both were removed in P4.4 (git history has them).
+// OwnedTree's tracking and signalling rules are unchanged, and processTree.test.ts pins
+// them against the legacy copy's results. Differences, all additive:
 //   - psSnapshotAsync(): the same ps query through execFile, so the job runtime never
 //     blocks the coordinator's event loop on ps. psSnapshot() is kept for OwnedTree's
 //     default and the tests; both parse through parsePsOutput().

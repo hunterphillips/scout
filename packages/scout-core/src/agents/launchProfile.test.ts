@@ -1,7 +1,5 @@
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { chmodSync, existsSync, mkdirSync, readdirSync, statSync, symlinkSync } from "node:fs";
 import { join } from "node:path";
-import { createLaunchProfile as legacyCreateLaunchProfile, FORWARD_KEYS as LEGACY_FORWARD_KEYS } from "personal-context-mcp";
 import { afterEach, describe, expect, it } from "vitest";
 import { createLaunchProfile, filterChildEnv, FORWARD_KEYS, LaunchProfileError, PROFILE_ID, runDirectPreflight } from "./launchProfile.js";
 import { cleanupSandboxes, fakeSpawnSync, gatewayParentEnv, makeSandbox, sentinelsIn, SUBSCRIPTION_STATUS, type Sandbox } from "./testing/preflightSandbox.js";
@@ -26,20 +24,17 @@ function codeOf(fn: () => unknown): string | undefined {
   return undefined;
 }
 
-describe("launch profile: parity with the legacy service", () => {
-  it("forwards exactly the same env as the legacy profile for the same parent env", () => {
+// Pinned from the legacy personal-context service's launch profile before P4.4 removed it
+// (git history has the package): the same parent env must yield the same child env.
+describe("launch profile: parity with the removed legacy service (pinned)", () => {
+  it("forwards exactly the env the legacy profile forwarded for the same parent env", () => {
     const sb = makeSandbox();
-    const scratch = realpathSync(mkdtempSync(join(tmpdir(), "scout-legacy-scratch-")));
-    try {
-      for (const parentEnv of [gatewayParentEnv(sb.home), gatewayParentEnv(sb.home, { CLAUDE_CONFIG_DIR: join(sb.home, "cfg") })]) {
-        const legacy = legacyCreateLaunchProfile({ parentEnv, scratchRoot: scratch, workspaceRoots: [sb.root], claudePath: sb.claudePath });
-        legacy.cleanup();
-        expect(filterChildEnv(parentEnv)).toEqual(legacy.env);
-      }
-      expect(FORWARD_KEYS).toEqual(LEGACY_FORWARD_KEYS);
-    } finally {
-      rmSync(scratch, { recursive: true, force: true });
-    }
+    const parentEnv = gatewayParentEnv(sb.home);
+    const legacy = { HOME: sb.home, USER: "someone", LOGNAME: "someone", PATH: parentEnv.PATH, SHELL: "/bin/zsh", LANG: "en_US.UTF-8", TMPDIR: parentEnv.TMPDIR };
+    expect(filterChildEnv(parentEnv)).toEqual(legacy);
+    const withConfig = gatewayParentEnv(sb.home, { CLAUDE_CONFIG_DIR: join(sb.home, "cfg") });
+    expect(filterChildEnv(withConfig)).toEqual({ ...legacy, CLAUDE_CONFIG_DIR: join(sb.home, "cfg") });
+    expect(FORWARD_KEYS).toEqual(["HOME", "USER", "LOGNAME", "PATH", "SHELL", "LANG", "LC_ALL", "LC_CTYPE", "TMPDIR"]);
   });
 });
 

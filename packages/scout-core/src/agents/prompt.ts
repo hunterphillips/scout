@@ -1,7 +1,8 @@
 // What a recommendation job is told.
 //
-// Provenance: adapted from packages/personal-context-mcp/src/prompt.ts. Unchanged: the
-// nonce-delimited untrusted block (parity-tested for marker-free text). Differences:
+// Provenance: adapted from packages/personal-context-mcp/src/prompt.ts (removed in P4.4; git
+// history has it). Unchanged: the nonce-delimited untrusted block (pinned against the
+// legacy output for marker-free text). Differences:
 //   - sanitizeField also replaces every run of three or more `<` or `>` with a space, so
 //     untrusted text can never hold anything shaped like a block marker (`<<<END UNTRUSTED SITE
 //     DATA nonce>>>`), even with a guessed nonce. Otherwise it matches the legacy copy
