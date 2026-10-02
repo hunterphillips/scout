@@ -159,18 +159,32 @@ the plan's phase log):
   compile-time check forces every command onto one side), `CommandFrameSchema`,
   `PanelFrameSchema`, `StdioOnlyCommandFrameSchema` (recognised to refuse), fixtures in
   `fixtures/bridge/`.
-- `packages/browser-extension` (`@scout/browser-extension`): the MV3 "Scout Sensor".
+- `packages/browser-extension` (`@scout/browser-extension`): the MV3 extension — sensor
+  plus, since pivot P4.1, Scout's user interface for browsing: the **side panel**.
   `background-core.ts` is wiring; the logic is in `port.ts` (native port + bounded
-  reconnect, state persisted in `chrome.storage.session`), `focus-observer.ts`,
-  `page-text-gate.ts` (approval, cancel epoch, paused-from-storage, capture policy),
-  `reconnect.ts`, `origin.ts` (popup site validation; zod-free), `content/capture.ts`
-  (route gate, settle, navCounter), `selectors.ts` and `route.ts` (verbatim from the
-  live-verified Phase 0 spike). Since pivot P2.1: `https://*/*` is optional-only plus
-  `activeTab`; the popup grants or removes one exact origin and holds the GitHub-capture
-  toggle; nothing is posted until the core's `capture_policy`, then a revisioned
-  permissions snapshot and a focus; url/title only for granted origins; a Chrome all-sites
-  grant counts as not granted. `build.mjs` writes `dist/` and preserves the manifest `key`
-  that setup adds. The background bundle includes zod (run jitless for MV3 CSP).
+  reconnect, state persisted in `chrome.storage.session`; `onPanel`/`sendCommandResult`/
+  `onLinkChange`), `focus-observer.ts`, `page-text-gate.ts` (approval, cancel epoch,
+  capture policy — pause follows the core's `capture_policy.paused`; the extension keeps
+  no pause flag of its own), `reconnect.ts`, `origin.ts` (site validation; zod-free),
+  `content/capture.ts` (route gate, settle, navCounter), `selectors.ts` and `route.ts`
+  (verbatim from the live-verified Phase 0 spike). Side panel: `panel-bridge.ts` (worker
+  side — port only from `panel.html`, in-memory cache of the last grant/capabilities/
+  audit/state/results for repaint, badge dot, `action.onClicked` → `sidePanel.open`
+  synchronously so the click grants `activeTab`; `openPanelOnActionClick` would not),
+  `panel-app.ts` + `panel.ts` (page adapter: own-window tab tracking, Allow/Remove via
+  `permissions.request/remove` as the click's first statement, "Allow another site",
+  `tabs.create` next to the current tab after the ack's href is re-validated), and the
+  pure `panel/*` modules porting ScoutKit's `CommandTracker` (`sp-` ids, 10 s expiry),
+  `PreviewAssembler` (WebCrypto SHA-256 before Approve), `LinkOpener`, `ResultsModel`,
+  `CapabilityModel`, `PanelModel`, `PauseState`; `view.ts` renders text only. Sections:
+  Results, Sites, This site, Settings, Activity, Problems. No popup. Since pivot P2.1:
+  `https://*/*` is optional-only plus `activeTab`; nothing is posted until the core's
+  `capture_policy`, then a revisioned permissions snapshot and a focus; url/title only for
+  granted origins; a Chrome all-sites grant counts as not granted. `build.mjs` writes
+  `dist/` (entries `background`, `panel`, `content/github-issue`) and preserves the
+  manifest `key` that setup adds. The background bundle includes zod (run jitless for MV3
+  CSP; ~820 KB — P4.4 candidate); `panel.js` has none. `test/side-panel.test.mjs` drives
+  the real panel in Chrome for Testing, opt-in: `SCOUT_E2E_CHROME=1 SCOUT_E2E_BROWSERS=<dir>`.
 - `packages/native-host` (`@scout/native-host`): Chrome native-messaging host. `relay.ts`
   is the pure relay (origin check, protocol-3 hello, validated re-encoding both ways;
   since P4.0 it forwards `command` frames core-ward only after `ready` — never buffered,
