@@ -176,7 +176,7 @@ describe("main --stdio", () => {
     writeFileSync(join(home, "config.json"), JSON.stringify({ agentBrowserContext: true }));
     const c = await startReady();
     await until(() => ["grant", "capabilities", "audit"].every((t) => c.lines.some((l) => (l as { type?: string }).type === t)));
-    expect(c.lines.find((l) => (l as { type?: string }).type === "grant")).toEqual({ type: "grant", agentBrowserContext: true });
+    expect(c.lines.find((l) => (l as { type?: string }).type === "grant")).toEqual({ type: "grant", agentBrowserContext: true, destinations: [] });
     expect(c.lines.find((l) => (l as { type?: string }).type === "capabilities")).toMatchObject({ offers: [], library: [], truncated: false });
     c.child.stdin.end();
     expect((await c.exited).code).toBe(0);
