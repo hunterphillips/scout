@@ -388,6 +388,35 @@ describe("job scheduler: cancellation", () => {
     expect(h.frames.at(-1)).toMatchObject({ type: "results", status: "cancelled", reason: "superseded" });
   });
 
+  it("a profile change with new tools: the next job runs on the agent the getter returns now, and a cached answer from the old profile never hits", async () => {
+    const cache = createJobResumeCache<JobAnswer>({ clock: { now: () => 0 } });
+    const next = fakeAgent();
+    let current: ReturnType<typeof fakeAgent>["agent"] | null = null;
+    const h = harness({ resumeCache: cache, agent: () => current });
+    current = h.agent.agent;
+    h.settle();
+    h.agent.calls[0]!.answer(ok(["c0"]));
+    await flush();
+    expect(cache.size).toBe(1);
+    // The profile is edited: a new fingerprint and tools revision, and a new adapter for the next job.
+    current = next.agent;
+    h.scheduler.onProfileChanged({ fingerprint: "fp-2", toolsRevision: 2, hasUserTools: false });
+    h.world.visit = { ...h.world.visit!, epoch: 4 } as ActiveVisit;
+    h.scheduler.onVisitChanged();
+    h.settle();
+    expect(h.agent.calls).toHaveLength(1);
+    expect(next.calls).toHaveLength(1);
+    expect(next.calls[0]!.request.profileFingerprint).toBe("fp-2");
+    // An unusable profile: no agent, the job is unavailable without a launch.
+    current = null;
+    h.scheduler.onProfileChanged({ fingerprint: "none", toolsRevision: 0, hasUserTools: false });
+    h.world.visit = { ...h.world.visit!, epoch: 5 } as ActiveVisit;
+    h.scheduler.onVisitChanged();
+    h.settle();
+    await flush();
+    expect(h.frames.at(-1)).toMatchObject({ type: "results", status: "unavailable", reason: "agent_unavailable" });
+  });
+
   it("a cancel in the adapter's drain window (it still answers ok) is never published as ok", async () => {
     const h = harness();
     h.agent.setDrainOk(true);
