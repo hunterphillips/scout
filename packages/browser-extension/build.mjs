@@ -1,5 +1,5 @@
 // Builds the unpacked extension into dist/:
-//   manifest.json  background.js  popup.html  popup.js  content/github-issue.js
+//   manifest.json  background.js  panel.html  panel.js  content/github-issue.js
 // The manifest has no `key`; scripts/setup.mjs adds it to dist/manifest.json
 // so the extension id is stable. A rebuild keeps a key already in dist/.
 // SCOUT_EXT_DIST overrides the output dir (tests).
@@ -15,10 +15,10 @@ const common = { bundle: true, target: "chrome116", platform: "browser", legalCo
 const key = await readFile(join(dist, "manifest.json"), "utf8").then((t) => JSON.parse(t).key).catch(() => undefined);
 await rm(dist, { recursive: true, force: true });
 await mkdir(join(dist, "content"), { recursive: true });
-await build({ ...common, format: "esm", entryPoints: { background: "src/background.ts", popup: "src/popup.ts" }, outdir: dist, absWorkingDir: root });
+await build({ ...common, format: "esm", entryPoints: { background: "src/background.ts", panel: "src/panel.ts" }, outdir: dist, absWorkingDir: root });
 // Registered content scripts are classic scripts, not modules.
 await build({ ...common, format: "iife", entryPoints: { "content/github-issue": "src/content/github-issue.ts" }, outdir: dist, absWorkingDir: root });
-await copyFile(join(root, "src/popup.html"), join(dist, "popup.html"));
+await copyFile(join(root, "src/panel.html"), join(dist, "panel.html"));
 const manifest = JSON.parse(await readFile(join(root, "manifest.json"), "utf8"));
 if (typeof key === "string") manifest.key = key;
 await writeFile(join(dist, "manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`);

@@ -10,7 +10,6 @@ import type { Clock } from "./reconnect.js";
 export interface SharedState {
   /** Bumped by pause, revoke, tab change, focus loss and port loss; async work re-checks it after every await. */
   cancelEpoch: number;
-  paused: boolean;
   browserFocused: boolean;
   port: chrome.runtime.Port | null;
   /** Last observation seq used. Seeded from the clock so a worker restart never goes backwards. */
@@ -42,7 +41,6 @@ export function createSharedState(clock: Clock): SharedState {
   const seed = Math.max(0, Math.floor(clock.now()));
   return {
     cancelEpoch: 0,
-    paused: false,
     browserFocused: true,
     port: null,
     seq: seed,
@@ -60,6 +58,13 @@ export const githubGranted = (state: SharedState): boolean => state.granted.incl
 
 /** GitHub capture is effectively on: the user's toggle and the exact GitHub grant. */
 export const githubCaptureOn = (state: SharedState): boolean => state.githubCapture && githubGranted(state);
+
+/**
+ * Scout is paused: the core's latest capture_policy says so. The core is the one source of
+ * truth for pause (the side panel, the Mac menu and the window all pause the core); while it is
+ * paused the extension posts nothing, and on resume it sends what it held back.
+ */
+export const corePaused = (state: SharedState): boolean => state.policy?.paused === true;
 
 /** The core's current policy lets the extension capture page text. */
 export const policyAllowsCapture = (state: SharedState): boolean =>
