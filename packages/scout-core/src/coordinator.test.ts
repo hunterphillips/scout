@@ -17,6 +17,7 @@ import type { DiagnosticFields, Diagnostics } from "./diagnostics.js";
 import { DWELL_MS } from "./dwell.js";
 import type { GuardedFetchResult } from "./fetch/guardedFetch.js";
 import { createOriginFetchSession, type OriginFetchSession } from "./fetch/originSession.js";
+import { createJobScheduler, type JobScheduler } from "./jobScheduler.js";
 import { createResultRegistry } from "./results.js";
 import type { SocketClient } from "./socketServer.js";
 
@@ -1363,6 +1364,104 @@ describe("coordinator: recommendation job hooks", () => {
     expect(s.coordinator.activity.revision).toBeGreaterThan(before);
     s.grant(s.c, DEFAULT_GRANTS, false);
     expect(s.calls.filter((c) => c[0] === "onActivityAccepted")).toHaveLength(1);
+  });
+
+  it("Chrome leaving the foreground while a job runs reaches onVisitChanged, and the real scheduler cancels the job visit_changed", async () => {
+    const caps = fakeCapabilities();
+    const candidate = { id: "c0", sourceUrl: "https://docs.stripe.com/a", title: "A", labelQuality: "published", provenance: "llms.txt" };
+    caps.capabilities.resolveCatalog = async () => {
+      const r = catalogOf("fresh");
+      return { ...r, result: { ...r.result, catalog: { ...(r.result as { catalog: object }).catalog, candidates: [candidate] } } } as CatalogResolution;
+    };
+    const forwarded: string[] = [];
+    const signals: AbortSignal[] = [];
+    // An agent that runs until cancelled.
+    const agent = {
+      run: (request: { requestId: string; coreInstanceId: string; visitEpoch: number }, options: { signal?: AbortSignal }) =>
+        new Promise((resolve) => {
+          signals.push(options.signal!);
+          options.signal!.addEventListener("abort", () =>
+            resolve({
+              result: { requestId: request.requestId, coreInstanceId: request.coreInstanceId, visitEpoch: request.visitEpoch, status: "cancelled", reason: options.signal!.reason },
+              details: { adapter: "fake", termination: "cancelled", toolUses: [], optionalTools: [], droppedPicks: 0, cutPicks: 0, toolErrors: {}, optionalToolFailed: false, timings: { totalMs: 0 }, usage: {} },
+            }),
+          );
+        }),
+    };
+    const held = new Map<string, object>();
+    const releases: Array<string | undefined> = [];
+    const snapshots = {
+      take: (o: { jobId: string }) => {
+        const snapshot = { ...o, id: `snap-${o.jobId}` };
+        held.set(snapshot.id, snapshot);
+        return { snapshot, token: "job-token" };
+      },
+      get: (id: string) => held.get(id),
+      release: (id: string, reason?: string) => {
+        releases.push(reason);
+        held.delete(id);
+      },
+    };
+    let s!: ReturnType<typeof setup>;
+    let scheduler!: JobScheduler;
+    const jobs: NonNullable<CoordinatorOptions["jobs"]> = {
+      onSettled: (visit, catalog, settledAt) => scheduler.onSettled(visit, catalog, settledAt),
+      onVisitChanged: () => {
+        forwarded.push("onVisitChanged");
+        scheduler.onVisitChanged();
+      },
+      onPause: () => scheduler.onPause(),
+      onSensorLost: () => scheduler.onSensorLost(),
+      onPermissionsChanged: () => scheduler.onPermissionsChanged(),
+      onActivityAccepted: (revision) => scheduler.onActivityAccepted(revision),
+      stop: () => scheduler.stop(),
+    };
+    s = setup({ capabilities: caps.capabilities, jobs, config: { destinations: ["docs.stripe.com"] } });
+    const diagnostics: Diagnostics = { failures: 0, event: (name, fields = {}) => void s.events.push({ name, fields }) };
+    scheduler = createJobScheduler({
+      coreInstanceId: "core-test",
+      clock: s.clock,
+      diagnostics,
+      destinations: ["docs.stripe.com"],
+      results: { beginJob: () => ({ ok: true }), publish: () => ({ ok: true }) } as never,
+      snapshots: () => snapshots as never,
+      view: {
+        visit: () => (s.coordinator.stopped || s.coordinator.agentView().paused ? null : s.coordinator.tracker.current()),
+        permissionsRevision: () => s.coordinator.permissions.revision,
+        isPermitted: (origin) => s.coordinator.permissions.isPermitted(origin),
+        captureAllowed: () => s.coordinator.captureAllowed(),
+      },
+      window: { working: (epoch, jobId) => s.coordinator.showWorking(epoch, jobId), idle: (epoch) => s.coordinator.showIdle(epoch) },
+      activity: () => [],
+      browserContextGranted: () => false,
+      grantRevision: () => 0,
+      approvalRevision: () => 0,
+      agent: agent as never,
+      profile: { fingerprint: "fp", toolsRevision: 0, hasUserTools: false },
+      socketPath: "/tmp/agent.sock",
+      verify: async (candidates) => ({ verified: candidates.map((c) => ({ ...c, humanHref: c.sourceUrl })), dropped: [], ms: 0 }),
+      newJobId: () => "job-1",
+    });
+    const c = s.connect();
+    s.chrome();
+    c.observe(s.focus());
+    s.advance(DWELL_MS);
+    await flush();
+    expect(scheduler.running).toMatchObject({ jobId: "job-1", visitEpoch: s.coordinator.tracker.epoch });
+    expect(signals).toHaveLength(1);
+    expect(s.panel.at(-1)).toMatchObject({ status: "working", jobId: "job-1" });
+    forwarded.length = 0; // the visit's own start
+
+    s.coordinator.handleNativeCommand({ type: "frontmost", bundleId: "com.apple.Terminal", at: s.clock.t });
+    expect(forwarded).toEqual(["onVisitChanged"]);
+    expect(signals[0]!.aborted).toBe(true);
+    expect(signals[0]!.reason).toBe("visit_changed");
+    expect(s.events.filter((e) => e.name === "job_cancelled").map((e) => e.fields)).toEqual([{ reason: "visit_changed", epoch: expect.any(Number) }]);
+    // The cancel released the snapshot at once (its token is revoked).
+    expect(releases).toEqual(["cancelled"]);
+    expect(held.size).toBe(0);
+    await scheduler.settled();
+    expect(scheduler.running).toBeNull();
   });
 
   it("showWorking and showIdle emit only for the current, shown visit; working carries the job and the hostname only", () => {
