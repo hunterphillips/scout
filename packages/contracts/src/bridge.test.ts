@@ -13,9 +13,7 @@ import {
   STDIO_ONLY_COMMANDS,
   ToChromeFrameSchema,
 } from "./index.js";
-import { MAX_FRAME_TO_CHROME } from "./frame.js";
-
-const MAX_PANEL_FRAME_BYTES = 1024 * 1024;
+import { MAX_FRAME_TO_CHROME, MAX_PANEL_FRAME_BYTES } from "./frame.js";
 
 // Bridge protocol 3 fixtures (packages/contracts/fixtures/bridge/), the frames the browser side
 // panel builds against: `to-core.*` must parse as a BridgeFrame, `to-chrome.*` as a

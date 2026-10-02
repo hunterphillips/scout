@@ -10,6 +10,10 @@ import {
   type FrameResult,
   MAX_FRAME_FROM_CHROME,
   MAX_FRAME_TO_CHROME,
+  MAX_PANEL_FRAME_BYTES,
+  encodeToChromeFrame,
+  toChromeDecoder,
+  toChromeFrameLimit,
 } from "./frame.js";
 
 const frame = (obj: unknown) => {
@@ -116,5 +120,43 @@ describe("frame codec", () => {
     expect(exact.length).toBe(MAX_FRAME_TO_CHROME + 4);
     expect(exact.subarray(0, 4)).toEqual(frameHeader(MAX_FRAME_TO_CHROME));
     expect(() => frameBytes(Buffer.alloc(MAX_FRAME_TO_CHROME + 1, 0x20))).toThrow(FrameError);
+  });
+
+  describe("per-type core -> Chrome caps", () => {
+    /** A frame of `type` whose JSON is exactly `n` bytes. */
+    const sized = (type: string, n: number): { type: string; pad: string } => {
+      const base = JSON.stringify({ type, pad: "" }).length;
+      return { type, pad: "x".repeat(n - base) };
+    };
+
+    it("gives panel frames 1 MiB and everything else 16 KiB", () => {
+      expect(MAX_PANEL_FRAME_BYTES).toBe(1024 * 1024);
+      expect(toChromeFrameLimit({ type: "panel" })).toBe(MAX_PANEL_FRAME_BYTES);
+      for (const type of ["ack", "ready", "capture_policy", "core_unavailable", "upgrade_required", undefined]) {
+        expect(toChromeFrameLimit({ type })).toBe(MAX_FRAME_TO_CHROME);
+      }
+    });
+
+    it("encodes a panel frame up to 1 MiB and refuses a byte more; other frames stop at 16 KiB", () => {
+      expect(encodeToChromeFrame(sized("panel", MAX_PANEL_FRAME_BYTES)).length).toBe(4 + MAX_PANEL_FRAME_BYTES);
+      expect(() => encodeToChromeFrame(sized("panel", MAX_PANEL_FRAME_BYTES + 1))).toThrow(FrameError);
+      expect(encodeToChromeFrame(sized("ack", MAX_FRAME_TO_CHROME)).length).toBe(4 + MAX_FRAME_TO_CHROME);
+      expect(() => encodeToChromeFrame(sized("ack", MAX_FRAME_TO_CHROME + 1))).toThrow(FrameError);
+    });
+
+    it("decodes a 1 MiB panel frame, drops a 16 KiB + 1 non-panel frame, and skips an over-1 MiB prefix unread", () => {
+      const d = toChromeDecoder();
+      const big = sized("panel", MAX_PANEL_FRAME_BYTES);
+      const small = sized("capture_policy", MAX_FRAME_TO_CHROME);
+      const fat = sized("capture_policy", MAX_FRAME_TO_CHROME + 1);
+      const out = d.push(Buffer.concat([frame(big), frame(fat), frame(small)]));
+      expect(out.map((r) => (r.ok ? (r.value["type"] as string) : r.code))).toEqual(["panel", "oversized", "capture_policy"]);
+      expect(d.dropped.oversized).toBe(1);
+      // A prefix over 1 MiB is refused before any body is buffered, then skipped.
+      const huge = Buffer.concat([frameHeader(MAX_PANEL_FRAME_BYTES + 1), Buffer.alloc(1000)]);
+      expect(values(d.push(huge))).toEqual(["oversized"]);
+      expect(d.bufferedBytes).toBe(0);
+      expect(values(d.push(Buffer.concat([Buffer.alloc(MAX_PANEL_FRAME_BYTES + 1 - 1000), frame({ type: "ready" })])))).toEqual([{ type: "ready" }]);
+    });
   });
 });
