@@ -149,7 +149,9 @@ const BROWSER_METHODS: ReadonlySet<AgentMethod> = new Set(["current_site", "rece
 
 export function createAgentHandlers(options: AgentHandlerOptions): AgentHandlers {
   const { coreInstanceId, store, clock, audit } = options;
-  const { issueCursor, takeCursor, dropCursors, ...cursors } = createCursorTable({ coreInstanceId, clock, releasePins: (pinId) => store.releasePins(pinId) });
+  const cursors = createCursorTable({ coreInstanceId, clock, releasePins: (pinId) => store.releasePins(pinId) });
+  const { issueCursor, takeCursor } = cursors;
+
   const envelope = (requestId: string) => ({ protocol: AGENT_PROTOCOL_VERSION, requestId, coreInstanceId });
   const errorResponse = (requestId: string, code: AgentStatusCode): AgentResponse => ({
     ...envelope(requestId),
@@ -455,7 +457,7 @@ export function createAgentHandlers(options: AgentHandlerOptions): AgentHandlers
       return result;
     },
     endConnection(conn) {
-      dropCursors((c) => c.connectionId === conn.id);
+      cursors.dropCursors((c) => c.connectionId === conn.id);
     },
     dropResource: (resourceId) => cursors.revokeResource(resourceId),
     sweepExpired: () => cursors.sweepExpired(),
