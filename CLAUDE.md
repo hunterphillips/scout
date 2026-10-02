@@ -29,9 +29,13 @@ passed its gate the same day**; Phase 2 (website capabilities) is in progress: P
 Phase 2's seven tasks are built, reviewed, merged, and live-checked against real
 sites from throwaway locations (evidence in
 `../thoughts/shared/research/2026-10-01-scout-phase2-live-check/`); the gate
-passed on 2026-10-01 (the Swift window's live checklist moved to P4.1). Phase 3
-(background recommendations) is built and merged (P3.1–P3.4); its gate awaits the
-automated verification and the agent-run live checks.
+passed on 2026-10-01. Phase 3 (background recommendations) passed on 2026-10-02 (three
+authorized real runs; `../thoughts/shared/research/2026-10-01-scout-phase3-live-check/`).
+Phase 4 was re-planned the same day around Hunter's direction: the UI for this use case
+moves into the Chrome extension's **side panel**; the Mac app stays as the core's home
+(menu-bar accessory, window hidden by default — P4.2 merged) and the future UI for
+non-browser uses. P4.0 (panel frames over the browser relay, bridge protocol 3) and P4.1
+(the side panel) follow, then install/cleanup/docs.
 Recommendations run only for hosts listed in `config.json` `destinations` (empty by
 default); a destination spends Hunter's quota on every settled visit there. The old
 build above is still intact and still not wired into the app; the legacy
@@ -276,7 +280,14 @@ the plan's phase log):
   from `~/.scout/config.json` (no PATH fallback; `SCOUT_HOME` stripped from the child
   env), restart cap 3 per 60 s, non-blocking stdin writes (`send` → written / retryLater /
   oversize; a command line incl. newline must be under 512 bytes, macOS `PIPE_BUF`);
-  `FrontmostMonitor`. Pivot P3.4: quitting goes through `TerminationPolicy` (ScoutKit) —
+  `FrontmostMonitor`. Pivot P4.2: the app is a menu-bar accessory (`NSStatusItem`,
+  `binoculars`): status line, Pause/Resume, Show/Hide window, Quit Scout. The window is
+  created lazily on Show window or `SCOUT_WINDOW=1` (the one UI-only env flag) and closing
+  it hides it; frames keep feeding the models while hidden. ScoutKit `PauseState` (pure;
+  `pause`/`resume` have no `commandId` and are never acked, so it tracks one pending
+  request itself and settles on the first `state` frame showing the target),
+  `StatusMenuModel`, `WindowLaunch`; `AppSourceGuardTests` forbid any activation call in
+  `ScoutApp`. Pivot P3.4: quitting goes through `TerminationPolicy` (ScoutKit) —
   `applicationShouldTerminate` answers `.terminateLater`, `beginShutdown` sends `shutdown`,
   waits 7 s, then terminate, then SIGKILL after 1 s, and the app quits when the core is
   gone; a duplicate Quit never cancels. Pivot P2.5: ScoutKit (no AppKit) holds the whole decision layer —
@@ -321,6 +332,7 @@ Run from `scout/`:
 - `npm run setup [--dry-run] [--scout-root <dir>]`, `npm run doctor`,
   `npm run uninstall [--yes] [--include-key] [--dry-run]`
 - `cd native/Scout && swift build && swift test`; `swift run ScoutApp` to start the app
+  (menu-bar only; `SCOUT_WINDOW=1 swift run ScoutApp` shows the window at launch)
 - Catalog dev CLI (after a build; only these two touch the network, only when invoked):
   `node packages/scout-core/dist/cli.js catalog <origin> [--refresh] [--json]` and
   `… verify <url>...` (≤10 URLs, one origin). `… rank` is still a stub (exit 2); the
