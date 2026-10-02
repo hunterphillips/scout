@@ -31,7 +31,8 @@ Phase 2's seven tasks are built, reviewed, merged, and live-checked against real
 sites from throwaway locations (evidence in
 `../thoughts/shared/research/2026-10-01-scout-phase2-live-check/`); the gate
 passed on 2026-10-01 (the Swift window's live checklist moved to P4.1). Phase 3
-(background recommendations) is in progress: P3.1, P3.2, P3.3 merged, P3.4 building.
+(background recommendations) is built and merged (P3.1–P3.4); its gate awaits the
+automated verification and the agent-run live checks.
 Recommendations run only for hosts listed in `config.json` `destinations` (empty by
 default); a destination spends Hunter's quota on every settled visit there. The old
 build above is still intact and still not wired into the app; the legacy
@@ -92,8 +93,16 @@ the plan's phase log):
   read ends, `sweepExpired()` before each GC), `installedRecord.ts` (reads `installed.json`
   for `skillsRoot`; the exporter is wired only when one is recorded — P2.6 writes it).
   `main.ts` opens the capability store once for the core's lifetime (start: store → GC →
-  `core.sock` → startup export sync → token → `agent.sock`; shutdown the reverse, deadline
-  2 s). Job tokens are an in-memory table nothing populates until Phase 3.
+  `core.sock` → startup export sync → token → `agent.sock`). Pivot P3.4: one shutdown
+  sequence for every trigger (stdin EOF, abrupt close, `shutdown`, SIGTERM/SIGINT/SIGHUP) —
+  synchronous stop-accepting + preflight kill, then `jobs` (release snapshots, revoke
+  tokens, abort every adapter: SIGTERM → 2 s → SIGKILL → tracked descendants), `parsers`,
+  `sockets`, `store`, `descendants`; deadline 5 s, after which locks, token and sockets
+  are released synchronously (inode/instance checks), a last ps sweep kills tracked
+  survivors (`shutdown_orphan`), and the core exits 0. Each job dir holds a 0600
+  `tree.json` (pids, pgid, ps start times); the start-time sweep kills leftovers that still
+  match by pid + start time (`jobs_swept {count, killed}`) and removes the dirs. Job tokens
+  are revoked with their snapshots.
 - Pivot P2.7 (optional retrieval-tool setup CLI): `agents/{backendDefinition,
   environmentBindings,profileCli}.ts` behind `cli.js agent inspect|enable|disable|refresh|
   status` (`--allow-start` gates every backend launch, exit 3 without it; exit 2 while
@@ -101,8 +110,11 @@ the plan's phase log):
   secrets are `{file, pointer}` bindings resolved in memory from 0600 files, literals in a
   0600 definition become pointers, and a readable definition may hold only allowlisted
   literals. A backend that prompts (sampling/elicitation/roots) during inspection is marked
-  `unavailable: auth_prompt` in the profile and skipped by `planJobTools`. The core does not
-  yet hold the profile lock or react to `tools.revision` (Phase 3).
+  `unavailable: auth_prompt` in the profile and skipped by `planJobTools`. Since pivot P3.4 the
+  core holds `agent-profile.lock` for its lifetime (the CLI exits 2 meanwhile; constant in
+  `agents/profile.ts`) and `wiring/profileWatcher.ts` watches the profile (250 ms debounce,
+  5 s poll fallback): a change cancels the running job `superseded`, swaps the adapter and
+  clears the resume cache.
 - `scripts/agent-check/` + `npm run test:agent-contract` and
   `npm run verify:agent -- --case <hotload|baseline|selected-tool|cancel> --home <dir>`:
   the Phase 1 compatibility checks. Read `scripts/agent-check/README.md` before running
@@ -265,7 +277,10 @@ the plan's phase log):
   from `~/.scout/config.json` (no PATH fallback; `SCOUT_HOME` stripped from the child
   env), restart cap 3 per 60 s, non-blocking stdin writes (`send` → written / retryLater /
   oversize; a command line incl. newline must be under 512 bytes, macOS `PIPE_BUF`);
-  `FrontmostMonitor`. Pivot P2.5: ScoutKit (no AppKit) holds the whole decision layer —
+  `FrontmostMonitor`. Pivot P3.4: quitting goes through `TerminationPolicy` (ScoutKit) —
+  `applicationShouldTerminate` answers `.terminateLater`, `beginShutdown` sends `shutdown`,
+  waits 7 s, then terminate, then SIGKILL after 1 s, and the app quits when the core is
+  gone; a duplicate Quit never cancels. Pivot P2.5: ScoutKit (no AppKit) holds the whole decision layer —
   `Protocol.swift` (strict frame decoding, the seven window commands), `JSONLParser`
   (single pass, 1 MiB lines), `CommandTracker` (command ids; same-id resend for refused
   writes; on a core restart only approve/decline/revoke are re-sent, toggles settle
