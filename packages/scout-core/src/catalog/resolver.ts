@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { performance } from "node:perf_hooks";
 import { type Candidate, type SiteCatalog, SiteCatalogSchema } from "@scout/contracts";
 import type { Clock } from "../clock.js";
 import type { Diagnostics } from "../diagnostics.js";
@@ -19,6 +20,21 @@ export interface CatalogParsers {
   sitemap(xml: string, origin: string): Promise<ParsedSitemap>;
   llmsTxt(text: string, origin: string, baseUrl: string): Promise<ParsedLlmsTxt>;
 }
+
+/**
+ * The dedupe/robots pass runs on the core's main thread (P4.4 decision): it gives the event
+ * loop back (setImmediate) whenever it has run this long, checked every `SLICE_CHECK_EVERY`
+ * entries. Unsliced, the worst bounded shape (50,000 sitemap entries that are all spellings
+ * of one URL: a URL parse and a normalization each) held the loop ~60-70 ms, and a robots.txt
+ * at the rule cap spends ~25 ms of `MAX_ROBOTS_WORK`; sliced, the longest event-loop gap from a
+ * parsed 50,000-entry sitemap to the catalog is ~11-13 ms on an idle machine (resolver.test.ts
+ * bounds each shape under 50 ms; responsiveness.test.ts measures the whole pass inside the
+ * coordinator). Moving the pass into the parse worker would instead clone up
+ * to 50,000 entries across the thread boundary, itself a main-thread cost of the same order.
+ */
+export const PASS_SLICE_MS = 8;
+const SLICE_CHECK_EVERY = 16;
+const yieldToLoop = (): Promise<void> => new Promise((resolve) => setImmediate(resolve));
 
 /** Most candidates in one catalog. */
 export const MAX_CANDIDATES = 500;
@@ -267,7 +283,15 @@ export async function discoverCatalog(options: DiscoverOptions): Promise<Discove
   const kept: Draft[] = [];
   let bytes = 0;
   let truncated = false;
+  // Building the priority lists above is its own stretch (up to 50,000 entries); give the loop back before the pass.
+  await yieldToLoop();
+  let sliceStart = performance.now();
+  let examined = 0;
   for (const entry of [...published, ...imageTitled, ...slugged]) {
+    if (++examined % SLICE_CHECK_EVERY === 0 && performance.now() - sliceStart >= PASS_SLICE_MS) {
+      await yieldToLoop();
+      sliceStart = performance.now();
+    }
     // Once a cap is hit everything after it is dropped unexamined, so the kept set is a prefix of the priority order.
     if (truncated) {
       stats.capped += 1;

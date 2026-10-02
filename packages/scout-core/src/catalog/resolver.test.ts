@@ -1,8 +1,11 @@
 import { readFileSync } from "node:fs";
+import { performance } from "node:perf_hooks";
 import { describe, expect, it } from "vitest";
 import type { Diagnostics, DiagnosticFields } from "../diagnostics.js";
 import type { GuardedFetchResult } from "../fetch/guardedFetch.js";
 import { type CatalogFetch, SITEMAP_MAX_BYTES, TEXT_SOURCE_MAX_BYTES } from "./catalogFetch.js";
+import type { ParsedSitemap } from "./sitemap.js";
+import { MAX_SITEMAP_ENTRIES } from "./sitemap.js";
 import { discoverCatalog, MAX_CANDIDATES, MAX_ROBOTS_CHECKS, MAX_ROBOTS_WORK, normalizeUrl, slugTitle } from "./resolver.js";
 import { compileRobots, MAX_RULES, MAX_WILDCARDS_PER_RULE, parseRobots } from "./robots.js";
 
@@ -319,6 +322,56 @@ describe("discoverCatalog", () => {
     expect(catalog.candidates).toHaveLength(MAX_CANDIDATES);
     expect(stats.capped).toBe(50_000 - MAX_CANDIDATES);
     expect(stats.disallowed + stats.duplicates + stats.unlabeled + stats.offOrigin).toBe(0);
+  });
+});
+
+// P4.4: the dedupe/robots pass stays on the main thread, time-sliced (PASS_SLICE_MS). Each shape
+// is the entry cap from one already-parsed sitemap (the parse itself runs in the worker in the
+// core), with robots.txt at the rule cap: all distinct and allowed (500 kept, then capped), all
+// spellings of one URL (a URL parse and a normalization each; ~60-70 ms unsliced), and all
+// disallowed (until MAX_ROBOTS_WORK). A 1 ms ticker records the longest the event loop is held
+// from the parsed sitemap's arrival to the catalog; measured ~11-13 ms on an idle machine.
+describe("the resolver's main-thread pass is bounded", () => {
+  const BOUND_MS = 50;
+  const shapes = {
+    distinct: (n: number) => `${ORIGIN}/g/section-${n % 10}/page-${n}?a=1&b=2`,
+    duplicates: (n: number) => `${ORIGIN}/g/page?utm_source=${n}&a=1#f${n}`,
+    disallowed: (n: number) => `${ORIGIN}/g/section-${n % 10}/page-${n}`,
+  };
+  it.each(Object.keys(shapes) as (keyof typeof shapes)[])("%s: 50,000 entries never hold the event loop 50 ms", async (shape) => {
+    const rules = Array.from({ length: MAX_RULES - 1 }, (_, i) => `Disallow: /*/nomatch-${i}/*/x*.pdf$`);
+    const last = shape === "disallowed" ? "Disallow: /g/" : "Allow: /";
+    const { fetch } = fakeFetch({ [`${ORIGIN}/robots.txt`]: `User-agent: *\n${rules.join("\n")}\n${last}\n`, [`${ORIGIN}/sitemap.xml`]: "parsed elsewhere" });
+    const entries = Array.from({ length: MAX_SITEMAP_ENTRIES }, (_, n) => ({ url: shapes[shape](n), images: [{ title: `Guide ${n} & more`, caption: "How to set up metered billing" }] }));
+    let measuring = false;
+    let lastTick = 0;
+    let worst = 0;
+    const tick = setInterval(() => {
+      const now = performance.now();
+      if (measuring) worst = Math.max(worst, now - lastTick);
+      lastTick = now;
+    }, 1);
+    try {
+      const d = await discoverCatalog({
+        origin: ORIGIN,
+        fetch,
+        clock,
+        parsers: {
+          sitemap: async (): Promise<ParsedSitemap> => {
+            await new Promise((r) => setTimeout(r, 2));
+            measuring = true;
+            lastTick = performance.now();
+            return { kind: "urlset", entries, droppedOffOrigin: 0 };
+          },
+          llmsTxt: async () => ({ found: false, source: "absent" }) as never,
+        },
+      });
+      worst = Math.max(worst, performance.now() - lastTick);
+      expect(d.catalog.candidates.length).toBe(shape === "distinct" ? MAX_CANDIDATES : shape === "duplicates" ? 1 : 0);
+    } finally {
+      clearInterval(tick);
+    }
+    expect(worst).toBeLessThan(BOUND_MS);
   });
 });
 
