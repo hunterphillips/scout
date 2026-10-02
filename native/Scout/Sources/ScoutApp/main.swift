@@ -10,6 +10,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var model = PanelModel()
     private var panel: ScoutPanel?
     private var resendTimer: Timer?
+    /// Opens only links the core authorized for a click, never anything on its own, and only in
+    /// Chrome (`chromeBundleId` in ~/.scout/config.json, default Chrome): never the default browser.
+    private let linkOpener = LinkOpener { [chromeBundleId = ScoutConfig.chromeBundleId()] url, done in
+        guard let chrome = NSWorkspace.shared.urlForApplication(withBundleIdentifier: chromeBundleId) else {
+            done(false)
+            return
+        }
+        NSWorkspace.shared.open([url], withApplicationAt: chrome, configuration: NSWorkspace.OpenConfiguration()) { _, error in
+            done(error == nil)
+        }
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let panel = ScoutPanel { [weak self] action in self?.handle(action) }
@@ -28,6 +39,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         sidecar.onPanelState = { [weak self] state in
             guard let self else { return }
             send(model.apply(state))
+            openAuthorizedLinks()
         }
         frontmost.onChange = { [weak self] bundleId in
             self?.sidecar.send(.frontmost(bundleId: bundleId, date: Date()))
@@ -84,6 +96,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             send(model.retry(id))
         case let .dismiss(id):
             model.dismiss(id)
+        case let .openResult(candidateId):
+            send(model.openResult(candidateId))
         }
         render()
     }
@@ -97,6 +111,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             model.markSent(command, sidecar.send(command))
         }
         render()
+    }
+
+    /// Opens what the core authorized for the user's clicks (open_link acks), each checked again.
+    private func openAuthorizedLinks() {
+        let requests = model.takeLinksToOpen()
+        guard !requests.isEmpty else { return }
+        for request in requests {
+            let commandId = request.commandId
+            // The opener may answer from another thread; Problems lists a refusal.
+            linkOpener.open(request.href, origin: request.origin) { [weak self] refusal in
+                guard let refusal else { return }
+                Task { @MainActor in
+                    guard let self else { return }
+                    self.model.linkRefused(commandId: commandId, refusal)
+                    self.render()
+                }
+            }
+        }
     }
 
     private func render() {

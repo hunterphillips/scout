@@ -37,6 +37,14 @@
 //   Toggles carry no revision, so a boolean compare cannot tell a retried enable from a new one
 //   after an intervening disable (enable, disable, retried enable). Within one core the ID cache
 //   answers the retry; the app never retries a toggle across a core restart.
+// - open_link (a click on a recommended link): the result registry (results.ts) checks the
+//   displayed identity against the result it holds and re-checks the stored target and the
+//   origin's grant; `ok` carries `target: { href }` (only this command's ack does). Codes:
+//   `stale_revision`, `not_found`, `not_permitted`, `unavailable` (also without a registry).
+//   It changes no stored state. A retried ID gets the first ok ack (and target) again from the
+//   cache, without resolving again, even if the result has since been cleared: the duplicate
+//   carries the href resolved for the original click. The app opens a link only for the ack
+//   that settles a pending `open_link` it issued, so a duplicate ack opens nothing more.
 // Acks for commands not about one resource carry `revision: 0`.
 
 import type { MutationCommand, PanelAck } from "@scout/contracts";
@@ -44,6 +52,7 @@ import type { GrantWrite } from "./agentApi/grants.js";
 import { DecisionError, StaleApprovalError } from "./capabilities/decisions.js";
 import { type CapabilityStore, type ExportSync, StoreReadOnlyError } from "./capabilities/store.js";
 import type { Diagnostics } from "./diagnostics.js";
+import type { ResultRegistry } from "./results.js";
 
 export const COMMAND_CACHE_SIZE = 256;
 
@@ -63,6 +72,8 @@ export interface NativeCommandsOptions {
   onGrantChanged: (enabled: boolean) => void;
   /** `refresh_capabilities`: send the capabilities view now. */
   refreshCapabilities: () => void;
+  /** Resolves `open_link`; without it every `open_link` acks `unavailable`. */
+  results?: Pick<ResultRegistry, "resolveLink">;
   diagnostics?: Diagnostics;
   cacheSize?: number;
 }
@@ -79,7 +90,7 @@ export function createNativeCommands(options: NativeCommandsOptions): NativeComm
   const cacheSize = options.cacheSize ?? COMMAND_CACHE_SIZE;
   const cache = new Map<string, { fingerprint: string; result: Promise<PanelAck> }>();
 
-  const ok = (commandId: string, revision: number, approvalRevision: number = store.approvalRevision): PanelAck => ({
+  const ok = (commandId: string, revision: number, approvalRevision: number = store.approvalRevision): Extract<PanelAck, { ok: true }> => ({
     type: "ack",
     commandId,
     ok: true,
@@ -175,6 +186,13 @@ export function createNativeCommands(options: NativeCommandsOptions): NativeComm
       case "refresh_capabilities":
         options.refreshCapabilities();
         return { ack: ok(id, 0) };
+      case "open_link": {
+        if (!options.results) return { ack: failed(id, "unavailable") };
+        const { coreInstanceId, visitEpoch, jobId, candidateId } = cmd;
+        const link = options.results.resolveLink({ coreInstanceId, visitEpoch, jobId, candidateId });
+        if (!link.ok) return { ack: failed(id, link.code) };
+        return { ack: { ...ok(id, 0), target: { href: link.href } } };
+      }
     }
   }
 
@@ -204,7 +222,7 @@ export function createNativeCommands(options: NativeCommandsOptions): NativeComm
       if (!ack.ok && cache.get(commandId)?.result === attempt) cache.delete(commandId);
       emit(ack, cmd.type);
       // The changed view follows the ack; the export outcome (conflicts) follows the sync.
-      if (ack.ok && cmd.type !== "set_agent_browser_context" && cmd.type !== "refresh_capabilities") {
+      if (ack.ok && cmd.type !== "set_agent_browser_context" && cmd.type !== "refresh_capabilities" && cmd.type !== "open_link") {
         options.onStoreChanged();
         void cleanup?.then(options.onStoreChanged);
       }

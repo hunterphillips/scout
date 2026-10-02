@@ -110,12 +110,13 @@ describe("contract schemas", () => {
 
   it("ties results items to ok/empty and reason to unavailable/error", () => {
     expect(PanelStateSchema.parse({ type: "state", status: "idle" })).toEqual({ type: "state", status: "idle" });
-    const ok = { type: "results", visitEpoch: 1, status: "ok", items: [{ candidateId: "c0", title: "t", href: "h", reason: "r" }] };
+    const id = { type: "results", coreInstanceId: "core-1", visitEpoch: 1, origin: "https://x.example", jobId: "j1" };
+    const ok = { ...id, status: "ok", items: [{ candidateId: "c0", title: "t", reason: "r", hostname: "x.example" }] };
     expect(PanelStateSchema.parse(ok)).toEqual(ok);
-    const failed = { type: "results", visitEpoch: 1, status: "error", reason: "boom" };
+    const failed = { ...id, status: "error", reason: "agent_failed" };
     expect(PanelStateSchema.parse(failed)).toEqual(failed);
-    expect(PanelStateSchema.safeParse({ type: "results", visitEpoch: 1, status: "error", items: [] }).success).toBe(false);
-    expect(PanelStateSchema.safeParse({ type: "results", visitEpoch: 1, status: "ok", reason: "x" }).success).toBe(false);
+    expect(PanelStateSchema.safeParse({ ...id, status: "error", reason: "agent_failed", items: [] }).success).toBe(false);
+    expect(PanelStateSchema.safeParse({ ...id, status: "ok", reason: "x" }).success).toBe(false);
   });
 
   it("parses native commands", () => {

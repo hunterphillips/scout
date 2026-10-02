@@ -4,6 +4,13 @@
 // Core -> app frames are discriminated by `type`; two types carry a second discriminator the
 // Swift decoder reads: `results` by `status`, `ack` by `ok`.
 //
+// Results: a `results` frame names the core instance, visit, origin, and job it answers and
+// never carries a URL. A `state` frame resets the window's results for the visit it names (a
+// new `visitEpoch`, `paused`, `disconnected`, or `idle` for the same visit when the core
+// cleared them); `working` with a `jobId` starts a new job's spinner. So the core sends
+// `working{jobId}` and then the visit's `idle` before it publishes a job's results, never
+// after: a later `idle` for the same visit (a re-sent state included) wipes them.
+//
 // App -> core commands must each fit in one atomic pipe write (NATIVE_COMMAND_MAX_BYTES, the
 // platform's PIPE_BUF): the app drops a larger write rather than splitting it. So commands
 // carry IDs, hashes, revisions, cursors, and host origins only; never resource text or tool
@@ -13,7 +20,7 @@
 // whose effect already applied gets the same `ok: true` ack and changes nothing.
 
 import { z } from "zod";
-import { AGENT_METHODS, AGENT_STATUS_CODES, CoreInstanceIdSchema } from "./agent.js";
+import { AGENT_METHODS, AGENT_STATUS_CODES, AgentRequestIdSchema, CoreInstanceIdSchema } from "./agent.js";
 import {
   ContentHashSchema,
   HOSTNAME_MAX_CHARS,
@@ -21,9 +28,12 @@ import {
   ResourceIdSchema,
   ResourceKindSchema,
   ResourceVersionStateSchema,
+  SOURCE_URL_MAX_CHARS,
   SourceUrlSchema,
   isHttpsOrigin,
 } from "./capability.js";
+import { CANDIDATE_ID_MAX_CHARS, CANDIDATE_TITLE_MAX } from "./catalog.js";
+import { JOB_CANCELLED_REASONS, JOB_ERROR_REASONS, JOB_MAX_PICKS, JOB_REASON_MAX_CHARS, JOB_UNAVAILABLE_REASONS } from "./job.js";
 
 /**
  * PIPE_BUF on macOS (`sys/syslimits.h`), the largest write a pipe takes whole or not at all:
@@ -64,35 +74,62 @@ export const HostOriginSchema = z.string().max(HOST_ORIGIN_MAX_CHARS).refine(isH
 
 // --- Core -> native app ---
 
-export const PanelStatusStateSchema = z.object({
-  type: z.literal("state"),
-  status: z.enum(["idle", "working", "paused", "disconnected"]),
-  visitEpoch: z.int().nonnegative().optional(),
-  detail: z.string().optional(),
-  /** On `idle`: whether a visit to a Chrome-permitted origin is current. Absent on other statuses. */
-  permitted: z.boolean().optional(),
+export const PanelStatusStateSchema = z
+  .object({
+    type: z.literal("state"),
+    status: z.enum(["idle", "working", "paused", "disconnected"]),
+    visitEpoch: z.int().nonnegative().optional(),
+    detail: z.string().optional(),
+    /** On `idle`: whether a visit to a Chrome-permitted origin is current. Absent on other statuses. */
+    permitted: z.boolean().optional(),
+    /** On `working` only: the recommendation job the window's spinner belongs to. */
+    jobId: AgentRequestIdSchema.optional(),
+  })
+  .refine((s) => s.jobId === undefined || s.status === "working", { message: "jobId only on working" });
+
+/** A catalog candidate ID as the window echoes it back in `open_link`. */
+export const PanelCandidateIdSchema = z.string().max(CANDIDATE_ID_MAX_CHARS).regex(/^c[0-9a-z]+$/);
+
+/**
+ * One recommended link as the window shows it. Never the URL: a click sends the candidate ID
+ * back (`open_link`) and the core answers with the target it re-checked. `hostname` is the
+ * verified target's host, for display. `reason` is shown only in Scout's window, never logged.
+ */
+export const PanelResultItemSchema = z.strictObject({
+  candidateId: PanelCandidateIdSchema,
+  title: z.string().min(1).max(CANDIDATE_TITLE_MAX),
+  reason: z.string().min(1).max(JOB_REASON_MAX_CHARS),
+  hostname: z.string().min(1).max(HOSTNAME_MAX_CHARS),
 });
 
-export const PanelResultItemSchema = z.object({
-  candidateId: z.string(),
-  title: z.string(),
-  href: z.string(),
-  reason: z.string(),
-});
-
-export const PanelResultsListSchema = z.object({
+/**
+ * What a `results` frame names: this core start, the visit, its origin, and the job that
+ * produced it. The window ignores a frame whose instance or visit is not the one it shows.
+ */
+const resultsIdentity = {
   type: z.literal("results"),
+  coreInstanceId: CoreInstanceIdSchema,
   visitEpoch: z.int().nonnegative(),
-  status: z.enum(["ok", "empty"]),
-  items: z.array(PanelResultItemSchema),
-});
+  origin: HostOriginSchema,
+  jobId: AgentRequestIdSchema,
+};
 
-export const PanelResultsFailureSchema = z.object({
-  type: z.literal("results"),
-  visitEpoch: z.int().nonnegative(),
-  status: z.enum(["unavailable", "error"]),
-  reason: z.string(),
+// Strict: a results frame that carries anything else (an href above all) is not a results frame.
+export const PanelResultsOkSchema = z.strictObject({
+  ...resultsIdentity,
+  status: z.literal("ok"),
+  items: z
+    .array(PanelResultItemSchema)
+    .min(1)
+    .max(JOB_MAX_PICKS)
+    .refine((items) => new Set(items.map((i) => i.candidateId)).size === items.length, { message: "duplicate candidate id" }),
 });
+/** The model's intentional "nothing relevant": a success, never a stand-in for a failure. */
+export const PanelResultsEmptySchema = z.strictObject({ ...resultsIdentity, status: z.literal("empty") });
+export const PanelResultsUnavailableSchema = z.strictObject({ ...resultsIdentity, status: z.literal("unavailable"), reason: z.enum(JOB_UNAVAILABLE_REASONS) });
+/** `reason: "timeout"` is the visit deadline; the window shows it as its own state. */
+export const PanelResultsErrorSchema = z.strictObject({ ...resultsIdentity, status: z.literal("error"), reason: z.enum(JOB_ERROR_REASONS) });
+export const PanelResultsCancelledSchema = z.strictObject({ ...resultsIdentity, status: z.literal("cancelled"), reason: z.enum(JOB_CANCELLED_REASONS) });
 
 export const SkillDescriptorSchema = z.object({ name: z.string(), description: z.string().optional() });
 
@@ -210,6 +247,11 @@ export const PanelAckOkSchema = z.object({
   /** The resource's revision after the command; 0 for commands not about one resource. */
   revision: Revision,
   approvalRevision: Revision,
+  /**
+   * `open_link` only: the target the core re-checked for the clicked candidate. The app checks
+   * it again (https, no credentials or port, the result's host) before opening it.
+   */
+  target: z.strictObject({ href: z.string().min(1).max(SOURCE_URL_MAX_CHARS) }).optional(),
 });
 
 export const PanelAckFailureSchema = z.object({
@@ -242,10 +284,18 @@ export const PanelGrantSchema = z.object({
   agentBrowserContext: z.boolean(),
 });
 
-// Two members share type "results" (by `status`) and two share "ack" (by `ok`).
+export const PanelResultsSchema = z.discriminatedUnion("status", [
+  PanelResultsOkSchema,
+  PanelResultsEmptySchema,
+  PanelResultsUnavailableSchema,
+  PanelResultsErrorSchema,
+  PanelResultsCancelledSchema,
+]);
+
+// Five members share type "results" (by `status`) and two share "ack" (by `ok`).
 export const PanelStateSchema = z.discriminatedUnion("type", [
   PanelStatusStateSchema,
-  z.discriminatedUnion("status", [PanelResultsListSchema, PanelResultsFailureSchema]),
+  PanelResultsSchema,
   PanelCapabilitiesSchema,
   PanelPreviewChunkSchema,
   z.discriminatedUnion("ok", [PanelAckOkSchema, PanelAckFailureSchema]),
@@ -279,6 +329,20 @@ export const SetAutoAcquireCommandSchema = cmd("set_auto_acquire", { origin: Hos
  */
 export const SetAgentBrowserContextCommandSchema = cmd("set_agent_browser_context", { enabled: z.boolean(), expectedEnabled: z.boolean() });
 export const RefreshCapabilitiesCommandSchema = cmd("refresh_capabilities", {});
+/**
+ * The user clicked a recommended link: the identity the window displayed. The core checks it
+ * against the result it holds (instance, visit, job, candidate), re-checks the stored target
+ * and the origin's grant, and acks `ok` with `target`, or `stale_revision` (another instance,
+ * visit, or job, or the result is gone), `not_found` (no such candidate in the result),
+ * `not_permitted` (Chrome no longer grants the origin), `unavailable` (no result registry, or
+ * the target failed its re-check). Nothing opens except through this ack.
+ */
+export const OpenLinkCommandSchema = cmd("open_link", {
+  coreInstanceId: CoreInstanceIdSchema,
+  visitEpoch: Revision,
+  jobId: AgentRequestIdSchema,
+  candidateId: PanelCandidateIdSchema,
+});
 
 export const NativeCommandSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("frontmost"), bundleId: z.string(), at: z.number() }),
@@ -292,9 +356,12 @@ export const NativeCommandSchema = z.discriminatedUnion("type", [
   SetAutoAcquireCommandSchema,
   SetAgentBrowserContextCommandSchema,
   RefreshCapabilitiesCommandSchema,
+  OpenLinkCommandSchema,
 ]);
 
 export type PanelResultItem = z.infer<typeof PanelResultItemSchema>;
+export type PanelResults = z.infer<typeof PanelResultsSchema>;
+export type OpenLinkCommand = z.infer<typeof OpenLinkCommandSchema>;
 export type PanelState = z.infer<typeof PanelStateSchema>;
 export type PanelStatusState = z.infer<typeof PanelStatusStateSchema>;
 export type PanelCapabilities = z.infer<typeof PanelCapabilitiesSchema>;

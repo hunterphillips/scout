@@ -21,21 +21,22 @@ import Testing
         #expect(PanelModel.describe(90) == "90 seconds")
     }
 
-    @Test func runningShowsCoreStatusAndResults() {
+    @Test func runningShowsCoreStatusAndResults() throws {
         var model = PanelModel()
         _ = model.apply(.running)
+        _ = model.apply(.capabilities(try TestFrames.capabilities(instance: "core-1")))
         _ = model.apply(.state(status: .working, visitEpoch: 1, detail: "ranking"))
-        #expect(model.compactLine == "Working · ranking")
+        #expect(model.compactLine == "Working · ranking · Looking for links…")
         let items = [
-            ResultItem(candidateId: "c1", title: "Webhooks", href: "https://a", reason: "r"),
-            ResultItem(candidateId: "c2", title: "Testing", href: "https://b", reason: "r"),
+            ResultItem(candidateId: "c1", title: "Webhooks", reason: "r", hostname: "docs.example.com"),
+            ResultItem(candidateId: "c2", title: "Testing", reason: "r", hostname: "docs.example.com"),
         ]
-        _ = model.apply(.results(visitEpoch: 1, outcome: .ok(items)))
         _ = model.apply(.state(status: .idle, visitEpoch: 1, detail: nil))
-        #expect(model.compactLine == "Idle" && model.results == .ok(items))
+        _ = model.apply(TestFrames.results(epoch: 1, .ok(items)))
+        #expect(model.compactLine == "Idle · 2 links" && model.resultsDisplay == .ready(items))
         #expect(model.indicator == .results(count: 2))
-        _ = model.apply(.results(visitEpoch: 2, outcome: .unavailable("service down")))
-        #expect(model.indicator == .error("service down"))
+        _ = model.apply(TestFrames.results(epoch: 1, job: "job-2", .unavailable(.agentUnavailable)))
+        #expect(model.indicator == .error("Links unavailable"))
     }
 
     @Test func idleVisitShowsTheHostnameAndLeavingClearsIt() throws {
@@ -54,8 +55,8 @@ import Testing
     @Test func restartClearsCoreState() {
         var model = PanelModel()
         _ = model.apply(.running)
-        _ = model.apply(.state(status: .paused, visitEpoch: nil, detail: nil))
-        _ = model.apply(.results(visitEpoch: 1, outcome: .empty))
+        _ = model.apply(.state(status: .idle, visitEpoch: 1, detail: nil))
+        _ = model.apply(TestFrames.results(epoch: 1, .empty))
         _ = model.apply(.starting)
         _ = model.apply(.running)
         #expect(model.compactLine == "Connected" && model.results == nil)
@@ -92,10 +93,10 @@ import Testing
         // Another site: its offers are not this site's.
         _ = model.apply(.state(status: .idle, visitEpoch: 2, detail: "other.example.org", permitted: true))
         #expect(model.indicator == .nothing)
-        _ = model.apply(.results(visitEpoch: 2, outcome: .ok([ResultItem(candidateId: "c", title: "t", href: "h", reason: "r")])))
+        _ = model.apply(TestFrames.results(epoch: 2, .ok([ResultItem(candidateId: "c1", title: "t", reason: "r", hostname: "other.example.org")])))
         #expect(model.indicator == .results(count: 1))
-        _ = model.apply(.results(visitEpoch: 2, outcome: .error("timeout")))
-        #expect(model.indicator == .error("timeout"))
+        _ = model.apply(TestFrames.results(epoch: 2, job: "job-2", .error(.timeout)))
+        #expect(model.indicator == .error("Timed out"))
         // An unpermitted visit shows no offers.
         _ = model.apply(.state(status: .idle, visitEpoch: 3, detail: "docs.example.com", permitted: false))
         #expect(model.currentHost == nil && model.currentOffers.isEmpty)
@@ -106,7 +107,7 @@ import Testing
         _ = model.apply(.capabilities(try TestFrames.capabilities(revision: 2, offers: [TestFrames.offer(), TestFrames.offer(rid: F.rid2)])))
         #expect(!model.expanded && model.shownPreview == nil)
         model.toggleExpanded()
-        #expect(model.expanded && model.section == .offers)
+        #expect(model.expanded && model.section == .results)
         model.toggleExpanded()
         #expect(!model.expanded)
     }

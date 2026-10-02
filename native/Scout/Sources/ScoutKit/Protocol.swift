@@ -9,25 +9,126 @@ public enum CoreStatus: String, Sendable, Equatable, Decodable {
     case idle, working, paused, disconnected
 }
 
+/// `JOB_UNAVAILABLE_REASONS` in contracts job.ts.
+public enum JobUnavailableReason: String, Sendable, Equatable, Decodable, CaseIterable {
+    case noTimeLeft = "no_time_left"
+    case agentUnavailable = "agent_unavailable"
+    case busy
+}
+
+/// `JOB_ERROR_REASONS` in contracts job.ts. `timeout` is the visit deadline.
+public enum JobErrorReason: String, Sendable, Equatable, Decodable, CaseIterable {
+    case timeout
+    case invalidOutput = "invalid_output"
+    case toolUnavailable = "tool_unavailable"
+    case preflightFailed = "preflight_failed"
+    case unsupportedConfiguration = "unsupported_configuration"
+    case agentFailed = "agent_failed"
+}
+
+/// `JOB_CANCELLED_REASONS` in contracts job.ts.
+public enum JobCancelledReason: String, Sendable, Equatable, Decodable, CaseIterable {
+    case superseded
+    case visitChanged = "visit_changed"
+    case revoked, paused, shutdown
+}
+
+/// One recommended link as the window shows it. Never its URL: a click sends `candidateId`
+/// back (`open_link`) and the core answers with the target.
 public struct ResultItem: Sendable, Equatable, Decodable {
     public let candidateId: String
     public let title: String
-    public let href: String
+    /// Shown only in Scout's window.
     public let reason: String
+    /// The verified target's host.
+    public let hostname: String
 
-    public init(candidateId: String, title: String, href: String, reason: String) {
+    public init(candidateId: String, title: String, reason: String, hostname: String) {
         self.candidateId = candidateId
         self.title = title
-        self.href = href
         self.reason = reason
+        self.hostname = hostname
     }
+
+    public init(from decoder: Decoder) throws {
+        try onlyKeys(decoder, CodingKeys.allCases)
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        candidateId = try c.decode(String.self, forKey: .candidateId)
+        title = try c.decode(String.self, forKey: .title)
+        reason = try c.decode(String.self, forKey: .reason)
+        hostname = try c.decode(String.self, forKey: .hostname)
+        try check(WireFormat.isCandidateId(candidateId))
+        // zod counts UTF-16 code units.
+        try check((1...PanelLimits.resultTitleMax).contains(title.utf16.count))
+        try check((1...PanelLimits.resultReasonMax).contains(reason.utf16.count))
+        try check((1...PanelLimits.hostnameMaxBytes).contains(hostname.utf16.count))
+    }
+
+    private enum CodingKeys: String, CodingKey, CaseIterable { case candidateId, title, reason, hostname }
 }
 
 public enum ResultsOutcome: Sendable, Equatable {
+    /// One to `PanelLimits.resultItemsMax` items with distinct candidate IDs.
     case ok([ResultItem])
+    /// The model's intentional "nothing relevant": a success.
     case empty
-    case unavailable(String)
-    case error(String)
+    case unavailable(JobUnavailableReason)
+    case error(JobErrorReason)
+    case cancelled(JobCancelledReason)
+}
+
+/// A `results` frame: the core instance, visit, origin, and job it answers, and the outcome.
+public struct ResultsFrame: Sendable, Equatable, Decodable {
+    public let coreInstanceId: String
+    public let visitEpoch: Int
+    /// `https://host[:port]`.
+    public let origin: String
+    public let jobId: String
+    public let outcome: ResultsOutcome
+
+    public init(coreInstanceId: String, visitEpoch: Int, origin: String, jobId: String, outcome: ResultsOutcome) {
+        self.coreInstanceId = coreInstanceId
+        self.visitEpoch = visitEpoch
+        self.origin = origin
+        self.jobId = jobId
+        self.outcome = outcome
+    }
+
+    /// Strict like the contract: an unknown key (an `href` above all) drops the frame.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        coreInstanceId = try c.decode(String.self, forKey: .coreInstanceId)
+        visitEpoch = try c.decode(Int.self, forKey: .visitEpoch)
+        origin = try c.decode(String.self, forKey: .origin)
+        jobId = try c.decode(String.self, forKey: .jobId)
+        try check(WireFormat.isToken(coreInstanceId) && WireFormat.isToken(jobId))
+        try check(WireFormat.isRevision(visitEpoch) && WireFormat.isHostOrigin(origin))
+        let identity: [CodingKeys] = [.type, .coreInstanceId, .visitEpoch, .origin, .jobId, .status]
+        switch try c.decode(String.self, forKey: .status) {
+        case "ok":
+            try onlyKeys(decoder, identity + [.items])
+            let items = try c.decode([ResultItem].self, forKey: .items)
+            try check((1...PanelLimits.resultItemsMax).contains(items.count))
+            try check(Set(items.map(\.candidateId)).count == items.count)
+            outcome = .ok(items)
+        case "empty":
+            try onlyKeys(decoder, identity)
+            outcome = .empty
+        case "unavailable":
+            try onlyKeys(decoder, identity + [.reason])
+            outcome = .unavailable(try c.decode(JobUnavailableReason.self, forKey: .reason))
+        case "error":
+            try onlyKeys(decoder, identity + [.reason])
+            outcome = .error(try c.decode(JobErrorReason.self, forKey: .reason))
+        case "cancelled":
+            try onlyKeys(decoder, identity + [.reason])
+            outcome = .cancelled(try c.decode(JobCancelledReason.self, forKey: .reason))
+        default:
+            throw WireError()
+        }
+    }
+
+    private enum CodingKeys: String, CodingKey { case type, coreInstanceId, visitEpoch, origin, jobId, status, items, reason }
 }
 
 /// Bounds from packages/contracts (panel.ts, capability.ts).
@@ -53,6 +154,14 @@ public enum PanelLimits {
     public static let originMaxBytes = 267
     /// zod `z.int()`: a safe integer.
     public static let maxRevision = 9_007_199_254_740_991
+    /// JOB_MAX_PICKS.
+    public static let resultItemsMax = 3
+    /// CANDIDATE_TITLE_MAX, in UTF-16 code units.
+    public static let resultTitleMax = 160
+    /// JOB_REASON_MAX_CHARS, in UTF-16 code units.
+    public static let resultReasonMax = 140
+    /// CANDIDATE_ID_MAX_CHARS.
+    public static let candidateIdMaxBytes = 32
 }
 
 /// Pattern checks for values the app may send back to the core.
@@ -107,6 +216,13 @@ public enum WireFormat {
         return !labels.last!.utf8.allSatisfy { (0x30...0x39).contains($0) }
     }
 
+    /// `c` + lowercase base36, at most `candidateIdMaxBytes`.
+    public static func isCandidateId(_ s: String) -> Bool {
+        let bytes = Array(s.utf8)
+        return (2...PanelLimits.candidateIdMaxBytes).contains(bytes.count) && bytes[0] == 0x63
+            && bytes.dropFirst().allSatisfy { (0x30...0x39).contains($0) || (0x61...0x7A).contains($0) }
+    }
+
     static func isRevision(_ n: Int) -> Bool { n >= 0 && n <= PanelLimits.maxRevision }
 }
 
@@ -114,6 +230,20 @@ struct WireError: Error {}
 
 private func check(_ condition: Bool) throws {
     if !condition { throw WireError() }
+}
+
+private struct AnyKey: CodingKey {
+    let stringValue: String
+    var intValue: Int? { nil }
+    init(stringValue: String) { self.stringValue = stringValue }
+    init?(intValue: Int) { nil }
+}
+
+/// Throws when the object holds a key outside `allowed`.
+private func onlyKeys<K: CodingKey>(_ decoder: Decoder, _ allowed: [K]) throws {
+    let names = Set(allowed.map(\.stringValue))
+    let present = try decoder.container(keyedBy: AnyKey.self).allKeys
+    try check(present.allSatisfy { names.contains($0.stringValue) })
 }
 
 public enum ResourceKind: String, Sendable, Equatable, Codable {
@@ -406,13 +536,14 @@ public enum AckFailureCode: String, Sendable, Equatable, Decodable, CaseIterable
 
 public enum Ack: Sendable, Equatable {
     /// `revision` is the resource's revision after the command; 0 when not about one resource.
-    case ok(commandId: String, revision: Int, approvalRevision: Int)
+    /// `target` answers `open_link` only: the href the core re-checked, not yet checked here.
+    case ok(commandId: String, revision: Int, approvalRevision: Int, target: String? = nil)
     /// `revision` is the resource's current revision, when the command named a known one.
     case failed(commandId: String, code: AckFailureCode, revision: Int?)
 
     public var commandId: String {
         switch self {
-        case let .ok(id, _, _), let .failed(id, _, _): return id
+        case let .ok(id, _, _, _), let .failed(id, _, _): return id
         }
     }
 }
@@ -463,8 +594,9 @@ public struct AuditEntry: Sendable, Equatable, Decodable {
 /// Core -> app.
 public enum PanelState: Sendable, Equatable {
     /// `permitted` is present on `idle` only: whether a visit to a Chrome-permitted origin is current.
-    case state(status: CoreStatus, visitEpoch: Int?, detail: String?, permitted: Bool? = nil)
-    case results(visitEpoch: Int, outcome: ResultsOutcome)
+    /// `jobId` is present on `working` only: the job a spinner belongs to.
+    case state(status: CoreStatus, visitEpoch: Int?, detail: String?, permitted: Bool? = nil, jobId: String? = nil)
+    case results(ResultsFrame)
     case capabilities(Capabilities)
     case preview(PreviewChunk)
     case ack(Ack)
@@ -483,25 +615,12 @@ public enum PanelState: Sendable, Equatable {
             guard let name = raw.status, let status = CoreStatus(rawValue: name) else {
                 return nil
             }
-            return .state(status: status, visitEpoch: raw.visitEpoch, detail: raw.detail, permitted: raw.permitted)
-        case "results":
-            guard let epoch = raw.visitEpoch else { return nil }
-            switch raw.status {
-            case "ok":
-                guard let items = raw.items else { return nil }
-                return .results(visitEpoch: epoch, outcome: .ok(items))
-            case "empty":
-                guard raw.items != nil else { return nil }
-                return .results(visitEpoch: epoch, outcome: .empty)
-            case "unavailable":
-                guard let reason = raw.reason else { return nil }
-                return .results(visitEpoch: epoch, outcome: .unavailable(reason))
-            case "error":
-                guard let reason = raw.reason else { return nil }
-                return .results(visitEpoch: epoch, outcome: .error(reason))
-            default:
-                return nil
+            if let jobId = raw.jobId {
+                guard status == .working, WireFormat.isToken(jobId) else { return nil }
             }
+            return .state(status: status, visitEpoch: raw.visitEpoch, detail: raw.detail, permitted: raw.permitted, jobId: raw.jobId)
+        case "results":
+            return (try? decoder.decode(ResultsFrame.self, from: line)).map(PanelState.results)
         case "capabilities":
             return (try? decoder.decode(Capabilities.self, from: line)).map(PanelState.capabilities)
         case "preview":
@@ -511,7 +630,7 @@ public enum PanelState: Sendable, Equatable {
             if ok {
                 guard let revision = raw.revision, let approval = raw.approvalRevision,
                       WireFormat.isRevision(revision), WireFormat.isRevision(approval) else { return nil }
-                return .ack(.ok(commandId: id, revision: revision, approvalRevision: approval))
+                return .ack(.ok(commandId: id, revision: revision, approvalRevision: approval, target: raw.target?.href))
             }
             guard let name = raw.code, let code = AckFailureCode(rawValue: name) else { return nil }
             if let revision = raw.revision, !WireFormat.isRevision(revision) { return nil }
@@ -534,14 +653,18 @@ public enum PanelState: Sendable, Equatable {
         let visitEpoch: Int?
         let detail: String?
         let permitted: Bool?
-        let items: [ResultItem]?
-        let reason: String?
+        let jobId: String?
         let commandId: String?
         let ok: Bool?
         let code: String?
         let revision: Int?
         let approvalRevision: Int?
         let agentBrowserContext: Bool?
+        let target: AckTarget?
+    }
+
+    private struct AckTarget: Decodable {
+        let href: String
     }
 
     private struct AuditFrame: Decodable {
@@ -560,8 +683,12 @@ public enum PanelRequest: Sendable, Equatable, Hashable {
     case setAutoAcquire(origin: String, enabled: Bool, acknowledgeRisk: Bool, expectedEnabled: Bool)
     case setAgentBrowserContext(enabled: Bool, expectedEnabled: Bool)
     case refreshCapabilities
+    /// A click on a recommended link: the identity the window showed. Nothing opens except
+    /// through this command's ack.
+    case openLink(coreInstanceId: String, visitEpoch: Int, jobId: String, candidateId: String)
 
-    /// Everything except `preview` changes stored state or settings.
+    /// Everything except `preview` is acked and listed under Problems when it fails. All but
+    /// `openLink` change stored state or settings.
     public var isMutation: Bool {
         if case .preview = self { return false }
         return true
@@ -572,6 +699,16 @@ public enum PanelRequest: Sendable, Equatable, Hashable {
         switch self {
         case .approve, .decline, .revoke: return true
         default: return false
+        }
+    }
+
+    /// Whether a failed or unsent command may be re-sent under its ID from the window (Retry).
+    /// Previews restart through a new command, toggles are toggled again, and a link click is
+    /// clicked again: re-sending an `open_link` later would open a link the user may no longer want.
+    public var isRetryable: Bool {
+        switch self {
+        case .preview, .setAutoAcquire, .setAgentBrowserContext, .openLink: return false
+        case .approve, .decline, .revoke, .refreshCapabilities: return true
         }
     }
 
@@ -635,6 +772,9 @@ public enum NativeCommand: Sendable, Equatable {
             return ["type": "set_agent_browser_context", "enabled": enabled, "expectedEnabled": expectedEnabled]
         case .refreshCapabilities:
             return ["type": "refresh_capabilities"]
+        case let .openLink(coreInstanceId, visitEpoch, jobId, candidateId):
+            return ["type": "open_link", "coreInstanceId": coreInstanceId, "visitEpoch": visitEpoch, "jobId": jobId,
+                    "candidateId": candidateId]
         }
     }
 

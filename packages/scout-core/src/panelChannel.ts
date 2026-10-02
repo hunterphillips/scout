@@ -8,6 +8,17 @@
 // permission, visit, and ingest changes; commands call it after their ack), `audit` (debounced
 // AUDIT_DEBOUNCE_MS, skipped when unchanged) on `auditChanged()`, and `grant` when the user
 // toggles it. A `preview` command answers with a chunk, or with a failure ack.
+//
+// Recommendation results (results.ts): a publish goes out as a `results` frame (hrefs
+// stripped); a non-silent clear that dropped a result asks the coordinator to send its current
+// state again (`resendState`), which the window reads as "this visit's results are gone". The
+// coordinator's own clears are silent: the state frame it sends next resets the window anyway.
+// No stand-in `empty` frame is ever sent. `open_link` is answered from the same registry.
+//
+// Ordering: the window drops a visit's results on any `state` frame for that visit other than
+// `working` for the same job. So the coordinator (or P3.2's job scheduler) emits a job's
+// `working{jobId}` and then the visit's `idle` before the result is published; an `idle` or
+// `resendState` for the same visit after the publish wipes the window's results.
 
 import type { PanelAck, PanelCommand, PanelState } from "@scout/contracts";
 import type { GrantWrite } from "./agentApi/grants.js";
@@ -20,6 +31,7 @@ import type { Diagnostics } from "./diagnostics.js";
 import { type CommandStore, createNativeCommands } from "./nativeCommands.js";
 import { createCapabilitiesEmitter } from "./panelCapabilities.js";
 import { createPreviewStream, type PreviewStore } from "./previewStream.js";
+import type { ResultRegistry } from "./results.js";
 
 export const AUDIT_DEBOUNCE_MS = 250;
 
@@ -37,6 +49,10 @@ export interface PanelChannelOptions {
   isPermitted: (origin: string) => boolean;
   currentOrigin: () => string | null;
   emit: (frame: PanelState) => void;
+  /** Recommendation results; without it `open_link` acks `unavailable`. */
+  results?: Pick<ResultRegistry, "resolveLink" | "subscribe">;
+  /** Send the coordinator's current state again, even if unchanged (a cleared result). */
+  resendState?: () => void;
   clock: Clock;
   timers?: Timers;
   diagnostics: Diagnostics;
@@ -103,7 +119,13 @@ export function createPanelChannel(options: PanelChannelOptions): PanelChannel {
     onStoreChanged: () => capabilities.changed(),
     onGrantChanged: (enabled) => emit({ type: "grant", agentBrowserContext: enabled }),
     refreshCapabilities: () => capabilities.refresh(),
+    ...(options.results ? { results: options.results } : {}),
     diagnostics,
+  });
+
+  const unsubscribeResults = options.results?.subscribe((event) => {
+    if (event.kind === "published") emit(event.frame);
+    else if (!stopped) options.resendState?.();
   });
 
   return {
@@ -133,6 +155,7 @@ export function createPanelChannel(options: PanelChannelOptions): PanelChannel {
     stop() {
       if (stopped) return;
       stopped = true;
+      unsubscribeResults?.();
       capabilities.stop();
       audit.cancel();
       previews.close();

@@ -68,7 +68,7 @@ import Testing
             echo x >> '\(launches.path)'
             echo '{"type":"state","status":"idle"}'
             echo 'garbage'
-            echo '{"type":"results","visitEpoch":1,"status":"empty","items":[]}'
+            echo '{"type":"results","coreInstanceId":"core-1","visitEpoch":1,"origin":"https://docs.example.com","jobId":"job-1","status":"empty"}'
             while read line; do
               echo "$line" >> '\(received.path)'
               case "$line" in *shutdown*) exit 0;; esac
@@ -84,7 +84,7 @@ import Testing
 
         #expect(states == [
             .state(status: .idle, visitEpoch: nil, detail: nil),
-            .results(visitEpoch: 1, outcome: .empty),
+            .results(ResultsFrame(coreInstanceId: "core-1", visitEpoch: 1, origin: "https://docs.example.com", jobId: "job-1", outcome: .empty)),
         ])
         #expect(sidecar.ignoredLineCount == 1)
 

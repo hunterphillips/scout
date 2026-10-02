@@ -45,6 +45,12 @@
 // coordinator tells the channel when the capability view may have changed: a permissions
 // snapshot applied or cleared (offers follow Chrome's grants), the visit changed, or an ingest
 // committed (and again when its export sync settles).
+//
+// Recommendation results (results.ts) live only as long as their visit: a visit change (which
+// includes losing the origin's grant, which clears them first), pause, disconnect (or a
+// replacing sensor), and stop clear them. These clears are silent: the state frame each sends
+// next (the new visit's idle, paused, disconnected) is what makes the window drop them, and
+// stop sends nothing. `resendState` is for P3.2's job clears within one visit.
 
 import type {
   ActiveVisit,
@@ -59,6 +65,7 @@ import type { AgentView } from "./agentApi/handlers.js";
 import type { DiscoveryResult } from "./capabilities/discovery.js";
 import type { CapabilityStore } from "./capabilities/store.js";
 import type { PanelChannel } from "./panelChannel.js";
+import type { ResultRegistry } from "./results.js";
 import type { CatalogResolution } from "./catalog/resolveCatalog.js";
 import type { Clock, Timers } from "./clock.js";
 import type { Diagnostics } from "./diagnostics.js";
@@ -93,6 +100,8 @@ export interface CoordinatorOptions {
   capabilities?: CoordinatorCapabilities;
   /** Scout's window commands and capability view. Without it those commands are refused. */
   panel?: Pick<PanelChannel, "handle" | "capabilitiesChanged">;
+  /** Recommendation results, cleared whenever their visit stops being current. */
+  results?: Pick<ResultRegistry, "clear">;
 }
 
 export interface CoordinatorCapabilities {
@@ -120,6 +129,8 @@ export interface Coordinator {
   readonly capabilities: CoordinatorCapabilities | undefined;
   /** What agent.sock may see right now: the focused permitted visit and whether Scout is paused. A fresh copy. */
   agentView(): AgentView;
+  /** Send the current panel state again, even if it is the last one sent. */
+  resendState(): void;
 }
 
 const utf8 = new TextEncoder();
@@ -140,6 +151,11 @@ export function createCoordinator(options: CoordinatorOptions): Coordinator {
   const permissions = createPermissionState({ diagnostics });
   const caps = options.capabilities;
   const panelChanged = (): void => options.panel?.capabilitiesChanged();
+  // Silent: every caller sends a state frame next (a new visit's idle, paused, disconnected),
+  // or none at all (stop), so a `resendState` here would only add a stray frame (an idle for the
+  // old epoch before `disconnected`). The non-silent clear is for P3.2's job clears within one
+  // visit, where no other state frame follows.
+  const clearResults = (reason: string): void => void options.results?.clear(reason, { silent: true });
 
   let paused = false;
   let stopped = false;
@@ -290,6 +306,7 @@ export function createCoordinator(options: CoordinatorOptions): Coordinator {
 
   const onVisitChange = (change: VisitChange): void => {
     if (change.previous === null && change.visit === null) return;
+    clearResults("visit_changed");
     panelChanged();
     if (change.visit === null) dwell.cancel("visit_ended");
     else if (!paused && liveClient !== null) dwell.arm(change.visit);
@@ -339,6 +356,7 @@ export function createCoordinator(options: CoordinatorOptions): Coordinator {
       if (activity.revision !== revision) diagnostics.event("activity_cleared", { reason: permissions.githubCapture ? "grant_lost" : "capture_off" });
     }
     if (before !== null && !permissions.isPermitted(before.origin)) {
+      clearResults("permission_lost");
       dwell.cancel("permission_lost");
       diagnostics.event("permission_lost", { origin: before.origin, epoch: before.epoch });
     }
@@ -390,6 +408,7 @@ export function createCoordinator(options: CoordinatorOptions): Coordinator {
 
   /** The live connection is gone or replaced: cancel its work and forget its grants. */
   const dropConnectionState = (): void => {
+    clearResults("disconnected");
     dwell.cancel("disconnected");
     dropPendingSettle("disconnected");
     cancelRunningPass("disconnected");
@@ -419,6 +438,11 @@ export function createCoordinator(options: CoordinatorOptions): Coordinator {
     get stopped() {
       return stopped;
     },
+    resendState() {
+      if (stopped) return;
+      lastEmitted = null;
+      emitCurrent();
+    },
     handleNativeCommand(cmd) {
       if (stopped) return;
       switch (cmd.type) {
@@ -428,6 +452,7 @@ export function createCoordinator(options: CoordinatorOptions): Coordinator {
           return;
         case "pause":
           paused = true;
+          clearResults("paused");
           dwell.cancel("paused");
           dropPendingSettle("paused");
           cancelRunningPass("paused");
@@ -484,6 +509,7 @@ export function createCoordinator(options: CoordinatorOptions): Coordinator {
     stop() {
       if (stopped) return;
       stopped = true;
+      clearResults("stopped");
       dwell.stop();
       dropPendingSettle("stopped");
       cancelRunningPass("stopped");

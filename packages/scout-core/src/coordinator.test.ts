@@ -12,11 +12,12 @@ import type { IngestReport } from "./capabilities/store.js";
 import type { CatalogResolution } from "./catalog/resolveCatalog.js";
 import type { Timers } from "./clock.js";
 import { type ActivityStore, createActivityStore } from "./activity/store.js";
-import { type CoordinatorCapabilities, type CoordinatorOptions, createCoordinator } from "./coordinator.js";
+import { type Coordinator, type CoordinatorCapabilities, type CoordinatorOptions, createCoordinator } from "./coordinator.js";
 import type { DiagnosticFields, Diagnostics } from "./diagnostics.js";
 import { DWELL_MS } from "./dwell.js";
 import type { GuardedFetchResult } from "./fetch/guardedFetch.js";
 import { createOriginFetchSession, type OriginFetchSession } from "./fetch/originSession.js";
+import { createResultRegistry } from "./results.js";
 import type { SocketClient } from "./socketServer.js";
 
 const STRIPE = "https://docs.stripe.com/payments/checkout";
@@ -1134,5 +1135,130 @@ describe("coordinator: page_text into the activity store", () => {
     const { coordinator } = setup({ onPause: () => void paused++ });
     coordinator.handleNativeCommand({ type: "pause" });
     expect(paused).toBe(1);
+  });
+});
+
+describe("coordinator results", () => {
+  const SITE = "https://docs.stripe.com";
+
+  /** A coordinator with a real result registry, wired as main.ts wires it. */
+  function withResults() {
+    let coordinator: Coordinator | null = null;
+    const results = createResultRegistry({
+      coreInstanceId: "core-test",
+      activeVisit: () => {
+        if (coordinator === null || coordinator.stopped) return null;
+        const view = coordinator.agentView();
+        return view.paused || view.currentSite === null ? null : { visitEpoch: view.currentSite.visitEpoch, origin: view.currentSite.origin };
+      },
+      isPermitted: (origin) => coordinator?.permissions.isPermitted(origin) ?? false,
+    });
+    const s = setup({ results });
+    coordinator = s.coordinator;
+    results.subscribe((e) => {
+      if (e.kind === "cleared") s.coordinator.resendState();
+    });
+    const c = s.connect();
+    s.chrome();
+    c.observe(s.focus());
+    const epoch = s.coordinator.tracker.epoch;
+    /** Begin job-1 for the current visit (if any), then publish its result for `visitEpoch`. */
+    const publish = (visitEpoch = epoch) => {
+      results.beginJob("job-1");
+      return results.publish({
+        coreInstanceId: "core-test",
+        visitEpoch,
+        origin: SITE,
+        jobId: "job-1",
+        status: "ok",
+        items: [{ candidateId: "c1", title: "Checkout", reason: "r", href: `${SITE}/payments/checkout`, hostname: "docs.stripe.com" }],
+      });
+    };
+    return { ...s, c, results, epoch, publish };
+  }
+
+  it("a published result is held until its visit changes, then cleared and the new state sent", () => {
+    const s = withResults();
+    expect(s.publish()).toEqual({ ok: true });
+    s.c.observe(s.focus({ url: "https://www.peakdesign.com/" }));
+    expect(s.results.current()).toBeNull();
+    expect(s.panel.at(-1)).toMatchObject({ type: "state", status: "idle", visitEpoch: s.epoch + 1 });
+    // The late job for the old visit is refused.
+    expect(s.publish(s.epoch)).toEqual({ ok: false, code: "stale_visit" });
+  });
+
+  it("pause clears the result and refuses publishing until resumed", () => {
+    const s = withResults();
+    s.publish();
+    s.coordinator.handleNativeCommand({ type: "pause" });
+    expect(s.results.current()).toBeNull();
+    expect(s.panel.at(-1)).toEqual({ type: "state", status: "paused" });
+    expect(s.publish()).toEqual({ ok: false, code: "stale_visit" });
+    s.coordinator.handleNativeCommand({ type: "resume" });
+    expect(s.publish()).toEqual({ ok: true });
+  });
+
+  it("losing the origin's grant clears the result", () => {
+    const s = withResults();
+    s.publish();
+    s.grant(s.c, ["https://github.com/*"]);
+    expect(s.results.current()).toBeNull();
+    expect(s.panel.at(-1)).toMatchObject({ type: "state", status: "idle", permitted: false });
+  });
+
+  it("a disconnect clears the result and ends with the disconnected state", () => {
+    const s = withResults();
+    s.publish();
+    s.c.disconnect();
+    expect(s.results.current()).toBeNull();
+    expect(s.panel.at(-1)).toEqual({ type: "state", status: "disconnected" });
+  });
+
+  it("a disconnect sends exactly the disconnected state: no idle for the old visit first", () => {
+    const s = withResults();
+    s.publish();
+    const before = s.panel.length;
+    s.c.disconnect();
+    expect(s.panel.slice(before)).toEqual([{ type: "state", status: "disconnected" }]);
+  });
+
+  it("the coordinator's clears are silent: each sends only its own state frame", () => {
+    const s = withResults();
+    s.publish();
+    let before = s.panel.length;
+    s.coordinator.handleNativeCommand({ type: "pause" });
+    expect(s.panel.slice(before)).toEqual([{ type: "state", status: "paused" }]);
+    s.coordinator.handleNativeCommand({ type: "resume" });
+    s.publish(s.coordinator.tracker.epoch);
+    before = s.panel.length;
+    s.c.observe(s.focus({ url: "https://www.peakdesign.com/" }));
+    expect(s.panel.slice(before)).toEqual([
+      expect.objectContaining({ type: "state", status: "idle", visitEpoch: s.coordinator.tracker.epoch }),
+    ]);
+  });
+
+  it("a replacing sensor clears the result", () => {
+    const s = withResults();
+    s.publish();
+    s.attach(2);
+    expect(s.results.current()).toBeNull();
+  });
+
+  it("stop clears the result and sends nothing more", () => {
+    const s = withResults();
+    s.publish();
+    const sent = s.panel.length;
+    s.coordinator.stop();
+    expect(s.results.current()).toBeNull();
+    expect(s.panel).toHaveLength(sent);
+  });
+
+  it("resendState sends the current state again even when unchanged", () => {
+    const s = withResults();
+    const last = s.panel.at(-1);
+    const count = s.panel.length;
+    s.coordinator.resendState();
+    expect(s.panel).toHaveLength(count + 1);
+    expect(s.panel.at(-1)).toEqual(last);
   });
 });

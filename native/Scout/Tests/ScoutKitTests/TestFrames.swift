@@ -41,6 +41,13 @@ enum TestFrames {
         return try JSONDecoder().decode(Capabilities.self, from: JSONSerialization.data(withJSONObject: frame))
     }
 
+    /// A `results` frame for core instance "core-1" (TestFrames.capabilities' default).
+    static func results(
+        epoch: Int, job: String = "job-1", instance: String = "core-1", origin: String = F.origin, _ outcome: ResultsOutcome
+    ) -> PanelState {
+        .results(ResultsFrame(coreInstanceId: instance, visitEpoch: epoch, origin: origin, jobId: job, outcome: outcome))
+    }
+
     static let descriptor = PreviewDescriptor(kind: .llmsTxt, siteOrigin: F.origin, sourceUrl: F.origin + "/llms.txt")
 
     static func sha256(_ data: Data) -> String {

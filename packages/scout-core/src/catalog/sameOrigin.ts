@@ -46,3 +46,24 @@ export function sameOriginAbsoluteHttpsUrl(raw: string, origin: string): URL | n
     return null;
   }
 }
+
+/**
+ * `href` as a URL Scout may open for `origin`, or null: the same rule as above (https, no
+ * credentials, the same origin, at most `MAX_URL_LENGTH` characters), plus no explicit port (so
+ * only origins on the default port qualify) and `href` exactly as the WHATWG parser writes it.
+ * No trimming, no base: whitespace, backslashes, upper-case hosts, and any other form the parser
+ * rewrites (and another parser might read differently) return null. Any path, query, or
+ * fragment on the origin passes. A `humanHref` from verifyTargets.ts passes, because it is a
+ * parsed URL's `href`. Scout's window opens only targets that pass this (results.ts).
+ */
+export function exactSameOriginHttpsUrl(href: string, origin: string): URL | null {
+  if (typeof href !== "string" || href.length > MAX_URL_LENGTH) return null;
+  let url: URL;
+  try {
+    url = new URL(href);
+  } catch {
+    return null;
+  }
+  if (url.port !== "" || url.href !== href) return null;
+  return check(url, origin);
+}

@@ -2,7 +2,7 @@ import Foundation
 
 /// The sections of the expanded panel.
 public enum PanelSection: String, Sendable, Equatable, CaseIterable {
-    case offers, library, preview, settings, activity, problems
+    case results, offers, library, preview, settings, activity, problems
 
     public var title: String { rawValue.capitalized }
 }
@@ -21,6 +21,8 @@ public enum Problem: Sendable, Equatable {
     case conflict(CapabilityConflict)
     case command(CommandTracker.Record)
     case preview(PreviewKey, PreviewAssembler.Failure)
+    /// The core answered a link click with a target this app would not open, or Chrome did not open it.
+    case link(commandId: String, LinkOpener.Refusal)
 }
 
 /// Everything Scout's window shows: sidecar and core status, results, the capability view,
@@ -36,12 +38,13 @@ public struct PanelModel: Sendable, Equatable {
     public private(set) var core: CoreStatus?
     public private(set) var detail: String?
     public private(set) var permitted: Bool?
-    public private(set) var results: ResultsOutcome?
+    /// The current visit's results and the links clicked on them.
+    public private(set) var resultsModel = ResultsModel()
     public private(set) var capabilities = CapabilityModel()
     public private(set) var commands: CommandTracker
 
     public private(set) var expanded = false
-    public private(set) var section: PanelSection = .offers
+    public private(set) var section: PanelSection = .results
     /// The preview in the Preview section; changes only by a user action.
     public private(set) var shownPreview: PreviewKey?
     public private(set) var previews: [PreviewKey: PreviewAssembler] = [:]
@@ -70,7 +73,7 @@ public struct PanelModel: Sendable, Equatable {
             core = nil
             detail = nil
             permitted = nil
-            results = nil
+            resultsModel.coreStopped()
             capabilities.reset()
             decidedSinceFrame = []
             revokedSinceFrame = []
@@ -82,6 +85,7 @@ public struct PanelModel: Sendable, Equatable {
 
     /// A new core process: re-send pending mutations under their IDs and reload loading previews.
     private mutating func coreRestarted() -> [NativeCommand] {
+        resultsModel.reset()
         var out = commands.coreRestarted()
         for key in previewOrder where previews[key]?.phase == .loading {
             out += startPreview(key).map { [$0] } ?? []
@@ -92,12 +96,14 @@ public struct PanelModel: Sendable, Equatable {
     /// Returns commands to send: the next `preview` chunk request, if a chunk asks for one.
     public mutating func apply(_ state: PanelState) -> [NativeCommand] {
         switch state {
-        case let .state(status, _, detail, permitted):
+        case let .state(status, epoch, detail, permitted, jobId):
+            resultsModel.applyState(status, epoch: epoch, jobId: jobId)
             core = status
             self.detail = detail
             self.permitted = permitted
-        case let .results(_, outcome):
-            results = outcome
+        case let .results(frame):
+            guard sidecar == .running else { break }
+            resultsModel.applyResults(frame, coreInstanceId: capabilities.capabilities?.coreInstanceId, core: core)
         case let .capabilities(frame):
             let previous = capabilities.capabilities?.coreInstanceId
             if capabilities.apply(frame) {
@@ -110,8 +116,11 @@ public struct PanelModel: Sendable, Equatable {
         case let .preview(chunk):
             return receive(chunk)
         case let .ack(ack):
+            let wasPending = commands.record(ack.commandId)?.state == .pending
             guard let record = commands.apply(ack) else { break }
             switch (record.request, ack) {
+            case let (.openLink, .ok(id, _, _, target)):
+                resultsModel.linkAcked(commandId: id, target: target, wasPending: wasPending)
             case let (.preview(rid, version, _), .failed(_, code, _)):
                 let key = PreviewKey(resourceId: rid, version: version)
                 if awaiting[key] == ack.commandId {
@@ -173,6 +182,43 @@ public struct PanelModel: Sendable, Equatable {
         let command = commands.issue(next)
         awaiting[key] = command.commandId
         return [command]
+    }
+
+    // MARK: Results
+
+    /// The visit the latest `state` frame named.
+    public var visitEpoch: Int? { resultsModel.visitEpoch }
+
+    /// The current visit's results; reset by every `state` frame that is not `working` for the
+    /// same visit and job, and by a core restart.
+    public var results: ResultsPhase? { resultsModel.phase }
+
+    public var resultsDisplay: ResultsDisplay {
+        guard sidecar == .running else { return .none }
+        return resultsModel.display(core: core)
+    }
+
+    /// The user clicked a shown result: ask the core for its target with the identity shown.
+    /// Nothing opens until the core's ack authorizes a target and it passes `LinkOpener`; a late
+    /// ok ack after the user navigated still opens the link clicked (`ResultsModel.openResult`).
+    public mutating func openResult(_ candidateId: String) -> NativeCommand? {
+        guard sidecar == .running else { return nil }
+        return resultsModel.openResult(candidateId, commands: &commands)
+    }
+
+    /// The newest click on `candidateId` of the results shown.
+    public func linkRecord(_ candidateId: String) -> CommandTracker.Record? {
+        resultsModel.linkRecord(candidateId, commands: commands)
+    }
+
+    /// Links to open now, each once. Only acks for the user's clicks put links here.
+    public mutating func takeLinksToOpen() -> [LinkOpenRequest] {
+        resultsModel.takeLinksToOpen()
+    }
+
+    /// The app did not open a link (its check, or the open itself, failed); Problems lists why.
+    public mutating func linkRefused(commandId: String, _ refusal: LinkOpener.Refusal) {
+        resultsModel.linkRefused(commandId: commandId, refusal)
     }
 
     // MARK: User actions
@@ -294,15 +340,17 @@ public struct PanelModel: Sendable, Equatable {
     /// Whether `retry(commandId)` would send something.
     public func canRetry(_ commandId: String) -> Bool { commands.canRetry(commandId) }
 
-    /// Re-sends a failed or unsent decision or refresh with its own ID. Toggles are not retried.
+    /// Re-sends a failed or unsent decision or refresh with its own ID. Toggles and link clicks
+    /// are not retried.
     public mutating func retry(_ commandId: String) -> NativeCommand? {
         guard let command = commands.retry(commandId) else { return nil }
         dismissed.remove(commandId)
         return command
     }
 
-    /// Removes a failed command from Problems.
+    /// Removes a failed command or a refused link from Problems.
     public mutating func dismiss(_ commandId: String) {
+        resultsModel.dismissLink(commandId)
         guard case .failed? = commands.record(commandId)?.state else { return }
         dismissed.insert(commandId)
         // Forget dismissals of commands the tracker no longer holds.
@@ -380,10 +428,10 @@ public struct PanelModel: Sendable, Equatable {
         if let host = currentHost, !currentOffers.isEmpty {
             return .offers(count: currentOffers.count, host: host)
         }
-        switch results {
-        case let .ok(items): return .results(count: items.count)
-        case let .unavailable(reason), let .error(reason): return .error(reason)
-        case .empty, nil: return .nothing
+        switch resultsDisplay {
+        case let .ready(items): return .results(count: items.count)
+        case .unavailable, .timeout, .error: return .error(resultsDisplay.summary ?? "")
+        case .none, .paused, .disconnected, .working, .empty, .cancelled: return .nothing
         }
     }
 
@@ -400,6 +448,7 @@ public struct PanelModel: Sendable, Equatable {
             return $0.request.isMutation
         }
             .reversed().map(Problem.command)
+        out += resultsModel.linkRefusals.reversed().map { Problem.link(commandId: $0.commandId, $0.refusal) }
         for key in previewOrder.reversed() {
             if case let .failed(failure) = previews[key]?.phase { out.append(.preview(key, failure)) }
         }
@@ -419,11 +468,26 @@ public struct PanelModel: Sendable, Equatable {
         return parts.joined(separator: " · ")
     }
 
-    /// One line for the compact panel: status, current host, offer count.
+    /// One line for the compact panel: status, current host, offer count, results.
     public var compactLine: String {
+        var parts = [statusLine]
         let count = currentOffers.count
-        guard count > 0 else { return statusLine }
-        return statusLine + " · " + (count == 1 ? "1 offer" : "\(count) offers")
+        if count > 0 { parts.append(count == 1 ? "1 offer" : "\(count) offers") }
+        if let summary = resultsSummary { parts.append(summary) }
+        return parts.joined(separator: " · ")
+    }
+
+    /// The compact panel's label, which shows the offer count as a badge beside it.
+    public var headerLine: String {
+        [statusLine, resultsSummary].compactMap { $0 }.joined(separator: " · ")
+    }
+
+    /// The results part of the compact line; paused and disconnected are already the status.
+    private var resultsSummary: String? {
+        switch resultsDisplay {
+        case .paused, .disconnected: return nil
+        default: return resultsDisplay.summary
+        }
     }
 
     static var stoppedText: String {

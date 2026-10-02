@@ -80,9 +80,15 @@ describe("panel frames (core -> app)", () => {
     expect(PanelStateSchema.safeParse({ ...capabilities, library: [{ ...entry, state: "pending_only" }] }).success).toBe(false);
   });
 
-  it("still parses the old frames", () => {
+  it("still parses the old state frames", () => {
     expect(PanelStateSchema.safeParse({ type: "state", status: "disconnected" }).success).toBe(true);
-    expect(PanelStateSchema.safeParse({ type: "results", visitEpoch: 1, status: "empty", items: [] }).success).toBe(true);
+    expect(PanelStateSchema.safeParse({ type: "state", status: "working", visitEpoch: 3 }).success).toBe(true);
+  });
+
+  it("carries a job id on working states only", () => {
+    expect(PanelStateSchema.safeParse({ type: "state", status: "working", visitEpoch: 3, jobId: "job_1" }).success).toBe(true);
+    expect(PanelStateSchema.safeParse({ type: "state", status: "idle", visitEpoch: 3, jobId: "job_1" }).success).toBe(false);
+    expect(PanelStateSchema.safeParse({ type: "state", status: "working", visitEpoch: 3, jobId: "has space" }).success).toBe(false);
   });
 
   it("rejects bad shapes", () => {
@@ -109,6 +115,58 @@ describe("panel frames (core -> app)", () => {
   });
 });
 
+describe("results frames", () => {
+  const id = { type: "results", coreInstanceId: "0123456789abcdef0123456789abcdef", visitEpoch: 4, origin: "https://docs.example.com", jobId: "job_1" };
+  const item = { candidateId: "c1a", title: "Webhooks", reason: "You were reading about retries.", hostname: "docs.example.com" };
+
+  it("parses every status", () => {
+    const frames = [
+      { ...id, status: "ok", items: [item, { ...item, candidateId: "c2" }, { ...item, candidateId: "c3" }] },
+      { ...id, status: "empty" },
+      { ...id, status: "unavailable", reason: "no_time_left" },
+      { ...id, status: "error", reason: "timeout" },
+      { ...id, status: "error", reason: "invalid_output" },
+      { ...id, status: "cancelled", reason: "visit_changed" },
+    ];
+    for (const f of frames) expect(PanelStateSchema.parse(f)).toEqual(f);
+  });
+
+  it("never carries a URL", () => {
+    expect(PanelStateSchema.safeParse({ ...id, status: "ok", items: [{ ...item, href: "https://docs.example.com/webhooks" }] }).success).toBe(false);
+    expect(PanelStateSchema.safeParse({ ...id, status: "empty", href: "https://docs.example.com/" }).success).toBe(false);
+  });
+
+  it("rejects bad shapes", () => {
+    const bad = [
+      { ...id, status: "ok", items: [] },
+      { ...id, status: "ok", items: [item, { ...item, candidateId: "c2" }, { ...item, candidateId: "c3" }, { ...item, candidateId: "c4" }] },
+      { ...id, status: "ok", items: [item, item] },
+      { ...id, status: "ok", items: [{ ...item, candidateId: "x1" }] },
+      { ...id, status: "ok", items: [{ ...item, reason: "" }] },
+      { ...id, status: "ok", items: [{ ...item, reason: "r".repeat(141) }] },
+      { ...id, status: "ok", items: [{ ...item, title: "t".repeat(161) }] },
+      { ...id, status: "empty", items: [] },
+      { ...id, status: "unavailable", reason: "service down" },
+      { ...id, status: "error", reason: "no_time_left" },
+      { ...id, status: "cancelled", reason: "timeout" },
+      { ...id, status: "error" },
+      { ...id, status: "nothing" },
+      { ...id, status: "empty", coreInstanceId: undefined },
+      { ...id, status: "empty", jobId: undefined },
+      { ...id, status: "empty", origin: "https://docs.example.com/path" },
+      { ...id, status: "empty", origin: "http://docs.example.com" },
+      { ...id, status: "empty", visitEpoch: -1 },
+    ];
+    for (const f of bad) expect(PanelStateSchema.safeParse(f).success, JSON.stringify(f)).toBe(false);
+  });
+
+  it("acks an open_link with its target only as an optional field", () => {
+    expect(PanelStateSchema.safeParse({ type: "ack", commandId: "a1", ok: true, revision: 0, approvalRevision: 2, target: { href: "https://docs.example.com/webhooks" } }).success).toBe(true);
+    expect(PanelStateSchema.safeParse({ type: "ack", commandId: "a1", ok: true, revision: 0, approvalRevision: 2, target: {} }).success).toBe(false);
+    expect(PanelStateSchema.safeParse({ type: "ack", commandId: "a1", ok: true, revision: 0, approvalRevision: 2, target: { href: "" } }).success).toBe(false);
+  });
+});
+
 describe("native commands (app -> core)", () => {
   const commands = [
     { type: "preview", commandId: "c1", resourceId: RES, version: HASH },
@@ -119,6 +177,7 @@ describe("native commands (app -> core)", () => {
     { type: "set_auto_acquire", commandId: "c5", origin: "https://docs.example.com", enabled: true, expectedEnabled: false, acknowledgeRisk: true },
     { type: "set_agent_browser_context", commandId: "c6", enabled: false, expectedEnabled: true },
     { type: "refresh_capabilities", commandId: "c7" },
+    { type: "open_link", commandId: "c8", coreInstanceId: "core-1", visitEpoch: 4, jobId: "job_1", candidateId: "c1a" },
   ];
 
   it("parses every new command", () => {
@@ -142,6 +201,11 @@ describe("native commands (app -> core)", () => {
       { type: "set_agent_browser_context", commandId: "c", enabled: true },
       { type: "preview", commandId: "c", resourceId: RES, version: HASH, cursor: "x".repeat(65) },
       { type: "refresh_capabilities", commandId: "c", config: {} },
+      { type: "open_link", commandId: "c", coreInstanceId: "core-1", visitEpoch: 4, jobId: "job_1", candidateId: "c1", href: "https://x.example/" },
+      { type: "open_link", commandId: "c", coreInstanceId: "core-1", visitEpoch: 4, jobId: "job_1" },
+      { type: "open_link", commandId: "c", coreInstanceId: "core-1", visitEpoch: 4, jobId: "job_1", candidateId: "https://x.example/" },
+      { type: "open_link", commandId: "c", coreInstanceId: "core-1", visitEpoch: -1, jobId: "job_1", candidateId: "c1" },
+      { type: "open_link", commandId: "c", visitEpoch: 4, jobId: "job_1", candidateId: "c1" },
     ];
     for (const c of bad) expect(NativeCommandSchema.safeParse(c).success).toBe(false);
   });
@@ -161,6 +225,7 @@ describe("native commands (app -> core)", () => {
       { type: "set_auto_acquire", commandId: longest, origin, enabled: false, expectedEnabled: false, acknowledgeRisk: false },
       { type: "set_agent_browser_context", commandId: longest, enabled: false, expectedEnabled: false },
       { type: "refresh_capabilities", commandId: longest },
+      { type: "open_link", commandId: longest, coreInstanceId: longest, visitEpoch: maxInt, jobId: longest, candidateId: `c${"z".repeat(31)}` },
     ];
     expect(origin.length).toBe(HOST_ORIGIN_MAX_CHARS);
     for (const c of largest) {
