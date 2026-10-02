@@ -96,13 +96,50 @@ describe("activity store", () => {
     expect(store.accept({ ...first, text: "again" }, "c1").accepted).toBe(true);
   });
 
-  it("treats identical URL, title and text under a new seq as a duplicate: no change, no refresh", () => {
+  it("treats identical URL, title and text under a new seq as a duplicate that refreshes the observed time; the newest entry keeps the revision", () => {
     const { clock, store, obs } = setup();
     store.accept(obs(), "c1");
-    const before = store.entries()[0]!.observedAt;
     clock.t += 1000;
-    expect(store.accept(obs({ url: "https://github.com/o/r/issues/1#x" }), "c1")).toEqual({ accepted: false, duplicate: true, revision: 1 });
-    expect(store.entries()[0]!.observedAt).toBe(before);
+    expect(store.accept(obs({ url: "https://github.com/o/r/issues/1#x" }), "c2")).toEqual({ accepted: false, duplicate: true, revision: 1 });
+    expect(store.entries()[0]!.observedAt).toBe(clock.t);
+    expect(store.revision).toBe(1);
+  });
+
+  it("re-reading an older issue moves it to the front, keeps it alive past its first TTL, and is a change", () => {
+    const { clock, store, obs } = setup();
+    store.accept(obs({ url: "https://github.com/o/r/issues/1" }), "c1");
+    clock.t += 60_000;
+    store.accept(obs({ url: "https://github.com/o/r/issues/2" }), "c1");
+    clock.t += 60_000;
+    expect(store.accept(obs({ url: "https://github.com/o/r/issues/1" }), "c1")).toEqual({ accepted: false, duplicate: true, revision: 3 });
+    expect(store.entries().map((e) => [e.url, e.observedAt, e.revision])).toEqual([
+      ["https://github.com/o/r/issues/1", clock.t, 3],
+      ["https://github.com/o/r/issues/2", clock.t - 60_000, 2],
+    ]);
+    // Past issue 1's first TTL, but not its refreshed one.
+    clock.t += ACTIVITY_TTL_MS - 60_000;
+    expect(store.entries().map((e) => e.url)).toEqual(["https://github.com/o/r/issues/1"]);
+  });
+
+  it("a repeated (connection, seq) with the same content is a pure no-op: no refresh", () => {
+    const { clock, store, obs } = setup();
+    const first = obs();
+    store.accept(first, "c1");
+    clock.t += 1000;
+    expect(store.accept(first, "c1")).toEqual({ accepted: false, duplicate: true, revision: 1 });
+    expect(store.entries()[0]!.observedAt).toBe(clock.t - 1000);
+  });
+
+  it("view() returns the entries with the revision they belong to, after one prune", () => {
+    const { clock, store, obs } = setup();
+    store.accept(obs({ url: "https://github.com/o/r/issues/1" }), "c1");
+    clock.t += 1;
+    store.accept(obs({ url: "https://github.com/o/r/issues/2" }), "c1");
+    clock.t += ACTIVITY_TTL_MS - 1;
+    const view = store.view();
+    expect(view.entries.map((e) => e.url)).toEqual(["https://github.com/o/r/issues/2"]);
+    expect(view.revision).toBe(3);
+    expect(Object.isFrozen(view.entries)).toBe(true);
   });
 
   it("replaces a stored issue on new content, moving it to the front with a fresh observed time", () => {

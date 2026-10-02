@@ -5,18 +5,27 @@
 // fragment dropped), never persisted.
 //
 // `accept` is synchronous, so the coordinator can acknowledge an observation right after the
-// store took it. A repeat is still acknowledged but changes nothing: the same
-// `(connectionId, seq)` (a host re-sending after a reconnect) or the same URL, title and text
-// already stored. A new title or text for a stored issue replaces its entry and refreshes its
-// observed time. `revision` rises with every change to what `entries()` returns (accept,
-// expiry, clear); it is Scout's context revision for visits and pins live paging cursors.
+// store took it. Two kinds of repeat are acknowledged without new content: the same
+// `(connectionId, seq)` (the host re-sending on the same connection) changes nothing at all;
+// the same URL, title and text already stored (the same issue read again, or re-captured
+// after a reconnect, which starts a new seq space) refreshes the entry's observed time and
+// moves it to the front, so an issue the user keeps returning to stays alive. A new title
+// or text for a stored issue replaces its entry, also at the front with a fresh observed time.
+// `revision` rises with every change to the order or content of what `entries()` returns
+// (new content, a re-read that reorders, expiry, clear); a re-read of the newest entry only
+// refreshes its observed time and leaves the revision alone. It is Scout's context revision
+// for visits and pins live paging cursors; `view()` reads the entries and their revision
+// after one prune, so the two always describe the same list.
 
 import { PAGE_TEXT_BODY_MAX_BYTES, PAGE_TEXT_TITLE_MAX_CHARS, type PageTextObservation } from "@scout/contracts";
 import type { Clock } from "../clock.js";
 
 export const ACTIVITY_MAX_ENTRIES = 10;
 export const ACTIVITY_TTL_MS = 15 * 60 * 1000;
-/** How many `(connectionId, seq)` pairs are remembered for reconnect dedupe. */
+/**
+ * How many `(connectionId, seq)` pairs are remembered, to dedupe re-sends on the same
+ * connection. A reconnect is a new connection id; content dedupe covers that case.
+ */
 export const ACTIVITY_SEEN_SEQ_MAX = 64;
 
 export const GITHUB_ISSUE_ORIGIN = "https://github.com";
@@ -31,14 +40,14 @@ export interface StoredActivity {
   readonly title: string;
   readonly text: string;
   readonly textTruncated: boolean;
-  /** The store revision that wrote this entry. */
+  /** The store revision that last wrote or moved this entry. */
   readonly revision: number;
 }
 
 export type ActivityAcceptResult =
   /** Stored; acknowledge it. */
   | { accepted: true; duplicate: false; revision: number }
-  /** Already stored or already seen; acknowledge it, nothing changed. */
+  /** Already seen, or the same content already stored (its observed time refreshed); acknowledge it. */
   | { accepted: false; duplicate: true; revision: number }
   /** Not an issue page the store can hold; do not acknowledge it. */
   | { accepted: false; duplicate: false; revision: number };
@@ -47,8 +56,10 @@ export interface ActivityStore {
   accept(obs: PageTextObservation, connectionId: string | number): ActivityAcceptResult;
   /** Unexpired entries, newest first, as frozen copies. Prunes first. */
   entries(): readonly StoredActivity[];
-  /** Rises on every change to `entries()`; prunes first. */
+  /** Rises on every change to the order or content of `entries()`; prunes first. */
   readonly revision: number;
+  /** The entries and the revision they belong to, read after a single prune. */
+  view(): { entries: readonly StoredActivity[]; revision: number };
   clear(): void;
   /** Drop expired entries. */
   prune(): void;
@@ -86,6 +97,8 @@ export function createActivityStore(options: { clock: Clock }): ActivityStore {
     if (seen.length > ACTIVITY_SEEN_SEQ_MAX) seen.splice(0, seen.length - ACTIVITY_SEEN_SEQ_MAX);
   };
 
+  const snapshot = (): readonly StoredActivity[] => Object.freeze(list.map((e) => Object.freeze({ ...e })));
+
   return {
     accept(obs, connectionId) {
       prune();
@@ -97,7 +110,14 @@ export function createActivityStore(options: { clock: Clock }): ActivityStore {
       const title = obs.title.slice(0, PAGE_TEXT_TITLE_MAX_CHARS);
       const body = cutUtf8(obs.text, PAGE_TEXT_BODY_MAX_BYTES);
       const existing = list.find((e) => e.url === url);
-      if (existing && existing.title === title && existing.text === body.text) return { accepted: false, duplicate: true, revision };
+      if (existing && existing.title === title && existing.text === body.text) {
+        // Read again: keep it alive and newest. Only a change of order is a change.
+        const moved = list[0] !== existing;
+        if (moved) revision++;
+        const refreshed: StoredActivity = Object.freeze({ ...existing, observedAt: clock.now(), revision: moved ? revision : existing.revision });
+        list = [refreshed, ...list.filter((e) => e !== existing)];
+        return { accepted: false, duplicate: true, revision };
+      }
       revision++;
       const entry: StoredActivity = Object.freeze({
         origin: GITHUB_ISSUE_ORIGIN,
@@ -114,7 +134,11 @@ export function createActivityStore(options: { clock: Clock }): ActivityStore {
     },
     entries() {
       prune();
-      return Object.freeze(list.map((e) => Object.freeze({ ...e })));
+      return snapshot();
+    },
+    view() {
+      prune();
+      return { entries: snapshot(), revision };
     },
     get revision() {
       prune();
