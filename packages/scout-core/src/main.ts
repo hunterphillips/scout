@@ -92,6 +92,8 @@ export interface StdioDeps {
   exit: (code: number) => void;
   clock?: Clock;
   diagnostics?: Diagnostics;
+  /** Tests only: called once agent.sock is listening, with what a test drives job snapshots through. */
+  onAgentStarted?: (agent: { store: CapabilityStore; snapshots: SnapshotRegistry }) => void;
 }
 
 export interface StdioCore {
@@ -318,6 +320,7 @@ export async function runStdio(deps: StdioDeps): Promise<StdioCore> {
     } catch (e) {
       throw new StartError(`agent-${e instanceof SocketServerError ? e.code : "listen-failed"}`);
     }
+    deps.onAgentStarted?.({ store, snapshots: registry });
   };
 
   const starting = startSockets();

@@ -9,10 +9,11 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
 import { encodeFrame, FrameDecoder, MAX_FRAME_FROM_CHROME } from "@scout/contracts/frame";
-import { NATIVE_COMMAND_MAX_BYTES } from "@scout/contracts";
+import { AGENT_PROTOCOL_VERSION, NATIVE_COMMAND_MAX_BYTES } from "@scout/contracts";
 import { createSocketBackend } from "@scout/scout-mcp/client";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { createCapabilityStore } from "./capabilities/store.js";
+import type { SnapshotRegistry } from "./activity/snapshots.js";
+import { type CapabilityStore, createCapabilityStore } from "./capabilities/store.js";
 import { DEFAULT_DESTINATIONS, readConfig, readDestinations } from "./config.js";
 import type { Diagnostics } from "./diagnostics.js";
 import { DWELL_MS } from "./dwell.js";
@@ -373,8 +374,16 @@ describe("runStdio (in process)", () => {
     const logs: string[] = [];
     const exits: Array<{ code: number; socketLeft: boolean }> = [];
     const events: string[] = [];
-    const diagnostics: Diagnostics = { failures: 0, event: (name) => void events.push(name) };
+    const fields: Array<{ name: string; fields: Record<string, unknown> }> = [];
+    const diagnostics: Diagnostics = {
+      failures: 0,
+      event: (name, f = {}) => {
+        events.push(name);
+        fields.push({ name, fields: f });
+      },
+    };
     const socketPath = join(home, "run", "core.sock");
+    let agent: { store: CapabilityStore; snapshots: SnapshotRegistry } | null = null;
     const run = () =>
       runStdio({
         stdin,
@@ -383,10 +392,118 @@ describe("runStdio (in process)", () => {
         log: (l) => void logs.push(l),
         exit: (code) => void exits.push({ code, socketLeft: existsSync(socketPath) }),
         diagnostics,
+        onAgentStarted: (a) => void (agent = a),
       });
-    return { stdin, stdout, logs, exits, socketPath, run, events };
+    return {
+      stdin,
+      stdout,
+      logs,
+      exits,
+      socketPath,
+      run,
+      events,
+      fields,
+      get agent() {
+        return agent!;
+      },
+    };
   };
   const settle = () => new Promise((r) => setTimeout(r, 50));
+
+  /** A job snapshot over the store's approvals, and a production adapter client holding its token. */
+  const startJob = (h: ReturnType<typeof harness>, jobId = "job-1") => {
+    const { token } = h.agent.snapshots.take({
+      jobId, origin: "https://docs.example.com", visitEpoch: 1, activity: [], candidates: [], catalogHash: "cat",
+      permissionsRevision: 1, profileFingerprint: "fp", deadline: Date.now() + 60_000,
+    });
+    const tokenFile = join(home, `${jobId}-token`);
+    writeFileSync(tokenFile, `${token}\n`, { mode: 0o600 });
+    const backend = createSocketBackend({ socketPath: join(home, "run", "agent.sock"), tokenFile, timeoutMs: 2_000 });
+    let n = 0;
+    const list = () => backend.call({ protocol: AGENT_PROTOCOL_VERSION, requestId: `j${++n}`, method: "list_resources", params: {} } as never);
+    return { backend, list };
+  };
+
+  /** Ingest and approve `text` at `path` (a new version of the resource there), fetched at `fetchedAt`. */
+  async function approvedVersion(store: CapabilityStore, path: string, text: string, fetchedAt: number) {
+    const origin = "https://docs.example.com";
+    const sourceUrl = `${origin}${path}`;
+    const kind = path === "/llms.txt" ? ("llms_txt" as const) : ("agents_md" as const);
+    const sha256 = createHash("sha256").update(text, "utf8").digest("hex");
+    const report = await store.ingest(
+      {
+        origin, checkedAt: fetchedAt, robots: "not_fetched",
+        items: [{ kind, sourceUrl, status: "found", source: "network", resource: { kind, siteOrigin: origin, publisherOrigin: origin, sourceUrl, finalUrl: sourceUrl, text, sha256, byteLength: Buffer.byteLength(text), fetchedAt } }],
+        externalReferences: [], skillsOverCap: 0, acceptedBytes: 0, stats: { requests: 0, refused: 0, ms: 0 },
+      },
+      { chromePermitted: false },
+    );
+    const { resourceId: id, version } = report.results[0]!;
+    await store.approve({ resourceId: id, version, expectedRevision: store.getResource(id)!.revision });
+    return { id, version };
+  }
+
+  it("pause refuses a connected job's next call and blocks new snapshots", async () => {
+    const h = harness();
+    await h.run();
+    const job = startJob(h);
+    try {
+      expect(await job.list()).toMatchObject({ status: "ok" });
+      h.stdin.write(`${JSON.stringify({ type: "pause" })}\n`);
+      await until(() => h.events.includes("paused"));
+      expect(await job.list()).toMatchObject({ status: "error", error: { code: "not_granted" } });
+      expect(h.agent.snapshots.size).toBe(0);
+      expect(() => startJob(h, "job-2")).toThrow("paused");
+    } finally {
+      job.backend.close();
+    }
+    h.stdin.end();
+    await until(() => h.exits.length > 0);
+  });
+
+  it("shutdown releases every snapshot before agent.sock closes its connections", async () => {
+    const h = harness();
+    await h.run();
+    const job = startJob(h);
+    try {
+      expect(await job.list()).toMatchObject({ status: "ok" });
+      h.stdin.end();
+      await until(() => h.exits.length > 0);
+    } finally {
+      job.backend.close();
+    }
+    const revoked = h.fields.findIndex((e) => e.name === "job_token_revoked" && e.fields.reason === "shutdown");
+    const closed = h.events.indexOf("agent_close");
+    expect(revoked).toBeGreaterThanOrEqual(0);
+    expect(closed).toBeGreaterThan(revoked);
+    expect(h.exits.map((e) => e.code)).toEqual([0]);
+  });
+
+  it("a store revocation reaches a connected job through onRevoked and resourceRevoked: refused, and its pins released", async () => {
+    const h = harness();
+    await h.run();
+    const { store, snapshots } = h.agent;
+    const kept = await approvedVersion(store, "/llms.txt", "guide v1\n", 1);
+    const revoked = await approvedVersion(store, "/AGENTS.md", "agents\n", 1);
+    const job = startJob(h);
+    try {
+      // Newer approvals than collection retains: only the snapshot's pin keeps the first version.
+      for (let i = 2; i <= 8; i++) await approvedVersion(store, "/llms.txt", `guide v${i}\n`, i);
+      expect(await job.list()).toMatchObject({ status: "ok" });
+      await store.collectGarbage();
+      expect(store.resolveRead(kept.id, kept.version).ok).toBe(true);
+
+      await store.revoke(revoked.id);
+      expect(await job.list()).toMatchObject({ status: "error", error: { code: "not_granted" } });
+      expect(snapshots.size).toBe(0);
+      await store.collectGarbage();
+      expect(store.resolveRead(kept.id, kept.version)).toEqual({ ok: false, code: "not_found" });
+    } finally {
+      job.backend.close();
+    }
+    h.stdin.end();
+    await until(() => h.exits.length > 0);
+  });
 
   it("a socket start failure exits once with 1 and no stdin-closed shutdown", async () => {
     mkdirSync(join(home, "run"));
