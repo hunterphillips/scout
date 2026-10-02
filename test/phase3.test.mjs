@@ -17,7 +17,7 @@
 
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { endianness, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -480,6 +480,24 @@ describe.skipIf(!BUILT)("Phase 3 verification e2e: B10 outcomes and B11 click au
     ]);
     expect(new Set(byClass.values()).size).toBe(byClass.size);
     expect(shown.get("quota")).toBe(shown.get("auth"));
+  });
+
+  it("B8/B9 no prescribed personal paths: every job ran in its own dir under run/jobs, its argv names only that dir, and its prompt names no path or personal source", () => {
+    const jobsRoot = join(realpathSync(home), "run", "jobs");
+    const launches = b.fake().filter((l) => Array.isArray(l.argv));
+    expect(launches.length).toBeGreaterThan(5);
+    for (const l of launches) {
+      expect(l.cwd.startsWith(`${jobsRoot}/`), l.cwd).toBe(true);
+      for (const a of l.argv.filter((x) => typeof x === "string" && x.startsWith("/"))) expect(a.startsWith(`${l.cwd}/`), a).toBe(true);
+      expect(l.envKeys.some((k) => /PERSONAL_CONTEXT|SCOUT_HOME/.test(k)), l.envKeys.join(",")).toBe(false);
+      expect(l.violations).toEqual([]);
+    }
+    const prompts = b.fake().filter((l) => typeof l.prompt === "string").map((l) => l.prompt);
+    expect(prompts.length).toBeGreaterThan(5);
+    for (const p of prompts) {
+      expect(/(^|[\s"'(=])\/(Users|home|private|var|tmp|etc)\//.test(p), p.slice(0, 200)).toBe(false);
+      expect(/personal-context|second-brain|PERSONAL_CONTEXT|~\//i.test(p)).toBe(false);
+    }
   });
 
   it("no fixture text (issue, candidates, reasons, links) in the diagnostics file or the core's stderr; DNS only for the test site", () => {
