@@ -20,6 +20,7 @@ import {
   type SpawnFn,
 } from "./claudeJob.js";
 import { FORWARD_KEYS, runDirectPreflight } from "./launchProfile.js";
+import { createPreflightFacade, type PreflightReportLike } from "./preflightWorker.js";
 import { DEFAULT_AGENT_MODEL, type AgentProfile } from "./profile.js";
 import { markerInstructionText, newInstructionMarker } from "./prompt.js";
 import { fakeBackend, selection, type FakeBackendDef } from "./testing/fakeBackend.js";
@@ -350,6 +351,45 @@ describe("claude job: the init event and the stream stop a misconfigured job", (
     const next = await e.adapter.run(request(e, { requestId: "job-2" }), { toolSurface: surface(e) });
     expect(next.result).toMatchObject({ status: "error", reason: "preflight_failed" });
     expect(e.spawnCalls).toBe(spawnsBefore);
+  });
+
+  it("a preflight that could not read the CLI version is not sticky: the job waiting on it is preflight_failed, the next job re-runs it and a subscription verdict lets it run", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const reports: PreflightReportLike[] = [
+      { verdict: "ambiguous", reasons: ["cli: version unreadable"] },
+      { verdict: "subscription", reasons: [], cliVersion: VERIFIED_CLI_VERSION },
+    ];
+    let runs = 0;
+    // The real facade (it never caches a report without a version) over a scripted run.
+    const facade = createPreflightFacade({
+      run: async () => {
+        const n = runs++;
+        if (n === 0) await gate;
+        return reports[n]!;
+      },
+    });
+    const e = await setup({ mode: "ok", deps: { preflightAsync: facade } });
+    // The core's start-up preflight, still running when the first job arrives.
+    void e.adapter.refreshPreflightAsync();
+    const firstJob = e.adapter.run(request(e), { toolSurface: surface(e) });
+    release();
+    const first = await firstJob;
+    expect(first.result).toMatchObject({ status: "error", reason: "preflight_failed" });
+    expect(first.details.detail).toBe("unverified");
+    expect(e.adapter.preflight).toMatchObject({ verdict: "ambiguous" });
+    expect(e.adapter.preflight.cliVersion).toBeUndefined();
+    expect(e.spawnCalls).toBe(0);
+    expect(runs).toBe(1);
+
+    const second = await e.adapter.run(request(e, { requestId: "job-2" }), { toolSurface: surface(e) });
+    expect(second.result).toMatchObject({ status: "ok" });
+    expect(runs).toBe(2);
+    expect(e.adapter.preflight).toMatchObject({ verdict: "subscription", cliVersion: VERIFIED_CLI_VERSION });
+    expect(diagLines(e).filter((l) => l.event === "agent_preflight_retry")).toHaveLength(1);
+    // A cached subscription verdict: no further runs.
+    expect((await e.adapter.run(request(e, { requestId: "job-3" }), { toolSurface: surface(e) })).result).toMatchObject({ status: "ok" });
+    expect(runs).toBe(2);
   });
 
   it("a job waits for a preflight in flight, then runs on its verdict", async () => {

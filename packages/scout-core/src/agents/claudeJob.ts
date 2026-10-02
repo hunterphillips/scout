@@ -39,6 +39,11 @@
 // the adapter starts one async re-preflight at once, and the job's answer counts only if that
 // verdict is `subscription` (otherwise `preflight_failed`, detail `cli_version_changed`);
 // later jobs wait for it. The init's auth-route check still stops any job outright.
+// A preflight that could not read the CLI version and is not `subscription` (an unreachable or
+// broken CLI, a failed worker) is not sticky: it arms one retry, and the next job starts a
+// fresh async preflight and waits for it (the facade never caches a report without a
+// version). Each such result arms one more retry, so a broken CLI costs one preflight per job,
+// never a loop.
 //
 // Nothing a model writes can become `ok` after the job was cancelled or timed out: once a
 // stop is decided, later result events are ignored. A result that arrived before the stop
@@ -299,6 +304,8 @@ export function createClaudeJobAdapter(deps: ClaudeJobDeps): ClaudeJobAdapter {
 
   /** In flight from refreshPreflightAsync; jobs wait for it. */
   let refreshing: Promise<PreflightState> | undefined;
+  /** The last verdict could not read the CLI version and was not subscription: the next job re-runs the preflight. */
+  let retryPreflight = false;
 
   const preflightInput = (): PreflightInput => {
     const opts: PreflightInput = { parentEnv: deps.parentEnv, claudePath: profile.claudePath, model: profile.model, jobsRoot };
@@ -315,6 +322,7 @@ export function createClaudeJobAdapter(deps: ClaudeJobDeps): ClaudeJobAdapter {
     }
     next.at = (deps.clock ?? systemClock).now();
     preflight = Object.freeze(next);
+    retryPreflight = preflight.verdict !== "subscription" && preflight.cliVersion === undefined;
     deps.diagnostics?.event("agent_preflight", { verdict: preflight.verdict, reasons: preflight.reasons.length, ...(preflight.cliVersion ? { cliVersion: preflight.cliVersion } : {}) });
     return preflight;
   }
@@ -397,6 +405,12 @@ export function createClaudeJobAdapter(deps: ClaudeJobDeps): ClaudeJobAdapter {
     if (closed) return finish({ status: "unavailable", reason: "agent_unavailable" }, "agent_unavailable", "closed");
     if (current) return finish({ status: "unavailable", reason: "busy" }, "busy");
     const deadlineAt = Math.min(options.deadline ?? Number.POSITIVE_INFINITY, t0 + req.deadlineMs);
+    if (!refreshing && retryPreflight) {
+      // The last preflight could not read the CLI version: this job runs one fresh one and waits for it.
+      retryPreflight = false;
+      deps.diagnostics?.event("agent_preflight_retry", {});
+      void refreshPreflightAsync();
+    }
     if (refreshing) {
       // A preflight is in flight (the core's start, or a CLI update another job saw): wait for its verdict.
       const settled = await waitBounded(refreshing, deadlineAt, clock, options.signal);

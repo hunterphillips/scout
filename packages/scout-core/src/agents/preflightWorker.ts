@@ -8,6 +8,9 @@
 // another CLI version (`knownCliVersion`), which re-runs it. Concurrent calls for the same
 // key share one run. A worker that fails, exits early, or overruns PREFLIGHT_WORKER_MAX_MS is
 // terminated and reported `ambiguous` (never `subscription`), with a fixed reason only.
+// A report without a CLI version (the CLI could not be read, or the worker failed) is never
+// cached: the adapter arms one retry for it (claudeJob.ts), and the next job's call here runs
+// fresh instead of leaving `ambiguous` in place until the core restarts.
 
 import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
