@@ -52,7 +52,7 @@ export interface PanelBridge {
   configureAction(): Promise<void>;
   /** One window frame from the core (port.ts onPanel). */
   onFrame(state: PanelState): void;
-  /** The native port is gone: forget every cached frame and tell open panels. */
+  /** The native port is gone: forget every cached frame (open panels hear it via pushStatus). */
   onLinkLost(): void;
   /** Send the current status to every open panel. */
   pushStatus(): void;
@@ -137,10 +137,10 @@ export function createPanelBridge(deps: PanelBridgeDeps): PanelBridge {
     broadcast({ type: "frame", state });
   }
 
+  /** The status push follows from port.ts's onLinkChange, once the reconnect plan is known. */
   function onLinkLost(): void {
     cache.clear();
     setBadge("");
-    pushStatus();
   }
 
   function cached(): PanelState[] {

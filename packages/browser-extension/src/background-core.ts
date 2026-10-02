@@ -118,6 +118,7 @@ export function createBackground(ch: typeof chrome, deps: BackgroundDeps = {}): 
       panel.onLinkLost();
     },
     onPanel: (frame) => panel.onFrame(frame),
+    onLinkChange: () => panel.pushStatus(),
   });
   const panel = createPanelBridge({ ch, status: () => snapshot(), linkState: () => link.linkState(), handle: (r) => panelRequest(r) });
 
@@ -245,11 +246,20 @@ export function createBackground(ch: typeof chrome, deps: BackgroundDeps = {}): 
       // Tell the core the visit is over. Nothing else is posted while paused.
       post(state, { kind: "focus", seq: ++state.seq, at: clock.now(), browserFocused: false, windowId: windowIdNone });
     }
-    await ch.storage.local.set({ paused: state.paused });
+    // A failed write still takes effect in memory (and resume still sends what it held back);
+    // the error is rethrown afterwards for the caller to report.
+    const saved = Promise.resolve()
+      .then(() => ch.storage.local.set({ paused: state.paused }))
+      .then(
+        () => null,
+        (e: unknown) => e,
+      );
+    const failure = await saved;
     if (!state.paused) {
       sendSnapshot(); // any grant change while paused was held back; follows with focus
       void gate.refreshActive();
     }
+    if (failure !== null) throw failure;
   }
 
   /** The side panel's checkbox (a user gesture). Turning it on needs the GitHub grant. */
@@ -272,13 +282,19 @@ export function createBackground(ch: typeof chrome, deps: BackgroundDeps = {}): 
    * follow reach a resumed core.
    */
   async function onPause(paused: boolean): Promise<PauseReply> {
+    // A failed storage write still pauses in memory (setPaused sets it first); the core is told
+    // either way, and the panel always gets a reply.
+    const persist = (p: Promise<void>) =>
+      p.catch((e: unknown) => {
+        console.warn("scout: the paused flag was not saved", e instanceof Error ? e.message : "");
+      });
     let written: boolean;
     if (paused) {
-      await setPaused(true);
+      await persist(setPaused(true));
       written = link.sendCommand({ type: "pause" });
     } else {
       written = link.sendCommand({ type: "resume" });
-      await setPaused(false);
+      await persist(setPaused(false));
     }
     return { status: snapshot(), written };
   }

@@ -284,3 +284,51 @@ describe("panel requests", () => {
     expect(p.got.filter((m) => m.type === "status").at(-1)).toMatchObject({ status: { granted: ["https://docs.stripe.com/*"] } });
   });
 });
+
+describe("link changes reach open panels at once", () => {
+  /** Status messages the worker has posted to the open panel (synchronous: the worker's side). */
+  const pushed = (f: FakeChrome) =>
+    (f._.panelPorts.at(-1)!.posted as WorkerToPanel[]).filter((m) => m.type === "status").map((m) => (m as { status: StatusSnapshot }).status.link);
+
+  it("core_unavailable from the host is pushed in the same tick, and the port coming back ready too", async () => {
+    const { f } = await setup();
+    await openPanel(f);
+    const n = pushed(f).length;
+    lastPort(f).onMessage.emit({ type: "core_unavailable" });
+    expect(pushed(f).slice(n)).toEqual(["core_unavailable"]); // no await: synchronous
+    lastPort(f).onMessage.emit({ type: "ready" });
+    expect(pushed(f).slice(n)).toEqual(["core_unavailable", "connected"]);
+    lastPort(f).onMessage.emit({ type: "ready" }); // no change, no push
+    expect(pushed(f).slice(n)).toHaveLength(2);
+  });
+
+  it("a lost port, each retry, and the series giving up are pushed", async () => {
+    const { f, clock } = await setup();
+    await openPanel(f);
+    const n = pushed(f).length;
+    f._.state.host = "missing";
+    dropPort(f);
+    expect(pushed(f).slice(n)).toEqual(["connecting"]); // a retry is scheduled
+    await clock.advance(120_000); // every retry fails until the series is exhausted
+    expect(pushed(f).at(-1)).toBe("disconnected");
+    f._.state.host = "ok";
+    const p = await openPanel(f);
+    await p.request({ type: "reconnect" });
+    await clock.advance(0);
+    expect(pushed(f).at(-1)).toBe("connected");
+  });
+
+  it("pause answers even when storage refuses the write, and the core still hears it", async () => {
+    const { f } = await setup();
+    const p = await openPanel(f);
+    f._.state.storageSetFails = true;
+    const r = (await p.request({ type: "pause", paused: true })) as { status: StatusSnapshot; written: boolean } | null;
+    expect(r).toMatchObject({ written: true, status: { paused: true } });
+    expect(commandsPosted(f)).toEqual([{ type: "pause" }]);
+    const r2 = (await p.request({ type: "pause", paused: false })) as { status: StatusSnapshot; written: boolean } | null;
+    expect(r2).toMatchObject({ written: true, status: { paused: false } });
+    const posted = lastPort(f).posted;
+    const resume = posted.findIndex((m) => m["type"] === "command" && (m["command"] as { type: string }).type === "resume");
+    expect(posted.slice(resume + 1).some((m) => m["kind"] === "permissions")).toBe(true); // resume still sends what it held back
+  });
+});
