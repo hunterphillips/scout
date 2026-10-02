@@ -6,3 +6,4 @@ coverage/
 native/Scout/.build/
 native/Scout/.swiftpm/
 *.xcodeproj/xcuserdata/
+.dist-staging-*/

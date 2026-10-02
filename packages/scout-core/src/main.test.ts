@@ -1,7 +1,6 @@
 // Drives the built dist/main.js as the native app would: a child process on pipes.
-import { type ChildProcessWithoutNullStreams, execFileSync, spawn } from "node:child_process";
+import { type ChildProcessWithoutNullStreams, spawn } from "node:child_process";
 import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
-import { createRequire } from "node:module";
 import { connect, Server } from "node:net";
 import { tmpdir } from "node:os";
 import { PassThrough } from "node:stream";
@@ -11,7 +10,7 @@ import { createHash } from "node:crypto";
 import { encodeFrame, FrameDecoder, MAX_FRAME_FROM_CHROME } from "@scout/contracts/frame";
 import { AGENT_PROTOCOL_VERSION, NATIVE_COMMAND_MAX_BYTES } from "@scout/contracts";
 import { createSocketBackend } from "@scout/scout-mcp/client";
-import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { SnapshotRegistry } from "./activity/snapshots.js";
 import { type CapabilityStore, createCapabilityStore } from "./capabilities/store.js";
 import { DEFAULT_DESTINATIONS, readConfig, readDestinations } from "./config.js";
@@ -25,12 +24,9 @@ const mainJs = join(pkgDir, "dist", "main.js");
 const cliJs = join(pkgDir, "dist", "cli.js");
 const fakeClaude = join(pkgDir, "src", "agents", "testing", "fake-claude.mjs");
 
-beforeAll(() => {
-  // Build so the test always exercises the current source.
-  const tsPkg = createRequire(import.meta.url).resolve("typescript/package.json");
-  const tsc = join(dirname(tsPkg), "bin", "tsc");
-  execFileSync(process.execPath, [tsc, "-p", join(pkgDir, "tsconfig.build.json")], { stdio: "inherit" });
-}, 60_000);
+// dist/ is built once by the global setup (test/global-setup.mjs). Never rebuild it from a
+// test file: other files run in parallel and spawn dist entrypoints, and one that loads a
+// module while tsc is rewriting it dies at import.
 
 interface Core {
   child: ChildProcessWithoutNullStreams;
