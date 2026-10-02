@@ -4,7 +4,8 @@
 // side-panel e2e (test/side-panel.test.mjs) covers the panel itself.
 // usage: node drive.mjs <cmd> [args]
 //   panel <extId>            open chrome-extension://<id>/panel.html in a tab, print its text
-//   grant <extId>            click the panel tab's first button named "Grant ..." (Chrome's prompt)
+//   allow <extId> <host>     in the panel tab, click the Sites row's "Allow" for <host>, or type
+//                            <host> into "Allow another site" and submit (Chrome's prompt)
 //   text <extId>             print the panel tab's text
 //   goto <url>               open <url> in a new tab and bring it to front
 //   front <substr>           bring the first tab whose url contains <substr> to front
@@ -31,11 +32,16 @@ try {
   } else if (cmd === "text") {
     const p = findPage(panelUrl(args[0]));
     console.log(p ? await p.innerText("body") : "(no panel tab)");
-  } else if (cmd === "grant") {
+  } else if (cmd === "allow") {
     const p = findPage(panelUrl(args[0]));
+    if (!p || !args[1]) throw new Error("usage: allow <extId> <host> (open the panel tab first)");
     await p.bringToFront();
-    const box = await p.getByRole("button", { name: /^grant/i }).first().boundingBox();
-    await p.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+    const row = p.locator(`[data-key="allow-${args[1]}"]`);
+    if (await row.count()) await row.first().click();
+    else {
+      await p.locator("#site-input").fill(args[1]);
+      await p.locator('[data-key="site-add"]').click();
+    }
     await p.waitForTimeout(1500);
     console.log(await p.innerText("body"));
   } else if (cmd === "goto") {
