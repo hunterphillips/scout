@@ -315,6 +315,7 @@ describe("main --stdio", () => {
         title: "t",
         text: "body",
         truncated: false,
+        policyRevision: 1,
       },
     });
     await until(() => acks().length === 1);
@@ -329,7 +330,7 @@ describe("main --stdio", () => {
 
     const log = readFileSync(join(home, "logs", "diagnostics.jsonl"), "utf8");
     expect(log).toContain('"event":"native_command_invalid"');
-    expect(log).toContain('"event":"activity_forwarded"');
+    expect(log).toContain('"event":"activity_accepted"');
     expect(log).not.toContain("github.com");
     expect(log).not.toContain("body");
   });

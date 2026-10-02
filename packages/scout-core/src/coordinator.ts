@@ -16,12 +16,14 @@
 // paused. A policy can only restrict: the extension still needs Chrome's grant and its
 // own toggle.
 //
-// page_text is forwarded only when not paused, a snapshot has arrived on this connection,
-// that snapshot enables GitHub capture and grants GitHub, Chrome is frontmost with a
-// focused, non-incognito window, and the text comes from the focused tab's issue. The
-// document check applies only when the focus carries a `documentId`; the extension's
-// focus observations do not carry one today, so the same-document check is the
-// extension's.
+// page_text is accepted into the activity store (activity/store.ts) only when not paused, a
+// snapshot has arrived on this connection, that snapshot enables GitHub capture and grants
+// GitHub, the text was captured under the policy revision last sent on this connection,
+// Chrome is frontmost with a focused, non-incognito window, and the text comes from the
+// focused tab's issue. The document check applies only when the focus carries a
+// `documentId`; the extension's focus observations do not carry one today, so the
+// same-document check is the extension's. The ack goes out only after the store returned:
+// for text it took, and for a repeat it already holds (a re-send after a reconnect).
 //
 // A visit that stays unchanged for DWELL_MS settles (dwell.ts) and starts one discovery
 // pass for its origin: one paced fetch session with one window, the catalog and resource
@@ -52,7 +54,7 @@ import type {
   PageTextObservation,
   PanelState,
 } from "@scout/contracts";
-import { createActivityForwarder, type ActivityForwarder, type ActivitySend } from "./activityForwarder.js";
+import { type ActivityStore, canonicalIssueUrl, createActivityStore } from "./activity/store.js";
 import type { AgentView } from "./agentApi/handlers.js";
 import type { DiscoveryResult } from "./capabilities/discovery.js";
 import type { CapabilityStore } from "./capabilities/store.js";
@@ -79,8 +81,10 @@ export interface CoordinatorOptions {
   timers?: Timers;
   diagnostics: Diagnostics;
   emitPanel: (state: PanelState) => void;
-  /** Phase 3 passes the real observe_activity client. */
-  sendActivity?: ActivitySend;
+  /** Where accepted page text goes; defaults to a fresh store on `clock`. */
+  activity?: ActivityStore;
+  /** Called after a `pause` command took effect (main revokes job tokens there). */
+  onPause?: () => void;
   /** How long a visit must stay unchanged before discovery; defaults to DWELL_MS. */
   dwellMs?: number;
   /** Called once when a `shutdown` command stops the coordinator. */
@@ -110,13 +114,15 @@ export interface Coordinator {
   readonly stopped: boolean;
   readonly tracker: VisitTracker;
   readonly permissions: PermissionState;
-  readonly forwarder: ActivityForwarder;
+  readonly activity: ActivityStore;
   /** Constructed for Phase 2's ranking; not used in Phase 1. */
   readonly resumeCache: ResumeCache<unknown>;
   readonly capabilities: CoordinatorCapabilities | undefined;
   /** What agent.sock may see right now: the focused permitted visit and whether Scout is paused. A fresh copy. */
   agentView(): AgentView;
 }
+
+const utf8 = new TextEncoder();
 
 /** A discovery pass in progress; `cancelled` is set when it must never ingest, whatever happens next. */
 interface RunningPass {
@@ -129,9 +135,7 @@ interface RunningPass {
 export function createCoordinator(options: CoordinatorOptions): Coordinator {
   const { clock, diagnostics } = options;
   const chromeBundleId = options.config.chromeBundleId ?? CHROME_BUNDLE_ID;
-  const forwarder = createActivityForwarder(
-    options.sendActivity === undefined ? { diagnostics } : { diagnostics, send: options.sendActivity },
-  );
+  const activity = options.activity ?? createActivityStore({ clock });
   const resumeCache = createResumeCache<unknown>({ clock, diagnostics });
   const permissions = createPermissionState({ diagnostics });
   const caps = options.capabilities;
@@ -299,7 +303,7 @@ export function createCoordinator(options: CoordinatorOptions): Coordinator {
     clock,
     diagnostics,
     onChange: onVisitChange,
-    getContextRevision: () => forwarder.contextRevision,
+    getContextRevision: () => activity.revision,
   });
 
   /** Why a page_text is not forwarded, or null to forward it. */
@@ -307,6 +311,8 @@ export function createCoordinator(options: CoordinatorOptions): Coordinator {
     if (paused) return "paused";
     if (!permissions.received) return "no_permissions_snapshot";
     if (!permissions.githubCapture || !permissions.isPermitted(GITHUB_ORIGIN)) return "capture_disabled";
+    // Captured under an older policy (or by an extension that does not say): never accepted.
+    if (obs.policyRevision === undefined || obs.policyRevision !== lastPolicy?.revision) return "policy_revision";
     if (frontmostBundleId !== chromeBundleId) return "chrome-not-frontmost";
     const f = latestFocus;
     if (f === null || !f.browserFocused || f.windowId === WINDOW_ID_NONE) return "browser-not-focused";
@@ -350,7 +356,16 @@ export function createCoordinator(options: CoordinatorOptions): Coordinator {
           diagnostics.event("page_text_dropped", { reason });
           return;
         }
-        void forwarder.forward(obs);
+        const result = activity.accept(obs, client.id);
+        if (!result.accepted && !result.duplicate) {
+          diagnostics.event("page_text_dropped", { reason: "not_an_issue" });
+          return;
+        }
+        diagnostics.event("activity_accepted", {
+          bytes: utf8.encode(obs.text).byteLength,
+          truncated: obs.truncated,
+          duplicate: result.duplicate,
+        });
         client.send({ type: "ack", seq: obs.seq });
         return;
       }
@@ -387,7 +402,7 @@ export function createCoordinator(options: CoordinatorOptions): Coordinator {
   const coordinator: Coordinator = {
     tracker,
     permissions,
-    forwarder,
+    activity,
     resumeCache,
     capabilities: caps,
     agentView() {
@@ -412,6 +427,7 @@ export function createCoordinator(options: CoordinatorOptions): Coordinator {
           diagnostics.event("paused", {});
           syncPolicy();
           emitCurrent();
+          options.onPause?.();
           return;
         case "resume": {
           paused = false;
@@ -464,7 +480,7 @@ export function createCoordinator(options: CoordinatorOptions): Coordinator {
       dwell.stop();
       dropPendingSettle("stopped");
       cancelRunningPass("stopped");
-      diagnostics.event("coordinator_stopped", { pending: forwarder.pendingCount });
+      diagnostics.event("coordinator_stopped", {});
     },
   };
 
@@ -481,22 +497,4 @@ function errorCode(e: unknown): string {
   return "unknown";
 }
 
-// Same rule as the extension's route.ts (copied, not imported): a GitHub issue page,
-// with query and fragment ignored.
-const ISSUE_PATH_RE = /^\/([^/]+)\/([^/]+)\/issues\/(\d+)\/?$/;
-
-/** `https://github.com/<owner>/<repo>/issues/<n>` with owner/repo lowercased, or null if not an issue page. */
-export function canonicalIssueUrl(raw: string): string | null {
-  let u: URL;
-  try {
-    u = new URL(raw);
-  } catch {
-    return null;
-  }
-  if (u.protocol !== "https:" || u.hostname !== "github.com" || u.port !== "" || u.username || u.password) return null;
-  const m = ISSUE_PATH_RE.exec(u.pathname);
-  if (m === null) return null;
-  const number = Number(m[3]);
-  if (!Number.isSafeInteger(number) || number <= 0) return null;
-  return `https://github.com/${m[1]!.toLowerCase()}/${m[2]!.toLowerCase()}/issues/${number}`;
-}
+export { canonicalIssueUrl };

@@ -11,6 +11,7 @@ import type { DiscoveryResult } from "./capabilities/discovery.js";
 import type { IngestReport } from "./capabilities/store.js";
 import type { CatalogResolution } from "./catalog/resolveCatalog.js";
 import type { Timers } from "./clock.js";
+import { type ActivityStore, createActivityStore } from "./activity/store.js";
 import { type CoordinatorCapabilities, type CoordinatorOptions, createCoordinator } from "./coordinator.js";
 import type { DiagnosticFields, Diagnostics } from "./diagnostics.js";
 import { DWELL_MS } from "./dwell.js";
@@ -162,6 +163,12 @@ function setup(extra: Partial<CoordinatorOptions> = {}) {
   });
   let seq = 0;
   let permissionsRevision = 100;
+  let lastClient: ReturnType<typeof fakeClient> | null = null;
+  /** The revision of the last capture_policy the latest sensor received, as the extension stamps it. */
+  const policyRevision = (): number | undefined => {
+    const p = lastClient?.sent.filter((f) => f.type === "capture_policy").at(-1);
+    return p?.type === "capture_policy" ? p.revision : undefined;
+  };
   const focus = (overrides: Partial<FocusObservation> = {}): FocusObservation => ({
     kind: "focus",
     seq: ++seq,
@@ -184,6 +191,7 @@ function setup(extra: Partial<CoordinatorOptions> = {}) {
     title: "An issue",
     text: "Issue body",
     truncated: false,
+    ...(policyRevision() !== undefined ? { policyRevision: policyRevision()! } : {}),
     ...overrides,
   });
   const chrome = () => coordinator.handleNativeCommand({ type: "frontmost", bundleId: "com.google.Chrome", at: clock.t });
@@ -191,6 +199,7 @@ function setup(extra: Partial<CoordinatorOptions> = {}) {
   const attach = (id = 1) => {
     const c = fakeClient(id);
     coordinator.attachClient(c.client);
+    lastClient = c;
     return c;
   };
   /** A permissions snapshot with the next revision. */
@@ -296,16 +305,17 @@ describe("coordinator", () => {
     expect(panel.at(-1)).toEqual({ type: "state", status: "idle", visitEpoch: coordinator.tracker.epoch, permitted: false });
   });
 
-  it("page_text from the focused tab bumps contextRevision and is acked to the host", () => {
+  it("page_text from the focused tab is accepted into the activity store and acked to the host", () => {
     const { coordinator, events, focus, pageText, chrome, connect, acks } = setup();
     const c = connect();
     chrome();
     c.observe(focus({ tabId: 20, url: ISSUE, documentId: "doc-issue" }));
     const obs = pageText();
     c.observe(obs);
-    expect(coordinator.forwarder.contextRevision).toBe(1);
+    expect(coordinator.activity.revision).toBe(1);
     expect(acks(c)).toEqual([{ type: "ack", seq: obs.seq }]);
-    expect(events.some((e) => e.name === "activity_forwarded")).toBe(true);
+    expect(events.find((e) => e.name === "activity_accepted")?.fields).toEqual({ bytes: 10, truncated: false, duplicate: false });
+    expect(coordinator.activity.entries()).toMatchObject([{ url: ISSUE, title: "An issue", text: "Issue body", source: "github_issue" }]);
   });
 
   it("new visits carry the bumped contextRevision", () => {
@@ -330,7 +340,7 @@ describe("coordinator", () => {
     coordinator.handleNativeCommand({ type: "frontmost", bundleId: "com.apple.Terminal", at: 1 });
     c.observe(pageText());
     expect(acks(c)).toEqual([]);
-    expect(coordinator.forwarder.contextRevision).toBe(0);
+    expect(coordinator.activity.revision).toBe(0);
     expect(events.filter((e) => e.name === "page_text_dropped").map((e) => e.fields.reason)).toEqual([
       "not-focused-tab",
       "browser-not-focused",
@@ -345,7 +355,7 @@ describe("coordinator", () => {
     c.observe(focus({ tabId: 20, url: ISSUE, documentId: "doc-issue", incognito: true }));
     c.observe(pageText());
     expect(acks(c)).toEqual([]);
-    expect(coordinator.forwarder.contextRevision).toBe(0);
+    expect(coordinator.activity.revision).toBe(0);
     expect(events.filter((e) => e.name === "page_text_dropped").map((e) => e.fields.reason)).toEqual(["incognito"]);
   });
 
@@ -363,7 +373,7 @@ describe("coordinator", () => {
     const obs = pageText();
     c.observe(obs);
     expect(acks(c)).toEqual([{ type: "ack", seq: obs.seq }]);
-    expect(coordinator.forwarder.contextRevision).toBe(1);
+    expect(coordinator.activity.revision).toBe(1);
   });
 
   it("page_text whose URL is not the focused tab's issue is dropped as url-mismatch", () => {
@@ -375,7 +385,7 @@ describe("coordinator", () => {
     c.observe(focus({ tabId: 20, url: "https://github.com/o/r/pulls", documentId: "doc-issue" }));
     c.observe(pageText());
     expect(acks(c)).toEqual([]);
-    expect(coordinator.forwarder.contextRevision).toBe(0);
+    expect(coordinator.activity.revision).toBe(0);
     expect(events.filter((e) => e.name === "page_text_dropped").map((e) => e.fields.reason)).toEqual([
       "url-mismatch",
       "url-mismatch",
@@ -390,7 +400,7 @@ describe("coordinator", () => {
     const obs = pageText();
     c.observe(obs);
     expect(acks(c)).toEqual([{ type: "ack", seq: obs.seq }]);
-    expect(coordinator.forwarder.contextRevision).toBe(1);
+    expect(coordinator.activity.revision).toBe(1);
   });
 
   it("pause emits paused and suppresses forwarding and visit states; resume emits idle", () => {
@@ -405,7 +415,7 @@ describe("coordinator", () => {
     c.observe(focus());
     expect(panel.length).toBe(before);
     expect(acks(c)).toEqual([]);
-    expect(coordinator.forwarder.contextRevision).toBe(0);
+    expect(coordinator.activity.revision).toBe(0);
     coordinator.handleNativeCommand({ type: "resume" });
     // The visit to docs.stripe.com (tracked while paused) is still active.
     expect(panel.at(-1)).toEqual({
@@ -540,7 +550,7 @@ describe("coordinator capture policy and permissions", () => {
     c.observe(pageText());
     expect(acks(c)).toEqual([]);
     expect(policies(c)).toHaveLength(1);
-    expect(coordinator.forwarder.contextRevision).toBe(0);
+    expect(coordinator.activity.revision).toBe(0);
     expect(events.filter((e) => e.name === "page_text_dropped").map((e) => e.fields.reason)).toEqual(["no_permissions_snapshot"]);
   });
 
@@ -554,7 +564,7 @@ describe("coordinator capture policy and permissions", () => {
     grant(c, ["https://docs.stripe.com/*"], true);
     c.observe(pageText());
     expect(acks(c)).toEqual([]);
-    expect(coordinator.forwarder.contextRevision).toBe(0);
+    expect(coordinator.activity.revision).toBe(0);
     expect(events.filter((e) => e.name === "page_text_dropped").map((e) => e.fields.reason)).toEqual([
       "capture_disabled",
       "capture_disabled",
@@ -976,5 +986,98 @@ describe("coordinator panel wiring", () => {
     cleanup.resolve({ ok: true });
     await flush();
     expect(s.changes()).toBe(before + 2);
+  });
+});
+
+describe("coordinator: page_text into the activity store", () => {
+  /** An activity store that records when it was called, relative to the host's acks. */
+  function recordingStore(order: string[]) {
+    const real = createActivityStore({ clock: { now: () => 1_000 } });
+    const store: ActivityStore = {
+      accept: (obs, conn) => {
+        order.push(`accept:${obs.seq}`);
+        return real.accept(obs, conn);
+      },
+      entries: () => real.entries(),
+      get revision() {
+        return real.revision;
+      },
+      clear: () => real.clear(),
+      prune: () => real.prune(),
+    };
+    return store;
+  }
+
+  it("acks only after the store accepted the text", () => {
+    const order: string[] = [];
+    const { focus, pageText, chrome, connect } = setup({ activity: recordingStore(order) });
+    const c = connect();
+    const send = c.client.send;
+    c.client.send = (f) => {
+      if (f.type === "ack") order.push(`ack:${f.seq}`);
+      send(f);
+    };
+    chrome();
+    c.observe(focus({ tabId: 20, url: ISSUE, documentId: "doc-issue" }));
+    const obs = pageText();
+    c.observe(obs);
+    expect(order).toEqual([`accept:${obs.seq}`, `ack:${obs.seq}`]);
+  });
+
+  it("drops text with a missing or stale policy revision as policy_revision, unacked", () => {
+    const { coordinator, events, focus, pageText, chrome, connect, acks, grant } = setup();
+    const c = connect();
+    chrome();
+    c.observe(focus({ tabId: 20, url: ISSUE, documentId: "doc-issue" }));
+    const missing = pageText();
+    delete (missing as { policyRevision?: number }).policyRevision;
+    c.observe(missing);
+    // Capture off then on again: the policy moves on, and text stamped with the old revision is refused.
+    const stale = pageText();
+    grant(c, ["https://github.com/*"], false);
+    grant(c, ["https://github.com/*"], true);
+    c.observe(stale);
+    expect(acks(c)).toEqual([]);
+    expect(coordinator.activity.revision).toBe(0);
+    expect(events.filter((e) => e.name === "page_text_dropped").map((e) => e.fields.reason)).toEqual(["policy_revision", "policy_revision"]);
+    const fresh = pageText();
+    c.observe(fresh);
+    expect(acks(c)).toEqual([{ type: "ack", seq: fresh.seq }]);
+  });
+
+  it("acks a re-sent seq or the same text again without a second change, and refreshes on new text", () => {
+    const { coordinator, events, focus, pageText, chrome, connect, acks } = setup();
+    const c = connect();
+    chrome();
+    c.observe(focus({ tabId: 20, url: ISSUE, documentId: "doc-issue" }));
+    const obs = pageText();
+    c.observe(obs);
+    c.observe(obs);
+    c.observe(pageText());
+    expect(coordinator.activity.revision).toBe(1);
+    c.observe(pageText({ text: "Edited body" }));
+    expect(coordinator.activity.revision).toBe(2);
+    expect(acks(c)).toHaveLength(4);
+    expect(events.filter((e) => e.name === "activity_accepted").map((e) => e.fields.duplicate)).toEqual([false, true, true, false]);
+    expect(coordinator.activity.entries()).toHaveLength(1);
+  });
+
+  it("logs no text, title or issue URL", () => {
+    const { events, focus, pageText, chrome, connect } = setup();
+    const c = connect();
+    chrome();
+    c.observe(focus({ tabId: 20, url: ISSUE, documentId: "doc-issue" }));
+    c.observe(pageText());
+    const logged = JSON.stringify(events);
+    expect(logged).not.toContain("Issue body");
+    expect(logged).not.toContain("An issue");
+    expect(logged).not.toContain("issues/1");
+  });
+
+  it("calls onPause after a pause command", () => {
+    let paused = 0;
+    const { coordinator } = setup({ onPause: () => void paused++ });
+    coordinator.handleNativeCommand({ type: "pause" });
+    expect(paused).toBe(1);
   });
 });

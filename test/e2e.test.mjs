@@ -141,6 +141,8 @@ describe.skipIf(!BUILT)("host <-> core end to end", () => {
         title: TITLE,
         text: BODY,
         truncated: false,
+        // The enabling policy's revision, as the extension stamps it.
+        policyRevision: 1,
       }),
     );
     await until(() => toChrome.some((f) => f.type === "ack"), "ack for the page_text");

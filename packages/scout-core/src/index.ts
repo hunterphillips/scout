@@ -24,12 +24,16 @@ export {
   type VisitTracker,
   type VisitTrackerOptions,
 } from "./visitTracker.js";
+export type { ActivitySend } from "./activityForwarder.js";
 export {
-  createActivityForwarder,
-  type ActivityForwarder,
-  type ActivityForwarderOptions,
-  type ActivitySend,
-} from "./activityForwarder.js";
+  ACTIVITY_MAX_ENTRIES,
+  ACTIVITY_TTL_MS,
+  canonicalIssueUrl,
+  createActivityStore,
+  type ActivityAcceptResult,
+  type ActivityStore,
+  type StoredActivity,
+} from "./activity/store.js";
 export {
   createRankClient,
   SCOUT_SENSOR,
