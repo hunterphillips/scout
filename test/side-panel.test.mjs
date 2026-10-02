@@ -36,9 +36,14 @@ async function findChrome() {
 const OPT_IN = process.env.SCOUT_E2E_CHROME === "1";
 const BUILT = existsSync(CORE) && existsSync(HOST);
 const CHROME = OPT_IN ? await findChrome() : null;
-if (!OPT_IN) console.warn("side-panel e2e: skipped: set SCOUT_E2E_CHROME=1 with SCOUT_E2E_CHROME_PATH or SCOUT_E2E_BROWSERS to run it in Chrome for Testing");
-else if (!CHROME) console.warn("side-panel e2e: skipped: no Chrome for Testing at SCOUT_E2E_CHROME_PATH or in SCOUT_E2E_BROWSERS");
-else if (!BUILT) console.warn("side-panel e2e: skipped: run `npm run build` first");
+const SKIP = !OPT_IN
+  ? "set SCOUT_E2E_CHROME=1 with SCOUT_E2E_CHROME_PATH or SCOUT_E2E_BROWSERS to run it in Chrome for Testing"
+  : !CHROME
+    ? "no Chrome for Testing at SCOUT_E2E_CHROME_PATH or in SCOUT_E2E_BROWSERS"
+    : !BUILT
+      ? "run `npm run build` first"
+      : null;
+if (SKIP) console.warn(`side-panel e2e: skipped: ${SKIP}`);
 
 async function until(cond, what, ms = 10_000) {
   const start = Date.now();
@@ -74,7 +79,8 @@ function dnsStub(dir) {
   return pathToFileURL(path).href;
 }
 
-describe.skipIf(!OPT_IN || !CHROME || !BUILT)("Scout's side panel in Chrome for Testing", () => {
+// The reason is in the title too: vitest prints nothing a skipped file logs.
+describe.skipIf(SKIP !== null)(SKIP ? `Scout's side panel in Chrome for Testing (skipped: ${SKIP})` : "Scout's side panel in Chrome for Testing", () => {
   let home;
   let browser;
   let server;
