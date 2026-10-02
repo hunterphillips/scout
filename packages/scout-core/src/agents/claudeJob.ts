@@ -25,12 +25,29 @@
 // HostJobResult codes plus a finer `termination` in job details; abortAll() closes the
 // adapter, so a later job is `unavailable: agent_unavailable`.
 //
-// Billing gate: refreshPreflight() runs the direct preflight (blocking; call it when the
-// agent profile is loaded or edited, never on the job path) and caches the verdict with the
-// CLI version it saw. An adapter is bound to one profile (an edited profile means a new
-// adapter and a new preflight). A job runs only when the verdict is `subscription` and the
-// request names this profile's fingerprint, and its init event must report the same CLI
-// version and model.
+// Billing gate: refreshPreflight() runs the direct preflight (blocking; the dev CLI and the
+// compatibility checks use it) and refreshPreflightAsync() runs it through `preflightAsync`
+// (the core passes preflightWorker.ts's child-process facade, so its event loop never blocks);
+// either caches the verdict with the CLI version it saw. An adapter is bound to one profile
+// (an edited profile means a new adapter and a new preflight). A job waits for a refresh in
+// flight (within its deadline), then runs only when the verdict is `subscription` and the
+// request names this profile's fingerprint, and its init event must report the same model.
+// A job that finds no verdict yet (the core starts the preflight eagerly only when some host
+// is recommendation-enabled) starts one and waits for it. A verdict that does not arrive within
+// the job's deadline is `preflight_failed` (detail `preflight_pending`): the job never ran, so
+// it did not time out; billing was never verified.
+//
+// CLI auto-update policy: VERIFIED_CLI_VERSION records what the flag set was checked
+// against; it is not an allowlist. An init reporting another CLI version than the preflight
+// saw is advisory (`cliVersionChanged` in job details, `cli_version_changed` in diagnostics):
+// the adapter starts one async re-preflight at once, and the job's answer counts only if that
+// verdict is `subscription` (otherwise `preflight_failed`, detail `cli_version_changed`);
+// later jobs wait for it. The init's auth-route check still stops any job outright.
+// A preflight that could not read the CLI version and is not `subscription` (an unreachable or
+// broken CLI, a failed or killed preflight child) is not sticky: it arms one retry, and the next job starts a
+// fresh async preflight and waits for it (the facade never caches a report without a
+// version). Each such result arms one more retry, so a broken CLI costs one preflight per job,
+// never a loop.
 //
 // Nothing a model writes can become `ok` after the job was cancelled or timed out: once a
 // stop is decided, later result events are ignored. A result that arrived before the stop
@@ -47,7 +64,7 @@ import { isAbsolute, join } from "node:path";
 import { AgentTokenSchema, JOB_AGENT_OUTPUT_JSON_SCHEMA, JobRequestSchema, type HostJobResult, type JobRequest } from "@scout/contracts";
 import { systemClock, type Clock } from "../clock.js";
 import type { Diagnostics } from "../diagnostics.js";
-import { hashRequestId, toCancelReason, type AgentJobAdapter, type JobDetails, type JobOutcome, type JobRunOptions, type JobTermination } from "./adapter.js";
+import { hashRequestId, MIN_LAUNCH_MS, toCancelReason, type AgentJobAdapter, type JobDetails, type JobOutcome, type JobRunOptions, type JobTermination } from "./adapter.js";
 import { managedPathsFor, type Env, type ManagedPaths, type Verdict } from "./authPreflight.js";
 import type { BridgeJob } from "./contextToolBridge.js";
 import { startChild, type SnapshotFn, type SpawnFn, type SupervisedChild } from "./childSupervisor.js";
@@ -58,7 +75,7 @@ import { createJsonLineStream } from "./jsonLineStream.js";
 import { createLaunchProfile, LaunchProfileError, runDirectPreflight, type DirectPreflightOptions, type LaunchProfile } from "./launchProfile.js";
 import { mapOutcome, recordUsage } from "./mapOutcome.js";
 import { MODEL_RE, profileFingerprint, type AgentProfile } from "./profile.js";
-import { buildJobInstructions, buildJobPrompt } from "./prompt.js";
+import { buildJobInstructions, buildJobPrompt, type PromptActivity } from "./prompt.js";
 import { createStreamMonitor } from "./streamMonitor.js";
 import { checkManagedPolicy, defaultBridgeEntrypoint, managedMcpFilesFor, planJobTools, type JobManagedPaths, type ManagedPolicyResult, type ToolPlanOptions } from "./toolPolicy.js";
 
@@ -103,8 +120,7 @@ export const JOB_MAX_TURNS = 16;
 export const JOB_SETTINGS = Object.freeze({ disableAllHooks: true });
 export const KILL_GRACE_MS = 2000;
 export const MAX_STDOUT_BYTES = 4 * 1024 * 1024;
-/** Do not launch inference with less than this left (plan: common limits). */
-export const MIN_LAUNCH_MS = 5000;
+export { MIN_LAUNCH_MS } from "./adapter.js";
 
 export const JOB_FILES = Object.freeze({ mcp: "mcp.json", settings: "settings.json", instructions: "instructions.md", token: "agent-token", bridge: "bridge.json" });
 
@@ -145,6 +161,18 @@ export function buildJobArgv(model: string, jobDir: string, allowedToolsArg: str
 
 export type PreflightFn = (opts: DirectPreflightOptions) => { verdict: Verdict; reasons: readonly string[]; cliVersion?: string };
 
+/** What the async preflight receives: only plain data (it may cross a thread). */
+export type PreflightInput = Pick<DirectPreflightOptions, "parentEnv" | "claudePath" | "model" | "jobsRoot" | "workspaceRoots">;
+
+/**
+ * An off-thread preflight (preflightWorker.ts). `knownCliVersion`, when given, is a version a
+ * job's init reported: a cached verdict for another version is not reused.
+ */
+export type AsyncPreflightFn = (
+  opts: PreflightInput,
+  knownCliVersion?: string,
+) => Promise<{ verdict: Verdict; reasons: readonly string[]; cliVersion?: string }>;
+
 export interface PreflightState {
   verdict: Verdict | "unchecked";
   /** Fixed reason codes with local paths removed. */
@@ -174,6 +202,8 @@ export interface ClaudeJobDeps {
   diagnostics?: Diagnostics;
   spawn?: SpawnFn;
   preflight?: PreflightFn;
+  /** The off-thread preflight refreshPreflightAsync uses. Defaults to `preflight` (which blocks). */
+  preflightAsync?: AsyncPreflightFn;
   /** Test seam for the ps query (default: psSnapshotAsync). */
   psSnapshot?: SnapshotFn;
   killGraceMs?: number;
@@ -186,11 +216,18 @@ export interface ClaudeJobDeps {
 export interface ClaudeJobRunOptions extends JobRunOptions {
   /** Compatibility checks only: the marker a user-level instructions file defines. */
   instructionMarker?: string;
+  /** The job snapshot's activity entries, for the prompt's untrusted block (prompt.ts). */
+  activity?: readonly PromptActivity[];
 }
 
 export interface ClaudeJobAdapter extends AgentJobAdapter {
-  /** Blocking (spawnSync, up to minutes): only when the profile is loaded or edited. */
+  /** Blocking (spawnSync, up to minutes): only when the profile is loaded or edited, never in the core. */
   refreshPreflight(): PreflightState;
+  /**
+   * The same through `preflightAsync`, off the caller's event loop. One at a time: a call while
+   * one is in flight returns that one. A job waits for it.
+   */
+  refreshPreflightAsync(knownCliVersion?: string): Promise<PreflightState>;
   readonly preflight: PreflightState;
   readonly profileFingerprint: string;
   /** Whether a job is running. */
@@ -268,22 +305,76 @@ export function createClaudeJobAdapter(deps: ClaudeJobDeps): ClaudeJobAdapter {
   /** Set by abortAll: the adapter runs no further jobs. */
   let closed = false;
 
-  function refreshPreflight(): PreflightState {
-    const clock = deps.clock ?? systemClock;
+  /** In flight from refreshPreflightAsync; jobs wait for it. */
+  let refreshing: Promise<PreflightState> | undefined;
+  /** The last verdict could not read the CLI version and was not subscription: the next job re-runs the preflight. */
+  let retryPreflight = false;
+
+  const preflightInput = (): PreflightInput => {
+    const opts: PreflightInput = { parentEnv: deps.parentEnv, claudePath: profile.claudePath, model: profile.model, jobsRoot };
+    if (deps.workspaceRoots) opts.workspaceRoots = deps.workspaceRoots;
+    return opts;
+  };
+
+  /** Cache a preflight report (or a failure to get one) as the adapter's verdict. */
+  function settlePreflight(r: { verdict: Verdict; reasons: readonly string[]; cliVersion?: string } | undefined): PreflightState {
     let next: PreflightState = { verdict: "ambiguous", reasons: ["internal: preflight failed unexpectedly"] };
-    try {
-      const opts: DirectPreflightOptions = { parentEnv: deps.parentEnv, claudePath: profile.claudePath, model: profile.model, jobsRoot };
-      if (deps.workspaceRoots) opts.workspaceRoots = deps.workspaceRoots;
-      const r = preflightFn(opts);
+    if (r !== undefined) {
       next = { verdict: r.verdict === "subscription" ? "subscription" : "ambiguous", reasons: Object.freeze(r.reasons.map(redactReason)) };
       if (r.cliVersion !== undefined) next.cliVersion = r.cliVersion;
+    }
+    next.at = (deps.clock ?? systemClock).now();
+    preflight = Object.freeze(next);
+    retryPreflight = preflight.verdict !== "subscription" && preflight.cliVersion === undefined;
+    deps.diagnostics?.event("agent_preflight", { verdict: preflight.verdict, reasons: preflight.reasons.length, ...(preflight.cliVersion ? { cliVersion: preflight.cliVersion } : {}) });
+    return preflight;
+  }
+
+  function refreshPreflight(): PreflightState {
+    let r: ReturnType<PreflightFn> | undefined;
+    try {
+      r = preflightFn(preflightInput());
     } catch {
       // never echo the error
     }
-    next.at = clock.now();
-    preflight = Object.freeze(next);
-    deps.diagnostics?.event("agent_preflight", { verdict: preflight.verdict, reasons: preflight.reasons.length, ...(preflight.cliVersion ? { cliVersion: preflight.cliVersion } : {}) });
-    return preflight;
+    return settlePreflight(r);
+  }
+
+  function refreshPreflightAsync(knownCliVersion?: string): Promise<PreflightState> {
+    if (refreshing) return refreshing;
+    const fn: AsyncPreflightFn = deps.preflightAsync ?? (async (o) => preflightFn(o));
+    const p = (async () => {
+      let r: Awaited<ReturnType<AsyncPreflightFn>> | undefined;
+      try {
+        r = await fn(preflightInput(), knownCliVersion);
+      } catch {
+        // never echo the error
+      }
+      return settlePreflight(r);
+    })();
+    refreshing = p;
+    void p.finally(() => {
+      if (refreshing === p) refreshing = undefined;
+    });
+    return p;
+  }
+
+  /** Wait for `p` until the deadline or the signal; undefined when either came first. */
+  async function waitBounded<T>(p: Promise<T>, deadlineAt: number, clock: Clock, signal: AbortSignal | undefined): Promise<T | undefined> {
+    if (signal?.aborted) return undefined;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let onAbort: (() => void) | undefined;
+    const stopped = new Promise<undefined>((resolve) => {
+      timer = setTimeout(() => resolve(undefined), Math.max(0, deadlineAt - clock.now()));
+      onAbort = () => resolve(undefined);
+      signal?.addEventListener("abort", onAbort, { once: true });
+    });
+    try {
+      return await Promise.race([p, stopped]);
+    } finally {
+      clearTimeout(timer);
+      if (onAbort) signal?.removeEventListener("abort", onAbort);
+    }
   }
 
   async function run(request: JobRequest, options: ClaudeJobRunOptions): Promise<JobOutcome> {
@@ -299,6 +390,8 @@ export function createClaudeJobAdapter(deps: ClaudeJobDeps): ClaudeJobAdapter {
       optionalTools: [],
       droppedPicks: 0,
       cutPicks: 0,
+      toolErrors: {},
+      optionalToolFailed: false,
       timings: { totalMs: 0 },
       usage: {},
     };
@@ -314,13 +407,32 @@ export function createClaudeJobAdapter(deps: ClaudeJobDeps): ClaudeJobAdapter {
 
     if (closed) return finish({ status: "unavailable", reason: "agent_unavailable" }, "agent_unavailable", "closed");
     if (current) return finish({ status: "unavailable", reason: "busy" }, "busy");
+    const deadlineAt = Math.min(options.deadline ?? Number.POSITIVE_INFINITY, t0 + req.deadlineMs);
+    if (!refreshing && retryPreflight) {
+      // The last preflight could not read the CLI version: this job runs one fresh one and waits for it.
+      retryPreflight = false;
+      deps.diagnostics?.event("agent_preflight_retry", {});
+      void refreshPreflightAsync();
+    } else if (!refreshing && preflight.verdict === "unchecked") {
+      // No preflight has run yet (the core starts none while no host is enabled): this job starts it.
+      void refreshPreflightAsync();
+    }
+    if (refreshing) {
+      // A preflight is in flight (the core's start, or a CLI update another job saw): wait for its verdict.
+      const settled = await waitBounded(refreshing, deadlineAt, clock, options.signal);
+      if (settled === undefined) {
+        if (options.signal?.aborted) return finish({ status: "cancelled", reason: toCancelReason(options.signal.reason) }, "cancelled");
+        return finish({ status: "error", reason: "preflight_failed" }, "preflight_failed", "preflight_pending");
+      }
+      if (closed) return finish({ status: "unavailable", reason: "agent_unavailable" }, "agent_unavailable", "closed");
+      if (current) return finish({ status: "unavailable", reason: "busy" }, "busy");
+    }
     if (preflight.verdict !== "subscription") return finish({ status: "error", reason: "preflight_failed" }, "preflight_failed", "unverified");
     if (req.profileFingerprint !== fingerprint) return finish({ status: "error", reason: "unsupported_configuration" }, "unsupported_configuration", "profile_mismatch");
     const scout = options.toolSurface.scout;
     if (!isAbsolute(scout.socketPath) || scout.socketPath.includes("\0") || !AgentTokenSchema.safeParse(scout.token).success) {
       return finish({ status: "error", reason: "unsupported_configuration" }, "unsupported_configuration", "tool_surface");
     }
-    const deadlineAt = Math.min(options.deadline ?? Number.POSITIVE_INFINITY, t0 + req.deadlineMs);
     if (options.signal?.aborted) return finish({ status: "cancelled", reason: toCancelReason(options.signal.reason) }, "cancelled");
     if (deadlineAt - clock.now() < minLaunchMs) return finish({ status: "unavailable", reason: "no_time_left" }, "no_time_left");
 
@@ -331,7 +443,8 @@ export function createClaudeJobAdapter(deps: ClaudeJobDeps): ClaudeJobAdapter {
     const onSignal = (): void => stop.external({ result: { status: "cancelled", reason: toCancelReason(options.signal?.reason) }, termination: "cancelled" });
     options.signal?.addEventListener("abort", onSignal, { once: true });
     try {
-      const out = await execute(req, scout, options, details, clock, stop);
+      let out = await execute(req, scout, options, details, clock, stop);
+      if (details.cliVersionChanged && (out.result.status === "ok" || out.result.status === "empty")) out = await recheckAfterCliChange(out, deadlineAt, clock, options.signal);
       return finish(out.result, out.termination, out.detail);
     } finally {
       clearTimeout(timer);
@@ -339,6 +452,20 @@ export function createClaudeJobAdapter(deps: ClaudeJobDeps): ClaudeJobAdapter {
       current = undefined;
       resolveDone();
     }
+  }
+
+  /**
+   * The job's CLI reported another version than the preflight saw: its answer counts only once
+   * the re-preflight it started (on init) says `subscription`, within the job's deadline.
+   */
+  async function recheckAfterCliChange(out: Out, deadlineAt: number, clock: Clock, signal: AbortSignal | undefined): Promise<Out> {
+    const settled = await waitBounded(refreshing ?? Promise.resolve(preflight), deadlineAt, clock, signal);
+    if (settled === undefined) {
+      if (signal?.aborted) return { result: { status: "cancelled", reason: toCancelReason(signal.reason) }, termination: "cancelled" };
+      return { result: { status: "error", reason: "timeout" }, termination: "timeout", detail: "cli_version_changed" };
+    }
+    if (settled.verdict !== "subscription") return { result: { status: "error", reason: "preflight_failed" }, termination: "preflight_failed", detail: "cli_version_changed" };
+    return out;
   }
 
   async function execute(
@@ -390,6 +517,7 @@ export function createClaudeJobAdapter(deps: ClaudeJobDeps): ClaudeJobAdapter {
       const expected: ExpectedInit = { servers: surface.expected, model: profile.model };
       if (preflight.cliVersion !== undefined) expected.cliVersion = preflight.cliVersion;
       const promptOpts: Parameters<typeof buildJobPrompt>[1] = { instructionMarkerProbe: options.instructionMarker !== undefined };
+      if (options.activity !== undefined) promptOpts.activity = options.activity;
       const nonce = deps.nonce?.();
       if (nonce !== undefined) promptOpts.nonce = nonce;
       const prompt = buildJobPrompt(req, promptOpts);
@@ -433,7 +561,18 @@ export function createClaudeJobAdapter(deps: ClaudeJobDeps): ClaudeJobAdapter {
     try {
       const streamFailed: Out = { result: { status: "error", reason: "agent_failed" }, termination: "process_error", detail: "stream_failed" };
       stop.onHalt(() => sup.terminate());
-      const monitor = createStreamMonitor({ expected, allowedTools: surface.allowedTools, details, stop, clock, startedAt });
+      const monitor = createStreamMonitor({
+        expected,
+        allowedTools: surface.allowedTools,
+        details,
+        stop,
+        clock,
+        startedAt,
+        onCliVersionChanged: (version) => {
+          deps.diagnostics?.event("cli_version_changed", { ...(version !== undefined && /^[0-9][0-9A-Za-z.+-]{0,31}$/.test(version) ? { cliVersion: version } : {}) });
+          void refreshPreflightAsync(version);
+        },
+      });
       const stream = createJsonLineStream({
         maxBytes: maxStdout,
         onEvent: monitor.onEvent,
@@ -463,7 +602,12 @@ export function createClaudeJobAdapter(deps: ClaudeJobDeps): ClaudeJobAdapter {
       await sup.reap();
 
       recordUsage(monitor.result, details);
-      return mapOutcome({ spawnError: exit.spawnError, stop: stop.decision, init: monitor.init, result: monitor.result }, req, details, options.instructionMarker);
+      return mapOutcome(
+        { spawnError: exit.spawnError, stop: stop.decision, init: monitor.init, result: monitor.result, requiredToolFailed: monitor.requiredToolFailed() },
+        req,
+        details,
+        options.instructionMarker,
+      );
     } finally {
       sup.dispose();
     }
@@ -486,6 +630,12 @@ export function createClaudeJobAdapter(deps: ClaudeJobDeps): ClaudeJobAdapter {
     if (details.detail !== undefined) f.detail = details.detail;
     if (details.timings.cliMs !== undefined) f.cliMs = details.timings.cliMs;
     if (details.cliVersion !== undefined) f.cliVersion = details.cliVersion;
+    if (details.cliVersionChanged) f.cliVersionChanged = true;
+    if (details.timings.apiMs !== undefined) f.apiMs = details.timings.apiMs;
+    if (details.permissionDenials !== undefined) f.permissionDenials = details.permissionDenials;
+    const toolErrors = Object.values(details.toolErrors).reduce((a, b) => a + b, 0) + (details.unattributedToolErrors ?? 0);
+    if (toolErrors > 0) f.toolErrors = toolErrors;
+    if (details.optionalToolFailed) f.optionalToolFailed = true;
     if (details.model !== undefined && MODEL_RE.test(details.model)) f.model = details.model;
     // Diagnostics drop any field name containing "token", so usage counts are named usage*.
     const u = details.usage;
@@ -500,6 +650,7 @@ export function createClaudeJobAdapter(deps: ClaudeJobDeps): ClaudeJobAdapter {
   return {
     id: "claude-code",
     refreshPreflight,
+    refreshPreflightAsync,
     get preflight() {
       return preflight;
     },

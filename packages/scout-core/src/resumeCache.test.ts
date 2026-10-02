@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { type ContextStatus, createResumeCache, RESUME_MAX_ENTRIES, type ResumeKey } from "./resumeCache.js";
+import { activityHash, type ContextStatus, createJobResumeCache, createResumeCache, type JobResumeKey, RESUME_MAX_ENTRIES, RESUME_TTL_MS, type ResumeKey } from "./resumeCache.js";
 
 const STATUS: ContextStatus = { serviceInstanceId: "svc-1", activityRevision: 4, sourceGrantRevision: "grant-a" };
 const KEY_A: ResumeKey = {
@@ -224,5 +224,59 @@ describe("resumeCache", () => {
     expect(await cache.restore(KEY_A, fetchStatus)).toBeNull();
     expect(fetchStatus).not.toHaveBeenCalled();
     expect(cache.size).toBe(0);
+  });
+});
+
+describe("job resume cache", () => {
+  const key = (extra: Partial<JobResumeKey> = {}): JobResumeKey => ({
+    coreInstanceId: "core",
+    origin: "https://docs.example.com",
+    url: "https://docs.example.com/billing#top",
+    catalogHash: "cat",
+    activityHash: activityHash([{ url: "https://github.com/o/r/issues/1", title: "Issue", text: "Body" }]),
+    approvalRevision: 1,
+    grantRevision: 0,
+    profileFingerprint: "fp",
+    toolsRevision: 0,
+    ...extra,
+  });
+
+  it("reuses an answer for exactly the same key under 30 s (the fragment ignored); every key field counts", () => {
+    const clock = { t: 0, now: () => clock.t };
+    const cache = createJobResumeCache<string>({ clock });
+    cache.store(key(), { result: "answer", browserOnly: false });
+    expect(cache.restore(key({ url: "https://docs.example.com/billing" }), { hasUserTools: false })).toBe("answer");
+    for (const changed of [
+      { coreInstanceId: "core-2" },
+      { url: "https://docs.example.com/other" },
+      { catalogHash: "cat-2" },
+      { activityHash: activityHash([]) },
+      { approvalRevision: 2 },
+      { grantRevision: 1 },
+      { profileFingerprint: "fp-2" },
+      { toolsRevision: 1 },
+    ]) {
+      expect(cache.restore(key(changed), { hasUserTools: false }), JSON.stringify(changed)).toBeNull();
+    }
+    clock.t = RESUME_TTL_MS;
+    expect(cache.restore(key(), { hasUserTools: false })).toBeNull();
+    expect(cache.size).toBe(0);
+  });
+
+  it("a job with user tools never reuses a browser-only answer; one without them may", () => {
+    const cache = createJobResumeCache<string>({ clock: { now: () => 0 } });
+    cache.store(key({ toolsRevision: 3 }), { result: "browser-only", browserOnly: true });
+    expect(cache.restore(key({ toolsRevision: 3 }), { hasUserTools: true })).toBeNull();
+    expect(cache.restore(key({ toolsRevision: 3 }), { hasUserTools: false })).toBe("browser-only");
+    cache.store(key({ toolsRevision: 3 }), { result: "with-tools", browserOnly: false });
+    expect(cache.restore(key({ toolsRevision: 3 }), { hasUserTools: true })).toBe("with-tools");
+  });
+
+  it("the activity hash depends on order and content", () => {
+    const a = { url: "u1", title: "A", text: "x" };
+    const b = { url: "u2", title: "B" };
+    expect(activityHash([a, b])).not.toBe(activityHash([b, a]));
+    expect(activityHash([a])).not.toBe(activityHash([{ ...a, text: "y" }]));
+    expect(activityHash([])).toBe(activityHash([]));
   });
 });

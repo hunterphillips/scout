@@ -4,12 +4,21 @@ import type { Clock } from "../clock.js";
 import type { Diagnostics } from "../diagnostics.js";
 import type { GuardedFetchResult } from "../fetch/guardedFetch.js";
 import { type CatalogFetch, type CatalogFetchOptions, nextValidators } from "./catalogFetch.js";
-import { fetchLlmsTxt } from "./llmsTxt.js";
+import { fetchLlmsTxt, type ParsedLlmsTxt } from "./llmsTxt.js";
 import { isRefusal } from "./pacing.js";
 import { compileRobots, fetchRobots, isAllowed, type RobotsSource } from "./robots.js";
 import { sameOriginHttpsUrl } from "./sameOrigin.js";
 import { CANDIDATE_TITLE_MAX, sanitizeLabel } from "./sanitizeLabel.js";
-import { fetchSitemaps } from "./sitemap.js";
+import { fetchSitemaps, type ParsedSitemap } from "./sitemap.js";
+
+/**
+ * Where discovery parses what it fetched. The parsers are pure; the core runs them in its
+ * bounded parse worker (parseWorker.ts) so a large sitemap never blocks its input handling.
+ */
+export interface CatalogParsers {
+  sitemap(xml: string, origin: string): Promise<ParsedSitemap>;
+  llmsTxt(text: string, origin: string, baseUrl: string): Promise<ParsedLlmsTxt>;
+}
 
 /** Most candidates in one catalog. */
 export const MAX_CANDIDATES = 500;
@@ -97,6 +106,8 @@ export interface DiscoverOptions {
   fetch: CatalogFetch & { setCrawlDelay?: (ms: number | undefined) => void; readonly refused?: number };
   clock: Clock;
   diagnostics?: Diagnostics;
+  /** Off-thread parsers; without them each file is parsed inline. */
+  parsers?: CatalogParsers;
   /** Test hooks for the caps. */
   maxCandidates?: number;
   maxLabelBytes?: number;
@@ -202,8 +213,9 @@ export async function discoverCatalog(options: DiscoverOptions): Promise<Discove
 
   const robots = await fetchRobots(origin, recording);
   if (robots.source === "fetched") options.fetch.setCrawlDelay?.(robots.crawlDelayMs);
-  const llms = await fetchLlmsTxt(origin, recording);
-  const sitemaps = await fetchSitemaps(origin, robots.sitemaps, recording);
+  const parsers = options.parsers;
+  const llms = await fetchLlmsTxt(origin, recording, parsers ? (text, o, base) => parsers.llmsTxt(text, o, base) : undefined);
+  const sitemaps = await fetchSitemaps(origin, robots.sitemaps, recording, parsers ? { parse: (xml, o) => parsers.sitemap(xml, o) } : {});
 
   const stats: DiscoveryStats = {
     robotsSource: robots.source,

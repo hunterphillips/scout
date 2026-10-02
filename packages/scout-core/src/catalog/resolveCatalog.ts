@@ -5,6 +5,7 @@ import type { GuardedFetchOptions, GuardedFetchResult } from "../fetch/guardedFe
 import { createOriginFetchSession, type OriginFetchSession } from "../fetch/originSession.js";
 import { type CatalogCacheResult, createCatalogCache } from "./cache.js";
 import type { Sleep } from "./pacing.js";
+import type { CatalogParsers } from "./resolver.js";
 
 export interface CatalogResolverOptions {
   /** Scout's home directory; the cache lives in `<scoutHome>/cache/catalog`. */
@@ -15,6 +16,8 @@ export interface CatalogResolverOptions {
   guardedFetch?: (url: string, options: GuardedFetchOptions) => Promise<GuardedFetchResult>;
   /** Test hook; defaults to `setTimeout`. */
   sleep?: Sleep;
+  /** Off-thread parsers (the core's parse worker); without them files are parsed inline, as the CLI does. */
+  parsers?: CatalogParsers;
 }
 
 /** What one resolve cost on the network. */
@@ -69,7 +72,14 @@ export function createCatalogResolver(options: CatalogResolverOptions): CatalogR
       if (session.origin !== new URL(origin).origin) throw new TypeError("session is for another origin");
       const before = session.stats();
       const started = clock.now();
-      const result = await cache.resolve({ origin, fetch: session.fetch, refresh, isCancelled: session.isCancelled, ...(startWindow ? { startWindow } : {}) });
+      const result = await cache.resolve({
+        origin,
+        fetch: session.fetch,
+        refresh,
+        isCancelled: session.isCancelled,
+        ...(startWindow ? { startWindow } : {}),
+        ...(options.parsers ? { parsers: options.parsers } : {}),
+      });
       const after = session.stats();
       return {
         result,

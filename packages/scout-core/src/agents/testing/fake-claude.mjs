@@ -24,6 +24,8 @@
 // With selected user tools, mcp.json also names the REAL per-job bridge (scout_bridge),
 // which it starts like any server; `bridge-call` calls the bridged `lookup` and puts its
 // reply in the first pick's reason, so a test sees the tool was called, not just listed.
+// `tool-errors` is `bridge-call` with Scout's `current_site` and the bridged `lookup` results
+// reported as `is_error` (a tool that failed at runtime), then the same answer.
 
 import { appendFileSync, readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -141,8 +143,8 @@ function startup() {
 }
 
 let toolUseSeq = 0;
-/** Call a tool; returns its first text content (or the error text). */
-async function useTool(server, tool, args = {}) {
+/** Call a tool; returns its first text content (or the error text). `reportError` marks its result `is_error`. */
+async function useTool(server, tool, args = {}, reportError = false) {
   const id = `toolu_${++toolUseSeq}`;
   emit({ type: "assistant", message: { content: [{ type: "tool_use", id, name: `mcp__${server.name}__${tool}`, input: args }] } });
   let text;
@@ -152,7 +154,9 @@ async function useTool(server, tool, args = {}) {
   } catch (e) {
     text = `error ${e?.code ?? ""}`;
   }
-  emit({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: id, content: "(elided)" }] } });
+  const res = { type: "tool_result", tool_use_id: id, content: "(elided)" };
+  if (reportError) res.is_error = true;
+  emit({ type: "user", message: { content: [res] } });
   return text;
 }
 
@@ -200,19 +204,19 @@ const probe = prompt.includes("Compatibility check:");
 
 const item = (id, reason = "Fits the open billing work") => ({ id, reason });
 
-/** Start up, call two Scout tools (and, if `bridged`, the bridge's `lookup`), answer. */
-async function answer(build, bridged = false) {
+/** Start up, call two Scout tools (and, if `bridged`, the bridge's `lookup`), answer. `failing` reports current_site and lookup as errors. */
+async function answer(build, bridged = false, failing = false) {
   startup();
   const servers = await connectAll();
   emit(initEvent(servers));
   const scout = servers.find((s) => s.name === "scout" && s.client);
   if (scout) {
-    await useTool(scout, "current_site");
+    await useTool(scout, "current_site", {}, failing);
     await useTool(scout, "recent_activity");
   }
   let reply;
   const bridge = servers.find((s) => s.name === "scout_bridge" && s.client);
-  if (bridged && bridge?.tools.includes("mcp__scout_bridge__lookup")) reply = await useTool(bridge, "lookup", { query: "metered" });
+  if (bridged && bridge?.tools.includes("mcp__scout_bridge__lookup")) reply = await useTool(bridge, "lookup", { query: "metered" }, failing);
   for (const s of servers) await s.client?.close();
   result({ structured_output: build(reply) });
 }
@@ -244,6 +248,9 @@ switch (mode) {
     break;
   case "bridge-call":
     await answer((reply) => ({ status: "ok", items: [item(ids[0], `Matches ${reply ?? "no reply"}`), item(ids[1])] }), true);
+    break;
+  case "tool-errors":
+    await answer((reply) => ({ status: "ok", items: [item(ids[0], `Matches ${reply ?? "no reply"}`), item(ids[1])] }), true, true);
     break;
   case "marker-only":
     // The first reason is the visible marker and nothing else.

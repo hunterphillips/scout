@@ -36,9 +36,9 @@ interface Core {
   exited: Promise<{ code: number | null; signal: NodeJS.Signals | null; at: number }>;
 }
 
-function spawnCore(home: string): Core {
+function spawnCore(home: string, env: NodeJS.ProcessEnv = process.env): Core {
   // A 10-minute dwell: the real visits these tests form never settle into real fetches.
-  const child = spawn(process.execPath, [mainJs, "--stdio"], { env: { ...process.env, SCOUT_HOME: home, SCOUT_DWELL_MS: "600000" } });
+  const child = spawn(process.execPath, [mainJs, "--stdio"], { env: { ...env, SCOUT_HOME: home, SCOUT_DWELL_MS: "600000" } });
   const lines: unknown[] = [];
   let out = "";
   let err = "";
@@ -365,6 +365,63 @@ describe("main --stdio", () => {
     expect(core.stderr()).toContain("config-invalid-destinations");
   });
 
+  describe("with an agent profile whose CLI hangs (the billing preflight's `claude` never answers)", () => {
+    /** A temp user home, a profile, and a `claude` that records its PID and sleeps: the preflight blocks on it. */
+    const hangingAgent = (destinations: string[]) => {
+      const userHome = join(home, "u");
+      mkdirSync(join(userHome, ".claude"), { recursive: true });
+      mkdirSync(join(home, "bin"));
+      const pids = join(home, "claude-pids");
+      const claudePath = join(home, "bin", "claude");
+      writeFileSync(claudePath, `#!/bin/sh\necho $$ >> '${pids}'\nexec sleep 30\n`);
+      chmodSync(claudePath, 0o755);
+      writeFileSync(join(home, "config.json"), JSON.stringify({ destinations }));
+      writeFileSync(join(home, "agent-profile.json"), JSON.stringify({ schemaVersion: 1, adapter: "claude-code", claudePath, model: "claude-sonnet-5-5" }), { mode: 0o600 });
+      // Only what the launch profile and the preflight read: no gateway, a throwaway HOME.
+      const env = { PATH: "/usr/bin:/bin", HOME: userHome, USER: "someone", LOGNAME: "someone", LANG: "en_US.UTF-8", TMPDIR: tmpdir() };
+      const started = (): number[] => (existsSync(pids) ? readFileSync(pids, "utf8").split("\n").filter(Boolean).map(Number) : []);
+      return { env, started };
+    };
+    const alive = (pid: number): boolean => {
+      try {
+        process.kill(pid, 0);
+        return true;
+      } catch (e) {
+        return (e as NodeJS.ErrnoException).code === "EPERM";
+      }
+    };
+
+    it("shutdown with the preflight in flight kills it first and exits well within the deadline", async () => {
+      const agent = hangingAgent(["docs.example.com"]);
+      core = spawnCore(home, agent.env);
+      const c = core;
+      await until(() => c.stderr().includes("listening on"));
+      // The eager preflight (an enabled host exists) is blocked on the hanging CLI.
+      await until(() => agent.started().length > 0);
+      const closedAt = Date.now();
+      c.child.stdin.end();
+      const { code, at } = await c.exited;
+      expect(code).toBe(0);
+      // SHUTDOWN_DEADLINE_MS is 2 s; a preflight that held the exit would take the CLI's 20 s.
+      expect(at - closedAt).toBeLessThan(1_000);
+      await until(() => !agent.started().some(alive), 2_000);
+    }, 20_000);
+
+    it("with no enabled host, no `claude` runs at start", async () => {
+      const agent = hangingAgent([]);
+      core = spawnCore(home, agent.env);
+      const c = core;
+      await until(() => c.stderr().includes("listening on"));
+      await new Promise((r) => setTimeout(r, 1_000));
+      expect(agent.started()).toEqual([]);
+      c.child.stdin.end();
+      expect((await c.exited).code).toBe(0);
+      const log = existsSync(join(home, "logs", "diagnostics.jsonl")) ? readFileSync(join(home, "logs", "diagnostics.jsonl"), "utf8") : "";
+      expect(log).not.toContain('"event":"agent_preflight"');
+      expect(log).not.toContain('"event":"agent_profile_unavailable"');
+    }, 20_000);
+  });
+
   it("exits 2 without --stdio", async () => {
     const child = spawn(process.execPath, [mainJs], { env: { ...process.env, SCOUT_HOME: home } });
     const code = await new Promise<number | null>((r) => child.once("exit", (c) => r(c)));
@@ -396,6 +453,7 @@ describe("runStdio (in process)", () => {
     };
     const socketPath = join(home, "run", "core.sock");
     let agent: { store: CapabilityStore; snapshots: SnapshotRegistry } | null = null;
+    let jobs: Parameters<NonNullable<Parameters<typeof runStdio>[0]["onJobsStarted"]>>[0] | null = null;
     const run = () =>
       runStdio({
         stdin,
@@ -405,6 +463,7 @@ describe("runStdio (in process)", () => {
         exit: (code) => void exits.push({ code, socketLeft: existsSync(socketPath) }),
         diagnostics,
         onAgentStarted: (a) => void (agent = a),
+        onJobsStarted: (j) => void (jobs = j),
       });
     return {
       stdin,
@@ -417,6 +476,9 @@ describe("runStdio (in process)", () => {
       fields,
       get agent() {
         return agent!;
+      },
+      get jobs() {
+        return jobs!;
       },
     };
   };
@@ -559,6 +621,38 @@ describe("runStdio (in process)", () => {
     expect(h.exits.map((e) => e.code)).toEqual([0]);
   });
 
+  it("without an agent profile jobs are wired but have no agent; a browser-context grant toggle reaches the scheduler", async () => {
+    const h = harness();
+    await h.run();
+    expect(h.fields.find((f) => f.name === "agent_profile_unavailable")?.fields).toEqual({ code: "profile: missing" });
+    expect(h.jobs.adapter).toBeNull();
+    const seen: boolean[] = [];
+    h.jobs.scheduler.onGrantChanged = (enabled) => void seen.push(enabled);
+    h.stdin.write(`${JSON.stringify({ type: "set_agent_browser_context", commandId: "g1", enabled: true, expectedEnabled: false })}\n`);
+    await until(() => seen.length > 0);
+    h.stdin.write(`${JSON.stringify({ type: "set_agent_browser_context", commandId: "g2", enabled: false, expectedEnabled: true })}\n`);
+    await until(() => seen.length > 1);
+    expect(seen).toEqual([true, false]);
+    h.stdin.end();
+    await until(() => h.exits.length > 0);
+  });
+
+  it("without configured destinations no origin is recommendation-enabled: a settled visit never begins a job", async () => {
+    const h = harness();
+    await h.run();
+    const { scheduler } = h.jobs;
+    expect(scheduler.isEnabled("https://docs.stripe.com")).toBe(false);
+    expect(scheduler.isEnabled("https://www.peakdesign.com")).toBe(false);
+    const visit = { epoch: 7, origin: "https://docs.stripe.com" } as never;
+    const catalog = { result: { ok: true, catalog: { candidates: [{ id: "c1", url: "https://docs.stripe.com/a", label: "A" }], version: "cat" } } } as never;
+    scheduler.onSettled(visit, catalog, Date.now());
+    expect(scheduler.running).toBeNull();
+    expect(h.fields.filter((f) => f.name === "job_skipped").map((f) => f.fields)).toEqual([{ epoch: 7, reason: "not_enabled" }]);
+    expect(h.events).not.toContain("job_started");
+    h.stdin.end();
+    await until(() => h.exits.length > 0);
+  });
+
   it("a stdout error (EPIPE) shuts down with 0 after removing the socket", async () => {
     const h = harness();
     await h.run();
@@ -597,6 +691,10 @@ describe("readDestinations", () => {
     home = mkdtempSync(join(tmpdir(), "scd-"));
   });
   afterEach(() => rmSync(home, { recursive: true, force: true }));
+
+  it("the default is empty: recommendations start off for every origin", () => {
+    expect(DEFAULT_DESTINATIONS).toEqual([]);
+  });
 
   it("defaults when config.json or its destinations field is missing", () => {
     expect(readDestinations(home)).toBe(DEFAULT_DESTINATIONS);

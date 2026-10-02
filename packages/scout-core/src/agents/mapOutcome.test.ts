@@ -5,7 +5,7 @@ import { mapOutcome, type CliRun } from "./mapOutcome.js";
 const MARKER = "SCOUTMARK0123456789ab";
 const req = { candidates: [{ id: "c1", title: "A", labelQuality: "published" as const }, { id: "c2", title: "B", labelQuality: "published" as const }], maxPicks: 3 };
 
-const details = (): JobDetails => ({ adapter: "claude-code", termination: "completed", toolUses: [], optionalTools: [], droppedPicks: 0, cutPicks: 0, timings: { totalMs: 0 }, usage: {} });
+const details = (): JobDetails => ({ adapter: "claude-code", termination: "completed", toolUses: [], optionalTools: [], droppedPicks: 0, cutPicks: 0, toolErrors: {}, optionalToolFailed: false, timings: { totalMs: 0 }, usage: {} });
 
 const run = (items: { id: string; reason: string }[]): CliRun => ({
   spawnError: false,
@@ -49,5 +49,11 @@ describe("mapOutcome: order", () => {
     const stop = { result: { status: "cancelled" as const, reason: "superseded" as const }, termination: "cancelled" as const };
     expect(mapOutcome({ ...run([{ id: "c1", reason: "Fits" }]), stop }, req, details()).result).toEqual(stop.result);
     expect(mapOutcome({ ...run([{ id: "c1", reason: "Fits" }]), stop, spawnError: true }, req, details())).toMatchObject({ termination: "agent_unavailable", detail: "spawn_failed" });
+  });
+  it("a required tool every call of which errored fails a valid answer (tool_unavailable); a stop still wins", () => {
+    const failedTool = { ...run([{ id: "c1", reason: "Fits" }]), requiredToolFailed: true };
+    expect(mapOutcome(failedTool, req, details())).toEqual({ result: { status: "error", reason: "tool_unavailable" }, termination: "tool_unavailable", detail: "required_tool_failed" });
+    const stop = { result: { status: "cancelled" as const, reason: "paused" as const }, termination: "cancelled" as const };
+    expect(mapOutcome({ ...failedTool, stop }, req, details()).result).toEqual(stop.result);
   });
 });

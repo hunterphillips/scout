@@ -6,6 +6,7 @@ import type { DiagnosticFields, Diagnostics } from "../diagnostics.js";
 import type { GuardedFetchOptions, GuardedFetchResult } from "../fetch/guardedFetch.js";
 import { createOriginFetchSession, type OriginFetchSession } from "../fetch/originSession.js";
 import { cacheFileName } from "../privateCacheFile.js";
+import { createParsePool } from "./parseWorker.js";
 import { createCatalogResolver } from "./resolveCatalog.js";
 
 const ORIGIN = "https://s.example";
@@ -88,5 +89,51 @@ describe("createCatalogResolver on a shared session", () => {
     expect(resolved.result.ok && resolved.result.catalog.errors.length).toBeGreaterThan(0);
     expect(existsSync(cacheFile())).toBe(true);
     expect(events.some((e) => e.name === "catalog_cache_skipped")).toBe(false);
+  });
+});
+
+describe("createCatalogResolver with the parse worker", () => {
+  it("builds the same catalog as inline parsing, with every llms.txt and sitemap file parsed in the worker", async () => {
+    const pool = createParsePool();
+    let parsed = 0;
+    const counting = {
+      sitemap: (xml: string, origin: string) => (parsed++, pool.parsers.sitemap(xml, origin)),
+      llmsTxt: (text: string, origin: string, base: string) => (parsed++, pool.parsers.llmsTxt(text, origin, base)),
+    };
+    try {
+      const responses = { "/llms.txt": LLMS, "/sitemap.xml": SITEMAP };
+      const inline = await createCatalogResolver({ scoutHome: home, clock, guardedFetch: site(responses).guardedFetch, sleep: async () => undefined }).resolve(ORIGIN, { refresh: true });
+      rmSync(cacheFile(), { force: true });
+      const viaWorker = await createCatalogResolver({ scoutHome: home, clock, guardedFetch: site(responses).guardedFetch, sleep: async () => undefined, parsers: counting }).resolve(ORIGIN, { refresh: true });
+      expect(parsed).toBe(2);
+      expect(viaWorker.result.ok && viaWorker.result.catalog.candidates).toEqual(inline.result.ok && inline.result.catalog.candidates);
+    } finally {
+      await pool.close();
+    }
+  });
+
+  it("a parse cancelled mid-pass leaves no catalog in the cache", async () => {
+    const pool = createParsePool();
+    try {
+      const responses = site({ "/llms.txt": LLMS, "/sitemap.xml": SITEMAP });
+      const s = createOriginFetchSession({ origin: ORIGIN, clock, guardedFetch: responses.guardedFetch, sleep: async () => undefined });
+      s.startWindow();
+      // The pass is cancelled while the sitemap is in the worker: its parse rejects.
+      const parsers = {
+        llmsTxt: pool.parsers.llmsTxt,
+        sitemap: (xml: string, origin: string) => {
+          const parsing = pool.parsers.sitemap(xml, origin);
+          s.cancel();
+          pool.cancel();
+          return parsing;
+        },
+      };
+      const resolver = createCatalogResolver({ scoutHome: home, clock, guardedFetch: responses.guardedFetch, sleep: async () => undefined, parsers });
+      const out = await resolver.resolve(ORIGIN, { session: s });
+      expect(out.result.ok).toBe(false);
+      expect(existsSync(cacheFile())).toBe(false);
+    } finally {
+      await pool.close();
+    }
   });
 });

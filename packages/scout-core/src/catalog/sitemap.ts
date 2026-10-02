@@ -63,6 +63,8 @@ export interface SitemapCounters {
 export interface FetchSitemapsOptions {
   /** Entry cap for the run; defaults to `MAX_SITEMAP_ENTRIES`. */
   maxEntries?: number;
+  /** Where each file is parsed; defaults to `parseSitemap` inline (the core passes its parse worker). */
+  parse?: (xml: string, origin: string) => ParsedSitemap | Promise<ParsedSitemap>;
 }
 
 export interface FetchedSitemaps {
@@ -190,6 +192,7 @@ export async function fetchSitemaps(
   options: FetchSitemapsOptions = {},
 ): Promise<FetchedSitemaps> {
   const maxEntries = options.maxEntries ?? MAX_SITEMAP_ENTRIES;
+  const parse = options.parse ?? parseSitemap;
   const counters: SitemapCounters = {
     filesFetched: 0,
     filesAbsent: 0,
@@ -226,7 +229,7 @@ export async function fetchSitemaps(
       return null;
     }
     counters.filesFetched += 1;
-    const parsed = parseSitemap(result.body, origin);
+    const parsed = await parse(result.body, origin);
     if (parsed.kind === "rejected") {
       counters.rejected += 1;
       return null;

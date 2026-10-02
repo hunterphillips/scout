@@ -31,6 +31,21 @@
 // `open_link`) and the coordinator (which clears them with their visit); results may be
 // published only for the coordinator's current, unpaused, permitted visit.
 //
+// Recommendation jobs: wiring/jobs.ts builds the adapter for `agent-profile.json` (without a
+// usable profile every job is `unavailable`), its billing preflight in a killable child process
+// (started at once only when some host is recommendation-enabled), the catalog parse worker a
+// cancelled discovery pass cancels too, and the scheduler. Every panel frame passes through it,
+// so the scheduler hears the browser-context grant as the window does; revoked resources reach
+// it through the store's revocation hook, after agent.sock released the snapshots that pinned
+// them.
+//
+// Shutdown order: a running preflight child is killed first, before anything is awaited; the
+// coordinator stops (its scheduler cancels the running job with `shutdown`); the job wiring
+// waits for the job's process tree (`adapter.abortAll()`) and closes the parse pool; then every
+// snapshot is released and the sockets close. The whole close is still bounded by
+// SHUTDOWN_DEADLINE_MS (2 s), which is the adapter's kill grace: a job that ignores SIGTERM may
+// outlive the core by that grace (P3.4 raises the deadline).
+//
 // The process exits 0 when stdin closes (the app quit or crashed), on SIGTERM/SIGINT/
 // SIGHUP, or on a `shutdown` command, after closing both sockets (which releases the agent
 // connections' pins), then the store, then removing the token file. It never outlives the
@@ -43,6 +58,8 @@ import { createInterface } from "node:readline";
 import type { Readable, Writable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { NATIVE_COMMAND_MAX_BYTES, NativeCommandSchema, type PanelState } from "@scout/contracts";
+import type { AgentJobAdapter } from "./agents/adapter.js";
+import type { JobScheduler } from "./jobScheduler.js";
 import { createActivityStore } from "./activity/store.js";
 import { createSnapshotRegistry, type SnapshotRegistry } from "./activity/snapshots.js";
 import { createAgentAuth, type InteractiveTokenFile, writeInteractiveTokenFile } from "./agentApi/auth.js";
@@ -61,11 +78,11 @@ import { ConfigError, type CoreConfig, readConfig } from "./config.js";
 import { type Coordinator, createCoordinator } from "./coordinator.js";
 import { createDiagnostics, defaultDiagnosticsPath, type Diagnostics, scoutHome } from "./diagnostics.js";
 import { DWELL_MS } from "./dwell.js";
-import { createOriginFetchSession } from "./fetch/originSession.js";
 import { InstalledRecordError, readInstalledRecord } from "./installedRecord.js";
 import { createPanelChannel, type PanelChannel } from "./panelChannel.js";
 import { createResultRegistry } from "./results.js";
 import { createSocketServer, SocketServerError } from "./socketServer.js";
+import { createJobWiring, type JobWiring } from "./wiring/jobs.js";
 
 /** Hard cap on shutdown: exit anyway if closing takes longer. */
 export const SHUTDOWN_DEADLINE_MS = 2000;
@@ -98,6 +115,8 @@ export interface StdioDeps {
   diagnostics?: Diagnostics;
   /** Tests only: called once agent.sock is listening, with what a test drives job snapshots through. */
   onAgentStarted?: (agent: { store: CapabilityStore; snapshots: SnapshotRegistry }) => void;
+  /** Tests only: the job scheduler, once built. */
+  onJobsStarted?: (jobs: { scheduler: JobScheduler; adapter: AgentJobAdapter | null }) => void;
 }
 
 export interface StdioCore {
@@ -129,13 +148,19 @@ export async function runStdio(deps: StdioDeps): Promise<StdioCore> {
   let agentServer: AgentSocketServer | null = null;
   // Built with the agent auth; job snapshots exist only once agent.sock can serve them.
   let snapshots: SnapshotRegistry | null = null;
+  // Built after the store and the coordinator's inputs; the store's revocation hook and the grant frames reach it then.
+  let jobs: JobWiring | null = null;
   let store: CapabilityStore;
   try {
     store = await createCapabilityStore({
       scoutHome: home,
       clock,
       diagnostics,
-      onRevoked: (resourceId) => agentServer?.resourceRevoked(resourceId),
+      onRevoked: (resourceId) => {
+        // agent.sock first: it releases the snapshots that pinned the resource.
+        agentServer?.resourceRevoked(resourceId);
+        jobs?.scheduler.onResourceRevoked(resourceId);
+      },
       ...(exporter ? { syncExports: (state) => exporter.sync(state) } : {}),
     });
   } catch (e) {
@@ -161,6 +186,7 @@ export async function runStdio(deps: StdioDeps): Promise<StdioCore> {
 
   let stdoutOpen = true;
   const emitPanel = (state: PanelState): void => {
+    jobs?.observePanel(state);
     if (!stdoutOpen) return;
     deps.stdout.write(`${JSON.stringify(state)}\n`);
   };
@@ -208,11 +234,28 @@ export async function runStdio(deps: StdioDeps): Promise<StdioCore> {
   });
   const panelChannel = panel;
 
-  // Settled visits run the same catalog and discovery pipelines as the dev CLI, with their
-  // caches under SCOUT_HOME; the coordinator owns each pass's fetch session and window.
-  const catalogResolver = createCatalogResolver({ scoutHome: home, clock, diagnostics });
-  const discoverer = createSiteResourceDiscoverer({ scoutHome: home, clock, diagnostics });
   const activity = createActivityStore({ clock });
+  // The adapter, preflight, parse pool and scheduler; it reads the coordinator only once a job runs.
+  const jobWiring = createJobWiring({
+    home,
+    env: deps.env,
+    destinations: config.destinations,
+    coreInstanceId,
+    clock,
+    diagnostics,
+    results,
+    snapshots: () => snapshots,
+    coordinator: () => coordinator,
+    activity,
+    store,
+  });
+  jobs = jobWiring;
+  const scheduler = jobWiring.scheduler;
+  // Settled visits run the same catalog and discovery pipelines as the dev CLI, with their
+  // caches under SCOUT_HOME; the coordinator owns each pass's fetch session and window. Catalog
+  // files are parsed in the parse worker; cancelling a pass's session cancels its parse.
+  const catalogResolver = createCatalogResolver({ scoutHome: home, clock, diagnostics, parsers: jobWiring.parsers });
+  const discoverer = createSiteResourceDiscoverer({ scoutHome: home, clock, diagnostics });
   const coordinator: Coordinator = createCoordinator({
     config,
     clock,
@@ -224,13 +267,15 @@ export async function runStdio(deps: StdioDeps): Promise<StdioCore> {
     onPause: () => snapshots?.releaseAll("paused"),
     capabilities: {
       store,
-      createFetchSession: (origin) => createOriginFetchSession({ origin, clock }),
+      createFetchSession: (origin) => jobWiring.createFetchSession(origin),
       resolveCatalog: (origin, session) => catalogResolver.resolve(origin, { session }),
       discover: (origin, session) => discoverer.discover(origin, { session }),
     },
     panel: panelChannel,
     results,
+    jobs: scheduler,
   });
+  deps.onJobsStarted?.({ scheduler, adapter: jobWiring.adapter });
   panelChannel.start();
   // The startup export sync may record conflicts the first frame could not show.
   void store.startupExportSync.then(() => panelChannel.capabilitiesChanged());
@@ -247,6 +292,8 @@ export async function runStdio(deps: StdioDeps): Promise<StdioCore> {
   const closeAll = (): Promise<void> =>
     (closing ??= (async () => {
       clearInterval(gcTimer);
+      // The scheduler already cancelled its job (`shutdown`); wait for the job's process tree.
+      await jobWiring.close();
       // No job reads past shutdown, even on a connection agent.sock has not closed yet.
       snapshots?.releaseAll("shutdown");
       await Promise.all([server.close(), agentServer?.close()]);
@@ -269,6 +316,8 @@ export async function runStdio(deps: StdioDeps): Promise<StdioCore> {
     // otherwise re-enter here as a second, stdin-closed shutdown with its own exit.
     let finished!: () => void;
     shuttingDown = new Promise<void>((resolve) => (finished = resolve));
+    // Before anything else: a preflight child blocked on `claude` must never hold the exit.
+    jobWiring.killPreflight();
     diagnostics.event("shutdown", { reason });
     deps.log(`scout-core: shutdown (${reason})`);
     coordinator.stop();
@@ -358,6 +407,7 @@ export async function runStdio(deps: StdioDeps): Promise<StdioCore> {
     // Claim shutdown first: rl.close() emits "close" synchronously, and that must not
     // start a second, stdin-closed shutdown with its own exit.
     shuttingDown = Promise.resolve();
+    jobWiring.killPreflight();
     coordinator.stop();
     panelChannel.stop();
     rl.close();
