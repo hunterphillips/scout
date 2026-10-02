@@ -379,12 +379,53 @@ describe("job scheduler: cancellation", () => {
     expect(h.agent.calls).toHaveLength(1);
   });
 
-  it("a profile change cancels as superseded and publishes it", async () => {
+  it("a profile change cancels the job as superseded and starts the visit's one replacement on the new profile's agent", async () => {
+    const next = fakeAgent();
+    let current: ReturnType<typeof fakeAgent>["agent"] | null = null;
+    const h = harness({ agent: () => current });
+    current = h.agent.agent;
+    h.settle();
+    const first = h.agent.calls[0]!;
+    current = next.agent;
+    h.scheduler.onProfileChanged({ fingerprint: "fp-2", toolsRevision: 2, hasUserTools: false });
+    expect(first.options.signal?.reason).toBe("superseded");
+    expect(h.named("job_replaced")).toEqual([{ reason: "superseded", epoch: 3 }]);
+    await flush();
+    expect(next.calls).toHaveLength(1);
+    expect(next.calls[0]!.request.profileFingerprint).toBe("fp-2");
+    expect(h.scheduler.running).toMatchObject({ jobId: "job2", replacementUsed: true });
+    // The cancelled run published nothing; the replacement's answer is what the window gets.
+    expect(h.frames.some((f) => f.type === "results")).toBe(false);
+    next.calls[0]!.answer(ok(["c1"]));
+    await flush();
+    expect(h.states()).toEqual(["working:job1", "working:job2", "idle", "results:ok:job2"]);
+    expect(h.agent.calls).toHaveLength(1);
+  });
+
+  it("a profile change after the replacement was used cancels and publishes cancelled: superseded, starting nothing", async () => {
     const h = harness();
     h.settle();
+    h.world.activity = [{ ...ISSUE, title: "Newer issue" }, ISSUE];
+    h.scheduler.onActivityAccepted(2); // the visit's one replacement
+    await flush();
+    expect(h.agent.calls).toHaveLength(2);
+    h.scheduler.onProfileChanged("fp-2");
+    expect(h.agent.calls[1]!.options.signal?.reason).toBe("superseded");
+    await flush();
+    expect(h.agent.calls).toHaveLength(2);
+    expect(h.frames.at(-1)).toMatchObject({ type: "results", status: "cancelled", reason: "superseded", jobId: "job2" });
+  });
+
+  it("a profile change with under MIN_JOB_MS left cancels and publishes cancelled: superseded, starting nothing", async () => {
+    const h = harness();
+    h.settle(h.clock.t - (30_000 - MIN_JOB_MS));
+    expect(h.agent.calls).toHaveLength(1);
+    h.clock.t += 1;
     h.scheduler.onProfileChanged("fp-2");
     expect(h.agent.calls[0]!.options.signal?.reason).toBe("superseded");
     await flush();
+    expect(h.agent.calls).toHaveLength(1);
+    expect(h.named("job_replaced")).toEqual([]);
     expect(h.frames.at(-1)).toMatchObject({ type: "results", status: "cancelled", reason: "superseded" });
   });
 

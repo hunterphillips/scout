@@ -22,7 +22,8 @@
 // elsewhere at start (a CLI write in progress) is retried every PROFILE_LOCK_RETRY_MS. The file
 // stays user-editable, so wiring/profileWatcher.ts watches it; a change whose fingerprint differs
 // (which any `tools.revision` change does) builds a new adapter for the next job, tells the
-// scheduler (`onProfileChanged`: the running job is cancelled `superseded`), and clears the
+// scheduler (`onProfileChanged`: the running job is cancelled `superseded` and the visit's one
+// replacement starts on the new adapter, budget permitting), and clears the
 // resume cache (its key already carries the fingerprint and tools revision, so an old entry could
 // not match; clearing just frees it). The replaced adapter is closed (`abortAll`) and awaited at
 // close. An edit that leaves the profile unusable leaves no adapter: jobs are `unavailable`.
