@@ -120,7 +120,11 @@ export function createPanelApp(deps: PanelAppDeps): PanelApp {
       inFlight.add(c.commandId);
       void request<CommandReply>({ type: "command", command: c }).then((r) => {
         inFlight.delete(c.commandId);
-        model.markSent(c, r?.written === true ? "written" : "retryLater", now());
+        const written = r?.written === true;
+        model.markSent(c, written ? "written" : "retryLater", now());
+        // Not sent (no ready port, or the host reports the core unavailable): nothing is queued
+        // in the worker; learn the link state so the panel says why and stops resending.
+        if (!written) void refreshStatus();
         renderSoon();
       });
     }
