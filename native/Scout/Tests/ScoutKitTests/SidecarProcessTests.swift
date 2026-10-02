@@ -192,9 +192,92 @@ import Testing
         }
         #expect(last == .retryLater)
         #expect(sidecar.droppedCommandCount > 1)
-        sidecar.shutdown()
+        sidecar.shutdown(timeout: 0.5)
         #expect(Date().timeIntervalSince(began) < 3)
         #expect(kill(pid, 0) != 0)
+    }
+
+    @Test func hardStopAllowanceIsAboveTheCoresDeadline() {
+        // scout-core's SHUTDOWN_DEADLINE_MS is 5 s; the app waits longer before it terminates.
+        #expect(SidecarProcess.hardStopAllowance == 7)
+        #expect(SidecarProcess.hardStopAllowance > 5)
+        #expect(SidecarProcess.terminateGrace == 1)
+    }
+
+    /// A child that takes `exitAfter` seconds to exit once it reads `shutdown`, records any
+    /// SIGTERM it gets (and ignores it), and records its pid.
+    private func slowCore(_ f: Fixture, exitAfter: Double?) throws -> (pid: URL, term: URL) {
+        let pidFile = f.dir.appendingPathComponent("pid")
+        let term = f.dir.appendingPathComponent("term")
+        let onShutdown = exitAfter.map { "sleep \($0); exit 0" } ?? "while :; do sleep 0.05; done"
+        try f.writeNode("""
+            #!/bin/sh
+            echo $$ > '\(pidFile.path)'
+            trap 'echo term >> "\(term.path)"' TERM
+            while read line; do
+              case "$line" in *shutdown*) \(onShutdown);; esac
+            done
+            \(onShutdown)
+            """)
+        return (pidFile, term)
+    }
+
+    @Test func beginShutdownWaitsForACoreThatIsStillStopping() async throws {
+        let f = try Fixture(); defer { f.cleanUp() }
+        let files = try slowCore(f, exitAfter: 0.6)
+        let sidecar = SidecarProcess(resolveLaunch: { .ready(LaunchSpec(executable: f.node, arguments: [])) })
+        sidecar.start()
+        await waitUntil { !lines(files.pid).isEmpty }
+        let pid = try #require(lines(files.pid).first.flatMap { pid_t($0) })
+
+        let began = Date()
+        var doneAt: Date?
+        sidecar.beginShutdown(allowance: 2, terminateGrace: 0.5) { doneAt = Date() }
+        // Still stopping: nothing is reported yet, and nothing is sent but `shutdown`.
+        try await Task.sleep(nanoseconds: 300_000_000)
+        #expect(doneAt == nil)
+        #expect(sidecar.isRunning)
+        await waitUntil(timeout: 4) { doneAt != nil }
+        let took = try #require(doneAt).timeIntervalSince(began)
+        #expect(took >= 0.5)
+        #expect(took < 2)
+        #expect(lines(files.term).isEmpty) // never terminated: it exited inside the allowance
+        #expect(kill(pid, 0) != 0)
+        #expect(!sidecar.isRunning)
+    }
+
+    @Test func beginShutdownTerminatesThenKillsOnlyAfterTheAllowance() async throws {
+        let f = try Fixture(); defer { f.cleanUp() }
+        let files = try slowCore(f, exitAfter: nil)
+        let sidecar = SidecarProcess(resolveLaunch: { .ready(LaunchSpec(executable: f.node, arguments: [])) })
+        sidecar.start()
+        await waitUntil { !lines(files.pid).isEmpty }
+        let pid = try #require(lines(files.pid).first.flatMap { pid_t($0) })
+
+        let began = Date()
+        var completions = 0
+        var doneAt: Date?
+        sidecar.beginShutdown(allowance: 0.8, terminateGrace: 0.4) { completions += 1; doneAt = Date() }
+        // A second request (the app asked twice) only waits for the same stop.
+        sidecar.beginShutdown { completions += 1 }
+        try await Task.sleep(nanoseconds: 600_000_000)
+        #expect(lines(files.term).isEmpty) // no SIGTERM inside the allowance
+        await waitUntil(timeout: 4) { completions == 2 }
+        let took = try #require(doneAt).timeIntervalSince(began)
+        #expect(took >= 1.2) // allowance + terminate grace: SIGTERM was ignored, SIGKILL ended it
+        #expect(took < 2.5)
+        #expect(lines(files.term) == ["term"])
+        #expect(kill(pid, 0) != 0)
+    }
+
+    @Test func beginShutdownWithNothingRunningCompletesAsynchronously() async throws {
+        let sidecar = SidecarProcess(resolveLaunch: { .setupNeeded("no config") })
+        sidecar.start()
+        var done = false
+        sidecar.beginShutdown { done = true }
+        #expect(!done) // never before the caller returned `.terminateLater`
+        await waitUntil(timeout: 1) { done }
+        #expect(done)
     }
 
     @Test func shutdownKillsAChildThatIgnoresIt() async throws {

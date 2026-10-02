@@ -57,9 +57,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         frontmost.start()
     }
 
+    /// Quitting waits for the core: it gets `SidecarProcess.hardStopAllowance` (7 s) to stop its
+    /// jobs and exit (its own deadline is 5 s), then is terminated and killed. AppKit gives
+    /// `applicationWillTerminate` no supported way to wait that long without freezing the app's
+    /// run loop, so the wait happens here instead: `.terminateLater` keeps the app running (in the
+    /// modal-panel run-loop mode, which the main queue still serves) until
+    /// `reply(toApplicationShouldTerminate:)` once the sidecar is gone.
+    private var terminating = false
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        // A second request while the first is pending: the first reply ends the app.
+        guard !terminating else { return .terminateCancel }
+        terminating = true
+        resendTimer?.invalidate()
+        frontmost.stop()
+        sidecar.beginShutdown {
+            NSApp.reply(toApplicationShouldTerminate: true)
+        }
+        return .terminateLater
+    }
+
     func applicationWillTerminate(_ notification: Notification) {
         resendTimer?.invalidate()
         frontmost.stop()
+        // Normally already stopped by applicationShouldTerminate; this is the fallback for a
+        // termination that skipped it, and returns at once when nothing is running.
         sidecar.shutdown()
     }
 
