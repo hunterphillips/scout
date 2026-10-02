@@ -7,6 +7,8 @@
 // a new frame; the preview pane changes content only when the user picks another preview.
 // Approve lives only in the Preview pane, bound to the shown version, so a list reordering
 // under the pointer can never put an approval where the user clicks.
+// Since P4.2 the window is hidden by default: the app creates it on the first Show window (menu
+// bar) or at launch with SCOUT_WINDOW=1, and closing it only hides it.
 import AppKit
 import ScoutKit
 
@@ -62,6 +64,7 @@ final class ScoutPanel: NSObject {
     private var previewTextKey: (PreviewKey, Int)?
     private var libraryPage = 0
     private var lastExpanded = false
+    private var placed = false
 
     init(onAction: @escaping (PanelAction) -> Void) {
         self.onAction = onAction
@@ -81,20 +84,29 @@ final class ScoutPanel: NSObject {
         window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         window.autorecalculatesKeyViewLoop = true
         window.onCancel = { [weak self] in
-            // Escape collapses the details; it never closes the window (closing quits Scout).
+            // Escape collapses the details; it never closes (hides) the window.
             guard let self, self.lastExpanded else { return }
             self.onAction(.toggleExpanded)
         }
         build()
     }
 
-    /// Shows the panel once, at launch.
+    /// Shows the panel without activating Scout: in the bottom-right corner the first time, then
+    /// wherever the user left it.
     func show() {
-        if let screen = NSScreen.main?.visibleFrame {
+        if !placed, let screen = NSScreen.main?.visibleFrame {
             window.setFrameOrigin(NSPoint(x: screen.maxX - window.frame.width - 16, y: screen.minY + 16))
         }
+        placed = true
         window.orderFrontRegardless()
     }
+
+    /// Hides the panel; it keeps its state and position.
+    func hide() {
+        window.orderOut(nil)
+    }
+
+    var isVisible: Bool { window.isVisible }
 
     // MARK: Layout
 
@@ -310,7 +322,7 @@ final class ScoutPanel: NSObject {
             return "library|\(running)|\(libraryPage)|\(caps.library)|\(caps.origins)|\(caps.capabilities?.truncated ?? false)|"
                 + caps.library.map { "\(String(describing: model.revokeRecord($0.resourceId)))\(model.canRevoke($0.resourceId))" }.joined()
         case .settings:
-            return "settings|\(running)|\(String(describing: model.core))|\(String(describing: caps.agentBrowserContext))|\(caps.origins)|"
+            return "settings|\(running)|\(String(describing: model.core))|\(String(describing: model.pauseControl))|\(String(describing: caps.agentBrowserContext))|\(caps.origins)|"
                 + "\(caps.capabilities?.truncated ?? false)|"
                 + "\(String(describing: model.grantRecord))"
                 + caps.origins.map { String(describing: model.autoAcquireRecord($0.origin)) }.joined()
@@ -447,10 +459,12 @@ final class ScoutPanel: NSObject {
 
     private func settingsRows(_ model: PanelModel) -> [NSView] {
         var rows: [NSView] = []
-        let paused = model.core == .paused
-        let pause = button(paused ? "Resume" : "Pause", id: "settings.pause",
-                           label: paused ? "Resume Scout" : "Pause Scout") { [onAction] in onAction(.pauseOrResume) }
-        pause.isEnabled = model.pauseCommand() != nil
+        // The same control as the menu bar's Pause item: both follow the core's state frame.
+        let control = model.pauseControl
+        let pause = button(control.title, id: "settings.pause", label: control.accessibilityLabel) { [onAction] in
+            onAction(.pauseOrResume)
+        }
+        pause.isEnabled = control.enabled
         let refresh = button("Refresh", id: "settings.refresh", label: "Refresh offers and library") { [onAction] in onAction(.refresh) }
         refresh.isEnabled = model.sidecar == .running
         rows.append(hstack([pause, refresh]))
@@ -834,8 +848,8 @@ private final class ActionTarget: NSObject {
     @objc func fire() { action() }
 }
 
-/// Scout's panel. Escape (`cancelOperation`) would close an `NSPanel`, and closing quits the app,
-/// so it goes to `onCancel` instead; only the close button closes the window.
+/// Scout's panel. Escape (`cancelOperation`) would close an `NSPanel`, so it goes to `onCancel`
+/// (collapse) instead; only the close button closes the window, and the app turns that into a hide.
 final class ScoutWindow: NSPanel {
     var onCancel: (() -> Void)?
 
