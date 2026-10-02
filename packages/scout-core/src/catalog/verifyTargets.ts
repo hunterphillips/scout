@@ -37,6 +37,8 @@ export interface VerifyOptions {
   clock?: Clock;
   budgetMs?: number;
   maxCandidates?: number;
+  /** Aborting ends the pass at once: every fetch still waiting counts as a timeout. */
+  signal?: AbortSignal;
 }
 
 export interface VerifyResult {
@@ -116,15 +118,21 @@ export async function verifyTargets(candidates: readonly Candidate[], options: V
     const remaining = Math.max(1, budgetMs - (clock.now() - started));
     let timer: ReturnType<typeof setTimeout> | undefined;
     // guardedFetch enforces `timeoutMs` itself; the race also bounds an injected fetch that does not.
+    let onAbort: (() => void) | undefined;
     const deadline = new Promise<GuardedFetchResult>((resolve) => {
       timer = setTimeout(() => resolve({ kind: "error", reason: "timeout", message: "verification budget spent" }), remaining);
+      onAbort = () => resolve({ kind: "error", reason: "timeout", message: "verification cancelled" });
+      if (options.signal?.aborted) onAbort();
+      else options.signal?.addEventListener("abort", onAbort, { once: true });
     });
     try {
+      if (options.signal?.aborted) return await deadline;
       return await Promise.race([fetch(url, { maxBytes: VERIFY_MAX_BYTES, accept: VERIFY_ACCEPT, timeoutMs: remaining }), deadline]);
     } catch {
       return { kind: "error", reason: "network", message: "verification fetch threw" };
     } finally {
       clearTimeout(timer);
+      if (onAbort) options.signal?.removeEventListener("abort", onAbort);
     }
   };
 

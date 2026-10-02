@@ -6,8 +6,11 @@
 //
 // `cancel()` terminates the worker and rejects every parse queued or running with
 // ParseCancelledError; the next parse starts a fresh worker. The core calls it when a discovery
-// pass's fetch session is cancelled (pause, permission loss, disconnect, stop). A parse that
-// overruns PARSE_MAX_MS is cancelled the same way. `close()` is for shutdown.
+// pass's fetch session is cancelled (pause, permission loss, disconnect, stop). `close()` is for
+// shutdown.
+//
+// A parse that overruns PARSE_MAX_MS fails alone with ParseTimeoutError (`parse_timeout`): its
+// stuck worker is terminated and the queue goes on in a fresh one.
 //
 // A worker that fails to start or dies (not a cancel) fails the parse it held with
 // ParseWorkerUnavailableError and reports `parse_worker_unavailable {code}` once per pool:
@@ -30,6 +33,14 @@ export class ParseCancelledError extends Error {
   constructor() {
     super("parse cancelled");
     this.name = "ParseCancelledError";
+  }
+}
+
+export class ParseTimeoutError extends Error {
+  readonly code = "parse_timeout";
+  constructor() {
+    super("parse timed out");
+    this.name = "ParseTimeoutError";
   }
 }
 
@@ -101,6 +112,15 @@ export function createParsePool(options: { entrypoint?: string; maxMs?: number; 
     for (const q of victims) fail(q, new ParseCancelledError());
   };
 
+  /** The running parse overran its bound: fail it alone, drop its stuck worker, go on with the queue. */
+  const timedOut = (r: Queued): void => {
+    if (running === null || running.id !== r.id) return;
+    running = null;
+    dropWorker();
+    r.reject(new ParseTimeoutError());
+    pump();
+  };
+
   const ensureWorker = (): Worker => {
     if (worker !== null) return worker;
     const w = new Worker(options.entrypoint ?? defaultParseWorkerEntrypoint(), { execArgv: [] });
@@ -147,9 +167,9 @@ export function createParsePool(options: { entrypoint?: string; maxMs?: number; 
       pump();
       return;
     }
-    const timer = setTimeout(cancelAll, maxMs);
-    timer.unref();
-    running = { ...next, timer };
+    const entry = { ...next, timer: setTimeout(() => timedOut(entry), maxMs) };
+    entry.timer.unref();
+    running = entry;
     w.postMessage({ id: next.id, ...next.job });
   };
 

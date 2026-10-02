@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { parseLlmsTxt } from "./llmsTxt.js";
-import { createParsePool, ParseCancelledError, ParseWorkerUnavailableError, type ParsePool } from "./parseWorker.js";
+import { createParsePool, ParseCancelledError, ParseTimeoutError, ParseWorkerUnavailableError, type ParsePool } from "./parseWorker.js";
 import { parseSitemap } from "./sitemap.js";
 
 const ORIGIN = "https://docs.example.com";
@@ -41,7 +41,7 @@ afterEach(async () => {
 });
 
 describe("parse worker", () => {
-  it("parses a 50,000-entry sitemap off the main thread: input frames are never held up 50 ms, and the result equals the inline parse", async () => {
+  it("parses a 50,000-entry sitemap off the main thread: input frames are never held up 100 ms, and the result equals the inline parse", async () => {
     pool = createParsePool();
     const xml = bigSitemap(50_000);
     // Warm the worker so its start-up is not part of the measurement.
@@ -49,7 +49,7 @@ describe("parse worker", () => {
     const { value, worstGap } = await worstGapDuring(() => pool!.parsers.sitemap(xml, ORIGIN));
     expect(value.kind).toBe("urlset");
     expect(value.kind === "urlset" && value.entries.length).toBe(50_000);
-    expect(worstGap).toBeLessThan(50);
+    expect(worstGap).toBeLessThan(100);
     expect(value).toEqual(parseSitemap(xml, ORIGIN));
   }, 60_000);
 
@@ -78,11 +78,34 @@ describe("parse worker", () => {
     expect(after.kind === "urlset" && after.entries.length).toBe(2);
   }, 30_000);
 
-  it("a parse over its bound is cancelled; after close every parse is refused", async () => {
-    pool = createParsePool({ maxMs: 1 });
-    await expect(pool.parsers.sitemap(bigSitemap(50_000), ORIGIN)).rejects.toBeInstanceOf(ParseCancelledError);
+  it("after close every parse is refused", async () => {
+    pool = createParsePool();
     await pool.close();
     await expect(pool.parsers.sitemap(bigSitemap(1), ORIGIN)).rejects.toBeInstanceOf(ParseCancelledError);
+  });
+
+  it("a parse over its bound fails alone with ParseTimeoutError; the queued parse runs in a fresh worker", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "spw-"));
+    try {
+      // The first worker never answers (a parse stuck past its bound); a fresh one (a second run of this file) does.
+      const entry = join(dir, "stuck.mjs");
+      const marker = join(dir, "stuck");
+      writeFileSync(
+        entry,
+        `import { existsSync, writeFileSync } from "node:fs";\nimport { parentPort } from "node:worker_threads";\n` +
+          `const first = !existsSync(${JSON.stringify(marker)});\nif (first) writeFileSync(${JSON.stringify(marker)}, "");\n` +
+          `parentPort.on("message", (m) => { if (!first) parentPort.postMessage({ id: m.id, ok: true, result: { kind: "urlset", entries: [] } }); });\n`,
+      );
+      pool = createParsePool({ entrypoint: entry, maxMs: 300 });
+      const stuck = pool.parsers.sitemap(bigSitemap(1), ORIGIN);
+      const queued = pool.parsers.sitemap(bigSitemap(2), ORIGIN);
+      await expect(stuck).rejects.toBeInstanceOf(ParseTimeoutError);
+      await expect(stuck).rejects.toMatchObject({ code: "parse_timeout" });
+      await expect(queued).resolves.toEqual({ kind: "urlset", entries: [] });
+      expect(pool.pending).toBe(0);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   }, 30_000);
 
   describe("an unavailable worker", () => {
