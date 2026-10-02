@@ -135,7 +135,7 @@ export function createPanelChannel(options: PanelChannelOptions): PanelChannel {
   };
   const destinations = (): { destinations?: string[] } => {
     if (!options.readDestinations) return {};
-    const origins = options.readDestinations().map((host) => `https://${host}`).filter(isHttpsOrigin);
+    const origins = [...new Set(options.readDestinations().map((host) => `https://${host}`))].filter(isHttpsOrigin);
     return { destinations: origins.slice(0, GRANT_DESTINATIONS_MAX) };
   };
   const grantFrame = (enabled = options.readBrowserContextGrant()): PanelState => ({ type: "grant", agentBrowserContext: enabled, ...destinations() });

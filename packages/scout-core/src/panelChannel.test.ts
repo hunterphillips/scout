@@ -99,7 +99,7 @@ describe("panel channel", () => {
   });
 
   it("puts the configured destinations on every grant frame as https origins, bounded, and the frame stays in the contract", async () => {
-    const hosts = ["docs.stripe.com", "www.peakdesign.com", "h.example:8443", ...Array.from({ length: 70 }, (_, i) => `h${i}.example`)];
+    const hosts = ["docs.stripe.com", "www.peakdesign.com", "docs.stripe.com", "h.example:8443", ...Array.from({ length: 70 }, (_, i) => `h${i}.example`)];
     const s = setup({ readDestinations: () => hosts });
     s.channel.start();
     const grant = s.frames[0] as Extract<PanelState, { type: "grant" }>;

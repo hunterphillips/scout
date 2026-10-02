@@ -16,11 +16,14 @@
 // rewrites `exports.json` without them; a changed wrapper, a symlink, or an I/O refusal is kept,
 // listed, and stays in the manifest. It is the exporter's own sync against an empty desired
 // set, so ownership comes only from the manifest, never from a `scout-` prefix. The skills root
-// comes from `installed.json`, as for the core. Exit 0 when every owned wrapper is gone, 3 when
-// some were kept, 2 while the core holds the lock (quit Scout first), 1 on an unusable
-// record, root, or manifest (nothing removed).
+// comes from `installed.json`, as for the core. A skills root that is now a symlink (or sits
+// under one) is never followed: every listed wrapper is reported kept as unreachable
+// (`unreachable: true` in --json), exports.json is left as is, and the exit is 3, so uninstall
+// can finish the rest and keep the root recorded for a retry. Exit 0 when every owned wrapper
+// is gone, 3 when some were kept, 2 while the core holds the lock (quit Scout first), 1 on an
+// unusable record or manifest (nothing removed).
 
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
 import { isHttpsOrigin } from "@scout/contracts";
 import { systemClock } from "../clock.js";
@@ -29,7 +32,7 @@ import { type Diagnostics, scoutHome } from "../diagnostics.js";
 import { InstalledRecordError, readInstalledRecord } from "../installedRecord.js";
 import { emptyState } from "./decisions.js";
 import type { DiscoveryResult } from "./discovery.js";
-import { createSkillExporter, ExportError } from "./exports.js";
+import { createSkillExporter, ExportError, MANAGED_NAME_RE } from "./exports.js";
 import { type CapabilityStore, createCapabilityStore } from "./store.js";
 import { acquireStoreLock, StoreLockedError } from "./storeLock.js";
 
@@ -176,7 +179,21 @@ interface UnexportOutcome {
   removed: string[];
   kept: { name: string; code: string }[];
   note?: string;
+  /** The skills root could not be entered safely; nothing in it was touched. */
+  unreachable?: true;
 }
+
+/** Wrapper names exports.json lists, read without trusting it further (for an unreachable root). */
+function listedNames(home: string): string[] {
+  try {
+    const entries = (JSON.parse(readFileSync(join(home, "capabilities", "exports.json"), "utf8")) as { entries?: unknown }).entries;
+    return Array.isArray(entries) ? entries.map((e) => (e as { name?: unknown })?.name).filter((n): n is string => typeof n === "string" && MANAGED_NAME_RE.test(n)) : [];
+  } catch {
+    return [];
+  }
+}
+
+const UNREACHABLE: readonly string[] = ["root_symlink", "root_not_real", "root_not_directory"];
 
 /** `capability unexport-all`: see the header. */
 async function unexportAll(home: string, json: boolean, io: CapabilityCliIo): Promise<number> {
@@ -215,6 +232,12 @@ async function unexportAll(home: string, json: boolean, io: CapabilityCliIo): Pr
       throw error;
     }
     if (skillsRoot === undefined) return fail("installed.json records no skillsRoot, so the wrappers cannot be located");
+    const root = skillsRoot;
+    const unreachable = (code: string): number => {
+      const why = code === "root_not_directory" ? "is not a directory" : "is a symlink or sits under one";
+      print({ removed: [], kept: listedNames(home).map((name) => ({ name, code })), unreachable: true, note: `the recorded skills root ${root} ${why}; Scout never follows it, so no wrapper was touched and exports.json is left as is` });
+      return EXIT_KEPT;
+    };
     let exporter;
     try {
       exporter = createSkillExporter({ scoutHome: home, skillsRoot, diagnostics: io.diagnostics });
@@ -223,6 +246,7 @@ async function unexportAll(home: string, json: boolean, io: CapabilityCliIo): Pr
         print({ removed: [], kept: [], note: "the recorded skills root is gone, so no wrapper is on disk; exports.json left as is" });
         return 0;
       }
+      if (error instanceof ExportError && UNREACHABLE.includes(error.code)) return unreachable(error.code);
       if (error instanceof ExportError) return fail(error.message);
       throw error;
     }
@@ -231,6 +255,7 @@ async function unexportAll(home: string, json: boolean, io: CapabilityCliIo): Pr
       before = exporter.manifest().entries.map((e) => e.name);
       await exporter.sync(emptyState());
     } catch (error) {
+      if (error instanceof ExportError && UNREACHABLE.includes(error.code)) return unreachable(error.code);
       if (error instanceof ExportError) return fail(error.message);
       throw error;
     }

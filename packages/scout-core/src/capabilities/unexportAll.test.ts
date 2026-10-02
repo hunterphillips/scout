@@ -1,7 +1,7 @@
 // `cli.js capabilities unexport-all`: the one-shot uninstall runs before it drops the recorded
 // skills root (P4.3).
 import { createHash } from "node:crypto";
-import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -99,6 +99,33 @@ describe("capabilities unexport-all", () => {
     expect(readFileSync(join(skillsRoot, changed!, "SKILL.md"), "utf8")).toContain("my edit");
     expect(existsSync(join(skillsRoot, exact!))).toBe(false);
     expect(manifestNames()).toEqual([changed]);
+  });
+
+  it("never follows a skills root that became a symlink: every wrapper kept as unreachable (exit 3), exports.json unchanged", async () => {
+    const names = await exported();
+    const manifest = readFileSync(join(home, "capabilities", "exports.json"), "utf8");
+    const moved = join(root, "moved-skills");
+    renameSync(skillsRoot, moved);
+    symlinkSync(moved, skillsRoot);
+    const r = await run(["--json"]);
+    expect(r.code).toBe(3);
+    const out = JSON.parse(r.out);
+    expect(out).toMatchObject({ removed: [], unreachable: true, kept: names.map((name) => ({ name, code: "root_symlink" })) });
+    expect(out.note).toContain(`${skillsRoot} is a symlink or sits under one`);
+    for (const n of names) expect(existsSync(join(moved, n, "SKILL.md"))).toBe(true);
+    expect(readFileSync(join(home, "capabilities", "exports.json"), "utf8")).toBe(manifest);
+  });
+
+  it("keeps a wrapper that became a symlink and never touches its target", async () => {
+    const [linked, exact] = await exported();
+    const target = join(root, "elsewhere");
+    renameSync(join(skillsRoot, linked!), target);
+    symlinkSync(target, join(skillsRoot, linked!));
+    const r = await run(["--json"]);
+    expect(r.code).toBe(3);
+    expect(JSON.parse(r.out)).toEqual({ removed: [exact], kept: [{ name: linked, code: "left_symlink" }] });
+    expect(existsSync(join(target, "SKILL.md"))).toBe(true);
+    expect(manifestNames()).toEqual([linked]);
   });
 
   it("refuses with exit 2 while the core holds the store lock, and removes nothing", async () => {
