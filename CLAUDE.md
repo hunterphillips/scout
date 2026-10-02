@@ -55,8 +55,10 @@ the plan's phase log):
   `src/main.ts`, `src/fixture.ts` (`./fixture`, the in-memory reference backend Phase 2's
   production core must match), `src/test-support/` (`./testing`, test-only socket server).
 - `packages/scout-core/src/agents/`: the background job runtime. `claudeJob.ts`
-  (`ClaudeJobAdapter`: one fresh `claude -p` per job in a 0700 `SCOUT_HOME/run/jobs/<id>/`,
-  argv-only, strict MCP config, exact `--allowedTools`, hooks off, no persistence),
+  (`ClaudeJobAdapter`: one fresh `claude -p` per job; private files in a 0700
+  `SCOUT_HOME/run/jobs/<id>/` named by argv only, the CLI's cwd is the single
+  `SCOUT_HOME/run/agent-cwd` (P4.0; so the CLI's own `~/.claude/projects` folder appears at
+  most once), strict MCP config, exact `--allowedTools`, hooks off, no persistence),
   `profile.ts` (`agent-profile.json`; `model: claude-sonnet-5-5` required, editable, never
   inherited), `toolProfile.ts` / `toolPolicy.ts` / `contextToolBridge.ts` + `bridgeMain.ts`
   (user-selected stdio tools behind a per-job forwarding bridge; secrets resolved in memory
@@ -116,8 +118,8 @@ the plan's phase log):
   `unavailable: auth_prompt` in the profile and skipped by `planJobTools`. Since pivot P3.4 the
   core holds `agent-profile.lock` for its lifetime (the CLI exits 2 meanwhile; constant in
   `agents/profile.ts`) and `wiring/profileWatcher.ts` watches the profile (250 ms debounce,
-  5 s poll fallback): a change cancels the running job `superseded`, swaps the adapter and
-  clears the resume cache.
+  5 s poll fallback): a change cancels the running job `superseded`, swaps the adapter,
+  clears the resume cache and (P4.0) starts the visit's one replacement on the new profile.
 - `scripts/agent-check/` + `npm run test:agent-contract` and
   `npm run verify:agent -- --case <hotload|baseline|selected-tool|cancel> --home <dir>`:
   the Phase 1 compatibility checks. Read `scripts/agent-check/README.md` before running
@@ -149,8 +151,14 @@ the plan's phase log):
 - `packages/contracts` (`@scout/contracts`): zod schemas + types for every Scout-internal
   message (`browser`, `visit`, `catalog`, `panel`, `bridge`, `service`). The root export
   is browser-safe (a test bundles it for the browser). The frame codec (4-byte
-  native-endian length prefix, 64 KiB in / 16 KiB out, streaming decoder with drop
-  counters) is Node-only at `@scout/contracts/frame`.
+  native-endian length prefix, 64 KiB in; out 16 KiB, or 1 MiB for `panel` frames —
+  decoded non-panel frames over 16 KiB are dropped; streaming decoder with drop counters)
+  is Node-only at `@scout/contracts/frame`. Pivot P4.0: bridge protocol **3** carries the
+  window's `panel` frames and `command`s over the relay — `RelayCommandSchema` is
+  `NativeCommandSchema` minus `STDIO_ONLY_COMMANDS` (`frontmost`, `shutdown`; a
+  compile-time check forces every command onto one side), `CommandFrameSchema`,
+  `PanelFrameSchema`, `StdioOnlyCommandFrameSchema` (recognised to refuse), fixtures in
+  `fixtures/bridge/`.
 - `packages/browser-extension` (`@scout/browser-extension`): the MV3 "Scout Sensor".
   `background-core.ts` is wiring; the logic is in `port.ts` (native port + bounded
   reconnect, state persisted in `chrome.storage.session`), `focus-observer.ts`,
@@ -164,7 +172,9 @@ the plan's phase log):
   grant counts as not granted. `build.mjs` writes `dist/` and preserves the manifest `key`
   that setup adds. The background bundle includes zod (run jitless for MV3 CSP).
 - `packages/native-host` (`@scout/native-host`): Chrome native-messaging host. `relay.ts`
-  is the pure relay (origin check, protocol-2 hello, validated re-encoding both ways;
+  is the pure relay (origin check, protocol-3 hello, validated re-encoding both ways;
+  since P4.0 it forwards `command` frames core-ward only after `ready` — never buffered,
+  `frontmost`/`shutdown` refused by schema — and `panel` frames Chrome-ward under 1 MiB;
   `ready` to Chrome only after the core's first `capture_policy` is forwarded and the
   pre-connect buffer flushed permissions → focus — buffered page_text is dropped; 5 s
   policy timeout and 2 s × 30 s retry then exit 1; `upgrade_required` → exit 1 without
@@ -182,7 +192,15 @@ the plan's phase log):
   list and feeds nothing yet), `panelCapabilities.ts` / `nativeCommands.ts` /
   `previewStream.ts` / `panelChannel.ts` (pivot P2.5: the window's capability view,
   acknowledged idempotent mutation commands, 16 KiB preview chunks, and the wiring; one
-  `coreInstanceId` per start shared with the agent API), `discoveryRunner.ts` (pivot
+  `coreInstanceId` per start shared with the agent API), `panelSinks.ts` + `commandRouting.ts`
+  (pivot P4.0: every panel frame fans out to every attached sink — the Mac app's stdout
+  and the live browser connection when its hello is protocol 3; `ack`/`preview` go only to
+  the sender via a 256-entry route map, `panel_ack_dropped` otherwise; idempotency cache
+  scoped per sink; a relay `frontmost`/`shutdown` is never applied; the core→relay writer
+  drops non-ack panel frames above a 2 MiB high-water mark and repaints once on drain; a
+  replaced connection's command gets `ack unavailable`; a new relay connection is
+  repainted with grant, capabilities, audit, state — results clear on replacement),
+  `discoveryRunner.ts` (pivot
   P3.2: the per-visit discovery pass — one at a time, latest-wins queue, cancelled by a
   visit change, catalog handed on as soon as it resolves), `jobScheduler.ts` (one
   recommendation job per core, one replacement per visit on an activity accept, cancel
