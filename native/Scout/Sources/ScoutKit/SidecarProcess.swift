@@ -22,6 +22,13 @@ public enum SendOutcome: Sendable, Equatable {
 /// stderr on the app's stderr. Restarts it on exit, subject to `RestartPolicy`.
 /// The child inherits the app's environment minus `SCOUT_HOME`, so the core always uses
 /// `~/.scout`, the same home the app and the browser side use.
+///
+/// Stopping (P3.4): `shutdown` is sent and stdin closed, then the core gets
+/// `hardStopAllowance` (7 s) to stop its jobs and exit on its own; its own deadline is 5 s
+/// (`SHUTDOWN_DEADLINE_MS` in scout-core's main.ts), so the allowance is only a backstop. Past
+/// it the core is sent SIGTERM (`terminate()`), then SIGKILL after `terminateGrace` (1 s).
+/// `beginShutdown` does this without blocking (the app's `.terminateLater` path);
+/// `shutdown(timeout:)` blocks the caller and is the fallback.
 @MainActor
 public final class SidecarProcess {
     public var onStatus: ((SidecarStatus) -> Void)?
@@ -48,6 +55,15 @@ public final class SidecarProcess {
     private var ignoredBefore = 0
     private var generation = 0
     private var stopping = false
+    /// The child `beginShutdown` is waiting for, and who to tell once it is gone.
+    private var stoppingProcess: Process?
+    private var shutdownCompletions: [@MainActor () -> Void] = []
+
+    /// How long the core gets to exit after `shutdown` before it is terminated. Above the
+    /// core's own 5 s shutdown deadline, so a core that is still stopping a job is not cut off.
+    public static let hardStopAllowance: TimeInterval = 7
+    /// After `terminate()` (SIGTERM), how long before SIGKILL.
+    public static let terminateGrace: TimeInterval = 1
 
     public init(
         resolveLaunch: @escaping () -> SidecarLaunch = { SidecarLaunch.resolve() },
@@ -105,25 +121,96 @@ public final class SidecarProcess {
         log("dropped command (\(reason)); total dropped \(droppedCommandCount)")
     }
 
-    /// Sends `shutdown`, waits up to `timeout` for the child to exit, then kills it.
-    /// Blocks the caller; meant for app termination.
-    public func shutdown(timeout: TimeInterval = 2) {
+    /// Whether a child is running (it may be shutting down).
+    public var isRunning: Bool { process?.isRunning ?? false }
+
+    /// Sends `shutdown`, waits up to `timeout` for the child to exit, then terminates it, then
+    /// SIGKILLs it after `terminateGrace`. Blocks the caller: the fallback when the app could not
+    /// wait for `beginShutdown`.
+    public func shutdown(timeout: TimeInterval = SidecarProcess.hardStopAllowance, terminateGrace: TimeInterval = SidecarProcess.terminateGrace) {
         stopping = true
         // Ignore anything the child still prints.
         generation += 1
-        guard let process, process.isRunning else { return }
+        guard let process, process.isRunning else {
+            self.process = nil
+            stdin = nil
+            return
+        }
         send(.shutdown)
         try? stdin?.close()
         stdin = nil
         if !Self.wait(for: process, upTo: timeout) {
-            log("sidecar did not exit after shutdown; killing pid \(process.processIdentifier)")
+            log("sidecar did not exit within \(timeout) s of shutdown; terminating pid \(process.processIdentifier)")
             process.terminate()
-            if !Self.wait(for: process, upTo: 0.5) {
+            if !Self.wait(for: process, upTo: terminateGrace) {
                 kill(process.processIdentifier, SIGKILL)
                 _ = Self.wait(for: process, upTo: 0.5)
             }
         }
         self.process = nil
+        finishShutdown(of: process)
+    }
+
+    /// Non-blocking shutdown: sends `shutdown`, closes stdin, and calls `completion` (always
+    /// asynchronously, on the main actor) once the child has exited, or once `allowance` and then
+    /// `terminateGrace` have passed and it was terminated and killed. A second call while one is
+    /// in progress only adds its completion. Timers run on the main queue, which AppKit serves in
+    /// the common run-loop modes, including the modal-panel mode it runs in while a
+    /// `.terminateLater` reply is pending.
+    public func beginShutdown(
+        allowance: TimeInterval = SidecarProcess.hardStopAllowance,
+        terminateGrace: TimeInterval = SidecarProcess.terminateGrace,
+        completion: @escaping @MainActor () -> Void
+    ) {
+        if stoppingProcess != nil {
+            shutdownCompletions.append(completion)
+            return
+        }
+        stopping = true
+        // Ignore anything the child still prints.
+        generation += 1
+        guard let process, process.isRunning else {
+            self.process = nil
+            stdin = nil
+            DispatchQueue.main.async { MainActor.assumeIsolated { completion() } }
+            return
+        }
+        stoppingProcess = process
+        shutdownCompletions = [completion]
+        send(.shutdown)
+        try? stdin?.close()
+        stdin = nil
+        DispatchQueue.main.asyncAfter(deadline: .now() + allowance) {
+            MainActor.assumeIsolated { [weak self] in
+                guard let self, self.stoppingProcess === process else { return }
+                self.log("sidecar did not exit within \(allowance) s of shutdown; terminating pid \(process.processIdentifier)")
+                process.terminate()
+                DispatchQueue.main.asyncAfter(deadline: .now() + terminateGrace) {
+                    MainActor.assumeIsolated { [weak self] in
+                        guard let self, self.stoppingProcess === process else { return }
+                        if process.isRunning { kill(process.processIdentifier, SIGKILL) }
+                        // The exit normally arrives first; never wait past this.
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                            MainActor.assumeIsolated { [weak self] in self?.finishShutdown(of: process) }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// The child `beginShutdown` waited for is gone (or its time is up): tell everyone once.
+    private func finishShutdown(of process: Process) {
+        guard stoppingProcess === process else { return }
+        stoppingProcess = nil
+        if self.process === process {
+            self.process = nil
+        }
+        let completions = shutdownCompletions
+        shutdownCompletions = []
+        for done in completions {
+            DispatchQueue.main.async { MainActor.assumeIsolated { done() } }
+        }
     }
 
     private func launch() {
@@ -170,7 +257,10 @@ public final class SidecarProcess {
         child.terminationHandler = { [weak self] exited in
             let code = exited.terminationStatus
             DispatchQueue.main.async {
-                MainActor.assumeIsolated { self?.handleExit(generation: gen, code: code) }
+                MainActor.assumeIsolated {
+                    self?.finishShutdown(of: exited)
+                    self?.handleExit(generation: gen, code: code)
+                }
             }
         }
 

@@ -1,6 +1,6 @@
 // Drives the built dist/main.js as the native app would: a child process on pipes.
 import { type ChildProcessWithoutNullStreams, execFileSync, spawn } from "node:child_process";
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { connect, Server } from "node:net";
 import { tmpdir } from "node:os";
@@ -17,10 +17,13 @@ import { type CapabilityStore, createCapabilityStore } from "./capabilities/stor
 import { DEFAULT_DESTINATIONS, readConfig, readDestinations } from "./config.js";
 import type { Diagnostics } from "./diagnostics.js";
 import { DWELL_MS } from "./dwell.js";
-import { dwellMsFromEnv, runStdio } from "./main.js";
+import { dwellMsFromEnv, runStdio, SHUTDOWN_DEADLINE_MS } from "./main.js";
+import { OwnedTree } from "./agents/processTree.js";
 
 const pkgDir = join(dirname(fileURLToPath(import.meta.url)), "..");
 const mainJs = join(pkgDir, "dist", "main.js");
+const cliJs = join(pkgDir, "dist", "cli.js");
+const fakeClaude = join(pkgDir, "src", "agents", "testing", "fake-claude.mjs");
 
 beforeAll(() => {
   // Build so the test always exercises the current source.
@@ -422,6 +425,63 @@ describe("main --stdio", () => {
     }, 20_000);
   });
 
+  /** A temp user home and a profile whose `claude` is the scripted fake (a subscription login; never a model). */
+  const fakeAgent = (destinations: string[]) => {
+    const userHome = join(home, "u");
+    mkdirSync(join(userHome, ".claude"), { recursive: true });
+    mkdirSync(join(home, "bin"));
+    const claudePath = join(home, "bin", "claude");
+    writeFileSync(claudePath, `#!/bin/sh\nexec '${process.execPath}' '${fakeClaude}' "$@"\n`);
+    chmodSync(claudePath, 0o755);
+    writeFileSync(join(home, "config.json"), JSON.stringify({ destinations }));
+    writeFileSync(join(home, "agent-profile.json"), JSON.stringify({ schemaVersion: 1, adapter: "claude-code", claudePath, model: "claude-sonnet-5-5" }), { mode: 0o600 });
+    return { PATH: "/usr/bin:/bin", HOME: userHome, USER: "someone", LOGNAME: "someone", LANG: "en_US.UTF-8", TMPDIR: tmpdir() };
+  };
+  const diagnosticsLog = (): Array<Record<string, unknown>> =>
+    existsSync(join(home, "logs", "diagnostics.jsonl"))
+      ? readFileSync(join(home, "logs", "diagnostics.jsonl"), "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l) as Record<string, unknown>)
+      : [];
+
+  it("the start-time sweep runs before the eager preflight: its run/jobs dir is never swept, and its verdict arrives", async () => {
+    const env = fakeAgent(["docs.example.com"]);
+    const leftover = join(home, "run", "jobs", "j-left");
+    mkdirSync(leftover, { recursive: true, mode: 0o700 });
+    chmodSync(join(home, "run"), 0o700);
+    chmodSync(join(home, "run", "jobs"), 0o700);
+    core = spawnCore(home, env);
+    const c = core;
+    await until(() => c.stderr().includes("listening on"));
+    await until(() => diagnosticsLog().some((e) => e.event === "agent_preflight"), 15_000);
+    const events = diagnosticsLog();
+    // Only the leftover was swept, and before the preflight began.
+    expect(events.filter((e) => e.event === "jobs_swept")).toEqual([expect.objectContaining({ count: 1, killed: 0 })]);
+    expect(events.find((e) => e.event === "agent_preflight")).toMatchObject({ verdict: "subscription" });
+    expect(events.some((e) => e.event === "jobs_sweep_failed")).toBe(false);
+    expect(existsSync(leftover)).toBe(false);
+    c.child.stdin.end();
+    expect((await c.exited).code).toBe(0);
+  }, 30_000);
+
+  it("while the core holds agent-profile.lock, the built CLI's `agent enable` exits 2 and leaves the profile alone", async () => {
+    const env = fakeAgent([]);
+    const before = readFileSync(join(home, "agent-profile.json"), "utf8");
+    core = spawnCore(home, env);
+    const c = core;
+    await until(() => c.stderr().includes("listening on"));
+    expect(existsSync(join(home, "agent-profile.lock"))).toBe(true);
+    const cli = spawn(process.execPath, [cliJs, "agent", "enable", "notes", "lookup", "--unattended-read"], { env: { ...env, SCOUT_HOME: home } });
+    let err = "";
+    cli.stderr.on("data", (d: Buffer) => void (err += d.toString("utf8")));
+    cli.stdout.resume();
+    const code = await new Promise<number | null>((r) => cli.once("exit", (n) => r(n)));
+    expect(code).toBe(2);
+    expect(err).toContain("locked");
+    expect(readFileSync(join(home, "agent-profile.json"), "utf8")).toBe(before);
+    c.child.stdin.end();
+    expect((await c.exited).code).toBe(0);
+    expect(existsSync(join(home, "agent-profile.lock"))).toBe(false);
+  }, 20_000);
+
   it("exits 2 without --stdio", async () => {
     const child = spawn(process.execPath, [mainJs], { env: { ...process.env, SCOUT_HOME: home } });
     const code = await new Promise<number | null>((r) => child.once("exit", (c) => r(c)));
@@ -652,6 +712,94 @@ describe("runStdio (in process)", () => {
     h.stdin.end();
     await until(() => h.exits.length > 0);
   });
+
+  it("removes leftover run/jobs dirs before agent.sock is published, never following a link out of the jobs root", async () => {
+    const jobs = join(home, "run", "jobs");
+    mkdirSync(join(jobs, "j-stale", "nested"), { recursive: true, mode: 0o700 });
+    chmodSync(join(home, "run"), 0o700);
+    writeFileSync(join(jobs, "j-stale", "mcp.json"), "{}");
+    const outside = join(home, "outside");
+    mkdirSync(outside);
+    writeFileSync(join(outside, "keep"), "x");
+    symlinkSync(outside, join(jobs, "j-link"));
+    const h = harness();
+    await h.run();
+    expect(readdirSync(jobs)).toEqual([]);
+    expect(readFileSync(join(outside, "keep"), "utf8")).toBe("x");
+    const swept = h.fields.findIndex((f) => f.name === "jobs_swept");
+    expect(h.fields[swept]?.fields).toEqual({ count: 2, killed: 0 });
+    expect(swept).toBeLessThan(h.events.indexOf("agent_socket_listening"));
+    h.stdin.end();
+    await until(() => h.exits.length > 0);
+  });
+
+  it("holds agent-profile.lock while running; shutdown releases it and reports each step's duration", async () => {
+    const h = harness();
+    await h.run();
+    expect(existsSync(join(home, "agent-profile.lock"))).toBe(true);
+    h.stdin.end();
+    await until(() => h.exits.length > 0);
+    expect(existsSync(join(home, "agent-profile.lock"))).toBe(false);
+    expect(h.fields.find((f) => f.name === "shutdown_begin")?.fields).toEqual({ reason: "stdin-closed" });
+    const done = h.fields.find((f) => f.name === "shutdown")!.fields;
+    expect(Object.keys(done).sort()).toEqual(["descendantsMs", "jobsMs", "parsersMs", "reason", "socketsMs", "stopMs", "storeMs", "totalMs"]);
+    expect(Object.values(done).every((v) => typeof v === "number" || v === "stdin-closed")).toBe(true);
+    expect(h.events).not.toContain("shutdown_deadline");
+  });
+
+  it("a step that never finishes: exit 0 at the 5 s deadline, the pending step named", async () => {
+    const h = harness();
+    await h.run();
+    h.agent.store.close = () => new Promise<void>(() => {});
+    const t0 = Date.now();
+    h.stdin.end();
+    await until(() => h.exits.length > 0, 8_000);
+    const took = Date.now() - t0;
+    expect(took).toBeGreaterThanOrEqual(SHUTDOWN_DEADLINE_MS - 50);
+    expect(took).toBeLessThan(SHUTDOWN_DEADLINE_MS + 1_000);
+    expect(h.exits.map((e) => e.code)).toEqual([0]);
+    expect(h.fields.find((f) => f.name === "shutdown_deadline")?.fields).toEqual({ pending: "store" });
+    // The lock and the token went before the store's close.
+    expect(existsSync(join(home, "agent-profile.lock"))).toBe(false);
+    expect(existsSync(join(home, "run", "agent-token"))).toBe(false);
+  }, 15_000);
+
+  it("out of time in `jobs`: exit 0 at the deadline with the token, both locks and both sockets already gone", async () => {
+    const h = harness();
+    await h.run();
+    const files = ["run/agent-token", "agent-profile.lock", "capabilities/store.lock", "run/core.sock", "run/agent.sock"].map((f) => join(home, f));
+    for (const f of files) expect(existsSync(f), f).toBe(true);
+    h.jobs.wiring.abortJobs = () => new Promise<void>(() => {});
+    const t0 = Date.now();
+    h.stdin.end();
+    await until(() => h.exits.length > 0, 8_000);
+    const took = Date.now() - t0;
+    expect(took).toBeGreaterThanOrEqual(SHUTDOWN_DEADLINE_MS - 50);
+    expect(took).toBeLessThan(SHUTDOWN_DEADLINE_MS + 1_000);
+    expect(h.exits).toEqual([{ code: 0, socketLeft: false }]);
+    expect(h.fields.find((f) => f.name === "shutdown_deadline")?.fields).toEqual({ pending: "jobs" });
+    for (const f of files) expect(existsSync(f), f).toBe(false);
+  }, 15_000);
+
+  it("the last sweep at the deadline SIGKILLs a tracked process that ignores SIGTERM: shutdown_orphan {count: 1}", async () => {
+    const h = harness();
+    await h.run();
+    const sleeper = spawn("/bin/sh", ["-c", "trap '' TERM; exec /bin/sleep 30"], { detached: true, stdio: "ignore" });
+    const died = new Promise<NodeJS.Signals | null>((r) => sleeper.once("exit", (_code, signal) => r(signal)));
+    try {
+      h.jobs.wiring.processes.add(new OwnedTree(sleeper.pid!));
+      h.jobs.wiring.abortJobs = () => new Promise<void>(() => {});
+      h.stdin.end();
+      await until(() => h.exits.length > 0, 8_000);
+      expect(h.exits.map((e) => e.code)).toEqual([0]);
+      expect(h.fields.find((f) => f.name === "shutdown_deadline")?.fields).toEqual({ pending: "jobs" });
+      expect(h.fields.find((f) => f.name === "shutdown_orphan")?.fields).toEqual({ count: 1 });
+      expect(h.logs.some((l) => l.includes(`shutdown_orphan pids ${sleeper.pid}`))).toBe(true);
+      expect(await died).toBe("SIGKILL");
+    } finally {
+      if (sleeper.exitCode === null && sleeper.signalCode === null) sleeper.kill("SIGKILL");
+    }
+  }, 15_000);
 
   it("a stdout error (EPIPE) shuts down with 0 after removing the socket", async () => {
     const h = harness();

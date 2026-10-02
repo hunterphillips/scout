@@ -26,7 +26,12 @@
 // reply in the first pick's reason, so a test sees the tool was called, not just listed.
 // `tool-errors` is `bridge-call` with Scout's `current_site` and the bridged `lookup` results
 // reported as `is_error` (a tool that failed at runtime), then the same answer.
+// `sleep-ignore-term` (P3.4 lifecycle) starts like `ignore-term` (every server connected, no
+// final response, SIGTERM ignored) and also starts two `sleep` descendants that ignore SIGTERM:
+// one in its process group, one that leaves it (its own group); their pids go to the log as
+// {descendantPids}.
 
+import { spawn } from "node:child_process";
 import { appendFileSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -318,6 +323,14 @@ switch (mode) {
     process.on("SIGTERM", () => {});
     hang();
     break;
+  case "sleep-ignore-term": {
+    await startAndHang();
+    process.on("SIGTERM", () => {});
+    const sleeper = (detached) => spawn("/bin/sh", ["-c", "trap '' TERM; exec /bin/sleep 300"], { stdio: "ignore", detached }).pid;
+    logLine({ descendantPids: [sleeper(false), sleeper(true)] });
+    hang();
+    break;
+  }
   case "late-output":
     // Answers only once told to stop: the host must never count it.
     await startAndHang();

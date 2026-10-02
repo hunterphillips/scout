@@ -7,7 +7,14 @@
 // `cancel()` terminates the worker and rejects every parse queued or running with
 // ParseCancelledError; the next parse starts a fresh worker. The core calls it when a discovery
 // pass's fetch session is cancelled (pause, permission loss, disconnect, stop). `close()` is for
-// shutdown.
+// shutdown: it terminates the worker and refuses every later parse.
+//
+// `scope(isCancelled)` gives one discovery pass its own parsers (P3.4): a parse submitted once
+// `isCancelled()` is true (the pass's fetch session was cancelled) or after the scope's own
+// `cancel()` is refused with ParseCancelledError before it reaches the queue, so a cancelled
+// pass can never occupy the single worker; `cancel()` fails only that pass's queued parses
+// and, when the running parse is the pass's, terminates the worker (the queue goes on in a
+// fresh one). Another pass's parses are left alone.
 //
 // A parse that overruns PARSE_MAX_MS fails alone with ParseTimeoutError (`parse_timeout`): its
 // stuck worker is terminated and the queue goes on in a fresh one.
@@ -58,11 +65,20 @@ export function defaultParseWorkerEntrypoint(): string {
   return createRequire(import.meta.url).resolve("@scout/scout-core/catalog/parse-worker");
 }
 
+/** One discovery pass's view of the pool (see the header). */
+export interface ParseScope {
+  readonly parsers: CatalogParsers;
+  /** Fail this scope's queued and running parses, and refuse its later ones. Idempotent. */
+  cancel(): void;
+}
+
 export interface ParsePool {
   readonly parsers: CatalogParsers;
+  /** Parsers for one pass; refused once `isCancelled()` is true or the scope is cancelled. */
+  scope(isCancelled?: () => boolean): ParseScope;
   /** Terminate the worker; every queued or running parse rejects with ParseCancelledError. */
   cancel(): void;
-  /** Cancel, and refuse parses from now on. */
+  /** Cancel, refuse parses from now on, and resolve once the worker's thread has stopped. */
   close(): Promise<void>;
   /** Parses queued or running. */
   readonly pending: number;
@@ -73,6 +89,8 @@ type Job = { kind: "sitemap"; text: string; origin: string } | { kind: "llms"; t
 interface Queued {
   id: number;
   job: Job;
+  /** The scope that submitted it, if any. */
+  owner?: object;
   resolve: (value: unknown) => void;
   reject: (e: unknown) => void;
 }
@@ -95,28 +113,32 @@ export function createParsePool(options: { entrypoint?: string; maxMs?: number; 
 
   const fail = (q: Queued, e: unknown): void => q.reject(e);
 
-  const dropWorker = (): void => {
+  /** Terminate the current worker; resolves once its thread has stopped. */
+  const dropWorker = (): Promise<void> => {
     const w = worker;
     worker = null;
-    if (w !== null) {
-      w.removeAllListeners();
-      void w.terminate().catch(() => {});
-    }
+    if (w === null) return Promise.resolve();
+    w.removeAllListeners();
+    return w.terminate().then(
+      () => {},
+      () => {},
+    );
   };
 
-  const cancelAll = (): void => {
+  const cancelAll = (): Promise<void> => {
     const victims = [...(running ? [running] : []), ...queue.splice(0)];
     if (running) clearTimeout(running.timer);
     running = null;
-    dropWorker();
+    const stopped = dropWorker();
     for (const q of victims) fail(q, new ParseCancelledError());
+    return stopped;
   };
 
   /** The running parse overran its bound: fail it alone, drop its stuck worker, go on with the queue. */
   const timedOut = (r: Queued): void => {
     if (running === null || running.id !== r.id) return;
     running = null;
-    dropWorker();
+    void dropWorker();
     r.reject(new ParseTimeoutError());
     pump();
   };
@@ -173,25 +195,60 @@ export function createParsePool(options: { entrypoint?: string; maxMs?: number; 
     w.postMessage({ id: next.id, ...next.job });
   };
 
-  const submit = <T>(job: Job): Promise<T> =>
+  const submit = <T>(job: Job, owner?: object): Promise<T> =>
     new Promise<T>((resolve, reject) => {
       if (closed) {
         reject(new ParseCancelledError());
         return;
       }
-      queue.push({ id: ++nextId, job, resolve: resolve as (v: unknown) => void, reject });
+      queue.push({ id: ++nextId, job, resolve: resolve as (v: unknown) => void, reject, ...(owner ? { owner } : {}) });
       pump();
     });
+
+  /** Fail `owner`'s parses only; a running one takes its worker with it and the queue goes on. */
+  const cancelOwner = (owner: object): void => {
+    const victims: Queued[] = [];
+    for (let i = queue.length - 1; i >= 0; i--) if (queue[i]!.owner === owner) victims.unshift(...queue.splice(i, 1));
+    const r = running;
+    if (r !== null && r.owner === owner) {
+      clearTimeout(r.timer);
+      running = null;
+      void dropWorker();
+      victims.unshift(r);
+    }
+    for (const q of victims) fail(q, new ParseCancelledError());
+    pump();
+  };
+
+  const scope = (isCancelled: () => boolean = () => false): ParseScope => {
+    const owner = {};
+    let cancelled = false;
+    const refused = (): boolean => cancelled || isCancelled();
+    const guarded = <T>(job: Job): Promise<T> => (refused() ? Promise.reject(new ParseCancelledError()) : submit<T>(job, owner));
+    return {
+      parsers: {
+        sitemap: (xml, origin) => guarded<ParsedSitemap>({ kind: "sitemap", text: xml, origin }),
+        llmsTxt: (text, origin, baseUrl) => guarded<ParsedLlmsTxt>({ kind: "llms", text, origin, baseUrl }),
+      },
+      cancel() {
+        if (cancelled) return;
+        cancelled = true;
+        cancelOwner(owner);
+      },
+    };
+  };
 
   return {
     parsers: {
       sitemap: (xml, origin) => submit<ParsedSitemap>({ kind: "sitemap", text: xml, origin }),
       llmsTxt: (text, origin, baseUrl) => submit<ParsedLlmsTxt>({ kind: "llms", text, origin, baseUrl }),
     },
-    cancel: cancelAll,
+    scope,
+    cancel: () => void cancelAll(),
     async close() {
       closed = true;
-      cancelAll();
+      // The worker's thread is gone on return.
+      await cancelAll();
     },
     get pending() {
       return queue.length + (running ? 1 : 0);

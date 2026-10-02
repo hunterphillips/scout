@@ -39,26 +39,49 @@
 // it through the store's revocation hook, after agent.sock released the snapshots that pinned
 // them.
 //
-// Shutdown order: a running preflight child is killed first, before anything is awaited; the
-// coordinator stops (its scheduler cancels the running job with `shutdown`); the job wiring
-// waits for the job's process tree (`adapter.abortAll()`) and closes the parse pool; then every
-// snapshot is released and the sockets close. The whole close is still bounded by
-// SHUTDOWN_DEADLINE_MS (2 s), which is the adapter's kill grace: a job that ignores SIGTERM may
-// outlive the core by that grace (P3.4 raises the deadline).
+// Shutdown (P3.4), one function, one order, every trigger: stdin EOF (the app quit), stdin
+// closed abruptly (the app crashed), a read error on stdin, a stdout error, the `shutdown`
+// command, SIGTERM, SIGINT, SIGHUP.
+//   1. stop accepting (synchronous, nothing awaited before it): the coordinator stops (no new
+//      frames act, the dwell and the discovery pass are cancelled, the scheduler cancels its job
+//      with `shutdown`), the panel channel stops, stdin stops being read; then the preflight
+//      child is killed (`killPreflight()` is synchronous and runs before the first await).
+//   2. `jobs`: the scheduler is stopped; every snapshot is released and every job token revoked
+//      (a job's next read on agent.sock is refused); every adapter's job is aborted and its
+//      process tree waited for (SIGTERM to the group → 2 s grace → SIGKILL → tracked descendants).
+//   3. `parsers`: the parse worker is terminated.
+//   4. `sockets`: core.sock and agent.sock close (connections' pins go with them).
+//   5. `store`: the agent-profile lock is released and the agent token file removed, then the
+//      capability store closes (its writes are already atomic).
+//   6. `descendants`: any job descendant still tracked is SIGKILLed and waited for.
+// The whole shutdown is bounded by SHUTDOWN_DEADLINE_MS (5 s), above the adapter's 2 s kill grace
+// plus its reap; the Swift supervisor's hard stop (7 s) is the backstop beyond it. The deadline
+// timer keeps the event loop alive until shutdown ends. At the deadline the core logs
+// `shutdown_deadline {pending}` and exits 0 anyway, after releasing synchronously what the pending
+// steps would have: the agent-profile lock, the token file, the store lock (each only if still
+// ours) and both socket files (only the inodes it bound); then one last blocking ps sweep (1 s cap)
+// SIGKILLs whatever tracked descendant is left (`shutdown_orphan {count}`; pids on stderr only,
+// never arguments). The `shutdown` event carries the reason and each step's duration. A start that
+// fails after the store opened closes the same way, under the same deadline, then exits 1.
 //
-// The process exits 0 when stdin closes (the app quit or crashed), on SIGTERM/SIGINT/
-// SIGHUP, or on a `shutdown` command, after closing both sockets (which releases the agent
-// connections' pins), then the store, then removing the token file. It never outlives the
-// app by more than SHUTDOWN_DEADLINE_MS.
+// At start, right after the store's lock is taken (so no other core shares this home) and before the
+// job wiring exists (so before its preflight makes a `run/jobs/preflight-*` dir), every leftover
+// `run/jobs/*` entry is removed. A hard-killed core leaves them, with the job's tree still running:
+// a dir's `tree.json` (agents/processTree.ts) names the CLI and the owned processes ps saw, and
+// each one whose pid and start time still match is SIGKILLed first (only out of a private jobs root
+// and job dir this user owns). `jobs_swept {count, killed}`; an entry that cannot be removed is
+// logged and does not block start.
 
 import { randomBytes } from "node:crypto";
-import { realpathSync } from "node:fs";
+import { lstatSync, readdirSync, realpathSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
 import type { Readable, Writable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { NATIVE_COMMAND_MAX_BYTES, NativeCommandSchema, type PanelState } from "@scout/contracts";
 import type { AgentJobAdapter } from "./agents/adapter.js";
+import { JOB_TREE_FILE, killRecordedTree, parseJobTreeRecord, psSnapshot, type ProcessIdentity, type PsSnapshot } from "./agents/processTree.js";
+import { readPrivateFile } from "./agents/privateFile.js";
 import type { JobScheduler } from "./jobScheduler.js";
 import { createActivityStore } from "./activity/store.js";
 import { createSnapshotRegistry, type SnapshotRegistry } from "./activity/snapshots.js";
@@ -69,7 +92,7 @@ import { createReadAudit, type ReadAudit } from "./agentApi/readAudit.js";
 import { type AgentSocketServer, createAgentSocketServer } from "./agentSocketServer.js";
 import { createSkillExporter, ExportError, type SkillExporter } from "./capabilities/exports.js";
 import { type CapabilityStore, createCapabilityStore, StoreCorruptError } from "./capabilities/store.js";
-import { StoreLockedError } from "./capabilities/storeLock.js";
+import { releaseHeldLocks, StoreLockedError } from "./capabilities/storeLock.js";
 import { createSiteResourceDiscoverer } from "./capabilities/discovery.js";
 import { createCatalogCache } from "./catalog/cache.js";
 import { createCatalogResolver } from "./catalog/resolveCatalog.js";
@@ -82,10 +105,11 @@ import { InstalledRecordError, readInstalledRecord } from "./installedRecord.js"
 import { createPanelChannel, type PanelChannel } from "./panelChannel.js";
 import { createResultRegistry } from "./results.js";
 import { createSocketServer, SocketServerError } from "./socketServer.js";
+import { unlinkIfSameInode } from "./localSocketFiles.js";
 import { createJobWiring, type JobWiring } from "./wiring/jobs.js";
 
 /** Hard cap on shutdown: exit anyway if closing takes longer. */
-export const SHUTDOWN_DEADLINE_MS = 2000;
+export const SHUTDOWN_DEADLINE_MS = 5000;
 /** How often the capability store collects garbage while the core runs (also once at start). */
 export const GC_INTERVAL_MS = 60 * 60 * 1000;
 
@@ -115,8 +139,8 @@ export interface StdioDeps {
   diagnostics?: Diagnostics;
   /** Tests only: called once agent.sock is listening, with what a test drives job snapshots through. */
   onAgentStarted?: (agent: { store: CapabilityStore; snapshots: SnapshotRegistry }) => void;
-  /** Tests only: the job scheduler, once built. */
-  onJobsStarted?: (jobs: { scheduler: JobScheduler; adapter: AgentJobAdapter | null }) => void;
+  /** Tests only: the job scheduler and the wiring around it, once built. */
+  onJobsStarted?: (jobs: { scheduler: JobScheduler; adapter: AgentJobAdapter | null; wiring: JobWiring }) => void;
 }
 
 export interface StdioCore {
@@ -234,6 +258,9 @@ export async function runStdio(deps: StdioDeps): Promise<StdioCore> {
   });
   const panelChannel = panel;
 
+  // Before the job wiring: its preflight's dir under run/jobs is not a leftover (see the header).
+  sweepJobDirs(join(runDir, "jobs"), diagnostics);
+
   const activity = createActivityStore({ clock });
   // The adapter, preflight, parse pool and scheduler; it reads the coordinator only once a job runs.
   const jobWiring = createJobWiring({
@@ -254,7 +281,9 @@ export async function runStdio(deps: StdioDeps): Promise<StdioCore> {
   // Settled visits run the same catalog and discovery pipelines as the dev CLI, with their
   // caches under SCOUT_HOME; the coordinator owns each pass's fetch session and window. Catalog
   // files are parsed in the parse worker; cancelling a pass's session cancels its parse.
-  const catalogResolver = createCatalogResolver({ scoutHome: home, clock, diagnostics, parsers: jobWiring.parsers });
+  // Each pass resolves with its own session's parsers, which refuse work once the pass is cancelled.
+  const resolveCatalog = (origin: string, session: Parameters<JobWiring["parsersFor"]>[0]) =>
+    createCatalogResolver({ scoutHome: home, clock, diagnostics, parsers: jobWiring.parsersFor(session) }).resolve(origin, { session });
   const discoverer = createSiteResourceDiscoverer({ scoutHome: home, clock, diagnostics });
   const coordinator: Coordinator = createCoordinator({
     config,
@@ -268,14 +297,14 @@ export async function runStdio(deps: StdioDeps): Promise<StdioCore> {
     capabilities: {
       store,
       createFetchSession: (origin) => jobWiring.createFetchSession(origin),
-      resolveCatalog: (origin, session) => catalogResolver.resolve(origin, { session }),
+      resolveCatalog,
       discover: (origin, session) => discoverer.discover(origin, { session }),
     },
     panel: panelChannel,
     results,
     jobs: scheduler,
   });
-  deps.onJobsStarted?.({ scheduler, adapter: jobWiring.adapter });
+  deps.onJobsStarted?.({ scheduler, adapter: jobWiring.adapter, wiring: jobWiring });
   panelChannel.start();
   // The startup export sync may record conflicts the first frame could not show.
   void store.startupExportSync.then(() => panelChannel.capabilitiesChanged());
@@ -286,20 +315,106 @@ export async function runStdio(deps: StdioDeps): Promise<StdioCore> {
     diagnostics,
   });
   let tokenFile: InteractiveTokenFile | null = null;
+  /** The socket files this start bound, by inode: the deadline path removes only those. */
+  const boundSockets: Array<{ path: string; ino: number }> = [];
+  const noteBound = (path: string): void => {
+    try {
+      boundSockets.push({ path, ino: lstatSync(path).ino });
+    } catch {
+      // not there: nothing to remove later
+    }
+  };
 
-  // Sockets first (their connections' pins go with them), then the store, then the token.
+  // ---------- shutdown (see the header) ----------
+  const stepMs: Record<string, number> = {};
+  const pendingSteps = new Set<string>();
+  const step = async (name: string, fn: () => unknown): Promise<void> => {
+    pendingSteps.add(name);
+    const t = Date.now();
+    try {
+      await fn();
+    } catch {
+      diagnostics.event("shutdown_step_failed", { step: name });
+    } finally {
+      stepMs[name] = Date.now() - t;
+      pendingSteps.delete(name);
+    }
+  };
+  let orphans: ProcessIdentity[] = [];
   let closing: Promise<void> | null = null;
-  const closeAll = (): Promise<void> =>
+  /** Steps 2-6; `deadlineAt` (Date.now() time) bounds the descendant wait. */
+  const closeAll = (deadlineAt: number): Promise<void> =>
     (closing ??= (async () => {
       clearInterval(gcTimer);
-      // The scheduler already cancelled its job (`shutdown`); wait for the job's process tree.
-      await jobWiring.close();
-      // No job reads past shutdown, even on a connection agent.sock has not closed yet.
-      snapshots?.releaseAll("shutdown");
-      await Promise.all([server.close(), agentServer?.close()]);
-      await store.close();
-      tokenFile?.remove();
+      await step("jobs", async () => {
+        jobWiring.stopScheduler();
+        // No job reads past shutdown, even on a connection agent.sock has not closed yet.
+        snapshots?.releaseAll("shutdown");
+        await jobWiring.abortJobs();
+      });
+      await step("parsers", () => jobWiring.closeParsers());
+      await step("sockets", () => Promise.all([server.close(), agentServer?.close()]));
+      await step("store", async () => {
+        // The lock and the token first: a store close that hangs must not leave them behind.
+        jobWiring.releaseProfile();
+        tokenFile?.remove();
+        await store.close();
+      });
+      await step("descendants", async () => {
+        orphans = await jobWiring.reapDescendants(deadlineAt - FINAL_SWEEP_RESERVE_MS);
+      });
     })());
+
+  /** Out of time: synchronously release what the pending steps would have (see the header). */
+  const releaseNow = (): void => {
+    const quietly = (fn: () => void): void => {
+      try {
+        fn();
+      } catch {
+        // best effort: the process is about to exit
+      }
+    };
+    quietly(() => jobWiring.releaseProfile());
+    quietly(() => tokenFile?.remove());
+    quietly(() => void releaseHeldLocks(home));
+    for (const s of boundSockets) quietly(() => unlinkIfSameInode(s.path, s.ino));
+  };
+
+  /** A last blocking look at the job trees: SIGKILL and report whatever is still alive. */
+  const finalSweep = (): void => {
+    if (jobWiring.processes.size === 0) return;
+    const snap = psSnapshot({ timeout: FINAL_SWEEP_PS_TIMEOUT_MS });
+    const left = jobWiring.processes.alive(snap);
+    if (left.length === 0) return;
+    for (const p of left) {
+      try {
+        process.kill(p.pid, "SIGKILL");
+      } catch {
+        // gone
+      }
+    }
+    diagnostics.event("shutdown_orphan", { count: left.length });
+    deps.log(`scout-core: shutdown_orphan pids ${left.map((p) => p.pid).join(",")}`);
+  };
+
+  /**
+   * Steps 2-6 raced against the deadline. The timer is never unref'd: it keeps the process alive
+   * until shutdown ends, and is cleared when the steps finish first.
+   */
+  const closeBounded = async (deadlineAt: number, after: Promise<unknown>): Promise<void> => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<"deadline">((resolve) => {
+      timer = setTimeout(() => resolve("deadline"), Math.max(0, deadlineAt - Date.now()));
+    });
+    const closed = after.then(() => closeAll(deadlineAt)).then(() => "closed" as const);
+    const how = await Promise.race([closed, deadline]);
+    clearTimeout(timer);
+    if (how === "deadline") {
+      diagnostics.event("shutdown_deadline", { pending: [...pendingSteps].join(",") || "start" });
+      releaseNow();
+    }
+    if (how === "deadline" || orphans.length > 0) finalSweep();
+  };
 
   // The only writer is the native app that launched us over a private pipe. Its commands fit
   // one atomic pipe write (shorter than NATIVE_COMMAND_MAX_BYTES with the newline, the app's own
@@ -310,22 +425,31 @@ export async function runStdio(deps: StdioDeps): Promise<StdioCore> {
   // Settles (never rejects) once start has finished either way, so a shutdown that
   // arrives mid-bind closes the listeners that bind is about to produce.
   let startSettled: Promise<void> = Promise.resolve();
+  /** Step 1: stop accepting work, then kill the preflight. Synchronous. */
+  const stopAccepting = (): void => {
+    coordinator.stop();
+    panelChannel.stop();
+    rl.close();
+    // Before anything is awaited: a preflight child blocked on `claude` must never hold the exit.
+    jobWiring.killPreflight();
+  };
   const shutdown = (reason: string): Promise<void> => {
     if (shuttingDown !== null) return shuttingDown;
     // Claim shutdown before rl.close(): it emits "close" synchronously, which would
     // otherwise re-enter here as a second, stdin-closed shutdown with its own exit.
     let finished!: () => void;
     shuttingDown = new Promise<void>((resolve) => (finished = resolve));
-    // Before anything else: a preflight child blocked on `claude` must never hold the exit.
-    jobWiring.killPreflight();
-    diagnostics.event("shutdown", { reason });
+    const began = Date.now();
+    const deadlineAt = began + SHUTDOWN_DEADLINE_MS;
+    const t = Date.now();
+    stopAccepting();
+    stepMs.stop = Date.now() - t;
+    diagnostics.event("shutdown_begin", { reason });
     deps.log(`scout-core: shutdown (${reason})`);
-    coordinator.stop();
-    panelChannel.stop();
-    rl.close();
-    const deadline = new Promise<void>((resolve) => setTimeout(resolve, SHUTDOWN_DEADLINE_MS).unref());
-    const closed = startSettled.then(closeAll);
-    void Promise.race([closed, deadline]).then(() => {
+    void closeBounded(deadlineAt, startSettled).then(() => {
+      const fields: Record<string, string | number> = { reason, totalMs: Date.now() - began };
+      for (const [name, ms] of Object.entries(stepMs)) fields[`${name}Ms`] = ms;
+      diagnostics.event("shutdown", fields);
       deps.exit(EXIT_OK);
       finished();
     });
@@ -360,6 +484,7 @@ export async function runStdio(deps: StdioDeps): Promise<StdioCore> {
   /** core.sock, then (once wrappers are reconciled) the token and agent.sock. Stops early when shutdown began. */
   const startSockets = async (): Promise<void> => {
     await server.start();
+    noteBound(server.socketPath);
     await store.startupExportSync;
     if (shuttingDown !== null) return;
     try {
@@ -388,6 +513,7 @@ export async function runStdio(deps: StdioDeps): Promise<StdioCore> {
     } catch (e) {
       throw new StartError(`agent-${e instanceof SocketServerError ? e.code : "listen-failed"}`);
     }
+    noteBound(join(runDir, "agent.sock"));
     deps.onAgentStarted?.({ store, snapshots: registry });
   };
 
@@ -407,11 +533,8 @@ export async function runStdio(deps: StdioDeps): Promise<StdioCore> {
     // Claim shutdown first: rl.close() emits "close" synchronously, and that must not
     // start a second, stdin-closed shutdown with its own exit.
     shuttingDown = Promise.resolve();
-    jobWiring.killPreflight();
-    coordinator.stop();
-    panelChannel.stop();
-    rl.close();
-    await closeAll();
+    stopAccepting();
+    await closeBounded(Date.now() + SHUTDOWN_DEADLINE_MS, Promise.resolve());
     deps.exit(EXIT_START_FAILED);
     return { shutdown: async () => {} };
   }
@@ -419,6 +542,67 @@ export async function runStdio(deps: StdioDeps): Promise<StdioCore> {
   if (shuttingDown !== null) await shuttingDown;
   else deps.log(`scout-core: listening on ${server.socketPath} and ${join(runDir, "agent.sock")} (chromeBundleId ${config.chromeBundleId})`);
   return { shutdown };
+}
+
+/** Room left after the descendant wait for the last blocking sweep and the exit. */
+const FINAL_SWEEP_RESERVE_MS = 250;
+/** The last sweep's ps may block this long at most. */
+const FINAL_SWEEP_PS_TIMEOUT_MS = 1000;
+/** A `tree.json` larger than this is not one. */
+const TREE_RECORD_MAX_BYTES = 64 * 1024;
+
+/** A directory this user owns with no group or other permission bits (never a link). */
+function isPrivateDir(path: string): boolean {
+  try {
+    const st = lstatSync(path);
+    return st.isDirectory() && (process.getuid === undefined || st.uid === process.getuid()) && (st.mode & 0o077) === 0;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Remove every leftover job dir, first SIGKILLing what its `tree.json` still matches (see the
+ * header). Never follows a link out of the jobs root: an entry is removed as what it is, and a
+ * record is read only from a private job dir inside a private jobs root, through O_NOFOLLOW.
+ * Reports `jobs_swept {count, killed}`; an entry that cannot be removed is reported and does not
+ * block start. `snapshot` is a test seam (default: one blocking ps, taken only if a record exists).
+ */
+export function sweepJobDirs(jobsRoot: string, diagnostics: Diagnostics, options: { snapshot?: () => PsSnapshot } = {}): { count: number; killed: number } {
+  let entries: string[];
+  try {
+    if (!lstatSync(jobsRoot).isDirectory()) return { count: 0, killed: 0 };
+    entries = readdirSync(jobsRoot);
+  } catch {
+    return { count: 0, killed: 0 }; // no jobs root yet
+  }
+  const trusted = isPrivateDir(jobsRoot);
+  let snap: PsSnapshot | undefined;
+  let removed = 0;
+  let killed = 0;
+  for (const name of entries) {
+    const dir = join(jobsRoot, name);
+    if (trusted && isPrivateDir(dir)) {
+      let record;
+      try {
+        record = parseJobTreeRecord(readPrivateFile(join(dir, JOB_TREE_FILE), TREE_RECORD_MAX_BYTES, { private: true }).toString("utf8"));
+      } catch {
+        record = undefined; // none, or not a private regular file
+      }
+      if (record) {
+        snap ??= (options.snapshot ?? (() => psSnapshot({ timeout: 2000 })))();
+        killed += killRecordedTree(record, snap);
+      }
+    }
+    try {
+      rmSync(dir, { recursive: true, force: true });
+      removed += 1;
+    } catch (e) {
+      diagnostics.event("jobs_sweep_failed", { code: (e as NodeJS.ErrnoException)?.code ?? "unknown" });
+    }
+  }
+  if (entries.length > 0) diagnostics.event("jobs_swept", { count: removed, killed });
+  return { count: removed, killed };
 }
 
 class StartError extends Error {

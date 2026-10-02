@@ -10,9 +10,14 @@
 // never stall its event loop. The process-group signal covers the CLI and every in-group
 // descendant without ps; the polled tree only adds descendants that left the group.
 // dispose() always clears the timers and SIGKILLs the group if the CLI is still unreaped.
+// With a `tracker` (the core's ProcessTracker), the tree is registered at spawn and removed only
+// once reap() saw nothing owned alive: a straggler reap could not kill keeps it registered, so
+// the core's shutdown still waits for it and kills it.
+// With `onTree`, the tree's record (processTree.ts JobTreeRecord) is handed over at spawn and
+// again whenever ps shows a new owned process, so the caller can persist it for a later start.
 
 import type { ChildProcess, SpawnOptions } from "node:child_process";
-import { OwnedTree, psSnapshotAsync, type PsSnapshot } from "./processTree.js";
+import { jobTreeRecord, OwnedTree, psSnapshotAsync, type JobTreeRecord, type ProcessTracker, type PsSnapshot } from "./processTree.js";
 
 export type SpawnFn = (command: string, args: readonly string[], options: SpawnOptions) => ChildProcess;
 export type SnapshotFn = () => PsSnapshot | Promise<PsSnapshot>;
@@ -33,6 +38,10 @@ export interface ChildSupervisorOptions {
   killGraceMs: number;
   snapshot?: SnapshotFn;
   pollMs?: number;
+  /** The core's registry of live job trees (see the header). */
+  tracker?: ProcessTracker;
+  /** The tree's record: once at spawn, then on every newly seen owned process (see the header). Must not throw. */
+  onTree?: (record: JobTreeRecord) => void;
 }
 
 export type ExitWait = { spawnError: boolean } | "reap_timeout";
@@ -66,8 +75,25 @@ export function startChild(o: ChildSupervisorOptions): SupervisedChild {
   let resolveCap: (v: "reap_timeout") => void = () => {};
   const capped = new Promise<"reap_timeout">((r) => (resolveCap = r));
 
+  const startedAt = Date.now();
   let last: PsSnapshot = new Map();
   const tree = child.pid === undefined ? undefined : new OwnedTree(child.pid, () => last);
+  const untrack = tree && o.tracker ? o.tracker.add(tree) : () => {};
+  let recorded = -1;
+  let disposed = false;
+  /** Hand the record over when ps showed a new owned process (identities only grow). */
+  const record = (): void => {
+    if (!tree || !o.onTree || disposed) return;
+    const ids = tree.identities();
+    if (ids.length === recorded) return;
+    recorded = ids.length;
+    try {
+      o.onTree(jobTreeRecord(tree.rootPid, startedAt, ids));
+    } catch {
+      // the record is best effort
+    }
+  };
+  record();
   let inFlight: Promise<PsSnapshot> | undefined;
   /** The running query, or a new one; at most one ps at a time. */
   const refresh = (): Promise<PsSnapshot> => {
@@ -77,6 +103,7 @@ export function startChild(o: ChildSupervisorOptions): SupervisedChild {
         (s) => {
           last = s;
           tree?.poll(s);
+          record();
           return s;
         },
         () => last,
@@ -90,7 +117,6 @@ export function startChild(o: ChildSupervisorOptions): SupervisedChild {
     return refresh();
   };
 
-  let disposed = false;
   let terminating = false;
   let killTimer: NodeJS.Timeout | undefined;
   let capTimer: NodeJS.Timeout | undefined;
@@ -106,13 +132,6 @@ export function startChild(o: ChildSupervisorOptions): SupervisedChild {
     } catch {
       // group gone
     }
-  };
-  const signalTree = (sig: NodeJS.Signals, onlyIfAlive: boolean): void => {
-    if (!tree) return;
-    void fresh().then((s) => {
-      if (disposed) return;
-      if (!onlyIfAlive || tree.alive(s).length) tree.signalAll(sig, s);
-    });
   };
 
   return {
@@ -133,9 +152,15 @@ export function startChild(o: ChildSupervisorOptions): SupervisedChild {
           signalGroup("SIGTERM");
           tree.signalAll("SIGTERM", s);
         });
+      // As above: snapshot first, then the group, then the tree's stragglers from that snapshot.
       killTimer = setTimeout(() => {
-        signalGroup("SIGKILL");
-        signalTree("SIGKILL", true);
+        if (!tree) signalGroup("SIGKILL");
+        else
+          void fresh().then((s) => {
+            if (disposed) return;
+            signalGroup("SIGKILL");
+            tree.signalAll("SIGKILL", s);
+          });
       }, o.killGraceMs);
       capTimer = setTimeout(() => resolveCap("reap_timeout"), o.killGraceMs + REAP_CAP_EXTRA_MS);
     },
@@ -159,7 +184,10 @@ export function startChild(o: ChildSupervisorOptions): SupervisedChild {
         const until = Date.now() + ms;
         for (;;) {
           const s = await fresh();
-          if (tree.alive(s).length === 0) return true;
+          if (tree.alive(s).length === 0) {
+            untrack();
+            return true;
+          }
           if (Date.now() >= until) return false;
           await delay(100);
         }

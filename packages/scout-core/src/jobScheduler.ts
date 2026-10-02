@@ -105,8 +105,11 @@ export interface JobSchedulerOptions {
   /** Rises on every browser-context grant write. */
   grantRevision: () => number;
   approvalRevision: () => number;
-  /** The user's agent; null when no usable profile is loaded (jobs are `unavailable`). */
-  agent: JobAgent | null;
+  /**
+   * The user's agent; null when no usable profile is loaded (jobs are `unavailable`). A function
+   * is read at each job start, so a reloaded profile's adapter runs the next job.
+   */
+  agent: JobAgent | null | (() => JobAgent | null);
   profile: SchedulerProfile;
   /** agent.sock. */
   socketPath: string;
@@ -138,7 +141,12 @@ export interface JobScheduler {
   onGrantChanged(enabled: boolean): void;
   /** A resource was revoked (the snapshot registry already released the snapshots pinning it). */
   onResourceRevoked(resourceId: string): void;
-  onProfileChanged(fingerprint: string): void;
+  /**
+   * The agent profile changed (a new fingerprint, or new tools): the running job is cancelled
+   * `superseded` (published), and later jobs and resume-cache keys use the new profile. A bare
+   * fingerprint keeps the tools fields as they were.
+   */
+  onProfileChanged(next: string | SchedulerProfile): void;
   /** Cancel the running job (`shutdown`) and start none from now on. Idempotent. */
   stop(): void;
   /** Whether a host is recommendation-enabled. */
@@ -262,7 +270,7 @@ export function createJobScheduler(options: JobSchedulerOptions): JobScheduler {
     options.window.working(visit.epoch, jobId);
     const remaining = b.deadline - clock.now();
     if (remaining < MIN_JOB_MS) return answerNow(visit, jobId, { status: "unavailable", reason: "no_time_left" }, { epoch: visit.epoch });
-    const agent = options.agent;
+    const agent = typeof options.agent === "function" ? options.agent() : options.agent;
     const snapshots = options.snapshots();
     if (agent === null || snapshots === null) return answerNow(visit, jobId, { status: "unavailable", reason: "agent_unavailable" }, { epoch: visit.epoch });
 
@@ -477,8 +485,9 @@ export function createJobScheduler(options: JobSchedulerOptions): JobScheduler {
       if (job === null || job.cancelled !== null || job.snapshot === null) return;
       if (job.snapshot.approved.some((a) => a.resourceId === resourceId)) relevantChange("revoked");
     },
-    onProfileChanged(fingerprint) {
-      profile.fingerprint = fingerprint;
+    onProfileChanged(next) {
+      if (typeof next === "string") profile.fingerprint = next;
+      else Object.assign(profile, next);
       cancel("superseded", "publish");
     },
     stop() {
