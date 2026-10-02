@@ -26,19 +26,8 @@
 // for text it took, and for a repeat it already holds (a re-send after a reconnect).
 //
 // A visit that stays unchanged for DWELL_MS settles (dwell.ts) and starts one discovery
-// pass for its origin: one paced fetch session with one window, the catalog and resource
-// discovery sharing it, then a store ingest only if the visit is still current and the
-// origin still permitted. One pass runs at a time; settles meanwhile queue, latest wins.
-// Pause, loss of the pass origin's grant, disconnect (or a new sensor replacing the live
-// one), and stop cancel the running pass: its fetch session refuses every further request
-// (the one in flight finishes), and the pass is discarded for good. Resuming or
-// re-granting before it finishes does not let it ingest; the next settle (the dwell
-// re-armed on resume, or a new visit) produces a fresh pass instead.
-//
-// The final check and the `store.ingest` call have no await between them, so the store
-// is called with the permission state that check saw. A permission loss, pause, or
-// navigation while the store's own ingest is in flight is not caught: that ingest commits
-// with `chromePermitted: true`. The window is the store's write, and is accepted.
+// pass for its origin (discoveryRunner.ts). Pause, loss of the pass origin's grant,
+// disconnect (or a new sensor replacing the live one), and stop cancel it.
 //
 // Scout's window commands (those with a `commandId`) go to the panel channel
 // (panelChannel.ts), which answers them; without one each gets an `unavailable` ack. The
@@ -62,15 +51,12 @@ import type {
 } from "@scout/contracts";
 import { type ActivityStore, canonicalIssueUrl, createActivityStore } from "./activity/store.js";
 import type { AgentView } from "./agentApi/handlers.js";
-import type { DiscoveryResult } from "./capabilities/discovery.js";
-import type { CapabilityStore } from "./capabilities/store.js";
 import type { PanelChannel } from "./panelChannel.js";
 import type { ResultRegistry } from "./results.js";
-import type { CatalogResolution } from "./catalog/resolveCatalog.js";
 import type { Clock, Timers } from "./clock.js";
 import type { Diagnostics } from "./diagnostics.js";
+import { createDiscoveryRunner, type DiscoveryCapabilities } from "./discoveryRunner.js";
 import { createDwellScheduler, type DwellScheduler } from "./dwell.js";
-import type { OriginFetchSession } from "./fetch/originSession.js";
 import { createPermissionState, GITHUB_ORIGIN, type PermissionState } from "./permissionState.js";
 import { createResumeCache, type ResumeCache } from "./resumeCache.js";
 import type { SocketClient } from "./socketServer.js";
@@ -104,15 +90,7 @@ export interface CoordinatorOptions {
   results?: Pick<ResultRegistry, "clear">;
 }
 
-export interface CoordinatorCapabilities {
-  store: Pick<CapabilityStore, "ingest">;
-  /** One paced session per settled visit; the coordinator calls `startWindow()` once before discovery. */
-  createFetchSession: (origin: string) => OriginFetchSession;
-  /** The catalog resolve on the pass's session (it opens no window of its own). */
-  resolveCatalog: (origin: string, session: OriginFetchSession) => Promise<CatalogResolution>;
-  /** Resource discovery on the pass's session (it opens no window of its own). */
-  discover: (origin: string, session: OriginFetchSession) => Promise<DiscoveryResult>;
-}
+export type CoordinatorCapabilities = DiscoveryCapabilities;
 
 export interface Coordinator {
   handleNativeCommand(cmd: NativeCommand): void;
@@ -134,14 +112,6 @@ export interface Coordinator {
 }
 
 const utf8 = new TextEncoder();
-
-/** A discovery pass in progress; `cancelled` is set when it must never ingest, whatever happens next. */
-interface RunningPass {
-  visit: ActiveVisit;
-  cancelled: string | null;
-  /** Null until the pass has created its fetch session. */
-  session: OriginFetchSession | null;
-}
 
 export function createCoordinator(options: CoordinatorOptions): Coordinator {
   const { clock, diagnostics } = options;
@@ -204,99 +174,23 @@ export function createCoordinator(options: CoordinatorOptions): Coordinator {
 
   // --- Discovery on settled visits ---
 
-  /** The running pass, if any. */
-  let runningPass: RunningPass | null = null;
-  let pendingSettle: ActiveVisit | null = null;
-
-  /** Why a pass for `visit` must not run or ingest now, or null if it may. */
-  const discoveryBlocker = (visit: ActiveVisit): string | null => {
-    if (stopped) return "stopped";
-    if (paused) return "paused";
-    if (!permissions.isPermitted(visit.origin)) return "permission_lost";
-    if (tracker.current()?.epoch !== visit.epoch) return "epoch_changed";
-    return null;
-  };
-
-  /** Stop the running pass's fetches and mark it never to ingest. The first reason wins. */
-  const cancelRunningPass = (reason: string): void => {
-    if (runningPass === null) return;
-    runningPass.cancelled ??= reason;
-    runningPass.session?.cancel();
-  };
-
-  const discarded = (visit: ActiveVisit, reason: string): void =>
-    diagnostics.event("discovery_discarded", { origin: visit.origin, epoch: visit.epoch, reason });
-
-  const runPass = async (visit: ActiveVisit, c: CoordinatorCapabilities): Promise<void> => {
-    const pass: RunningPass = { visit, cancelled: null, session: null };
-    runningPass = pass;
-    const { origin, epoch } = visit;
-    const started = clock.now();
-    try {
-      const session = c.createFetchSession(origin);
-      pass.session = session;
-      session.startWindow();
-      diagnostics.event("discovery_start", { origin, epoch });
-      const [catalog, discovery] = await Promise.allSettled([c.resolveCatalog(origin, session), c.discover(origin, session)]);
-      if (catalog.status === "rejected") diagnostics.event("discovery_catalog_failed", { origin, epoch, code: errorCode(catalog.reason) });
-      if (discovery.status === "rejected") {
-        diagnostics.event("discovery_failed", { origin, epoch, code: errorCode(discovery.reason) });
-        return;
-      }
-      // No await from here to the ingest call: the store sees the state this check saw.
-      const blocked = pass.cancelled ?? discoveryBlocker(visit);
-      if (blocked !== null) {
-        discarded(visit, blocked);
-        return;
-      }
-      const chromePermitted = permissions.isPermitted(origin);
-      const report = await c.store.ingest(discovery.value, { chromePermitted });
-      panelChanged();
-      void report.cleanup.then(panelChanged, () => {});
-      diagnostics.event("discovery_ingested", {
-        origin,
-        epoch,
-        results: report.results.length,
-        skipped: report.skipped,
-        ms: clock.now() - started,
-      });
-    } catch (e) {
-      diagnostics.event("discovery_failed", { origin, epoch, code: errorCode(e) });
-    } finally {
-      runningPass = null;
-      const next = pendingSettle;
-      pendingSettle = null;
-      if (next !== null) startPass(next);
-    }
-  };
-
-  const startPass = (visit: ActiveVisit): void => {
-    const blocked = discoveryBlocker(visit);
-    if (blocked !== null) {
-      discarded(visit, blocked);
-      return;
-    }
-    if (caps === undefined) {
-      diagnostics.event("discovery_skipped", { origin: visit.origin, epoch: visit.epoch, reason: "not_wired" });
-      return;
-    }
-    if (runningPass !== null) {
-      if (pendingSettle !== null) discarded(pendingSettle, "superseded");
-      pendingSettle = visit;
-      diagnostics.event("discovery_queued", { origin: visit.origin, epoch: visit.epoch });
-      return;
-    }
-    void runPass(visit, caps);
-  };
-
-  const dropPendingSettle = (reason: string): void => {
-    if (pendingSettle === null) return;
-    discarded(pendingSettle, reason);
-    pendingSettle = null;
-  };
+  const discovery = createDiscoveryRunner({
+    clock,
+    diagnostics,
+    capabilities: caps,
+    blocker: (visit) => {
+      if (stopped) return "stopped";
+      if (paused) return "paused";
+      if (!permissions.isPermitted(visit.origin)) return "permission_lost";
+      if (tracker.current()?.epoch !== visit.epoch) return "epoch_changed";
+      return null;
+    },
+    isPermitted: (origin) => permissions.isPermitted(origin),
+    onIngested: panelChanged,
+  });
 
   const dwell: DwellScheduler = createDwellScheduler({
-    onSettled: startPass,
+    onSettled: (visit) => discovery.settle(visit),
     diagnostics,
     ...(options.timers ? { timers: options.timers } : {}),
     ...(options.dwellMs !== undefined ? { dwellMs: options.dwellMs } : {}),
@@ -360,8 +254,7 @@ export function createCoordinator(options: CoordinatorOptions): Coordinator {
       dwell.cancel("permission_lost");
       diagnostics.event("permission_lost", { origin: before.origin, epoch: before.epoch });
     }
-    if (pendingSettle !== null && !permissions.isPermitted(pendingSettle.origin)) dropPendingSettle("permission_lost");
-    if (runningPass !== null && !permissions.isPermitted(runningPass.visit.origin)) cancelRunningPass("permission_lost");
+    discovery.permissionsChanged();
     tracker.recompute();
     syncPolicy();
     panelChanged();
@@ -410,8 +303,7 @@ export function createCoordinator(options: CoordinatorOptions): Coordinator {
   const dropConnectionState = (): void => {
     clearResults("disconnected");
     dwell.cancel("disconnected");
-    dropPendingSettle("disconnected");
-    cancelRunningPass("disconnected");
+    discovery.cancel("disconnected");
     permissions.clear();
     lastPolicy = null;
     panelChanged();
@@ -454,8 +346,7 @@ export function createCoordinator(options: CoordinatorOptions): Coordinator {
           paused = true;
           clearResults("paused");
           dwell.cancel("paused");
-          dropPendingSettle("paused");
-          cancelRunningPass("paused");
+          discovery.cancel("paused");
           diagnostics.event("paused", {});
           syncPolicy();
           emitCurrent();
@@ -511,23 +402,13 @@ export function createCoordinator(options: CoordinatorOptions): Coordinator {
       stopped = true;
       clearResults("stopped");
       dwell.stop();
-      dropPendingSettle("stopped");
-      cancelRunningPass("stopped");
+      discovery.cancel("stopped");
       diagnostics.event("coordinator_stopped", {});
     },
   };
 
   emitCurrent();
   return coordinator;
-}
-
-/** A scalar code for a thrown value; never its message, which may carry a URL. */
-function errorCode(e: unknown): string {
-  if (e instanceof Error) {
-    const code = (e as { code?: unknown }).code;
-    return typeof code === "string" && /^[\w-]{1,64}$/.test(code) ? code : e.name;
-  }
-  return "unknown";
 }
 
 export { canonicalIssueUrl };
