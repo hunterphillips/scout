@@ -702,6 +702,16 @@ public enum PanelRequest: Sendable, Equatable, Hashable {
         }
     }
 
+    /// Whether a failed or unsent command may be re-sent under its ID from the window (Retry).
+    /// Previews restart through a new command, toggles are toggled again, and a link click is
+    /// clicked again: re-sending an `open_link` later would open a link the user may no longer want.
+    public var isRetryable: Bool {
+        switch self {
+        case .preview, .setAutoAcquire, .setAgentBrowserContext, .openLink: return false
+        case .approve, .decline, .revoke, .refreshCapabilities: return true
+        }
+    }
+
     /// A settings toggle: never retried; the user toggles again from fresh state.
     public var isToggle: Bool {
         switch self {

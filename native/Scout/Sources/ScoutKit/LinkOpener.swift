@@ -2,11 +2,17 @@ import Foundation
 
 /// Opens a recommended link, and only one the core sent back for the user's click
 /// (`open_link`'s ack). The core has already re-checked the target; this checks it again
-/// before anything opens: `https`, no user or password, no explicit port (not even 443), and
-/// exactly the result's host. Any path, query, or fragment on that host passes, so a verified
-/// HTML twin does. The open itself is injected (`NSWorkspace.shared.open` in the app), so the
-/// checks are testable and nothing here touches AppKit.
+/// before anything opens: `https`, no user or password, no explicit port (not even 443, nor an
+/// empty one), and exactly the result's host, compared byte for byte with the link's authority.
+/// Any path, query, or fragment on that host passes, so a verified HTML twin does.
+///
+/// The open itself is injected, so the checks are testable and nothing here touches AppKit. The
+/// app opens in Chrome (the configured `chromeBundleId`), never in the default browser: when
+/// Chrome is not installed, or the open reports an error, the link is refused as `openFailed`.
 public struct LinkOpener {
+    /// Opens `url` in Chrome and calls `done` with whether it did (from any thread).
+    public typealias Open = (_ url: URL, _ done: @escaping @Sendable (Bool) -> Void) -> Void
+
     /// Why a target was not opened; the Problems list shows it.
     public enum Refusal: String, Error, Sendable, Equatable, CaseIterable {
         case malformed
@@ -14,6 +20,8 @@ public struct LinkOpener {
         case credentials
         case port
         case wrongHost = "wrong_host"
+        /// Chrome was not found, or did not open the link.
+        case openFailed = "open_failed"
 
         public var text: String {
             switch self {
@@ -22,13 +30,14 @@ public struct LinkOpener {
             case .credentials: return "the link carried a user name or password"
             case .port: return "the link named a port"
             case .wrongHost: return "the link pointed at another site"
+            case .openFailed: return "Chrome could not open it"
             }
         }
     }
 
-    private let openURL: (URL) -> Void
+    private let openURL: Open
 
-    public init(open: @escaping (URL) -> Void) {
+    public init(open: @escaping Open) {
         openURL = open
     }
 
@@ -49,18 +58,24 @@ public struct LinkOpener {
         guard let expected = URLComponents(string: origin), expected.scheme == "https", expected.port == nil,
               let host = expected.percentEncodedHost, !host.isEmpty, "https://" + host == origin else { return .failure(.wrongHost) }
         guard parts.percentEncodedHost == host, url.host == host else { return .failure(.wrongHost) }
+        // The authority as written (after `https://`, up to the first `/`, `?`, or `#`) must be the
+        // host itself, byte for byte: nothing a parser drops, such as an empty port (`host:`).
+        let rest = href.utf8.dropFirst("https://".utf8.count)
+        let authority = rest.prefix { $0 != UInt8(ascii: "/") && $0 != UInt8(ascii: "?") && $0 != UInt8(ascii: "#") }
+        guard authority.elementsEqual(host.utf8) else {
+            return .failure(authority.starts(with: Array((host + ":").utf8)) ? .port : .wrongHost)
+        }
         return .success(url)
     }
 
-    /// Checks `href` and opens it; returns why not when refused.
-    @discardableResult
-    public func open(_ href: String, origin: String) -> Refusal? {
+    /// Checks `href` and opens it. `completion` gets nil once it opened, or why not: a failed
+    /// check at once (nothing is opened), `openFailed` when the opener reports it did not open.
+    public func open(_ href: String, origin: String, completion: @escaping @Sendable (Refusal?) -> Void) {
         switch Self.check(href, origin: origin) {
         case let .success(url):
-            openURL(url)
-            return nil
+            openURL(url) { opened in completion(opened ? nil : .openFailed) }
         case let .failure(refusal):
-            return refusal
+            completion(refusal)
         }
     }
 }

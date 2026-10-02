@@ -2,6 +2,25 @@ import Foundation
 import Testing
 @testable import ScoutKit
 
+/// What a fake opener saw and what `open` answered; the completion may run on any thread.
+final class OpenLog: @unchecked Sendable {
+    private let lock = NSLock()
+    private var _opened: [URL] = []
+    private var _answers: [LinkOpener.Refusal?] = []
+    var opened: [URL] { lock.withLock { _opened } }
+    var answers: [LinkOpener.Refusal?] { lock.withLock { _answers } }
+    func open(_ url: URL) { lock.withLock { _opened.append(url) } }
+    func answer(_ refusal: LinkOpener.Refusal?) { lock.withLock { _answers.append(refusal) } }
+
+    /// An opener that records the URL and reports `succeeds`.
+    func opener(succeeds: Bool = true) -> LinkOpener {
+        LinkOpener { url, done in
+            self.open(url)
+            done(succeeds)
+        }
+    }
+}
+
 @Suite struct LinkOpenerTests {
     static let origin = "https://docs.example.com"
 
@@ -17,6 +36,11 @@ import Testing
         ("https://user@docs.example.com/a", .credentials),
         ("https://docs.example.com:443/a", .port),
         ("https://docs.example.com:8443/a", .port),
+        ("https://docs.example.com:/a", .port),
+        ("https://docs.example.com:", .port),
+        ("https://docs.example.com.:443/a", .port),
+        ("https://docs.example.com./a", .wrongHost),
+        ("https://docs.example.com.", .wrongHost),
         ("https://other.example.com/a", .wrongHost),
         ("https://docs.example.com.evil.example/a", .wrongHost),
         ("https://evil.example/#docs.example.com", .wrongHost),
@@ -30,10 +54,19 @@ import Testing
         ("https://docs.example.com/\u{00E9}", .malformed),
     ] as [(String, LinkOpener.Refusal?)])
     func checks(href: String, refusal: LinkOpener.Refusal?) {
-        var opened: [URL] = []
-        let opener = LinkOpener { opened.append($0) }
-        #expect(opener.open(href, origin: Self.origin) == refusal, "\(href)")
-        #expect(opened.map(\.absoluteString) == (refusal == nil ? [href] : []), "\(href)")
+        let log = OpenLog()
+        log.opener().open(href, origin: Self.origin) { log.answer($0) }
+        #expect(log.answers == [refusal], "\(href)")
+        #expect(log.opened.map(\.absoluteString) == (refusal == nil ? [href] : []), "\(href)")
+    }
+
+    @Test func anOpenThatFailsIsRefusedAsOpenFailed() {
+        // The app's opener reports failure when Chrome is not installed or the open errs; it
+        // never falls back to another browser.
+        let log = OpenLog()
+        log.opener(succeeds: false).open(Self.origin + "/a", origin: Self.origin) { log.answer($0) }
+        #expect(log.opened == [URL(string: Self.origin + "/a")!])
+        #expect(log.answers == [.openFailed])
     }
 
     @Test func aResultOnAnotherPortCannotOpen() {

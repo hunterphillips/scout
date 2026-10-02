@@ -144,7 +144,8 @@ public struct CommandTracker: Sendable, Equatable {
 
     /// Re-sends a decision or refresh that failed for a passing reason (`AckFailureCode.isRetryable`)
     /// or whose write was refused, with its own ID. Previews restart from their first chunk through
-    /// a new command instead, and toggles are toggled again, so neither is retried here.
+    /// a new command instead, toggles are toggled again, and link clicks are clicked again, so none
+    /// is retried here (`PanelRequest.isRetryable`).
     public mutating func retry(_ id: String) -> NativeCommand? {
         guard canRetry(id), let i = index(id) else { return nil }
         if case .failed = records[i].state {
@@ -156,7 +157,7 @@ public struct CommandTracker: Sendable, Equatable {
 
     /// Whether `retry(id)` would send something.
     public func canRetry(_ id: String) -> Bool {
-        guard let record = record(id), record.request.isMutation, !record.request.isToggle else { return false }
+        guard let record = record(id), record.request.isRetryable else { return false }
         switch record.state {
         case let .failed(code): return code.isRetryable
         case .pending: return !record.sent

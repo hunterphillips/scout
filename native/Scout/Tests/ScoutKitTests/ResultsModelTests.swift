@@ -189,17 +189,65 @@ import Testing
         #expect(model.takeLinksToOpen().isEmpty)
     }
 
+    /// Opens what the model queued the way the app does, recording refusals.
+    private func openQueued(_ model: inout PanelModel, with opener: LinkOpener, log: OpenLog) {
+        for request in model.takeLinksToOpen() {
+            opener.open(request.href, origin: request.origin) { log.answer($0) }
+            if case let refusal?? = log.answers.last { model.linkRefused(commandId: request.commandId, refusal) }
+        }
+    }
+
     @Test func clicksOpenThroughTheInjectedOpener() throws {
         var model = try ready()
-        var opened: [URL] = []
-        let opener = LinkOpener { opened.append($0) }
+        let log = OpenLog()
         let sent = model.openResult("c1")
         let click = try #require(sent)
         _ = model.apply(.ack(.ok(commandId: click.commandId!, revision: 0, approvalRevision: 0, target: F.origin + "/webhooks")))
-        for request in model.takeLinksToOpen() {
-            if let refusal = opener.open(request.href, origin: request.origin) { model.linkRefused(commandId: request.commandId, refusal) }
-        }
-        #expect(opened == [URL(string: F.origin + "/webhooks")!])
+        openQueued(&model, with: log.opener(), log: log)
+        #expect(log.opened == [URL(string: F.origin + "/webhooks")!])
+        #expect(model.problems.isEmpty)
+    }
+
+    @Test func aLinkChromeCouldNotOpenIsAProblemWithDismissOnly() throws {
+        var model = try ready()
+        let log = OpenLog()
+        let sent = model.openResult("c1")
+        let click = try #require(sent)
+        _ = model.apply(.ack(.ok(commandId: click.commandId!, revision: 0, approvalRevision: 0, target: F.origin + "/webhooks")))
+        openQueued(&model, with: log.opener(succeeds: false), log: log)
+        #expect(model.problems == [.link(commandId: click.commandId!, .openFailed)])
+        #expect(!model.canRetry(click.commandId!))
+        model.dismiss(click.commandId!)
+        #expect(model.problems.isEmpty)
+    }
+
+    @Test func aFailedClickIsNeverRetried() throws {
+        var model = try ready()
+        let sent = model.openResult("c1")
+        let click = try #require(sent)
+        let id = click.commandId!
+        // Unsent: the pipe's own re-send still covers it, but there is no Retry.
+        #expect(!model.canRetry(id))
+        #expect(model.commands.unsent == [click])
+        model.markSent(click, written: true)
+        // `unavailable` is a retryable code for decisions; a click still gets Dismiss only.
+        _ = model.apply(.ack(.failed(commandId: id, code: .unavailable, revision: nil)))
+        guard case let .command(record)? = model.problems.first else { Issue.record("no problem"); return }
+        #expect(record.id == id)
+        #expect(!model.canRetry(id))
+        #expect(model.retry(id) == nil)
+        #expect(model.commands.record(id)?.state == .failed(.unavailable))
+    }
+
+    @Test func aLateAckAfterNavigatingStillOpensTheClickedLink() throws {
+        var model = try ready()
+        let sent = model.openResult("c1")
+        let click = try #require(sent)
+        // The user moves on before the core answers; the results are gone.
+        _ = model.apply(.state(status: .idle, visitEpoch: 2, detail: "other.example.org", permitted: true))
+        #expect(model.results == nil)
+        _ = model.apply(.ack(.ok(commandId: click.commandId!, revision: 0, approvalRevision: 0, target: F.origin + "/webhooks")))
+        #expect(model.takeLinksToOpen() == [LinkOpenRequest(commandId: click.commandId!, href: F.origin + "/webhooks", origin: F.origin)])
     }
 
     @Test func nothingIsClickableWithoutReadyResultsOrARunningCore() throws {

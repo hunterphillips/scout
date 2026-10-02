@@ -21,115 +21,8 @@ public enum Problem: Sendable, Equatable {
     case conflict(CapabilityConflict)
     case command(CommandTracker.Record)
     case preview(PreviewKey, PreviewAssembler.Failure)
-    /// The core answered a link click with a target this app would not open.
+    /// The core answered a link click with a target this app would not open, or Chrome did not open it.
     case link(commandId: String, LinkOpener.Refusal)
-}
-
-/// The job behind the results the window shows: what a click on one of them sends back.
-public struct ResultsIdentity: Sendable, Equatable {
-    public let coreInstanceId: String
-    public let visitEpoch: Int
-    public let origin: String
-    public let jobId: String
-}
-
-/// The current visit's recommendation results.
-public enum ResultsPhase: Sendable, Equatable {
-    /// A job is running; `jobId` when the core named it.
-    case working(jobId: String?)
-    case ready(ResultsIdentity, [ResultItem])
-    /// The model found nothing relevant: a successful answer.
-    case empty
-    case unavailable(JobUnavailableReason)
-    /// The visit's deadline passed.
-    case timeout
-    case error(JobErrorReason)
-    case cancelled(JobCancelledReason)
-}
-
-/// What the Results section and the compact line show. Each state is distinct; "nothing
-/// relevant" (`empty`) is never shown for a failure.
-public enum ResultsDisplay: Sendable, Equatable {
-    case none
-    case paused
-    case disconnected
-    case working
-    case ready([ResultItem])
-    case empty
-    case unavailable(JobUnavailableReason)
-    case timeout
-    case error(JobErrorReason)
-    case cancelled(JobCancelledReason)
-
-    /// A few words for the compact line; nil when there is nothing to say.
-    public var summary: String? {
-        switch self {
-        case .none: return nil
-        case .paused: return "Paused"
-        case .disconnected: return "Chrome not connected"
-        case .working: return "Looking for links…"
-        case let .ready(items): return items.count == 1 ? "1 link" : "\(items.count) links"
-        case .empty: return "Nothing relevant"
-        case .unavailable: return "Links unavailable"
-        case .timeout: return "Timed out"
-        case .error: return "Links failed"
-        case .cancelled: return "Stopped"
-        }
-    }
-
-    /// One sentence for the Results section, also its accessibility label.
-    public var explanation: String {
-        switch self {
-        case .none: return "No links for this page yet. Scout looks once you stay on a site Chrome lets it read."
-        case .paused: return "Scout is paused. Resume it to get links."
-        case .disconnected: return "Scout can't see Chrome right now, so it has no links to show."
-        case .working: return "Looking for links on this site…"
-        case let .ready(items): return items.count == 1 ? "1 link for this page." : "\(items.count) links for this page."
-        case .empty: return "Nothing on this site looks relevant to what you are doing."
-        case let .unavailable(reason): return "Links are unavailable: \(Self.text(reason))."
-        case .timeout: return "Scout ran out of time looking for links on this visit."
-        case let .error(reason): return "Scout couldn't get links: \(Self.text(reason))."
-        case let .cancelled(reason): return "Scout stopped looking: \(Self.text(reason))."
-        }
-    }
-
-    static func text(_ reason: JobUnavailableReason) -> String {
-        switch reason {
-        case .noTimeLeft: return "not enough time was left on this visit"
-        case .agentUnavailable: return "Claude is not available"
-        case .busy: return "Scout is busy with another request"
-        }
-    }
-
-    static func text(_ reason: JobErrorReason) -> String {
-        switch reason {
-        case .timeout: return "it took too long"
-        case .invalidOutput: return "the answer was not usable"
-        case .toolUnavailable: return "a required tool was unavailable"
-        case .preflightFailed: return "the subscription check failed"
-        case .unsupportedConfiguration: return "this setup is not supported"
-        case .agentFailed: return "the agent failed"
-        }
-    }
-
-    static func text(_ reason: JobCancelledReason) -> String {
-        switch reason {
-        case .superseded: return "a newer request replaced this one"
-        case .visitChanged: return "you moved on"
-        case .revoked: return "access was revoked"
-        case .paused: return "Scout was paused"
-        case .shutdown: return "Scout is shutting down"
-        }
-    }
-}
-
-/// A link the core authorized for the user's click, checked here; the app opens it through
-/// `LinkOpener`, which checks it once more.
-public struct LinkOpenRequest: Sendable, Equatable {
-    public let commandId: String
-    public let href: String
-    /// The origin of the result the user clicked.
-    public let origin: String
 }
 
 /// Everything Scout's window shows: sidecar and core status, results, the capability view,
@@ -145,11 +38,8 @@ public struct PanelModel: Sendable, Equatable {
     public private(set) var core: CoreStatus?
     public private(set) var detail: String?
     public private(set) var permitted: Bool?
-    /// The visit the latest `state` frame named.
-    public private(set) var visitEpoch: Int?
-    /// The current visit's results; reset by every `state` frame that is not `working` for the
-    /// same visit and job, and by a core restart.
-    public private(set) var results: ResultsPhase?
+    /// The current visit's results and the links clicked on them.
+    public private(set) var resultsModel = ResultsModel()
     public private(set) var capabilities = CapabilityModel()
     public private(set) var commands: CommandTracker
 
@@ -167,17 +57,6 @@ public struct PanelModel: Sendable, Equatable {
     private var revokedSinceFrame: Set<String> = []
     /// Failed commands the user dismissed from Problems.
     private var dismissed: Set<String> = []
-    /// Jobs of the current visit that a newer job replaced; their late results are ignored.
-    private var supersededJobs: Set<String> = []
-    /// The job whose answer `results` shows.
-    private var resultJob: String?
-    /// The origin of the result each pending `open_link` was clicked on.
-    private var linkOrigins: [String: String] = [:]
-    /// Links the core authorized, waiting for the app to open them (`takeLinksToOpen`).
-    private var linksToOpen: [LinkOpenRequest] = []
-    /// Link targets refused here, newest last.
-    private var linkRefusals: [LinkRefusalRecord] = []
-    static let linkRefusalsMax = 8
 
     public init(commands: CommandTracker = CommandTracker()) {
         self.commands = commands
@@ -194,8 +73,7 @@ public struct PanelModel: Sendable, Equatable {
             core = nil
             detail = nil
             permitted = nil
-            visitEpoch = nil
-            resetResults()
+            resultsModel.coreStopped()
             capabilities.reset()
             decidedSinceFrame = []
             revokedSinceFrame = []
@@ -207,7 +85,7 @@ public struct PanelModel: Sendable, Equatable {
 
     /// A new core process: re-send pending mutations under their IDs and reload loading previews.
     private mutating func coreRestarted() -> [NativeCommand] {
-        resetResults()
+        resultsModel.reset()
         var out = commands.coreRestarted()
         for key in previewOrder where previews[key]?.phase == .loading {
             out += startPreview(key).map { [$0] } ?? []
@@ -219,12 +97,13 @@ public struct PanelModel: Sendable, Equatable {
     public mutating func apply(_ state: PanelState) -> [NativeCommand] {
         switch state {
         case let .state(status, epoch, detail, permitted, jobId):
-            applyState(status, epoch: epoch, jobId: jobId)
+            resultsModel.applyState(status, epoch: epoch, jobId: jobId)
             core = status
             self.detail = detail
             self.permitted = permitted
         case let .results(frame):
-            applyResults(frame)
+            guard sidecar == .running else { break }
+            resultsModel.applyResults(frame, coreInstanceId: capabilities.capabilities?.coreInstanceId, core: core)
         case let .capabilities(frame):
             let previous = capabilities.capabilities?.coreInstanceId
             if capabilities.apply(frame) {
@@ -241,8 +120,7 @@ public struct PanelModel: Sendable, Equatable {
             guard let record = commands.apply(ack) else { break }
             switch (record.request, ack) {
             case let (.openLink, .ok(id, _, _, target)):
-                guard wasPending, let origin = linkOrigins.removeValue(forKey: id) else { break }
-                linkAuthorized(commandId: id, href: target, origin: origin)
+                resultsModel.linkAcked(commandId: id, target: target, wasPending: wasPending)
             case let (.preview(rid, version, _), .failed(_, code, _)):
                 let key = PreviewKey(resourceId: rid, version: version)
                 if awaiting[key] == ack.commandId {
@@ -308,116 +186,39 @@ public struct PanelModel: Sendable, Equatable {
 
     // MARK: Results
 
-    /// A `state` frame: a new visit, `idle`, `paused`, or `disconnected` resets the results (an
-    /// `idle` for the same visit is how the core says it cleared them); `working` for the
-    /// current visit starts a job's spinner, and a job it replaces can no longer publish.
-    private mutating func applyState(_ status: CoreStatus, epoch: Int?, jobId: String?) {
-        if epoch != visitEpoch { supersededJobs = [] }
-        visitEpoch = epoch
-        guard status == .working, epoch != nil else {
-            results = nil
-            return
-        }
-        if let running = currentJobId, running != jobId { supersededJobs.insert(running) }
-        results = .working(jobId: jobId)
-    }
+    /// The visit the latest `state` frame named.
+    public var visitEpoch: Int? { resultsModel.visitEpoch }
 
-    /// A `results` frame counts only for this core instance and the visit the latest `state`
-    /// named, while idle or working, and never for a job a newer one replaced. It replaces
-    /// whatever that visit showed; nothing opens.
-    private mutating func applyResults(_ frame: ResultsFrame) {
-        guard sidecar == .running, let instance = capabilities.capabilities?.coreInstanceId,
-              frame.coreInstanceId == instance, core == .idle || core == .working,
-              let epoch = visitEpoch, frame.visitEpoch == epoch, !supersededJobs.contains(frame.jobId) else { return }
-        if case let .working(running?)? = results, running != frame.jobId { return }
-        if let shown = currentJobId, shown != frame.jobId { supersededJobs.insert(shown) }
-        let identity = ResultsIdentity(coreInstanceId: frame.coreInstanceId, visitEpoch: frame.visitEpoch, origin: frame.origin, jobId: frame.jobId)
-        switch frame.outcome {
-        case let .ok(items): results = .ready(identity, items)
-        case .empty: results = .empty
-        case let .unavailable(reason): results = .unavailable(reason)
-        case .error(.timeout): results = .timeout
-        case let .error(reason): results = .error(reason)
-        case let .cancelled(reason): results = .cancelled(reason)
-        }
-        resultJob = frame.jobId
-    }
-
-    private var currentJobId: String? {
-        switch results {
-        case let .working(jobId)?: return jobId
-        case nil: return nil
-        default: return resultJob
-        }
-    }
-
-    private mutating func resetResults() {
-        results = nil
-        resultJob = nil
-        supersededJobs = []
-    }
+    /// The current visit's results; reset by every `state` frame that is not `working` for the
+    /// same visit and job, and by a core restart.
+    public var results: ResultsPhase? { resultsModel.phase }
 
     public var resultsDisplay: ResultsDisplay {
         guard sidecar == .running else { return .none }
-        switch core {
-        case .paused?: return .paused
-        case .disconnected?: return .disconnected
-        default: break
-        }
-        switch results {
-        case nil: return .none
-        case .working?: return .working
-        case let .ready(_, items)?: return .ready(items)
-        case .empty?: return .empty
-        case let .unavailable(reason)?: return .unavailable(reason)
-        case .timeout?: return .timeout
-        case let .error(reason)?: return .error(reason)
-        case let .cancelled(reason)?: return .cancelled(reason)
-        }
+        return resultsModel.display(core: core)
     }
 
     /// The user clicked a shown result: ask the core for its target with the identity shown.
-    /// Nothing opens until the core's ack authorizes a target and it passes `LinkOpener`.
+    /// Nothing opens until the core's ack authorizes a target and it passes `LinkOpener`; a late
+    /// ok ack after the user navigated still opens the link clicked (`ResultsModel.openResult`).
     public mutating func openResult(_ candidateId: String) -> NativeCommand? {
-        guard sidecar == .running, case let .ready(identity, items)? = results,
-              items.contains(where: { $0.candidateId == candidateId }),
-              linkRecord(candidateId)?.state != .pending else { return nil }
-        let command = commands.issue(.openLink(
-            coreInstanceId: identity.coreInstanceId, visitEpoch: identity.visitEpoch, jobId: identity.jobId, candidateId: candidateId))
-        if let id = command.commandId { linkOrigins[id] = identity.origin }
-        linkOrigins = linkOrigins.filter { commands.record($0.key) != nil }
-        return command
+        guard sidecar == .running else { return nil }
+        return resultsModel.openResult(candidateId, commands: &commands)
     }
 
     /// The newest click on `candidateId` of the results shown.
     public func linkRecord(_ candidateId: String) -> CommandTracker.Record? {
-        guard case let .ready(identity, _)? = results else { return nil }
-        return commands.latest {
-            $0 == .openLink(coreInstanceId: identity.coreInstanceId, visitEpoch: identity.visitEpoch, jobId: identity.jobId, candidateId: candidateId)
-        }
-    }
-
-    private mutating func linkAuthorized(commandId: String, href: String?, origin: String) {
-        switch href.map({ LinkOpener.check($0, origin: origin) }) {
-        case .success?:
-            linksToOpen.append(LinkOpenRequest(commandId: commandId, href: href!, origin: origin))
-        case let .failure(refusal)?:
-            linkRefused(commandId: commandId, refusal)
-        case nil:
-            linkRefused(commandId: commandId, .malformed)
-        }
+        resultsModel.linkRecord(candidateId, commands: commands)
     }
 
     /// Links to open now, each once. Only acks for the user's clicks put links here.
     public mutating func takeLinksToOpen() -> [LinkOpenRequest] {
-        defer { linksToOpen = [] }
-        return linksToOpen
+        resultsModel.takeLinksToOpen()
     }
 
-    /// The app did not open a link; Problems lists why.
+    /// The app did not open a link (its check, or the open itself, failed); Problems lists why.
     public mutating func linkRefused(commandId: String, _ refusal: LinkOpener.Refusal) {
-        linkRefusals.append(LinkRefusalRecord(commandId: commandId, refusal: refusal))
-        if linkRefusals.count > Self.linkRefusalsMax { linkRefusals.removeFirst(linkRefusals.count - Self.linkRefusalsMax) }
+        resultsModel.linkRefused(commandId: commandId, refusal)
     }
 
     // MARK: User actions
@@ -539,7 +340,8 @@ public struct PanelModel: Sendable, Equatable {
     /// Whether `retry(commandId)` would send something.
     public func canRetry(_ commandId: String) -> Bool { commands.canRetry(commandId) }
 
-    /// Re-sends a failed or unsent decision or refresh with its own ID. Toggles are not retried.
+    /// Re-sends a failed or unsent decision or refresh with its own ID. Toggles and link clicks
+    /// are not retried.
     public mutating func retry(_ commandId: String) -> NativeCommand? {
         guard let command = commands.retry(commandId) else { return nil }
         dismissed.remove(commandId)
@@ -548,7 +350,7 @@ public struct PanelModel: Sendable, Equatable {
 
     /// Removes a failed command or a refused link from Problems.
     public mutating func dismiss(_ commandId: String) {
-        linkRefusals.removeAll { $0.commandId == commandId }
+        resultsModel.dismissLink(commandId)
         guard case .failed? = commands.record(commandId)?.state else { return }
         dismissed.insert(commandId)
         // Forget dismissals of commands the tracker no longer holds.
@@ -646,7 +448,7 @@ public struct PanelModel: Sendable, Equatable {
             return $0.request.isMutation
         }
             .reversed().map(Problem.command)
-        out += linkRefusals.reversed().map { Problem.link(commandId: $0.commandId, $0.refusal) }
+        out += resultsModel.linkRefusals.reversed().map { Problem.link(commandId: $0.commandId, $0.refusal) }
         for key in previewOrder.reversed() {
             if case let .failed(failure) = previews[key]?.phase { out.append(.preview(key, failure)) }
         }
@@ -730,9 +532,4 @@ extension NativeCommand {
         if case let .panel(id, _) = self { return id }
         return nil
     }
-}
-
-struct LinkRefusalRecord: Sendable, Equatable {
-    let commandId: String
-    let refusal: LinkOpener.Refusal
 }

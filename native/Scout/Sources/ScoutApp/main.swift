@@ -10,8 +10,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var model = PanelModel()
     private var panel: ScoutPanel?
     private var resendTimer: Timer?
-    /// Opens only links the core authorized for a click; never anything on its own.
-    private let linkOpener = LinkOpener { url in _ = NSWorkspace.shared.open(url) }
+    /// Opens only links the core authorized for a click, never anything on its own, and only in
+    /// Chrome (`chromeBundleId` in ~/.scout/config.json, default Chrome): never the default browser.
+    private let linkOpener = LinkOpener { [chromeBundleId = ScoutConfig.chromeBundleId()] url, done in
+        guard let chrome = NSWorkspace.shared.urlForApplication(withBundleIdentifier: chromeBundleId) else {
+            done(false)
+            return
+        }
+        NSWorkspace.shared.open([url], withApplicationAt: chrome, configuration: NSWorkspace.OpenConfiguration()) { _, error in
+            done(error == nil)
+        }
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let panel = ScoutPanel { [weak self] action in self?.handle(action) }
@@ -109,11 +118,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let requests = model.takeLinksToOpen()
         guard !requests.isEmpty else { return }
         for request in requests {
-            if let refusal = linkOpener.open(request.href, origin: request.origin) {
-                model.linkRefused(commandId: request.commandId, refusal)
+            let commandId = request.commandId
+            // The opener may answer from another thread; Problems lists a refusal.
+            linkOpener.open(request.href, origin: request.origin) { [weak self] refusal in
+                guard let refusal else { return }
+                Task { @MainActor in
+                    guard let self else { return }
+                    self.model.linkRefused(commandId: commandId, refusal)
+                    self.render()
+                }
             }
         }
-        render()
     }
 
     private func render() {
