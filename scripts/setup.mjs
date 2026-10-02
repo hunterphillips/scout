@@ -1,43 +1,66 @@
 #!/usr/bin/env node
-// Scout setup: install the extension key, configs, native host wrapper, and
-// Chrome native-messaging manifest. Every file written is recorded in
+// Scout setup: install the extension key, the Scout config, the agent profile, the native host
+// wrapper, and the Chrome native-messaging manifest. Every file written is recorded in
 // <SCOUT_HOME>/installed.json so uninstall.mjs can remove exactly those.
 // --agent-integration also registers the user-scope `scout` MCP server through `claude mcp add`
 // and installs the static scout-integration skill (lib/agent-integration.mjs); without it,
 // setup never touches Claude Code's configuration.
-// ~/.personal-context-mcp/config.json belongs to the personal-context service;
-// setup only merges nodePath, claudePath, and x_scout_marker into it.
+// --login-launch [--app <Scout.app>] writes the login LaunchAgent for a bundled app
+// (`npm run bundle-app`; lib/app-bundle.mjs).
+// Setup registers nothing for the side panel: the extension bundle carries it. It no longer
+// touches ~/.personal-context-mcp (legacy `config-merged` records are only read, by uninstall).
+// <SCOUT_HOME>/agent-profile.json is written only when absent, with the absolute claude path
+// resolved here, so jobs launched from a Finder-started app never look claude up on PATH.
 //
 // Usage: node scripts/setup.mjs [--dry-run] [--scout-root <dir>] [--agent-integration]
-// Env overrides: SCOUT_HOME, PERSONAL_CONTEXT_HOME, CHROME_NMH_DIR, SCOUT_SKILLS_ROOT,
-// SCOUT_CLAUDE_BIN (see lib/paths.mjs). The last two are for test installs; with the real
-// ~/.scout, --agent-integration refuses them.
+//                               [--login-launch [--app <Scout.app>]]
+// Env overrides: SCOUT_HOME, CHROME_NMH_DIR, SCOUT_SKILLS_ROOT, SCOUT_CLAUDE_BIN,
+// LAUNCH_AGENTS_DIR (see lib/paths.mjs). The last three are for test installs; with the real
+// ~/.scout they are refused, and with a test home they are required.
 // When the Scout home is not the real ~/.scout (SCOUT_HOME or HOME overridden),
 // --scout-root is required so a test install cannot re-key the real built extension.
 // Never touches ~/.rook or any process.
 
 import { chmodSync, lstatSync, mkdirSync, readFileSync, statSync } from "node:fs";
 import { resolve } from "node:path";
-import { DEFAULT_DESTINATIONS, HOST_NAME, REPO_ROOT, isRealScoutHome, layout, scoutHome } from "./lib/paths.mjs";
+import { DEFAULT_DESTINATIONS, HOST_NAME, REPO_ROOT, appBinary, isRealScoutHome, layout, scoutHome } from "./lib/paths.mjs";
 import { extensionIdFromPem, generateKeyPem, manifestKey } from "./lib/extension-key.mjs";
 import { defaultClaudeFallbacks, isExecutableFile, resolveClaude, resolveNode } from "./lib/executables.mjs";
-import { PC_MERGED_KEYS, newMarker, readInstalled, upsertEntry } from "./lib/installed.mjs";
+import { newMarker, readInstalled, upsertEntry } from "./lib/installed.mjs";
 import { checkPrivateDir, ensurePrivateDir, exists, fileMarker, readJsonObject, shDoubleQuote, wrapperScript, writeFileMode, writeJson } from "./lib/files.mjs";
 import { isMain } from "./lib/is-main.mjs";
 import { INTEGRATION_EXPLANATION, applyIntegration, describeIntegration, planIntegration, recordedIntegration } from "./lib/agent-integration.mjs";
+import { launchAgentPlist, launchAgentRefusal, sha256 } from "./lib/app-bundle.mjs";
+
+/** The core's agent profile defaults (packages/scout-core/src/agents/profile.ts). */
+export const AGENT_PROFILE_DEFAULTS = Object.freeze({ schemaVersion: 1, adapter: "claude-code", model: "claude-sonnet-5-5" });
+
+/** Lines setup prints after an install: the one-time steps it cannot do itself. */
+export const NEXT_STEPS = [
+  "One-time steps setup cannot do:",
+  "  1. Load the unpacked extension: chrome://extensions, Developer mode on, Load unpacked, pick the folder below. Reload it there after every `npm run build`.",
+  "  2. Click the Scout toolbar button: it opens Scout's side panel for the current tab. Grant a site from the panel to let Scout see it.",
+  "  3. Start Scout: open the bundled app (`npm run bundle-app` builds it), or `swift run ScoutApp` in native/Scout. With Scout quit, the panel says Scout is not running; nothing is recorded or recommended.",
+];
 
 export function parseArgs(argv) {
-  const opts = { dryRun: false, scoutRoot: REPO_ROOT, scoutRootGiven: false, agentIntegration: false };
+  const opts = { dryRun: false, scoutRoot: REPO_ROOT, scoutRootGiven: false, agentIntegration: false, loginLaunch: false, app: null };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--dry-run") opts.dryRun = true;
     else if (a === "--agent-integration") opts.agentIntegration = true;
+    else if (a === "--login-launch") opts.loginLaunch = true;
+    else if (a === "--app") {
+      if (!argv[i + 1]) throw new Error("--app needs a Scout.app path");
+      opts.app = resolve(argv[++i]);
+    }
     else if (a === "--scout-root") {
       if (!argv[i + 1]) throw new Error("--scout-root needs a directory");
       opts.scoutRoot = argv[++i];
       opts.scoutRootGiven = true;
     } else throw new Error(`unknown argument: ${a}`);
   }
+  if (opts.app && !opts.loginLaunch) throw new Error("--app goes with --login-launch");
   return opts;
 }
 
@@ -51,12 +74,12 @@ function validDestinations(v) {
  * { path, kind, mode, summary, entry, keep, write() }. `claudeFallbacks` overrides the
  * places searched for claude after PATH (tests pass [] to make "not found" deterministic).
  */
-export function planSetup({ env = process.env, scoutRoot = REPO_ROOT, dryRun = false, claudeFallbacks } = {}) {
+export function planSetup({ env = process.env, scoutRoot = REPO_ROOT, dryRun = false, claudeFallbacks, loginLaunch = false, app = null, realHome } = {}) {
   const L = layout({ env, scoutRoot });
   const warnings = [];
 
   // Run the private-dir checks up front, so a dry run fails the same way a real run would.
-  const dirs = [L.scoutHome, L.binDir, L.pcHome].map((path) => ({ path, private: true, ...checkPrivateDir(path) }));
+  const dirs = [L.scoutHome, L.binDir].map((path) => ({ path, private: true, ...checkPrivateDir(path) }));
   dirs.push({ path: L.nmhDir, private: false, exists: exists(L.nmhDir) });
 
   if (!exists(L.extensionManifest)) {
@@ -77,10 +100,9 @@ export function planSetup({ env = process.env, scoutRoot = REPO_ROOT, dryRun = f
     warnings.push(`SCOUT_HOME is set (${L.scoutHome}); the native app only reads ~/.scout, so this install is for testing`);
   }
   const claudePath = resolveClaude({ pathVar: env.PATH ?? "", fallbacks: claudeFallbacks ?? defaultClaudeFallbacks(env) });
-  if (!claudePath) warnings.push("claude not found on PATH, ~/.local/bin, or /opt/homebrew/bin; writing claudePath: null (Phase 3 needs it)");
+  if (!claudePath) warnings.push("claude not found on PATH, ~/.local/bin, or /opt/homebrew/bin; no agent profile is written, so background recommendations stay unavailable until you re-run setup");
 
   // Refuse to overwrite any Scout-owned file that exists without this install's marker.
-  // The personal-context config is not in this list: it is merged, not owned.
   const foreign = [
     [L.scoutConfig, "config"],
     [L.wrapper, "wrapper"],
@@ -110,14 +132,6 @@ export function planSetup({ env = process.env, scoutRoot = REPO_ROOT, dryRun = f
   const existingScout = readJsonObject(L.scoutConfig) ?? {};
   const destinations = validDestinations(existingScout.destinations) ? existingScout.destinations : DEFAULT_DESTINATIONS;
   const scoutConfig = { ...existingScout, x_scout_marker: marker, nodePath, scoutRoot: L.scoutRoot, extensionId, destinations };
-  let existingPc;
-  try {
-    existingPc = readJsonObject(L.pcConfig) ?? {};
-  } catch (e) {
-    throw new Error(`cannot merge into ${L.pcConfig}: ${e.message}\nFix or move it aside and re-run.`);
-  }
-  const pcConfig = { ...existingPc, x_scout_marker: marker, nodePath, claudePath };
-  const pcKept = Object.keys(existingPc).filter((k) => !PC_MERGED_KEYS.includes(k));
   const nmh = {
     name: HOST_NAME,
     description: "Scout native bridge",
@@ -157,16 +171,6 @@ export function planSetup({ env = process.env, scoutRoot = REPO_ROOT, dryRun = f
       write: () => writeJson(L.scoutConfig, scoutConfig, 0o600),
     },
     {
-      path: L.pcConfig,
-      kind: "config-merged",
-      mode: 0o600,
-      summary:
-        `merge nodePath=${nodePath} claudePath=${claudePath ?? "null"}` +
-        (pcKept.length ? ` (keeps existing keys: ${pcKept.join(", ")})` : " (new file)"),
-      entry: { path: L.pcConfig, kind: "config-merged", keys: PC_MERGED_KEYS },
-      write: () => writeJson(L.pcConfig, pcConfig, 0o600),
-    },
-    {
       path: L.wrapper,
       kind: "wrapper",
       mode: 0o700,
@@ -183,7 +187,76 @@ export function planSetup({ env = process.env, scoutRoot = REPO_ROOT, dryRun = f
       write: () => writeJson(L.nmhManifest, nmh, 0o644),
     },
   ];
+  const profile = agentProfileStep({ L, record, claudePath });
+  if (profile.step) steps.splice(3, 0, profile.step);
+  if (profile.note) warnings.push(profile.note);
+  if (loginLaunch) steps.push(launchAgentStep({ L, record, app: app ?? L.appBundle, env, realHome }));
   return { L, marker, record, extensionId, nodePath, claudePath, warnings, dirs, steps };
+}
+
+/**
+ * The agent profile: written only when absent (with the absolute claude path), kept while it is
+ * still exactly what setup wrote, and otherwise left alone and unrecorded by this run.
+ * Returns { step?, note? }.
+ */
+function agentProfileStep({ L, record, claudePath }) {
+  const recorded = record?.files.find((f) => f.kind === "agent-profile" && f.path === L.agentProfile);
+  if (exists(L.agentProfile)) {
+    let text = null;
+    try {
+      if (lstatSync(L.agentProfile).isFile()) text = readFileSync(L.agentProfile, "utf8");
+    } catch {
+      // unreadable: left alone below
+    }
+    if (recorded && text !== null && sha256(text) === recorded.sha256) {
+      return { step: { path: L.agentProfile, kind: "agent-profile", mode: 0o600, summary: "agent profile (exists, written by setup, kept)", entry: recorded, keep: true, write: () => {} } };
+    }
+    return { note: `kept ${L.agentProfile} as it is (${recorded ? "changed since setup wrote it" : "not written by setup"}); Scout's jobs use the claude path and model it names` };
+  }
+  if (!claudePath) return {};
+  const text = JSON.stringify({ ...AGENT_PROFILE_DEFAULTS, claudePath }, null, 2) + "\n";
+  return {
+    step: {
+      path: L.agentProfile,
+      kind: "agent-profile",
+      mode: 0o600,
+      summary: `claudePath=${claudePath} model=${AGENT_PROFILE_DEFAULTS.model} (written only because none exists)`,
+      entry: { path: L.agentProfile, kind: "agent-profile", sha256: sha256(text) },
+      write: () => writeFileMode(L.agentProfile, text, 0o600),
+    },
+  };
+}
+
+/** The login LaunchAgent step. Throws a refusal (missing bundle, override rules, foreign file). */
+function launchAgentStep({ L, record, app, env, realHome }) {
+  const refusal = launchAgentRefusal(env, realHome);
+  if (refusal) throw new Error(refusal);
+  const program = appBinary(app);
+  if (!isExecutableFile(program)) throw new Error(`--login-launch: no bundled app at ${app} (missing ${program}); run \`npm run bundle-app\` first, or pass --app <Scout.app>`);
+  const text = launchAgentPlist({ program });
+  const recorded = record?.files.find((f) => f.kind === "launch-agent" && f.path === L.launchAgent);
+  if (exists(L.launchAgent)) {
+    let current = null;
+    try {
+      if (lstatSync(L.launchAgent).isFile()) current = readFileSync(L.launchAgent, "utf8");
+    } catch {
+      // unreadable: refused below
+    }
+    if (!recorded || current === null || sha256(current) !== recorded.sha256) {
+      throw new Error(`refusing to overwrite ${L.launchAgent}: ${recorded ? "it changed since setup wrote it" : "setup did not write it"}. Move it aside and re-run.`);
+    }
+  }
+  return {
+    path: L.launchAgent,
+    kind: "launch-agent",
+    mode: 0o644,
+    summary: `RunAtLoad ${program} (takes effect at your next login)`,
+    entry: { path: L.launchAgent, kind: "launch-agent", sha256: sha256(text), program },
+    write: () => {
+      mkdirSync(L.launchAgentsDir, { recursive: true });
+      writeFileMode(L.launchAgent, text, 0o644);
+    },
+  };
 }
 
 export function runSetup(argv, { env = process.env, out = console.log, err = console.error, claudeFallbacks, mcpTimeoutMs, realHome } = {}) {
@@ -197,7 +270,7 @@ export function runSetup(argv, { env = process.env, out = console.log, err = con
           `Pass --scout-root <dir> pointing at a separate built copy.`,
       );
     }
-    plan = planSetup({ env, scoutRoot: opts.scoutRoot, dryRun: opts.dryRun, claudeFallbacks });
+    plan = planSetup({ env, scoutRoot: opts.scoutRoot, dryRun: opts.dryRun, claudeFallbacks, loginLaunch: opts.loginLaunch, app: opts.app, realHome });
     // Every refusal happens here, before anything is written.
     if (opts.agentIntegration) integration = planIntegration({ env, L: plan.L, nodePath: plan.nodePath, record: plan.record, claudeFallbacks, mcpTimeoutMs, realHome });
   } catch (e) {
@@ -259,8 +332,10 @@ export function runSetup(argv, { env = process.env, out = console.log, err = con
     }
   }
   out(`recorded ${record.files.length} entries in ${L.installed}`);
+  if (opts.loginLaunch) out(`Login launch: Scout starts at login from now on; it takes effect at your next login (to start it now, open the app). \`npm run uninstall\` removes ${L.launchAgent}.`);
   out(`extension ID: ${plan.extensionId}`);
-  out(`Load the unpacked extension from ${L.extensionManifest.replace(/\/manifest\.json$/, "")}, then run \`npm run doctor\`.`);
+  for (const line of NEXT_STEPS) out(line);
+  out(`Unpacked extension folder: ${L.extensionManifest.replace(/\/manifest\.json$/, "")}. Then run \`npm run doctor\`.`);
   if (integration) {
     out("Agent integration installed.");
     for (const line of INTEGRATION_EXPLANATION) out(line);

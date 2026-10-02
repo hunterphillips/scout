@@ -3,9 +3,14 @@
 // { "version": 1, "marker": "<token>", "skillsRoot"?: "<abs dir>", "skillsRootCreated"?: true,
 //   "files": [ { "path", "kind", ...extra } ] }
 // kinds: config | config-merged | wrapper | nmh-manifest | key | extension-manifest-key
-//        | mcp-registration | skill
-// config-merged: a file someone else owns (the personal-context config); setup added
-// only the keys in `keys`, and uninstall removes only those.
+//        | mcp-registration | skill | agent-profile | launch-agent
+// config-merged (legacy, read only): setup before P4.3 merged `keys` into the personal-context
+// config. Setup no longer writes it; uninstall reports such an entry and drops it from the
+// record, and never edits or deletes that file or its directory.
+// agent-profile { path: "<SCOUT_HOME>/agent-profile.json", sha256 }: written only when absent,
+//                     with the absolute claude path setup resolved; removed only while unchanged
+// launch-agent  { path: "<LaunchAgents>/dev.scout.app.plist", sha256, program }: the optional
+//                     login launch (setup --login-launch); removed only while unchanged
 // The agent integration (setup --agent-integration, lib/agent-integration.mjs) adds:
 //   skillsRoot        the Claude Code skills root; scout-core reads it (installedRecord.ts)
 //                     to export runtime skill wrappers there
@@ -20,19 +25,16 @@ import { randomBytes } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 
-export const KINDS = ["config", "config-merged", "wrapper", "nmh-manifest", "key", "extension-manifest-key", "mcp-registration", "skill"];
+export const KINDS = ["config", "config-merged", "wrapper", "nmh-manifest", "key", "extension-manifest-key", "mcp-registration", "skill", "agent-profile", "launch-agent"];
 
 /** Kinds that may appear at most once; a new entry replaces the old one whatever its path. */
-const SINGLETON_KINDS = ["mcp-registration", "skill"];
+const SINGLETON_KINDS = ["mcp-registration", "skill", "agent-profile", "launch-agent"];
 
 export const INTEGRATION_SERVER_NAME = "scout";
 export const INTEGRATION_SKILL_DIR = "scout-integration";
 export const SCOUT_MCP_MAIN_SUFFIX = "/packages/scout-mcp/dist/main.js";
 
 const isCleanAbsolute = (p) => typeof p === "string" && isAbsolute(p) && resolve(p) === p;
-
-/** The keys setup merges into ~/.personal-context-mcp/config.json. */
-export const PC_MERGED_KEYS = ["x_scout_marker", "nodePath", "claudePath"];
 
 export function newMarker() {
   return randomBytes(16).toString("hex");
@@ -105,6 +107,10 @@ export function allowedPath(kind, path, L, record) {
       return path === L.pcConfig || (basename(path) === "config.json" && basename(dirname(path)) === ".personal-context-mcp");
     case "extension-manifest-key":
       return path.endsWith(EXTENSION_MANIFEST_SUFFIX);
+    case "agent-profile":
+      return path === L.agentProfile;
+    case "launch-agent":
+      return path === L.launchAgent;
     default:
       return false;
   }

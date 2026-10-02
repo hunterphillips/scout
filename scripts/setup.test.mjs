@@ -41,7 +41,8 @@ describe("setup --dry-run", () => {
     const r = spawnSync(process.execPath, [join(HERE, "setup.mjs"), "--dry-run", "--scout-root", fx.scoutRoot], { env, encoding: "utf8" });
     expect(r.status, r.stderr).toBe(0);
     const L = layout({ env: fx.env, scoutRoot: fx.scoutRoot });
-    for (const p of [L.keyPem, L.extensionManifest, L.scoutConfig, L.pcConfig, L.wrapper, L.nmhManifest, L.installed]) expect(r.stdout).toContain(p);
+    for (const p of [L.keyPem, L.extensionManifest, L.scoutConfig, L.agentProfile, L.wrapper, L.nmhManifest, L.installed]) expect(r.stdout).toContain(p);
+    expect(r.stdout).not.toContain(L.pcConfig);
     expect(r.stdout).toContain("Application Support/Google/Chrome/NativeMessagingHosts/dev.scout.bridge.json");
     expect(r.stdout).toMatch(/would write .*extension-key\.pem.*would generate/);
     expect(listTree(fx.root)).toEqual(before);
@@ -87,10 +88,10 @@ describe("setup", () => {
 
     expect(mode(L.scoutHome)).toBe(0o700);
     expect(mode(L.binDir)).toBe(0o700);
-    expect(mode(L.pcHome)).toBe(0o700);
+    expect(existsSync(L.pcHome)).toBe(false);
     expect(mode(L.keyPem)).toBe(0o600);
     expect(mode(L.scoutConfig)).toBe(0o600);
-    expect(mode(L.pcConfig)).toBe(0o600);
+    expect(mode(L.agentProfile)).toBe(0o600);
     expect(mode(L.wrapper)).toBe(0o700);
     expect(mode(L.installed)).toBe(0o600);
 
@@ -103,7 +104,7 @@ describe("setup", () => {
       extensionId: expect.stringMatching(/^[a-p]{32}$/),
       destinations: [],
     });
-    expect(json(L.pcConfig)).toEqual({ x_scout_marker: installed.marker, nodePath: process.execPath, claudePath: join(fx.binDir, "claude") });
+    expect(json(L.agentProfile)).toEqual({ schemaVersion: 1, adapter: "claude-code", model: "claude-sonnet-5-5", claudePath: join(fx.binDir, "claude") });
 
     const ext = json(L.extensionManifest);
     expect(extensionIdFromManifestKey(ext.key)).toBe(scout.extensionId);
@@ -128,11 +129,31 @@ describe("setup", () => {
         ["key", L.keyPem],
         ["extension-manifest-key", L.extensionManifest],
         ["config", L.scoutConfig],
-        ["config-merged", L.pcConfig],
+        ["agent-profile", L.agentProfile],
         ["wrapper", L.wrapper],
         ["nmh-manifest", L.nmhManifest],
       ].sort(),
     );
+    expect(r.text()).toContain("Load the unpacked extension");
+    expect(r.text()).toContain("opens Scout's side panel");
+  });
+
+  it("writes an agent profile the core accepts, only when none exists, and keeps a user's", async () => {
+    const { loadAgentProfile } = await import("../packages/scout-core/dist/agents/profile.js");
+    expect(setup().code).toBe(0);
+    const L = layout({ env: fx.env, scoutRoot: fx.scoutRoot });
+    expect(loadAgentProfile(L.scoutHome)).toMatchObject({ claudePath: join(fx.binDir, "claude"), model: "claude-sonnet-5-5" });
+    // A re-run keeps it and its record.
+    const first = json(L.installed).files.find((f) => f.kind === "agent-profile");
+    expect(setup().code).toBe(0);
+    expect(json(L.installed).files.find((f) => f.kind === "agent-profile")).toEqual(first);
+    // An edited profile is the user's: kept, never rewritten.
+    const edited = { ...json(L.agentProfile), model: "claude-opus-5-5" };
+    writeFileSync(L.agentProfile, JSON.stringify(edited));
+    const r = setup();
+    expect(r.code, r.text()).toBe(0);
+    expect(r.text()).toMatch(/kept .*agent-profile\.json as it is \(changed since setup wrote it\)/);
+    expect(json(L.agentProfile)).toEqual(edited);
   });
 
   it("the wrapper actually execs node on host.js with the origin argument", () => {
@@ -169,62 +190,47 @@ describe("setup", () => {
     expect(setup().code).toBe(0);
     const second = json(L.installed);
     expect(second.marker).toBe(first.marker);
-    expect(second.files).toHaveLength(6);
+    expect(second.files).toHaveLength(6); // key, manifest key, config, agent profile, wrapper, nmh manifest
     expect(readFileSync(L.keyPem, "utf8")).toBe(pem);
     expect(json(L.scoutConfig).extensionId).toBe(cfg.extensionId);
     expect(json(L.scoutConfig).destinations).toEqual(["example.com"]);
     expect(mode(L.scoutConfig)).toBe(0o600);
   });
 
-  it("writes claudePath null with a warning when claude is not found", () => {
+  it("writes no agent profile, with a warning, when claude is not found", () => {
     const r = setup([], { ...fx.env, PATH: join(fx.root, "no-bin") }, { claudeFallbacks: [] });
     expect(r.code, r.text()).toBe(0);
     const L = layout({ env: fx.env, scoutRoot: fx.scoutRoot });
-    expect(json(L.pcConfig).claudePath).toBeNull();
-    expect(r.text()).toMatch(/claude not found/);
+    expect(existsSync(L.agentProfile)).toBe(false);
+    expect(json(L.installed).files.some((f) => f.kind === "agent-profile")).toBe(false);
+    expect(r.text()).toMatch(/claude not found.*no agent profile is written/);
   });
 
-  it("merges into an existing personal-context config, keeping its other keys", () => {
+  it("never touches the personal-context home or config, even when one exists", () => {
     const L = layout({ env: fx.env, scoutRoot: fx.scoutRoot });
-    mkdirSync(L.pcHome, { recursive: true });
-    const sources = [{ id: "focus", kind: "focus_http", enabled: true }];
-    writeFileSync(L.pcConfig, JSON.stringify({ port: 47821, sources, nodePath: "/old/node" }));
-    const r = setup();
-    expect(r.code, r.text()).toBe(0);
-    const installed = json(L.installed);
-    expect(json(L.pcConfig)).toEqual({
-      port: 47821,
-      sources,
-      nodePath: process.execPath,
-      claudePath: join(fx.binDir, "claude"),
-      x_scout_marker: installed.marker,
-    });
-    expect(mode(L.pcConfig)).toBe(0o600);
-    expect(installed.files.find((f) => f.path === L.pcConfig)).toEqual({
-      path: L.pcConfig,
-      kind: "config-merged",
-      keys: ["x_scout_marker", "nodePath", "claudePath"],
-    });
+    mkdirSync(L.pcHome, { recursive: true, mode: 0o755 });
+    const original = JSON.stringify({ port: 47821, sources: [{ id: "focus", kind: "focus_http", enabled: true }] });
+    writeFileSync(L.pcConfig, original);
+    const before = listTree(L.pcHome);
+    for (const args of [["--dry-run"], []]) {
+      const r = setup(args);
+      expect(r.code, r.text()).toBe(0);
+      expect(r.text()).not.toContain(L.pcConfig);
+    }
+    expect(readFileSync(L.pcConfig, "utf8")).toBe(original);
+    expect(mode(L.pcHome)).toBe(0o755);
+    expect(listTree(L.pcHome)).toEqual(before);
+    expect(json(L.installed).files.some((f) => f.kind === "config-merged")).toBe(false);
   });
 
-  it("dry run names the existing personal-context keys it would keep", () => {
+  it("keeps a legacy config-merged record on re-run without acting on it", () => {
+    expect(setup().code).toBe(0);
     const L = layout({ env: fx.env, scoutRoot: fx.scoutRoot });
-    mkdirSync(L.pcHome, { recursive: true });
-    writeFileSync(L.pcConfig, JSON.stringify({ port: 47821, sources: [] }));
-    const r = setup(["--dry-run"]);
-    expect(r.code, r.text()).toBe(0);
-    expect(r.text()).toMatch(/keeps existing keys: port, sources/);
-  });
-
-  it("refuses a personal-context config that is not a JSON object", () => {
-    const L = layout({ env: fx.env, scoutRoot: fx.scoutRoot });
-    mkdirSync(L.pcHome, { recursive: true });
-    writeFileSync(L.pcConfig, "[1, 2]");
-    const r = setup();
-    expect(r.code).toBe(1);
-    expect(r.text()).toMatch(/cannot merge into .*not a JSON object/);
-    expect(readFileSync(L.pcConfig, "utf8")).toBe("[1, 2]");
-    expect(existsSync(L.scoutHome)).toBe(false);
+    const legacy = { path: L.pcConfig, kind: "config-merged", keys: ["x_scout_marker", "nodePath", "claudePath"] };
+    writeFileSync(L.installed, JSON.stringify({ ...json(L.installed), files: [...json(L.installed).files, legacy] }));
+    expect(setup().code).toBe(0);
+    expect(json(L.installed).files).toContainEqual(legacy);
+    expect(existsSync(L.pcConfig)).toBe(false);
   });
 
   it("warns that a SCOUT_HOME install is for testing", () => {
@@ -291,7 +297,7 @@ describe("setup", () => {
     expect(r.text()).toMatch(/re-running is safe/);
     expect(existsSync(L.nmhManifest)).toBe(false);
     const partial = json(L.installed);
-    expect(partial.files.map((f) => f.kind)).toEqual(["key", "extension-manifest-key", "config", "config-merged", "wrapper"]);
+    expect(partial.files.map((f) => f.kind)).toEqual(["key", "extension-manifest-key", "config", "agent-profile", "wrapper"]);
     const pem = readFileSync(L.keyPem, "utf8");
 
     // A stale temp file from the crashed run must not block the re-run.
@@ -364,7 +370,7 @@ describe("uninstall", () => {
 
     const r = await uninstall();
     expect(r.code, r.text()).toBe(0);
-    for (const p of [L.scoutConfig, L.pcConfig, L.wrapper, L.nmhManifest]) expect(existsSync(p)).toBe(false);
+    for (const p of [L.scoutConfig, L.agentProfile, L.wrapper, L.nmhManifest]) expect(existsSync(p)).toBe(false);
     expect(existsSync(L.binDir)).toBe(false);
     expect(json(L.extensionManifest)).toEqual(FAKE_MANIFEST);
     expect(existsSync(join(L.logsDir, "diagnostics.jsonl"))).toBe(true);
@@ -425,6 +431,7 @@ describe("uninstall: out-of-scope entries", () => {
     expect(code).toBe(2);
     expect(c.text()).toMatch(/SKIP .*victim\/config\.json \(not a path setup writes for kind config/);
     expect(c.text()).toMatch(/SKIP .*victim\/settings\.json \(not a path setup writes for kind config-merged/);
+    expect(json(L.installed).files).toHaveLength(2);
     expect(listTree(fx.root).map((f) => [f, readFileSync(join(fx.root, f), "utf8")])).toEqual(before);
 
     const bad = runChecks(fx.env).find((r) => r.label === "install record lists only paths setup writes");
@@ -432,42 +439,57 @@ describe("uninstall: out-of-scope entries", () => {
   });
 });
 
-describe("uninstall: merged personal-context config", () => {
-  const uninstall = async () => {
+describe("uninstall: legacy merged personal-context config", () => {
+  const uninstall = async (args = ["--yes"]) => {
     const c = capture();
-    const code = await runUninstall(["--yes"], { env: fx.env, out: c.out, err: c.err });
+    const code = await runUninstall(args, { env: fx.env, out: c.out, err: c.err });
     return { code, ...c };
   };
-
-  it("strips only Scout's keys and keeps the file when other keys remain", async () => {
-    const L = layout({ env: fx.env, scoutRoot: fx.scoutRoot });
-    mkdirSync(L.pcHome, { recursive: true });
-    const sources = [{ id: "focus", kind: "focus_http", enabled: true }];
-    writeFileSync(L.pcConfig, JSON.stringify({ port: 47821, sources }));
+  /** A pre-P4.3 install: setup had merged Scout's keys into the personal-context config. */
+  const legacyInstall = () => {
     expect(setup().code).toBe(0);
-    const r = await uninstall();
+    const L = layout({ env: fx.env, scoutRoot: fx.scoutRoot });
+    const record = json(L.installed);
+    mkdirSync(L.pcHome, { recursive: true, mode: 0o700 });
+    const merged = { port: 47821, x_scout_marker: record.marker, nodePath: process.execPath, claudePath: join(fx.binDir, "claude") };
+    writeFileSync(L.pcConfig, JSON.stringify(merged));
+    writeFileSync(L.installed, JSON.stringify({ ...record, files: [...record.files, { path: L.pcConfig, kind: "config-merged", keys: ["x_scout_marker", "nodePath", "claudePath"] }] }));
+    return { L, text: readFileSync(L.pcConfig, "utf8") };
+  };
+
+  it("never edits or deletes the file or its directory, even with only Scout's keys; it drops the entry", async () => {
+    const { L } = legacyInstall();
+    const onlyScout = JSON.stringify({ x_scout_marker: json(L.installed).marker, nodePath: process.execPath, claudePath: "/c" });
+    writeFileSync(L.pcConfig, onlyScout);
+    const r = await uninstall(["--yes", "--include-key"]);
     expect(r.code, r.text()).toBe(0);
-    expect(json(L.pcConfig)).toEqual({ port: 47821, sources });
-    expect(mode(L.pcConfig)).toBe(0o600);
-    expect(r.text()).toMatch(/remove x_scout_marker, nodePath, claudePath from .*keeping port, sources/);
+    expect(readFileSync(L.pcConfig, "utf8")).toBe(onlyScout);
+    expect(existsSync(L.pcHome)).toBe(true);
+    expect(r.text()).toMatch(/leave .*\.personal-context-mcp\/config\.json \(legacy record: .*never edits or deletes it or its directory; drop the entry\)/);
+    expect(existsSync(L.installed)).toBe(false);
   });
 
-  it("deletes the file when only Scout's keys were in it", async () => {
-    expect(setup().code).toBe(0);
-    const L = layout({ env: fx.env, scoutRoot: fx.scoutRoot });
+  it("keeps the user's edits and other keys", async () => {
+    const { L, text } = legacyInstall();
     const r = await uninstall();
     expect(r.code, r.text()).toBe(0);
-    expect(existsSync(L.pcConfig)).toBe(false);
+    expect(readFileSync(L.pcConfig, "utf8")).toBe(text);
   });
 
-  it("leaves the file alone when its marker changed", async () => {
-    expect(setup().code).toBe(0);
-    const L = layout({ env: fx.env, scoutRoot: fx.scoutRoot });
-    const changed = { ...json(L.pcConfig), x_scout_marker: "someone-else" };
-    writeFileSync(L.pcConfig, JSON.stringify(changed));
-    const r = await uninstall();
-    expect(r.code).toBe(2);
-    expect(json(L.pcConfig)).toEqual(changed);
+  it("--dry-run says the same and changes nothing", async () => {
+    legacyInstall();
+    const before = listTree(fx.root);
+    const r = await uninstall(["--dry-run"]);
+    expect(r.code).toBe(0);
+    expect(r.text()).toMatch(/leave .*config\.json \(legacy record.*would drop the entry\)/);
+    expect(listTree(fx.root)).toEqual(before);
+  });
+
+  it("doctor notes the legacy record and does not fail on it", () => {
+    legacyInstall();
+    const results = runChecks(fx.env);
+    expect(results.find((r) => r.label.startsWith("legacy personal-context record"))).toMatchObject({ status: "OK", section: "install record" });
+    expect(results.filter((r) => r.status === "FAIL")).toEqual([]);
   });
 });
 
@@ -527,42 +549,36 @@ describe("doctor", () => {
     expect(c.text()).not.toMatch(/^FAIL/m);
   });
 
-  it("reports WARN, not FAIL, for a null claudePath", () => {
+  it("reports WARN, not FAIL, without an agent profile", () => {
     expect(setup().code).toBe(0);
     const L = layout({ env: fx.env, scoutRoot: fx.scoutRoot });
-    writeFileSync(L.pcConfig, JSON.stringify({ ...json(L.pcConfig), claudePath: null }));
+    spawnSync("rm", [L.agentProfile]);
     const results = runChecks(fx.env);
-    expect(results.find((r) => r.label === "claudePath not set")?.status).toBe("WARN");
+    expect(results.find((r) => r.label === "agent profile")).toMatchObject({ status: "WARN", section: "CLI" });
     expect(results.filter((r) => r.status === "FAIL")).toEqual([]);
   });
 
   it("reports FAIL when a path breaks or a mode drifts", () => {
     expect(setup().code).toBe(0);
     const L = layout({ env: fx.env, scoutRoot: fx.scoutRoot });
-    writeFileSync(L.pcConfig, JSON.stringify({ ...json(L.pcConfig), claudePath: join(fx.root, "missing", "claude") }));
+    writeFileSync(L.agentProfile, JSON.stringify({ ...json(L.agentProfile), claudePath: join(fx.root, "missing", "claude") }));
     chmodSync(L.wrapper, 0o755);
     chmodSync(L.keyPem, 0o644);
     const c = capture();
     expect(runDoctor(fx.env, c.out)).toBe(1);
     const failed = runChecks(fx.env).filter((r) => r.status === "FAIL").map((r) => r.label);
-    expect(failed).toEqual(["claudePath is an executable file", "wrapper mode is 0700", "extension key is a 0600 file"]);
+    expect(failed).toEqual(["wrapper mode is 0700", "extension key is a 0600 file", "agent profile names an executable claude"]);
   });
 
   it("reports FAIL when a marker differs or a dir or manifest mode drifts", () => {
     expect(setup().code).toBe(0);
     const L = layout({ env: fx.env, scoutRoot: fx.scoutRoot });
-    writeFileSync(L.pcConfig, JSON.stringify({ ...json(L.pcConfig), x_scout_marker: "other" }));
-    chmodSync(L.pcConfig, 0o600);
+    writeFileSync(L.scoutConfig, JSON.stringify({ ...json(L.scoutConfig), x_scout_marker: "other" }));
+    chmodSync(L.scoutConfig, 0o600);
     chmodSync(L.nmhManifest, 0o600);
     chmodSync(L.binDir, 0o755);
-    chmodSync(L.pcHome, 0o750);
     const failed = runChecks(fx.env).filter((r) => r.status === "FAIL").map((r) => r.label);
-    expect(failed).toEqual([
-      "personal-context config carries the recorded marker",
-      "native messaging manifest is a 0644 file",
-      "scout bin dir is a 0700 dir owned by you",
-      "personal-context home is a 0700 dir owned by you",
-    ]);
+    expect(failed).toEqual(["scout config carries the recorded marker", "scout bin dir is a 0700 dir owned by you", "native messaging manifest is a 0644 file"]);
   });
 
   it("reports FAIL when nothing is installed and writes nothing", () => {

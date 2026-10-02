@@ -1,32 +1,44 @@
 #!/usr/bin/env node
-// Scout uninstall: remove only the files listed in <SCOUT_HOME>/installed.json,
-// and only those that still carry this install's Scout marker. For a merged config
-// (the personal-context config), it removes only the keys setup added.
+// Scout uninstall: remove only the files listed in <SCOUT_HOME>/installed.json, and only those
+// that are still exactly what setup wrote (its marker, or its recorded hash).
 // Lists the files and asks y/N before changing anything; --yes skips the prompt.
 // Without a terminal on stdin and without --yes, it aborts.
 //
 // Entries whose path is outside what setup could have written (lib/installed.mjs
-// allowedPath) are skipped and reported.
+// allowedPath) are skipped and reported. A legacy `config-merged` entry (the personal-context
+// config setup used to merge into) is reported and dropped from the record; uninstall never
+// edits or deletes that file or its directory.
 //
-// The agent integration (the `scout` MCP registration and the scout-integration skill) is
-// removed with everything else, or alone with --agent-integration; each part only while it is
-// still exactly what setup installed (lib/agent-integration.mjs). Scout app skill wrappers in
-// the skills root are never touched; uninstall reports how many remain. With the real ~/.scout
-// and SCOUT_SKILLS_ROOT or SCOUT_CLAUDE_BIN set, it refuses before changing anything.
+// Order: first, when installed.json records a skillsRoot and capabilities/exports.json lists
+// skill wrappers, the Scout app's wrappers go through the core's one-shot
+// `cli.js capabilities unexport-all` (it holds the store lock, removes only wrappers still
+// hashing to their recorded ownership, and keeps changed ones, which are listed). While Scout
+// runs it holds that lock, and uninstall stops before changing anything: quit Scout first.
+// Then the agent integration (the `scout` MCP registration and the scout-integration skill,
+// each only while still exactly what setup installed; lib/agent-integration.mjs), then the
+// files. --agent-integration does the first two only. With the real ~/.scout and
+// SCOUT_SKILLS_ROOT or SCOUT_CLAUDE_BIN set, it refuses before changing anything.
+// A removed login LaunchAgent stays loaded until logout; it only ever ran the app at login.
 //
 // Usage: node scripts/uninstall.mjs [--dry-run] [--yes] [--include-key] [--agent-integration]
-// Env overrides: SCOUT_HOME, PERSONAL_CONTEXT_HOME, SCOUT_CLAUDE_BIN (see lib/paths.mjs); the
-// other paths, and the skills root, come from installed.json, checked against allowedPath.
-// Never touches ~/.rook, ~/.scout/logs, or anything not listed.
+// Env overrides: SCOUT_HOME, SCOUT_CLAUDE_BIN, LAUNCH_AGENTS_DIR (see lib/paths.mjs); the other
+// paths, and the skills root, come from installed.json, checked against allowedPath.
+// Never touches ~/.rook, ~/.scout/logs, or anything not listed. Never removes a directory
+// because its name starts with `scout-`.
 
+import { spawnSync } from "node:child_process";
 import { lstatSync, readFileSync, rmdirSync, statSync, unlinkSync } from "node:fs";
 import { createInterface } from "node:readline/promises";
-import { layout } from "./lib/paths.mjs";
+import { join } from "node:path";
+import { REPO_ROOT, layout } from "./lib/paths.mjs";
 import { extensionIdFromPem } from "./lib/extension-key.mjs";
-import { PC_MERGED_KEYS, allowedPath, readInstalled } from "./lib/installed.mjs";
+import { allowedPath, readInstalled } from "./lib/installed.mjs";
 import { exists, fileMarker, readJsonObject, writeJson } from "./lib/files.mjs";
 import { isMain } from "./lib/is-main.mjs";
 import { isIntegrationEntry, overrideRefusal, removeIntegration } from "./lib/agent-integration.mjs";
+import { readExportsManifest } from "./lib/integration-skill.mjs";
+import { sha256 } from "./lib/app-bundle.mjs";
+import { coreLockHolder } from "./lib/core-state.mjs";
 
 export function parseArgs(argv) {
   const opts = { dryRun: false, yes: false, includeKey: false, agentIntegration: false };
@@ -62,10 +74,13 @@ export async function ttyConfirm(question, { input = process.stdin, output = pro
   }
 }
 
-/** Decide what to do with one entry: { action: "remove"|"strip-key"|"strip-merged"|"gone"|"keep"|"skip", reason }. */
+/** Decide what to do with one entry: { action: "remove"|"strip-key"|"legacy"|"gone"|"keep"|"skip", reason }. */
 export function judge(entry, marker, { includeKey }, L, record) {
   const p = entry.path;
   if (!allowedPath(entry.kind, p, L, record)) return { action: "skip", reason: `not a path setup writes for kind ${entry.kind}; not touching` };
+  if (entry.kind === "config-merged") {
+    return { action: "legacy", reason: "legacy record: setup no longer merges into the personal-context config; uninstall never edits or deletes it or its directory" };
+  }
   if (!exists(p)) return { action: "gone", reason: "already absent" };
   if (!isRegularFile(p)) return { action: "skip", reason: "not a regular file" };
   switch (entry.kind) {
@@ -75,19 +90,17 @@ export function judge(entry, marker, { includeKey }, L, record) {
       return fileMarker(p, entry.kind) === marker
         ? { action: "remove", reason: "marker matches" }
         : { action: "skip", reason: "Scout marker missing or different; not removing" };
-    case "config-merged": {
-      let m = null;
+    case "agent-profile":
+    case "launch-agent": {
+      let text = null;
       try {
-        m = readJsonObject(p);
+        text = readFileSync(p, "utf8");
       } catch {
-        // malformed
+        // unreadable
       }
-      if (!m) return { action: "skip", reason: "not a JSON object; not changing" };
-      if (m.x_scout_marker !== marker) return { action: "skip", reason: "Scout marker missing or different; not changing" };
-      const others = Object.keys(m).filter((k) => !PC_MERGED_KEYS.includes(k));
-      return others.length
-        ? { action: "strip-merged", reason: `marker matches; keeping ${others.join(", ")}` }
-        : { action: "remove", reason: "marker matches and only Scout's keys remain" };
+      return text !== null && typeof entry.sha256 === "string" && sha256(text) === entry.sha256
+        ? { action: "remove", reason: "unchanged since setup wrote it" }
+        : { action: "skip", reason: "changed since setup wrote it; not removing" };
     }
     case "key": {
       if (!includeKey) return { action: "keep", reason: "extension key kept so the extension ID survives a reinstall (pass --include-key to remove)" };
@@ -180,6 +193,14 @@ export async function runUninstall(argv, { env = process.env, out = console.log,
   }
 
   let skipped = 0;
+  const unexport = unexportWrappers(record, { env, L, dryRun: opts.dryRun });
+  for (const line of unexport.lines) out(line);
+  if (unexport.stop) {
+    err(`uninstall: ${unexport.stop}. Nothing changed.`);
+    return 1;
+  }
+  skipped += unexport.kept;
+
   let working = record;
   if (hasIntegration) {
     const r = removeIntegration(record, { env, L, dryRun: opts.dryRun, claudeFallbacks, mcpTimeoutMs, realHome });
@@ -206,13 +227,8 @@ export async function runUninstall(argv, { env = process.env, out = console.log,
         writeJson(entry.path, m, statSync(entry.path).mode & 0o777);
       }
       out(`${would}strip "key" from ${entry.path} (${reason})`);
-    } else if (action === "strip-merged") {
-      if (!opts.dryRun) {
-        const m = readJsonObject(entry.path);
-        for (const k of PC_MERGED_KEYS) delete m[k];
-        writeJson(entry.path, m, statSync(entry.path).mode & 0o777);
-      }
-      out(`${would}remove ${PC_MERGED_KEYS.join(", ")} from ${entry.path} (${reason})`);
+    } else if (action === "legacy") {
+      out(`leave ${entry.path} (${reason}; ${would}drop the entry)`);
     } else if (action === "gone") {
       out(`skip ${entry.path} (${reason})`);
     } else {
@@ -237,6 +253,67 @@ export async function runUninstall(argv, { env = process.env, out = console.log,
   removeDirIfEmpty(L.runDir, out, opts.dryRun);
   out(`Left in place: ${L.logsDir} (including diagnostics.jsonl) and any file not listed above.`);
   return skipped > 0 ? 2 : 0;
+}
+
+/** The core CLI that runs `capabilities unexport-all`: the installed scoutRoot's, else this checkout's. */
+function coreCli(L) {
+  let root = null;
+  try {
+    const cfg = readJsonObject(L.scoutConfig);
+    if (typeof cfg?.scoutRoot === "string") root = cfg.scoutRoot;
+  } catch {
+    // unreadable config: this checkout's CLI
+  }
+  const installed = root ? layout({ scoutRoot: root }).coreCli : null;
+  return installed && exists(installed) ? installed : layout({ scoutRoot: REPO_ROOT }).coreCli;
+}
+
+/**
+ * Step one: remove the Scout app's exported skill wrappers through the core's one-shot CLI.
+ * Returns { lines, kept, stop? }: `stop` is a reason to change nothing at all.
+ */
+export function unexportWrappers(record, { env, L, dryRun }) {
+  const lines = [];
+  if (!record.skillsRoot) return { lines, kept: 0 };
+  let listed;
+  try {
+    listed = readExportsManifest(L.exportsManifest);
+  } catch (e) {
+    listed = { error: e.message };
+  }
+  if (!listed || listed.wrappers === 0) return { lines, kept: 0 };
+  const cli = coreCli(L);
+  const command = `${process.execPath} ${cli} capabilities unexport-all --home ${L.scoutHome}`;
+  const holder = coreLockHolder(L);
+  if (dryRun) {
+    lines.push(`would run ${command}`);
+    if (listed.error) lines.push(`  (${listed.error}; the real run would stop here and change nothing)`);
+    else lines.push(`  it would remove each of the ${listed.wrappers} Scout app skill wrapper(s) listed in ${L.exportsManifest} that is unchanged, and keep and list any you changed`);
+    if (holder.state === "running") lines.push(`  Scout is running (pid ${holder.pid}): the real run would stop here and change nothing; quit Scout first`);
+    return { lines, kept: 0 };
+  }
+  if (holder.state === "running") return { lines, kept: 0, stop: `Scout is running (pid ${holder.pid}) and owns its skill wrappers; quit Scout first` };
+  const r = spawnSync(process.execPath, [cli, "capabilities", "unexport-all", "--home", L.scoutHome, "--json"], {
+    env: { ...env, SCOUT_HOME: L.scoutHome },
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+    timeout: 60_000,
+  });
+  if (r.status === 2) return { lines, kept: 0, stop: "Scout is running and owns its skill wrappers; quit Scout first" };
+  let outcome = null;
+  try {
+    outcome = JSON.parse(r.stdout.trim().split("\n").at(-1) ?? "");
+  } catch {
+    // reported below
+  }
+  if ((r.status !== 0 && r.status !== 3) || !outcome) {
+    const why = (r.stderr || "").trim().split("\n").at(-1) || (r.error ? r.error.message : `exit ${r.status ?? r.signal}`);
+    return { lines, kept: 0, stop: `could not remove the Scout app's skill wrappers (${why})` };
+  }
+  if (outcome.note) lines.push(`Scout app skill wrappers: ${outcome.note}`);
+  for (const name of outcome.removed) lines.push(`removed ${join(record.skillsRoot, name)} (Scout app skill wrapper, unchanged since Scout wrote it)`);
+  for (const k of outcome.kept) lines.push(`SKIP ${join(record.skillsRoot, k.name)} (Scout app skill wrapper, ${k.code === "left_symlink" ? "now a symlink" : k.code === "io_error" ? "the file system refused" : "changed since Scout wrote it"}; not touching, still listed in ${L.exportsManifest})`);
+  return { lines, kept: outcome.kept.length };
 }
 
 if (isMain(import.meta.url)) process.exitCode = await runUninstall(process.argv.slice(2));
