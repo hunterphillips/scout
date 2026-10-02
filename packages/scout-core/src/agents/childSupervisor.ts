@@ -3,10 +3,11 @@
 //
 // Stop = SIGTERM to the CLI's process group (directly, while it is unreaped), SIGKILL after
 // the grace period, then any straggler from the ps-recorded tree; the exit wait is capped at
-// grace + 2 s (`reap_timeout`). Adapted from the legacy agentRunner (temporary duplicate until
-// Phase 4). Differences: ps runs asynchronously (psSnapshotAsync), at most one query at a
-// time, every TREE_POLL_MS while the CLI runs and fresh on terminate and reap, instead of a
-// blocking spawnSync every 150 ms; this runtime lives in the coordinator process, so it must
+// grace + 2 s (`reap_timeout`). Adapted from the legacy agentRunner (removed with the
+// personal-context package in P4.4). Since P4.4 `agent inspect|refresh` stops an inspected
+// backend through this too (backendDefinition.ts inspectBackend). Differences: ps runs
+// asynchronously (psSnapshotAsync), at most one query at a time, every TREE_POLL_MS while
+// the CLI runs and fresh on terminate and reap, instead of a blocking spawnSync every 150 ms; this runtime lives in the coordinator process, so it must
 // never stall its event loop. The process-group signal covers the CLI and every in-group
 // descendant without ps; the polled tree only adds descendants that left the group.
 // dispose() always clears the timers and SIGKILLs the group if the CLI is still unreaped.
@@ -58,6 +59,8 @@ export interface SupervisedChild {
   drainOutput(): Promise<void>;
   /** Wait until no owned process is alive, signalling stragglers. */
   reap(): Promise<void>;
+  /** A fresh ps pass now, recording every owned process it shows. */
+  observe(): Promise<void>;
   /** Clear every timer; SIGKILL the group if the CLI is still unreaped. Idempotent. */
   dispose(): void;
 }
@@ -199,6 +202,9 @@ export function startChild(o: ChildSupervisorOptions): SupervisedChild {
       }
       tree.signalAll("SIGKILL", await fresh());
       await waitGone(1000);
+    },
+    async observe() {
+      if (tree) await fresh();
     },
     dispose() {
       if (disposed) return;

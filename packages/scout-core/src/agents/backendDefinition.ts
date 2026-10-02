@@ -20,10 +20,13 @@
 //
 // inspectBackend starts the backend once, with exactly the environment it is given, the
 // definition's cwd (default `/`) and stderr discarded; runs MCP `initialize` (within
-// `startupMs`) and `tools/list` (within `overallMs` from the start); then stops it
-// (stdin closed and SIGTERM; the transport sends SIGKILL after 1 s, and this module again if
-// it is still there after `stopGraceMs`). Only the backend process itself is signalled, not
-// processes it started (a wrapper should exec its server).
+// `startupMs`) and `tools/list` (within `overallMs` from the start); then stops it the way a
+// job's CLI is stopped (P4.4): the backend is spawned detached, so it leads its own process
+// group, under childSupervisor.ts; stop = stdin closed, SIGTERM to the group and to every
+// tracked descendant that left it (ps-polled OwnedTree), SIGKILL to both after
+// `stopGraceMs`, then a reap until nothing it owned is alive. So a backend that ignores
+// SIGTERM and EOF, or starts helpers (in its group or escaped from it), cannot outlive the
+// inspection. Only processes the backend owned are ever signalled.
 //
 // Decision (P2.7, plan: "an auth prompt produces an unavailable connection; do not open a
 // hidden login flow"): any request the backend makes of Scout during inspection (sampling,
@@ -38,6 +41,7 @@
 //
 // Errors and outcomes carry field paths and fixed codes only: never a value.
 
+import { spawn as nodeSpawn } from "node:child_process";
 import { closeSync, constants as fsc, fstatSync, readSync, openSync, realpathSync, statSync } from "node:fs";
 import { isAbsolute } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -45,6 +49,7 @@ import { ErrorCode, McpError, type Tool } from "@modelcontextprotocol/sdk/types.
 import { z } from "zod";
 import { isExecutableFile } from "./authPreflight.js";
 import { BRIDGE_DEFAULT_LIMITS } from "./contextToolBridge.js";
+import { startChild, type SupervisedChild } from "./childSupervisor.js";
 import { ExactEnvStdioTransport } from "./exactEnvTransport.js";
 import {
   absolutePath,
@@ -286,21 +291,16 @@ function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
   return Promise.race([p, new Promise<never>((_, reject) => (timer = setTimeout(() => reject(new Error("timeout")), Math.max(ms, 1))))]).finally(() => clearTimeout(timer));
 }
 
-async function waitUntil(cond: () => boolean, ms: number): Promise<boolean> {
-  const until = Date.now() + ms;
-  while (!cond()) {
-    if (Date.now() >= until) return false;
-    await new Promise((r) => setTimeout(r, 20));
-  }
-  return true;
-}
-
 /**
  * Start the backend once with exactly `env`, list its tools, stop it. `env` holds resolved
  * values: it goes to the spawn only.
  */
 export async function inspectBackend(launch: Pick<Connection, "command" | "args" | "cwd">, env: Readonly<Record<string, string>>, limits: InspectLimits = INSPECT_DEFAULT_LIMITS): Promise<InspectOutcome> {
-  const transport = new ExactEnvStdioTransport(launch.command, launch.args, env, launch.cwd ?? "/");
+  let supervised: SupervisedChild | undefined;
+  const transport = new ExactEnvStdioTransport(launch.command, launch.args, env, launch.cwd ?? "/", {
+    signalOnClose: false,
+    spawn: (command, args, options) => (supervised = startChild({ spawn: nodeSpawn, command, args, options, killGraceMs: limits.stopGraceMs })).child,
+  });
   const client = new Client({ name: "scout-setup", version: "0" }, { capabilities: {} });
   // The first backend request fails the inspection (see the header): `prompted` rejects,
   // which ends whichever stage is waiting, and the request itself gets an error reply.
@@ -351,14 +351,24 @@ export async function inspectBackend(launch: Pick<Connection, "command" | "args"
     if (askedForInput) return { ok: false, reason: "auth_prompt" };
     return { ok: false, reason: e instanceof Error && e.message === "timeout" ? "timed_out" : stage };
   } finally {
-    await stopBackend(transport, client, limits.stopGraceMs);
+    await stopBackend(client, supervised);
   }
 }
 
-async function stopBackend(transport: ExactEnvStdioTransport, client: Client, graceMs: number): Promise<void> {
-  if (transport.pid === undefined) return;
-  await client.close().catch(() => {}); // stdin end + SIGTERM
-  if (await waitUntil(() => transport.pid === undefined, graceMs)) return;
-  transport.killNow();
-  await waitUntil(() => transport.pid === undefined, 1000);
+/**
+ * Record the tree, end stdin, then the job stop: group + escaped descendants SIGTERM → grace →
+ * SIGKILL, reap. The ps pass before stdin ends sees every helper while its parent is alive, so
+ * one that escaped the group is still known after a backend that exits on EOF is gone.
+ */
+async function stopBackend(client: Client, supervised: SupervisedChild | undefined): Promise<void> {
+  if (supervised) await supervised.observe();
+  await client.close().catch(() => {}); // stdin end only (signalOnClose: false)
+  if (!supervised) return;
+  try {
+    supervised.terminate();
+    await supervised.waitExit();
+    await supervised.reap();
+  } finally {
+    supervised.dispose();
+  }
 }

@@ -18,6 +18,7 @@ export interface BackendLogLine {
   method?: string;
   tool?: string;
   reply?: { method: string; error?: number };
+  helperPids?: number[];
 }
 
 export interface FakeBackendDef {

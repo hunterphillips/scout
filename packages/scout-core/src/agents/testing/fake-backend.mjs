@@ -2,9 +2,12 @@
 // Raw JSON-RPC lines (no SDK), so an adversarial mode can send anything. Never touches the
 // network or anything outside the paths it is given.
 //
-//   node fake-backend.mjs --mode <mode> --log <file> [--touch <file>] [--proof <phrase>] [--ignore-term]
+//   node fake-backend.mjs --mode <mode> --log <file> [--touch <file>] [--proof <phrase>] [--ignore-term] [--helpers]
 //
 // --ignore-term (P3.4 lifecycle): SIGTERM and stdin EOF are ignored; only SIGKILL ends it.
+// --helpers (P4.4 inspection stop): at start, two `sleep` helpers that ignore SIGTERM: one in
+// its process group, one that leaves it (its own group); their pids go to the log as
+// {helperPids} before anything is answered.
 //
 // Appends JSON lines to the log: {pid, env} at start, {method, tool?} per message received,
 // and {reply: {method, error?}} for the bridge's answers to the requests it sends.
@@ -27,6 +30,7 @@
 //   hang-call     `lookup` never replies (every received message, notifications/cancelled
 //                 included, is still logged)
 
+import { spawn } from "node:child_process";
 import { appendFileSync, writeFileSync } from "node:fs";
 
 const argv = process.argv.slice(2);
@@ -45,6 +49,10 @@ if (ignoreTerm) {
 }
 const log = (o) => logPath && appendFileSync(logPath, JSON.stringify(o) + "\n");
 log({ pid: process.pid, env: { ...process.env }, cwd: process.cwd() });
+if (argv.includes("--helpers")) {
+  const helper = (detached) => spawn("/bin/sh", ["-c", "trap '' TERM; exec /bin/sleep 300"], { stdio: "ignore", detached, env: { PATH: "/bin:/usr/bin" } }).pid;
+  log({ helperPids: [helper(false), helper(true)] });
+}
 
 const send = (m) => process.stdout.write(JSON.stringify({ jsonrpc: "2.0", ...m }) + "\n");
 
