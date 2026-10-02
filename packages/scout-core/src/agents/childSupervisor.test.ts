@@ -1,7 +1,7 @@
 import { spawn as nodeSpawn } from "node:child_process";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { startChild, type SupervisedChild } from "./childSupervisor.js";
-import type { PsSnapshot } from "./processTree.js";
+import { psSnapshotAsync, type JobTreeRecord, type PsSnapshot } from "./processTree.js";
 
 const started: SupervisedChild[] = [];
 afterEach(() => {
@@ -84,6 +84,53 @@ describe("childSupervisor", () => {
       spy.mockRestore();
     }
     expect(order).toEqual(["snapshot", "snapshot", "group SIGTERM"]);
+  });
+
+  it("the kill timer takes a fresh snapshot before the group SIGKILL", async () => {
+    const order: string[] = [];
+    const s = start("process.on('SIGTERM',()=>{});console.log('ready');setInterval(()=>{},1000)", {
+      snapshot: async () => {
+        order.push("snapshot");
+        return new Map();
+      },
+      pollMs: 60_000,
+    });
+    let ready = false;
+    s.child.stdout!.once("data", () => (ready = true));
+    await until(() => ready && order.length === 1); // SIGTERM is ignored; the initial snapshot ran
+    const realKill = process.kill.bind(process);
+    const spy = vi.spyOn(process, "kill").mockImplementation((pid: number, sig?: string | number) => {
+      if (pid === -s.child.pid!) order.push(`group ${String(sig)}`);
+      return realKill(pid, sig);
+    });
+    try {
+      s.terminate();
+      expect(await s.waitExit()).toEqual({ spawnError: false });
+    } finally {
+      spy.mockRestore();
+    }
+    expect(order).toEqual(["snapshot", "snapshot", "group SIGTERM", "snapshot", "group SIGKILL"]);
+  });
+
+  it("hands over the tree's record at spawn and whenever ps shows a new owned process", async () => {
+    const records: JobTreeRecord[] = [];
+    const s = start("require('node:child_process').spawn('/bin/sleep',['30'],{stdio:'ignore'});setInterval(()=>{},1000)", {
+      snapshot: psSnapshotAsync,
+      pollMs: 50,
+      onTree: (r) => void records.push(r),
+    });
+    const pid = s.child.pid!;
+    expect(records[0]).toEqual({ schemaVersion: 1, pid, pgid: pid, startedAt: expect.any(Number), members: [] });
+    await until(() => (records.at(-1)?.members.length ?? 0) >= 2);
+    const last = records.at(-1)!;
+    expect(last.members.map((m) => m.pid)).toContain(pid);
+    expect(last.members.every((m) => typeof m.start === "string" && m.start.length > 0)).toBe(true);
+    const count = records.length;
+    await new Promise((r) => setTimeout(r, 200)); // polls with nothing new hand nothing over
+    expect(records.length).toBe(count);
+    s.terminate();
+    await s.waitExit();
+    await s.reap();
   });
 
   it("dispose kills a CLI that is still running", async () => {

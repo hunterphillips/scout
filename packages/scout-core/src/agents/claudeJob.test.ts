@@ -252,8 +252,13 @@ describe("claude job: happy path", () => {
     await waitFor(scoutStarted(e));
     const dir = join(e.scoutHome, "run", "jobs", "job-1");
     expect(statSync(dir).mode & 0o777).toBe(0o700);
-    expect(readdirSync(dir).sort()).toEqual(["agent-token", "instructions.md", "mcp.json", "settings.json"]);
+    expect(readdirSync(dir).sort()).toEqual(["agent-token", "instructions.md", "mcp.json", "settings.json", "tree.json"]);
     for (const f of readdirSync(dir)) expect(statSync(join(dir, f)).mode & 0o777).toBe(0o600);
+    // The tree record a later start would kill from: pids, group and start times only.
+    const tree = JSON.parse(readFileSync(join(dir, "tree.json"), "utf8"));
+    expect(Object.keys(tree).sort()).toEqual(["members", "pgid", "pid", "schemaVersion", "startedAt"]);
+    expect(tree.pgid).toBe(tree.pid);
+    for (const m of tree.members) expect(Object.keys(m).sort()).toEqual(["pid", "start"]);
     expect(JSON.parse(readFileSync(join(dir, "settings.json"), "utf8"))).toEqual({ disableAllHooks: true });
     const mcp = JSON.parse(readFileSync(join(dir, "mcp.json"), "utf8"));
     expect(Object.keys(mcp.mcpServers)).toEqual(["scout"]);
@@ -933,7 +938,7 @@ describe("claude job: selected tools through the per-job bridge", () => {
     const p = e.adapter.run(request(e), { toolSurface: surface(e), signal: ac.signal });
     await waitFor(() => backendOf(e).pids().length === 1);
     const dir = join(e.scoutHome, "run", "jobs", "job-1");
-    expect(readdirSync(dir).sort()).toEqual(["agent-token", "bridge.json", "instructions.md", "mcp.json", "settings.json"]);
+    expect(readdirSync(dir).sort()).toEqual(["agent-token", "bridge.json", "instructions.md", "mcp.json", "settings.json", "tree.json"]);
     expect(statSync(join(dir, "bridge.json")).mode & 0o777).toBe(0o600);
     const mcp = readFileSync(join(dir, "mcp.json"), "utf8");
     expect(Object.keys(JSON.parse(mcp).mcpServers)).toEqual(["scout", "scout_bridge"]);

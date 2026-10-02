@@ -22,6 +22,8 @@ import { resolveOnPath, type Env } from "./authPreflight.js";
 import { canonicalJson, ToolsProfileSchema } from "./toolProfile.js";
 
 export const AGENT_PROFILE_FILE = "agent-profile.json";
+/** The lock (capabilities/storeLock.ts) the running core holds and every profile CLI write takes. */
+export const AGENT_PROFILE_LOCK_FILE = "agent-profile.lock";
 export const AGENT_PROFILE_SCHEMA_VERSION = 1;
 /** Hunter's 2026-09-30 choice for the initial Claude profile. Editable in the profile file. */
 export const DEFAULT_AGENT_MODEL = "claude-sonnet-5-5";

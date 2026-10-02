@@ -32,7 +32,11 @@
 // every adapter's job process tree (SIGTERM → 2 s grace → SIGKILL → tracked descendants);
 // `closeParsers()` terminates the parse worker; `releaseProfile()` stops the watcher and releases
 // the lock; `reapDescendants(deadline)` SIGKILLs and waits for any tracked descendant a job's own
-// reap left behind. `close()` runs them all in that order.
+// reap left behind. `close(deadlineAt)` runs them all in that order (tests only; the core runs
+// each step itself, bounded by its own deadline).
+//
+// The watcher's baseline is taken before the profile is first read, so an edit that lands between
+// the read and the watch is still noticed (at worst once more than needed: the fingerprint decides).
 
 import { join } from "node:path";
 import type { PanelState } from "@scout/contracts";
@@ -41,8 +45,7 @@ import type { ActivityStore } from "../activity/store.js";
 import { readBrowserContextGrant } from "../agentApi/grants.js";
 import { createClaudeJobAdapter, type ClaudeJobAdapter } from "../agents/claudeJob.js";
 import { createPreflightFacade } from "../agents/preflightWorker.js";
-import { AgentProfileError, agentProfilePath, loadAgentProfile, profileFingerprint, type AgentProfile } from "../agents/profile.js";
-import { AGENT_PROFILE_LOCK_FILE } from "../agents/profileCli.js";
+import { AGENT_PROFILE_LOCK_FILE, AgentProfileError, agentProfilePath, loadAgentProfile, profileFingerprint, type AgentProfile } from "../agents/profile.js";
 import { ProcessTracker, type ProcessIdentity } from "../agents/processTree.js";
 import type { CapabilityStore } from "../capabilities/store.js";
 import { acquireStoreLock, StoreLockedError, type StoreLock } from "../capabilities/storeLock.js";
@@ -114,8 +117,8 @@ export interface JobWiring {
   releaseProfile(): void;
   /** SIGKILL and wait (until `deadlineAt`, Date.now() time) for tracked descendants; resolves with survivors. */
   reapDescendants(deadlineAt: number): Promise<ProcessIdentity[]>;
-  /** Every shutdown step above, in order. */
-  close(): Promise<void>;
+  /** Tests only: every shutdown step above, in order; the descendant wait ends at `deadlineAt` (Date.now() time). */
+  close(deadlineAt: number): Promise<void>;
 }
 
 export function createJobWiring(o: JobWiringOptions): JobWiring {
@@ -149,6 +152,14 @@ export function createJobWiring(o: JobWiringOptions): JobWiring {
     fingerprint: a?.profileFingerprint ?? "none",
     toolsRevision: p?.tools?.revision ?? 0,
     hasUserTools: (p?.tools?.selections.length ?? 0) > 0,
+  });
+  // Watch first: its baseline predates the read below (see the header). It calls back only from a timer.
+  const watcher: ProfileWatcher = watchProfile({
+    path: agentProfilePath(home),
+    onChange: () => reloadProfile(),
+    timers,
+    ...(o.watch ? { watch: o.watch } : {}),
+    onFallback: () => diagnostics.event("agent_profile_watch_fallback", {}),
   });
   let profile = openAgentProfile(home, diagnostics);
   let adapter = buildAdapter(profile);
@@ -215,13 +226,6 @@ export function createJobWiring(o: JobWiringOptions): JobWiring {
     }
     if (adapter !== null && o.destinations.length > 0) void adapter.refreshPreflightAsync();
   };
-  const watcher: ProfileWatcher = watchProfile({
-    path: agentProfilePath(home),
-    onChange: reloadProfile,
-    timers,
-    ...(o.watch ? { watch: o.watch } : {}),
-    onFallback: () => diagnostics.event("agent_profile_watch_fallback", {}),
-  });
 
   const sessions = new WeakMap<OriginFetchSession, CatalogParsers>();
 
@@ -287,14 +291,14 @@ export function createJobWiring(o: JobWiringOptions): JobWiring {
     closeParsers: () => parsePool.close(),
     releaseProfile,
     reapDescendants: (deadlineAt) => processes.killAll(deadlineAt),
-    close: () =>
+    close: (deadlineAt) =>
       (closing ??= (async () => {
         preflight.cancelAll();
         stopScheduler();
         await abortJobs();
         await parsePool.close();
         releaseProfile();
-        await processes.killAll(Date.now() + 2000);
+        await processes.killAll(deadlineAt);
       })()),
   };
 }

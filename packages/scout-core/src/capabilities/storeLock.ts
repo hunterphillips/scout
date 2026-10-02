@@ -9,10 +9,14 @@
 // and write is not robbed. Reclaim re-reads the file and removes it only if it is unchanged;
 // two reclaimers racing on the same stale lock remain a narrow window (no compare-and-unlink
 // exists on POSIX), and the O_EXCL create after it still lets only one of them win.
+//
+// Release removes the file only while it is still ours: the same inode we created and our
+// instanceId in it. Every lock this process holds is also registered, so a shutdown that ran out of
+// time can release them synchronously (`releaseHeldLocks(dir)`) without waiting for their owners.
 
 import { randomBytes } from "node:crypto";
-import { closeSync, constants as fsc, fstatSync, openSync, readFileSync, unlinkSync, writeSync } from "node:fs";
-import { join } from "node:path";
+import { closeSync, constants as fsc, fstatSync, lstatSync, openSync, readFileSync, unlinkSync, writeSync } from "node:fs";
+import { join, sep } from "node:path";
 
 export const LOCK_FILE = "store.lock";
 export const LOCK_PARSE_GRACE_MS = 5000;
@@ -45,6 +49,24 @@ export interface LockOptions {
   pid?: number;
   /** Test seam: `process.kill(pid, 0)`. */
   probe?: (pid: number) => void;
+}
+
+/** Every lock this process holds, by path. */
+const held = new Map<string, StoreLock>();
+
+/**
+ * Release, synchronously, every lock this process holds in `dir` or below it (each only if it is
+ * still ours). For a shutdown out of time; returns how many were held.
+ */
+export function releaseHeldLocks(dir: string): number {
+  const prefix = dir.endsWith(sep) ? dir : dir + sep;
+  let n = 0;
+  for (const [path, lock] of [...held]) {
+    if (!path.startsWith(prefix)) continue;
+    lock.release();
+    n++;
+  }
+  return n;
 }
 
 function readLock(path: string): { text: string; record?: LockRecord; mtimeMs: number } | undefined {
@@ -107,25 +129,30 @@ export function acquireStoreLock(dir: string, options: LockOptions): StoreLock {
       }
       continue;
     }
+    let ino: number;
     try {
+      ino = fstatSync(fd).ino;
       writeSync(fd, text);
     } finally {
       closeSync(fd);
     }
     let released = false;
-    return {
+    const lock: StoreLock = {
       instanceId: record.instanceId,
       release() {
         if (released) return;
         released = true;
+        if (held.get(path) === lock) held.delete(path);
         if (readLock(path)?.record?.instanceId !== record.instanceId) return;
         try {
-          unlinkSync(path);
+          if (lstatSync(path).ino === ino) unlinkSync(path);
         } catch {
           // Already gone.
         }
       },
     };
+    held.set(path, lock);
+    return lock;
   }
   throw new StoreLockedError(undefined);
 }

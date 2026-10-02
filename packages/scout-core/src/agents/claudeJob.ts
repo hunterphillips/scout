@@ -6,7 +6,10 @@
 // instructions.md, agent-token), plus bridge.json when the profile selects user tools (the
 // bridge's job file, holding the backend environment bindings but never their values, which
 // only the bridge resolves, in memory, at spawn); the CLI is spawned argv-only, detached, with the request on
-// stdin; the job dir is removed when the job ends, however it ends.
+// stdin; the job dir is removed when the job ends, however it ends. From the spawn on, the job dir
+// also holds `tree.json` (0600, written atomically: the CLI's pid and group, its spawn time, and
+// every owned process ps has shown, pid and start time only): a core hard-killed mid-job cannot
+// stop the tree, so the next start kills what still matches it (main.ts sweepJobDirs).
 //
 // Tool surface (toolPolicy.ts): Scout's server, plus the forwarding bridge for the
 // profile's selected tools. Before anything is written, managed policy is checked; a policy
@@ -63,7 +66,7 @@
 // tokens or URLs beyond the origin.
 
 import { spawn as nodeSpawn } from "node:child_process";
-import { writeFileSync } from "node:fs";
+import { renameSync, writeFileSync } from "node:fs";
 import { userInfo } from "node:os";
 import { isAbsolute, join } from "node:path";
 import { AgentTokenSchema, JOB_AGENT_OUTPUT_JSON_SCHEMA, JobRequestSchema, type HostJobResult, type JobRequest } from "@scout/contracts";
@@ -81,7 +84,7 @@ import { createLaunchProfile, LaunchProfileError, runDirectPreflight, type Direc
 import { mapOutcome, recordUsage } from "./mapOutcome.js";
 import { MODEL_RE, profileFingerprint, type AgentProfile } from "./profile.js";
 import { buildJobInstructions, buildJobPrompt, type PromptActivity } from "./prompt.js";
-import type { ProcessTracker } from "./processTree.js";
+import { JOB_TREE_FILE, type JobTreeRecord, type ProcessTracker } from "./processTree.js";
 import { createStreamMonitor } from "./streamMonitor.js";
 import { checkManagedPolicy, defaultBridgeEntrypoint, managedMcpFilesFor, planJobTools, type JobManagedPaths, type ManagedPolicyResult, type ToolPlanOptions } from "./toolPolicy.js";
 
@@ -295,6 +298,17 @@ export function defaultManagedPaths(env: Readonly<Record<string, string>>, usern
   // Per-user MDM policy is keyed by the OS account; without one, fail closed.
   if (!user || user.includes("/")) return unknown;
   return { ...managedPathsFor(process.platform, configDir, user), mcpFiles: managedMcpFilesFor(process.platform) };
+}
+
+/** `tree.json` in the job dir, replaced atomically (0600). Best effort: a failure is ignored. */
+export function writeTreeRecord(jobDir: string, record: JobTreeRecord): void {
+  const tmp = join(jobDir, `.${JOB_TREE_FILE}.tmp`);
+  try {
+    writeFileSync(tmp, JSON.stringify(record), { mode: 0o600 });
+    renameSync(tmp, join(jobDir, JOB_TREE_FILE));
+  } catch {
+    // the job dir is gone or unwritable: nothing to record into
+  }
 }
 
 // ---------- the adapter ----------
@@ -563,6 +577,7 @@ export function createClaudeJobAdapter(deps: ClaudeJobDeps): ClaudeJobAdapter {
         killGraceMs,
         ...(deps.psSnapshot ? { snapshot: deps.psSnapshot } : {}),
         ...(deps.processTracker ? { tracker: deps.processTracker } : {}),
+        onTree: (record) => writeTreeRecord(jobDir, record),
       });
     } catch {
       return { result: { status: "unavailable", reason: "agent_unavailable" }, termination: "agent_unavailable", detail: "spawn_failed" };

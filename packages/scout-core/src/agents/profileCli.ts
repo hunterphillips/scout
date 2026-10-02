@@ -51,10 +51,8 @@ import { scoutHome } from "../diagnostics.js";
 import { commandDrift, inspectBackend, INSPECT_DEFAULT_LIMITS, loadBackendDefinition, SECRET_NAME_RE, type BackendDefinition, type CommandDrift, type InspectLimits, type InspectOutcome } from "./backendDefinition.js";
 import { selectedToolDropReason, type BridgeDropCode } from "./contextToolBridge.js";
 import { BINDING_STATUS_TEXT, checkEnvBindings, resolveBackendEnv, type BindingStatus } from "./environmentBindings.js";
-import { AgentProfileError, createDefaultAgentProfile, loadAgentProfile, PROFILE_MAX_BYTES, writeAgentProfile, type AgentProfile } from "./profile.js";
+import { AGENT_PROFILE_LOCK_FILE, AgentProfileError, createDefaultAgentProfile, loadAgentProfile, PROFILE_MAX_BYTES, writeAgentProfile, type AgentProfile } from "./profile.js";
 import { canonicalJson, MAX_CONNECTIONS, MAX_INSPECTED_TOOLS, MAX_SELECTIONS, type Connection, type ToolSelection, type ToolsProfile } from "./toolProfile.js";
-
-export const AGENT_PROFILE_LOCK_FILE = "agent-profile.lock";
 
 /**
  * Why `status` reports a connection unavailable, when there is a single reason. Fixed codes:

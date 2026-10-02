@@ -2,8 +2,7 @@ import { chmodSync, mkdtempSync, realpathSync, renameSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { AGENT_PROFILE_LOCK_FILE } from "../agents/profileCli.js";
-import { profileFingerprint, type AgentProfile } from "../agents/profile.js";
+import { AGENT_PROFILE_LOCK_FILE, profileFingerprint, type AgentProfile } from "../agents/profile.js";
 import { acquireStoreLock, StoreLockedError } from "../capabilities/storeLock.js";
 import { ParseCancelledError } from "../catalog/parseWorker.js";
 import { systemClock, type Timers } from "../clock.js";
@@ -84,7 +83,7 @@ describe("job wiring: process ownership and the agent profile (P3.4)", () => {
   };
 
   afterEach(async () => {
-    await wiring?.close();
+    await wiring?.close(Date.now() + 5000);
     wiring = null;
     events.length = 0;
     rmSync(home, { recursive: true, force: true });
@@ -100,7 +99,7 @@ describe("job wiring: process ownership and the agent profile (P3.4)", () => {
     const w = build();
     expect(w.holdsProfileLock).toBe(true);
     expect(() => acquireStoreLock(home, { now: () => Date.now(), file: AGENT_PROFILE_LOCK_FILE })).toThrow(StoreLockedError);
-    await w.close();
+    await w.close(Date.now() + 5000);
     const lock = acquireStoreLock(home, { now: () => Date.now(), file: AGENT_PROFILE_LOCK_FILE });
     lock.release();
   });
@@ -162,7 +161,7 @@ describe("job wiring: process ownership and the agent profile (P3.4)", () => {
     const w = build();
     const seen: unknown[] = [];
     w.scheduler.onProfileChanged = (next) => void seen.push(next);
-    await w.close();
+    await w.close(Date.now() + 5000);
     writeProfile(home, profile(home, 2));
     await new Promise((r) => setTimeout(r, 600));
     expect(seen).toEqual([]);
