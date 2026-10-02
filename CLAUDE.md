@@ -33,9 +33,12 @@ passed on 2026-10-01. Phase 3 (background recommendations) passed on 2026-10-02 
 authorized real runs; `../thoughts/shared/research/2026-10-01-scout-phase3-live-check/`).
 Phase 4 was re-planned the same day around Hunter's direction: the UI for this use case
 moves into the Chrome extension's **side panel**; the Mac app stays as the core's home
-(menu-bar accessory, window hidden by default — P4.2 merged) and the future UI for
-non-browser uses. P4.0 (panel frames over the browser relay, bridge protocol 3) and P4.1
-(the side panel) follow, then install/cleanup/docs.
+(menu-bar accessory, window hidden by default) and the future UI for non-browser uses.
+Merged: P4.2 (menu-bar app), P4.0 (panel frames over the browser relay, bridge protocol
+3), P4.1 (the side panel, popup removed), P4.3 (bundle, login launch, doctor, uninstall
+order), P4.1b (Sites shows recommendation destinations). In progress: P4.4 (remove the
+legacy personal-context path, spikes, and other dead code), then P4.5 docs. Phase 4's
+gate is Hunter using Scout from the side panel on his own machine.
 Recommendations run only for hosts listed in `config.json` `destinations` (empty by
 default); a destination spends Hunter's quota on every settled visit there. The old
 build above is still intact and still not wired into the app; the legacy
@@ -337,13 +340,27 @@ the plan's phase log):
   contract's.
 - `scripts/setup.mjs`, `uninstall.mjs`, `doctor.mjs` with `scripts/lib/`: the install.
   Setup refuses to run against a non-default Scout home without `--scout-root`;
-  uninstall touches only recorded paths inside setup's own locations; the
-  personal-context config is merged, not owned. Pivot P2.6: `setup --agent-integration`
+  uninstall touches only recorded paths inside setup's own locations. Pivot P4.3: setup
+  writes `agent-profile.json` when absent (absolute `claude` from `integrationClaude`,
+  recorded with hash, never rewritten) and no longer touches `~/.personal-context-mcp`
+  (legacy `config-merged` records are read and reported, never acted on); one override
+  rule for `CHROME_NMH_DIR`, `LAUNCH_AGENTS_DIR`, `SCOUT_APPLICATIONS_DIR`,
+  `SCOUT_SKILLS_ROOT`, `SCOUT_CLAUDE_BIN` — required with a test Scout home, refused with
+  the real `~/.scout`; `setup --login-launch [--app]` writes a hash-recorded LaunchAgent
+  for the installed app; `bundle-app -- --install` copies `Scout.app` to `~/Applications`
+  (kind `app-bundle`); uninstall refuses while `capabilities/store.lock` is held by a live
+  pid, runs `cli.js capability unexport-all` first (removes only hash-matching wrappers;
+  a symlinked root is reported unreachable and the rest proceeds), then exact-hash
+  removals, `launchctl bootout` on the real home only; doctor reports eight sections
+  (install record, Mac app, core, Chrome relay + `BRIDGE_PROTOCOL`, agent integration,
+  CLI advisory, billing from the diagnostics log — never a fresh preflight,
+  recommendations) and exits 1 only on a fail. `installed.json` gains kinds
+  `agent-profile`, `launch-agent`, `app-bundle` and a `kinds` list. Pivot P2.6: `setup --agent-integration`
   registers the stdio MCP adapter at user scope through `claude mcp add` (never by
   editing JSON) and installs the static `scout-integration` skill into the skills root,
   both recorded in `installed.json` (`skillsRoot`, kinds `skill` and `mcp-registration`);
   `uninstall --agent-integration` removes only what matches the record (exact `get`
-  match, skill by hash), counts runtime wrappers and never touches them. Logic in
+  match, skill by hash). Logic in
   `lib/{claude-mcp,agent-integration,integration-skill}.mjs`; a foreign `scout`
   registration refuses and is reported without its command line. Test overrides
   `SCOUT_CLAUDE_BIN`/`SCOUT_SKILLS_ROOT` are required on a non-real home and refused on
@@ -361,8 +378,15 @@ Run from `scout/`:
 - `npm ci`, `npm run build`, `npm run typecheck`
 - `npm test`: workspace tests, then spikes, then setup-script tests
 - `npm run test:e2e` (after a build); `npm run test:all` builds then runs both
-- `npm run setup [--dry-run] [--scout-root <dir>]`, `npm run doctor`,
-  `npm run uninstall [--yes] [--include-key] [--dry-run]`
+- `npm run setup [--dry-run] [--scout-root <dir>] [--agent-integration] [--login-launch [--app <Scout.app>]]`,
+  `npm run doctor [-- --verbose]`, `npm run uninstall [--yes] [--include-key] [--dry-run]`
+- `npm run bundle-app -- [--out <dir>] [--dry-run] [--binary <path>] [--install]` (a
+  windowless `Scout.app`; `--install` → `~/Applications/Scout.app`); `npm run test:swift`;
+  `npm run test:pivot` (builds, then agent-contract + e2e; the side-panel e2e stays
+  opt-in: `SCOUT_E2E_CHROME=1 SCOUT_E2E_BROWSERS=<dir>`); `SCOUT_BUNDLE_SWIFT=1` opts the
+  real bundle build into the scripts tests
+- `node packages/scout-core/dist/cli.js capability unexport-all [--home <abs>] [--json]`
+  (exit 0 all gone / 3 kept / 2 Scout running / 1 untrusted record)
 - `cd native/Scout && swift build && swift test`; `swift run ScoutApp` to start the app
   (menu-bar only; `SCOUT_WINDOW=1 swift run ScoutApp` shows the window at launch)
 - Catalog dev CLI (after a build; only these two touch the network, only when invoked):
@@ -382,8 +406,10 @@ Run from `scout/`:
 - `SCOUT_LIVE=1 npm run test:live -w personal-context-mcp`: the opt-in real-model
   smoke test (one call, throwaway home). Never part of `npm test`.
 
-Env overrides for tests only: `SCOUT_HOME`, `PERSONAL_CONTEXT_HOME`, `PCM_PORT`,
-`PCM_SCRATCH_ROOT`, `PCM_WORKSPACE_ROOTS`, `CHROME_NMH_DIR`, `SCOUT_DWELL_MS` (the core's
+Env overrides for tests only: `SCOUT_HOME`, `CHROME_NMH_DIR`, `LAUNCH_AGENTS_DIR`,
+`SCOUT_APPLICATIONS_DIR`, `SCOUT_SKILLS_ROOT`, `SCOUT_CLAUDE_BIN` (all five: required on a
+test home, refused on the real one), `PERSONAL_CONTEXT_HOME`/`PCM_*` (legacy package only;
+setup no longer reads them), `SCOUT_DWELL_MS` (the core's
 dwell; tests that form real visits set it high so nothing settles into real fetches). The Swift app reads only
 `~/.scout`.
 
