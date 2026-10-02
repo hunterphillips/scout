@@ -2,7 +2,7 @@
   "name": "scout-workspace",
   "private": true,
   "version": "0.0.0",
-  "description": "Scout proof of concept workspace (Phases 1-3: plumbing, catalog discovery, personal-context service).",
+  "description": "Scout proof of concept workspace: the website agent (core, MCP adapter, browser extension, native host).",
   "type": "module",
   "engines": {
     "node": ">=22.12.0"
@@ -10,7 +10,6 @@
   "workspaces": [
     "packages/contracts",
     "packages/scout-mcp",
-    "packages/personal-context-mcp",
     "packages/scout-core",
     "packages/native-host",
     "packages/browser-extension"

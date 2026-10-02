@@ -27,7 +27,6 @@ import { createOriginFetchSession } from "./fetch/originSession.js";
  *   prints one line per probe. Resource text is never printed; `--json` omits it too. It
  *   runs on one origin fetch session and opens that session's single pacing window. Exits
  *   1 when robots.txt could not be fetched (an error, not a 404) and nothing was found.
- * - `rank <origin>` is not available until Phase 3.
  * - `capability ...` reads and changes the capability store under `SCOUT_HOME`
  *   (`capabilities/capabilityCli.ts`); only `capability ingest` touches the network.
  *   `capabilities` is an alias; `capability unexport-all` removes Scout's exported skill
@@ -48,7 +47,6 @@ export const USAGE = `usage:
   cli.js discover <https-origin> [--refresh] [--json]
                                     (exits 1 if robots.txt errored and nothing was found)
   cli.js verify <url>...            (at most ${VERIFY_CLI_MAX_URLS} URLs, all on one origin)
-  cli.js rank <https-origin>        (Phase 3)
 ${CAPABILITY_USAGE}${AGENT_USAGE}`;
 
 /** How many candidates `catalog` lists after the summary. */
@@ -76,7 +74,6 @@ export interface CliIo {
 
 const EXIT_OK = 0;
 const EXIT_FAIL = 1;
-const EXIT_UNAVAILABLE = 2;
 
 export type ParsedOrigin = { ok: true; origin: string } | { ok: false; reason: string };
 
@@ -169,9 +166,6 @@ export async function runCli(argv: readonly string[], io: CliIo): Promise<number
           ...(io.env ? { env: io.env } : {}),
           ...(io.deps?.agent || io.deps?.clock ? { deps: { ...(io.deps?.clock ? { now: () => io.deps!.clock!.now() } : {}), ...io.deps?.agent } } : {}),
         });
-      case "rank":
-        io.stderr("rank: not available until Phase 3\n");
-        return EXIT_UNAVAILABLE;
       default:
         return usage();
     }

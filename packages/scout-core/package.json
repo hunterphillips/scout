@@ -40,7 +40,6 @@
     "@scout/contracts": "0.0.0",
     "@scout/scout-mcp": "0.0.0",
     "fast-xml-parser": "^5.11.1",
-    "personal-context-mcp": "0.0.0",
     "undici": "^7.30.0",
     "zod": "^4.6.5"
   }

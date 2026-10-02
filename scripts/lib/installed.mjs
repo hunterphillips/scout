@@ -117,7 +117,7 @@ export function allowedPath(kind, path, L, record) {
     case "nmh-manifest":
       return basename(path) === "dev.scout.bridge.json";
     case "config-merged":
-      return path === L.pcConfig || (basename(path) === "config.json" && basename(dirname(path)) === ".personal-context-mcp");
+      return path === L.legacyPcConfig || (basename(path) === "config.json" && basename(dirname(path)) === ".personal-context-mcp");
     case "extension-manifest-key":
       return path.endsWith(EXTENSION_MANIFEST_SUFFIX);
     case "agent-profile":
