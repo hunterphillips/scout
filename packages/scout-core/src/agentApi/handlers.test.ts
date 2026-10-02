@@ -765,6 +765,35 @@ describe("job snapshots", () => {
     expect(mine.every((c) => valid(interactive, c))).toBe(true);
   });
 
+  // B7/B12/B13 (Phase 3 verification): every way a job's token is invalidated refuses the
+  // already-connected job's next chunk of a read it had started, and the read's pin goes with it.
+  it.each<[string, (job: ReturnType<typeof takeJob>, resourceId: string) => unknown, string]>([
+    ["the job is cancelled (its snapshot released)", (job) => snapshots.release(job.snapshot.id, "cancelled"), "not_granted"],
+    ["Scout is paused (releaseAll)", () => snapshots.releaseAll("paused"), "not_granted"],
+    ["the core shuts down (releaseAll)", () => snapshots.releaseAll("shutdown"), "not_granted"],
+    ["the job's deadline passes", () => void (now += 30_000), "not_granted"],
+    // As main.ts wires it: the store's onRevoked drops the cursors, then agent.sock releases the snapshots that pinned it.
+    ["the pinned resource is revoked", async (_job, id) => (await store.revoke(id), snapshots.releasePinning(id, "revoked")), "not_granted"],
+  ])("token invalidated during a chunked read: %s refuses the next chunk (%#)", async (_name, invalidate, refusal) => {
+    const r = await ingest("llms_txt", "/llms.txt", LONG_TEXT);
+    await approve(r.id, r.version);
+    const taken = takeJob();
+    const job = connect(taken.token);
+    const first = ok(job, "read_resource", { resourceId: r.id });
+    expect(first.nextCursor).toBeDefined();
+    const second = ok(job, "read_resource", { resourceId: r.id, cursor: first.nextCursor! });
+    expect(second.nextCursor).toBeDefined();
+    await invalidate(taken, r.id);
+    expect(code(job, "read_resource", { resourceId: r.id, cursor: second.nextCursor! })).toBe(refusal);
+    // Nothing else on the job's connection answers either, and its token cannot authenticate again.
+    expect(code(job, "list_resources", {})).toBe("not_granted");
+    const again: AgentConnection = { id: `conn-${++connSeq}`, principal: null };
+    expect(code(again, "hello", { token: taken.token })).not.toBe("ok");
+    // An expired snapshot is refused at once and released by the next sweep (before each GC).
+    snapshots.sweepExpired();
+    expect(snapshots.size).toBe(0);
+  });
+
   it("a job token is refused past its deadline, and after releaseAll", () => {
     const a = connect(takeJob({ deadline: now + 1_000 }).token);
     const b = connect(takeJob({ deadline: now + 60_000 }).token);
