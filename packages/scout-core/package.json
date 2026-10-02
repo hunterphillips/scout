@@ -17,6 +17,14 @@
     "./agents/bridge": {
       "types": "./dist/agents/bridgeMain.d.ts",
       "default": "./dist/agents/bridgeMain.js"
+    },
+    "./agents/preflight-worker": {
+      "types": "./dist/agents/preflightWorkerMain.d.ts",
+      "default": "./dist/agents/preflightWorkerMain.js"
+    },
+    "./catalog/parse-worker": {
+      "types": "./dist/catalog/parseWorkerMain.d.ts",
+      "default": "./dist/catalog/parseWorkerMain.js"
     }
   },
   "files": [

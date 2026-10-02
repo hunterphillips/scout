@@ -9,8 +9,8 @@
 //
 // Outcomes map onto HostJobResult reasons:
 //   - unsupported_configuration: an unexpected server or tool (a built-in tool means
-//     `--tools ""` did not hold), permission mode not dontAsk, another model, another CLI
-//     version than the preflight saw, or a malformed event.
+//     `--tools ""` did not hold), permission mode not dontAsk, another model, or a malformed
+//     event.
 //   - tool_unavailable: a required server missing or not connected, or a required tool
 //     missing. Availability is per tool: an optional tool that did not load (its server
 //     failed, or the server connected without it, e.g. the bridge dropped it for a changed
@@ -18,6 +18,11 @@
 //     partially loaded optional server that did load stay usable and are reported available.
 //   - preflight_failed: an auth route other than the subscription login (apiKeySource not
 //     `none`, or a non-first-party apiProvider).
+//
+// Another CLI version than the preflight saw (the CLI auto-updated) is advisory, not a
+// failure: the result says `cliVersionChanged` and the adapter re-runs the billing preflight
+// before the job's answer counts (claudeJob.ts). VERIFIED_CLI_VERSION is a record of what
+// the flag set was checked against, not an allowlist.
 
 import { STRUCTURED_OUTPUT_TOOL, type ExpectedServer } from "./jobSurface.js";
 
@@ -34,13 +39,20 @@ export type InitFailureDetail =
   | "extra_tool"
   | "permission_mode"
   | "model_mismatch"
-  | "cli_version_changed"
   | "auth_route"
   | "required_server_unavailable"
   | "required_tool_missing";
 
 export type InitCheckResult =
-  | { ok: true; /** Full names of optional tools that did not load. */ optionalUnavailable: string[]; model: string; cliVersion?: string }
+  | {
+      ok: true;
+      /** Full names of optional tools that did not load. */
+      optionalUnavailable: string[];
+      model: string;
+      cliVersion?: string;
+      /** The init reported another CLI version than the preflight saw (or none). Advisory. */
+      cliVersionChanged?: true;
+    }
   | { ok: false; reason: "unsupported_configuration" | "tool_unavailable" | "preflight_failed"; detail: InitFailureDetail };
 
 type Rec = Record<string, unknown>;
@@ -70,7 +82,7 @@ export function checkInit(init: Rec, expected: ExpectedInit): InitCheckResult {
   if (init.permissionMode !== "dontAsk") return fail("unsupported_configuration", "permission_mode");
   if (init.model !== expected.model) return fail("unsupported_configuration", "model_mismatch");
   const version = typeof init.claude_code_version === "string" ? init.claude_code_version : undefined;
-  if (expected.cliVersion !== undefined && version !== expected.cliVersion) return fail("unsupported_configuration", "cli_version_changed");
+  const cliVersionChanged = expected.cliVersion !== undefined && version !== expected.cliVersion;
 
   const optionalUnavailable: string[] = [];
   const listed = new Set(tools as string[]);
@@ -86,5 +98,6 @@ export function checkInit(init: Rec, expected: ExpectedInit): InitCheckResult {
   }
   const ok: InitCheckResult = { ok: true, optionalUnavailable, model: init.model };
   if (version !== undefined) ok.cliVersion = version;
+  if (cliVersionChanged) ok.cliVersionChanged = true;
   return ok;
 }

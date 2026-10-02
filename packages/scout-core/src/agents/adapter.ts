@@ -80,7 +80,21 @@ export interface JobDetails {
   cutPicks: number;
   /** Whether a synthetic instruction marker reached the model (compatibility checks only). */
   instructionMarker?: "reached" | "missing";
-  timings: { totalMs: number; cliMs?: number; initMs?: number };
+  /**
+   * The init reported another CLI version than the preflight saw. Advisory: the adapter re-ran
+   * the billing preflight, and the answer counted only if that verdict was `subscription`.
+   */
+  cliVersionChanged?: true;
+  /** How many tool calls the CLI's permission mode denied (the result event's `permission_denials`). */
+  permissionDenials?: number;
+  /** Tool calls whose result was an error, by full tool name (names only, bounded). */
+  toolErrors: Record<string, number>;
+  /**
+   * An optional selected tool was unavailable or returned an error: the answer, if any, rests on
+   * Scout's browser context alone. A required tool's failure never yields an answer.
+   */
+  optionalToolFailed: boolean;
+  timings: { totalMs: number; cliMs?: number; initMs?: number; /** The result event's `duration_api_ms`. */ apiMs?: number };
   usage: JobUsage;
 }
 

@@ -5,7 +5,7 @@ import { mapOutcome, type CliRun } from "./mapOutcome.js";
 const MARKER = "SCOUTMARK0123456789ab";
 const req = { candidates: [{ id: "c1", title: "A", labelQuality: "published" as const }, { id: "c2", title: "B", labelQuality: "published" as const }], maxPicks: 3 };
 
-const details = (): JobDetails => ({ adapter: "claude-code", termination: "completed", toolUses: [], optionalTools: [], droppedPicks: 0, cutPicks: 0, timings: { totalMs: 0 }, usage: {} });
+const details = (): JobDetails => ({ adapter: "claude-code", termination: "completed", toolUses: [], optionalTools: [], droppedPicks: 0, cutPicks: 0, toolErrors: {}, optionalToolFailed: false, timings: { totalMs: 0 }, usage: {} });
 
 const run = (items: { id: string; reason: string }[]): CliRun => ({
   spawnError: false,

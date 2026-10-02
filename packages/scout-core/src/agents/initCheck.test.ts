@@ -73,8 +73,6 @@ describe("checkInit", () => {
     ["the Skill tool", { tools: [...scoutTools, "Skill"] }, {}, "unsupported_configuration", "extra_tool"],
     ["permission mode default", { permissionMode: "default" }, {}, "unsupported_configuration", "permission_mode"],
     ["another model", { model: "claude-opus-other" }, {}, "unsupported_configuration", "model_mismatch"],
-    ["another CLI version", { claude_code_version: "2.1.300" }, {}, "unsupported_configuration", "cli_version_changed"],
-    ["no CLI version when one was verified", { claude_code_version: undefined }, {}, "unsupported_configuration", "cli_version_changed"],
     ["an API key route", { apiKeySource: "ANTHROPIC_API_KEY" }, {}, "preflight_failed", "auth_route"],
     ["a Bedrock provider", { apiProvider: "bedrock" }, {}, "preflight_failed", "auth_route"],
     ["the required server failed", { mcp_servers: [{ name: "scout", status: "failed" }, { name: "bridge", status: "connected" }], tools: [...bridgeTools] }, {}, "tool_unavailable", "required_server_unavailable"],
@@ -84,6 +82,17 @@ describe("checkInit", () => {
     ["a malformed server entry", { mcp_servers: ["scout"] }, {}, "unsupported_configuration", "malformed_init"],
   ])("rejects %s", (_l, patch, exp, reason, detail) => {
     expect(checkInit(good(patch), expected(exp))).toEqual({ ok: false, reason, detail });
+  });
+
+  it.each<[string, Record<string, unknown>]>([
+    ["another CLI version", { claude_code_version: "2.1.300" }],
+    ["no CLI version when one was verified", { claude_code_version: undefined }],
+  ])("%s is advisory: ok with cliVersionChanged", (_l, patch) => {
+    expect(checkInit(good(patch), expected())).toMatchObject({ ok: true, cliVersionChanged: true });
+  });
+
+  it("the same CLI version is not flagged", () => {
+    expect(checkInit(good(), expected())).not.toHaveProperty("cliVersionChanged");
   });
 
   it("does not compare versions when the preflight could not tell", () => {

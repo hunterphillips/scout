@@ -5,9 +5,13 @@
 //   - anything but `system` or `result` before init: malformed_startup;
 //   - a second init: malformed_startup, `second_init`;
 //   - the init event must pass checkInit (initCheck.ts); it fills the job's model, CLI
-//     version and per-tool optional status;
+//     version and per-tool optional status; another CLI version than the preflight saw is
+//     recorded (`cliVersionChanged`) and reported through `onCliVersionChanged`, never a stop;
 //   - an assistant `tool_use` must name an allowed tool or the structured-output tool
 //     (`unexpected_tool_use`); names are recorded, bounded;
+//   - a user `tool_result` with `is_error` counts against its tool's name (`toolErrors`); an
+//     error from an optional tool sets `optionalToolFailed`, as does an optional tool that did
+//     not load;
 //   - the first `result` event is kept;
 //   - a non-result event that reports an auth or quota problem: unavailable, auth_or_quota.
 //
@@ -43,6 +47,8 @@ export interface StreamMonitorOptions {
   clock: Clock;
   /** When the CLI was spawned, on `clock`. */
   startedAt: number;
+  /** The init reported another CLI version than the preflight saw (the version it reported, if any). */
+  onCliVersionChanged?: (version: string | undefined) => void;
 }
 
 export interface StreamMonitor {
@@ -55,6 +61,9 @@ export function createStreamMonitor(o: StreamMonitorOptions): StreamMonitor {
   const { expected, details, stop } = o;
   let init: StreamRecord | undefined;
   let result: StreamRecord | undefined;
+  /** tool_use id → tool name, for counting errored results (bounded like the names). */
+  const toolUseNames = new Map<string, string>();
+  const optional = new Set(expected.servers.flatMap((s) => s.optionalTools));
   const unsupported = (detail: string): void => stop.halt({ result: { status: "error", reason: "unsupported_configuration" }, termination: "unsupported_configuration", detail });
 
   const onEvent = (ev: StreamRecord): void => {
@@ -76,6 +85,11 @@ export function createStreamMonitor(o: StreamMonitorOptions): StreamMonitor {
       for (const s of expected.servers) {
         for (const tool of s.optionalTools) details.optionalTools.push({ server: s.name, tool, status: check.optionalUnavailable.includes(tool) ? "unavailable" : "available" });
       }
+      if (details.optionalTools.some((t) => t.status === "unavailable")) details.optionalToolFailed = true;
+      if (check.cliVersionChanged) {
+        details.cliVersionChanged = true;
+        o.onCliVersionChanged?.(check.cliVersion);
+      }
     } else if (ev.type === "assistant") {
       const content = isRecord(ev.message) && Array.isArray(ev.message.content) ? ev.message.content : [];
       for (const c of content) {
@@ -83,6 +97,16 @@ export function createStreamMonitor(o: StreamMonitorOptions): StreamMonitor {
         const name = typeof c.name === "string" ? c.name : "";
         if (details.toolUses.length < MAX_TOOL_USES_RECORDED && /^[A-Za-z0-9_-]{1,128}$/.test(name)) details.toolUses.push(name);
         if (name !== STRUCTURED_OUTPUT_TOOL && !o.allowedTools.has(name)) return unsupported("unexpected_tool_use");
+        if (typeof c.id === "string" && toolUseNames.size < MAX_TOOL_USES_RECORDED) toolUseNames.set(c.id, name);
+      }
+    } else if (ev.type === "user") {
+      const content = isRecord(ev.message) && Array.isArray(ev.message.content) ? ev.message.content : [];
+      for (const c of content) {
+        if (!isRecord(c) || c.type !== "tool_result" || c.is_error !== true || typeof c.tool_use_id !== "string") continue;
+        const name = toolUseNames.get(c.tool_use_id);
+        if (name === undefined) continue;
+        details.toolErrors[name] = (details.toolErrors[name] ?? 0) + 1;
+        if (optional.has(name)) details.optionalToolFailed = true;
       }
     } else if (ev.type === "result" && result === undefined) {
       result = ev;

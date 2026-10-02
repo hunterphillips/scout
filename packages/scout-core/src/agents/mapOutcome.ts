@@ -4,7 +4,8 @@
 // structured output through validateJobOutput. Only `completed` can be `ok` or `empty`.
 // With an instruction marker, the first pick's reason loses the marker; a pick whose reason
 // was only the marker is dropped like any other pick without a reason.
-// Usage counts are copied from the result event whatever the outcome.
+// Usage counts, API time and permission denials are copied from the result event whatever the
+// outcome.
 
 import type { JobRequest } from "@scout/contracts";
 import type { JobDetails, JobTermination } from "./adapter.js";
@@ -34,6 +35,9 @@ export function recordUsage(resultEv: StreamRecord | undefined, details: JobDeta
   set("outputTokens", usage.output_tokens);
   set("cacheReadTokens", usage.cache_read_input_tokens);
   set("cacheWriteTokens", usage.cache_creation_input_tokens);
+  const apiMs = num(resultEv?.duration_api_ms);
+  if (apiMs !== undefined) details.timings.apiMs = apiMs;
+  if (Array.isArray(resultEv?.permission_denials)) details.permissionDenials = resultEv.permission_denials.length;
 }
 
 export function mapOutcome(run: CliRun, req: Pick<JobRequest, "candidates" | "maxPicks">, details: JobDetails, instructionMarker?: string): Out {
