@@ -7,7 +7,9 @@
 //
 // Budget: one JOB_MAX_DEADLINE_MS (30 s) budget per settled visit, from the dwell settle,
 // covering discovery, inference and verification. A job gets what remains when it starts;
-// under MIN_JOB_MS left it is `unavailable: no_time_left` without a launch.
+// under MIN_JOB_MS left it is `unavailable: no_time_left` without a launch. MIN_JOB_MS
+// (pipeline.ts) is the adapter's launch floor plus the verification reserve, so the scheduler
+// never starts a job the adapter would refuse for time; the same threshold gates a replacement.
 //
 // Per job, in order: `results.beginJob(jobId)` → the window's `working{jobId}` → the resume
 // cache, else `snapshots.take(...)` → the pipeline → the visit's `idle` → `results.publish`.
@@ -18,9 +20,10 @@
 // is allowed right now; otherwise `activity: []`.
 //
 // Changes while a job runs:
-//   - fatal, nothing is published: visit change (navigation, Chrome leaving the foreground,
-//     the origin's grant lost) → `visit_changed`; sensor loss → `visit_changed`; pause →
-//     `paused`; stop → `shutdown`.
+//   - fatal, nothing is published: visit change (navigation, Chrome leaving the foreground)
+//     → `visit_changed`; the origin's grant lost → `revoked` (the permissions change arrives
+//     before the visit change it causes, and the first cancel reason stands); sensor loss →
+//     `visit_changed`; pause → `paused`; stop → `shutdown`.
 //   - relevant: an accepted activity entry the job may see (→ `superseded`); capture
 //     disallowed or the grant turned off while the snapshot carried activity (→ `revoked`); a
 //     revoked resource the snapshot pinned (→ `revoked`). The job is cancelled and ONE
@@ -42,6 +45,9 @@
 // permissions and grant baselines, the profile fingerprint. A mismatch is a discard
 // (`job_discarded {stage, why}`), never a publish. Answers (`ok`, `empty`) go into the resume
 // cache, and a job whose key hits publishes the cached answer at once, through the same order.
+// That includes a replacement: it starts only once the cancelled run has ended, so a hit
+// publishes `working{replacement}` → `idle` → its results, and the cancelled run publishes
+// nothing.
 //
 // Diagnostics (scalars only, never reasons, titles, URLs or prompts): job_started, job_finished,
 // job_cancelled, job_discarded, job_skipped, job_replaced, verify.
@@ -54,12 +60,11 @@ import type { JobCancelReason } from "./agents/adapter.js";
 import type { CatalogResolution } from "./catalog/resolveCatalog.js";
 import type { Clock } from "./clock.js";
 import type { DiagnosticFields, Diagnostics } from "./diagnostics.js";
-import { type JobAgent, type JobAnswer, type JobRun, runJob, type VerifyFn } from "./pipeline.js";
+import { type JobAgent, type JobAnswer, type JobRun, MIN_JOB_MS, runJob, type VerifyFn } from "./pipeline.js";
 import type { ResultRegistry } from "./results.js";
 import { activityHash, type JobResumeCache, type JobResumeKey } from "./resumeCache.js";
 
-/** Below this much budget a job is not started (`unavailable: no_time_left`). */
-export const MIN_JOB_MS = 5_000;
+export { MIN_JOB_MS } from "./pipeline.js";
 
 /** What the scheduler reads from the coordinator, live, on every check. */
 export interface SchedulerView {
@@ -322,7 +327,7 @@ export function createJobScheduler(options: JobSchedulerOptions): JobScheduler {
     if (d?.timings.apiMs !== undefined) f.apiMs = d.timings.apiMs;
     if (d?.usage.turns !== undefined) f.turns = d.usage.turns;
     if (d?.permissionDenials !== undefined) f.permissionDenials = d.permissionDenials;
-    const toolErrors = d ? Object.values(d.toolErrors).reduce((a, n) => a + n, 0) : 0;
+    const toolErrors = d ? Object.values(d.toolErrors).reduce((a, n) => a + n, 0) + (d.unattributedToolErrors ?? 0) : 0;
     if (toolErrors > 0) f.toolErrors = toolErrors;
     if (d?.optionalToolFailed) f.optionalToolFailed = true;
     if (d?.cliVersionChanged) f.cliVersionChanged = true;

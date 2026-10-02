@@ -26,15 +26,16 @@
 // for text it took, and for a repeat it already holds (a re-send after a reconnect).
 //
 // A visit that stays unchanged for DWELL_MS settles (dwell.ts) and starts one discovery
-// pass for its origin (discoveryRunner.ts). Pause, loss of the pass origin's grant,
-// disconnect (or a new sensor replacing the live one), and stop cancel it.
+// pass for its origin (discoveryRunner.ts). Pause, loss of the pass origin's grant, a visit
+// change, disconnect (or a new sensor replacing the live one), and stop cancel it.
 //
 // Recommendation jobs (jobScheduler.ts, `jobs`): the pass's catalog goes to the scheduler with
-// the settle time (its 30 s budget starts at the settle), and the scheduler hears visit
-// changes, pause, sensor loss (and a replacing sensor), applied permissions, accepted
-// activity (new content only), and stop. It shows a job through `showWorking` / `showIdle`,
-// which emit only for the current, shown visit. Whether a visit's host is recommendation-
-// enabled (`config.destinations`) is in `agentView()`.
+// the settle time (its 30 s budget starts at the settle) as soon as it resolves, and the
+// scheduler hears visit changes, pause, sensor loss (and a replacing sensor), applied
+// permissions, accepted activity (new content only), and stop. It shows a job through
+// `showWorking` / `showIdle`, which emit only for the current, shown visit. Whether a visit's
+// host is recommendation-enabled is in `agentView()`, asked of the scheduler (its
+// `config.destinations` are the one source); without a scheduler nothing is enabled.
 //
 // Scout's window commands (those with a `commandId`) go to the panel channel
 // (panelChannel.ts), which answers them; without one each gets an `unavailable` ack. The
@@ -72,14 +73,12 @@ import { CHROME_BUNDLE_ID, createVisitTracker, type VisitChange, type VisitTrack
 export interface CoordinatorConfig {
   /** The bundle id treated as "Chrome frontmost". Defaults to CHROME_BUNDLE_ID. */
   chromeBundleId?: string;
-  /** Hosts with recommendations enabled. Defaults to none. */
-  destinations?: readonly string[];
 }
 
 /** What the coordinator tells the job scheduler. */
 export type CoordinatorJobs = Pick<
   JobScheduler,
-  "onSettled" | "onVisitChanged" | "onPause" | "onSensorLost" | "onPermissionsChanged" | "onActivityAccepted" | "stop"
+  "onSettled" | "onVisitChanged" | "onPause" | "onSensorLost" | "onPermissionsChanged" | "onActivityAccepted" | "stop" | "isEnabled"
 >;
 
 export interface CoordinatorOptions {
@@ -144,7 +143,6 @@ export function createCoordinator(options: CoordinatorOptions): Coordinator {
   const permissions = createPermissionState({ diagnostics });
   const caps = options.capabilities;
   const jobs = options.jobs;
-  const destinations = new Set(options.config.destinations ?? []);
   const panelChanged = (): void => options.panel?.capabilitiesChanged();
   // Silent: every caller sends a state frame next (a new visit's idle, paused, disconnected),
   // or none at all (stop), so a `resendState` here would only add a stray frame (an idle for the
@@ -233,6 +231,8 @@ export function createCoordinator(options: CoordinatorOptions): Coordinator {
     if (change.previous === null && change.visit === null) return;
     clearResults("visit_changed");
     jobs?.onVisitChanged();
+    // The old visit's pass may never ingest; stop its fetches so the new visit's settle runs at once.
+    discovery.cancel("visit_changed");
     panelChanged();
     if (change.visit === null) dwell.cancel("visit_ended");
     else if (!paused && liveClient !== null) dwell.arm(change.visit);
@@ -362,7 +362,7 @@ export function createCoordinator(options: CoordinatorOptions): Coordinator {
       return {
         currentSite: visit === null ? null : { origin: visit.origin, url: visit.url, visitEpoch: visit.epoch },
         paused,
-        recommendationsEnabled: visit !== null && destinations.has(new URL(visit.origin).host),
+        recommendationsEnabled: visit !== null && (jobs?.isEnabled(visit.origin) ?? false),
       };
     },
     captureAllowed: captureEnabled,

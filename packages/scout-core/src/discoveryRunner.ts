@@ -3,10 +3,13 @@
 // discovery share it, then the store ingests only if the visit is still current and the
 // origin still permitted (the caller's `blocker`).
 //
-// Pause, loss of the pass origin's grant, disconnect (or a new sensor replacing the live
-// one), and stop cancel the running pass: its fetch session refuses every further request
-// (the one in flight finishes), and the pass is discarded for good. Resuming or re-granting
-// before it finishes does not let it ingest; the next settle produces a fresh pass instead.
+// Pause, loss of the pass origin's grant, a visit change (the coordinator cancels with
+// `visit_changed`), disconnect (or a new sensor replacing the live one), and stop cancel the
+// running pass: its fetch session refuses every further request (the one in flight finishes),
+// and the pass is discarded for good. Resuming or re-granting before it finishes does not let
+// it ingest; the next settle produces a fresh pass instead. A cancelled pass no longer holds
+// the slot: a settle (or the queued one) starts at once while the cancelled pass unwinds its
+// in-flight request, so a new visit never waits behind the old visit's resource probes.
 //
 // The final check and the `store.ingest` call have no await between them, so the store is
 // called with the permission state that check saw. A permission loss, pause, or navigation
@@ -14,8 +17,9 @@
 // `chromePermitted: true`. The window is the store's write, and is accepted.
 //
 // The pass's catalog is handed on (`onCatalogReady`) so a recommendation job reuses it
-// instead of fetching again: at once when it came from the fresh cache (no request made),
-// otherwise when the whole pass has finished, and never for a cancelled or blocked pass.
+// instead of fetching again: as soon as the catalog resolve settles, whatever its source
+// (fresh, refetched, not_modified, stale, miss, or a failure), without waiting for resource
+// discovery; never for a cancelled or blocked pass.
 
 import type { ActiveVisit } from "@scout/contracts";
 import type { DiscoveryResult } from "./capabilities/discovery.js";
@@ -102,20 +106,14 @@ export function createDiscoveryRunner(options: DiscoveryRunnerOptions): Discover
     runningPass = pass;
     const { origin, epoch } = visit;
     const started = clock.now();
-    let catalog: CatalogResolution | null = null;
-    let catalogHandedOn = false;
     try {
       const session = c.createFetchSession(origin);
       pass.session = session;
       session.startWindow();
       diagnostics.event("discovery_start", { origin, epoch });
+      // A job needs the catalog only, never the resource probes: hand it on the moment it is ready.
       const catalogPromise = c.resolveCatalog(origin, session).then((resolution) => {
-        catalog = resolution;
-        // A fresh cached catalog made no request: a job need not wait for discovery.
-        if (resolution.result.ok && resolution.result.source === "fresh") {
-          catalogHandedOn = true;
-          catalogReady(pass, resolution);
-        }
+        catalogReady(pass, resolution);
         return resolution;
       });
       const [catalogOutcome, discovery] = await Promise.allSettled([catalogPromise, c.discover(origin, session)]);
@@ -144,13 +142,19 @@ export function createDiscoveryRunner(options: DiscoveryRunnerOptions): Discover
     } catch (e) {
       diagnostics.event("discovery_failed", { origin, epoch, code: errorCode(e) });
     } finally {
-      runningPass = null;
-      const resolved = catalog as CatalogResolution | null;
-      if (resolved !== null && !catalogHandedOn) catalogReady(pass, resolved);
-      const next = pendingSettle;
-      pendingSettle = null;
-      if (next !== null) settle(next);
+      // A cancelled pass may already have been succeeded by a fresh one: leave that one alone.
+      if (runningPass === pass) {
+        runningPass = null;
+        startPending();
+      }
     }
+  };
+
+  /** Start the queued settle, if any. */
+  const startPending = (): void => {
+    const next = pendingSettle;
+    pendingSettle = null;
+    if (next !== null) settle(next);
   };
 
   const settle = (visit: ActiveVisit): void => {
@@ -163,7 +167,8 @@ export function createDiscoveryRunner(options: DiscoveryRunnerOptions): Discover
       diagnostics.event("discovery_skipped", { origin: visit.origin, epoch: visit.epoch, reason: "not_wired" });
       return;
     }
-    if (runningPass !== null) {
+    // Only a live pass holds the slot; a cancelled one finishes its in-flight request on its own.
+    if (runningPass !== null && runningPass.cancelled === null) {
       if (pendingSettle !== null) discarded(pendingSettle, "superseded");
       pendingSettle = visit;
       diagnostics.event("discovery_queued", { origin: visit.origin, epoch: visit.epoch });
@@ -180,7 +185,11 @@ export function createDiscoveryRunner(options: DiscoveryRunnerOptions): Discover
     },
     permissionsChanged() {
       if (pendingSettle !== null && !options.isPermitted(pendingSettle.origin)) dropPendingSettle("permission_lost");
-      if (runningPass !== null && !options.isPermitted(runningPass.visit.origin)) cancelRunningPass("permission_lost");
+      if (runningPass !== null && !options.isPermitted(runningPass.visit.origin)) {
+        cancelRunningPass("permission_lost");
+        // The queued settle need not wait for the cancelled pass to unwind.
+        startPending();
+      }
     },
   };
 }

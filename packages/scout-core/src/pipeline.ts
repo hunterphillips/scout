@@ -10,6 +10,9 @@
 // template (agents/prompt.ts) keeps them in its untrusted block, and nothing in them reaches
 // the tool grants, output schema, origin, or deadline.
 //
+// Verification gets the job's signal: a cancel during it ends the pass at once, and the job is
+// discarded at the verify stage.
+//
 // Every stage re-checks `stillCurrent` (core instance, visit epoch, snapshot, permissions and
 // browser-context grant revisions, profile fingerprint) and returns a discard instead of an
 // answer once anything moved. The adapter may still report `ok` for a job cancelled while its
@@ -22,7 +25,7 @@
 
 import { JOB_MAX_PICKS, type Candidate, type HostJobResult, type JobRequest } from "@scout/contracts";
 import type { JobSnapshot } from "./activity/snapshots.js";
-import type { AgentJobAdapter, JobDetails, JobRunOptions } from "./agents/adapter.js";
+import { MIN_LAUNCH_MS, type AgentJobAdapter, type JobDetails, type JobRunOptions } from "./agents/adapter.js";
 import type { PromptActivity } from "./agents/prompt.js";
 import { VERIFY_BUDGET_MS, type VerifyResult } from "./catalog/verifyTargets.js";
 import type { Clock } from "./clock.js";
@@ -30,6 +33,13 @@ import type { PublishedItem, PublishedResult } from "./results.js";
 
 /** Time kept back from the agent for target verification. */
 export const VERIFY_RESERVE_MS = VERIFY_BUDGET_MS;
+
+/**
+ * The one launch threshold: below this much visit budget a job is not started
+ * (`unavailable: no_time_left`). It is the adapter's own launch floor plus the verification
+ * reserve, so a job the scheduler starts always leaves the adapter at least MIN_LAUNCH_MS.
+ */
+export const MIN_JOB_MS = MIN_LAUNCH_MS + VERIFY_RESERVE_MS;
 
 /** A job's answer before its identity is stamped on: what the registry will hold. */
 export type JobAnswer = DistributiveOmit<PublishedResult, "coreInstanceId" | "visitEpoch" | "origin" | "jobId">;
@@ -52,7 +62,8 @@ export type JobAgent = Pick<AgentJobAdapter, "run"> & {
   run(request: JobRequest, options: JobRunOptions & { activity?: readonly PromptActivity[] }): ReturnType<AgentJobAdapter["run"]>;
 };
 
-export type VerifyFn = (candidates: readonly Candidate[], options: { origin: string; budgetMs: number; clock: Clock }) => Promise<VerifyResult>;
+/** The bounded target check. It must end promptly once `signal` aborts (the job was cancelled). */
+export type VerifyFn = (candidates: readonly Candidate[], options: { origin: string; budgetMs: number; clock: Clock; signal: AbortSignal }) => Promise<VerifyResult>;
 
 export interface RunJobInput {
   coreInstanceId: string;
@@ -157,9 +168,10 @@ export async function runJob(input: RunJobInput): Promise<JobRun> {
   const picked = ids.map((id) => sources.get(id)).filter((c): c is Candidate => c !== undefined);
   const budgetMs = Math.min(VERIFY_BUDGET_MS, remaining());
   if (budgetMs <= 0) return answer({ status: "error", reason: "timeout" }, details);
-  const verified = await input.verify(picked, { origin: snapshot.origin, budgetMs, clock });
+  if (input.signal.aborted) return { kind: "discard", stage: "verify", why: input.stillCurrent() ?? "cancelled", details };
+  const verified = await input.verify(picked, { origin: snapshot.origin, budgetMs, clock, signal: input.signal });
   counts = { picked: picked.length, verified: verified.verified.length };
-  const afterVerify = input.stillCurrent();
+  const afterVerify = input.stillCurrent() ?? (input.signal.aborted ? "cancelled" : null);
   if (afterVerify !== null) return { kind: "discard", stage: "verify", why: afterVerify, details, verify: counts };
 
   const reasons = new Map(result.items.map((i) => [i.id, i.reason]));

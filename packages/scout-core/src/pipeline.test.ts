@@ -4,6 +4,7 @@ import type { JobSnapshot } from "./activity/snapshots.js";
 import { snapshotCandidates } from "./activity/snapshots.js";
 import type { JobDetails, JobRunOptions } from "./agents/adapter.js";
 import type { PromptActivity } from "./agents/prompt.js";
+import { verifyTargets, type VerifyFetch } from "./catalog/verifyTargets.js";
 import { buildJobRequest, runJob, type RunJobInput, VERIFY_RESERVE_MS } from "./pipeline.js";
 
 const ORIGIN = "https://docs.example.com";
@@ -173,6 +174,50 @@ describe("pipeline: picks and verification", () => {
       },
     });
     expect(await runJob(base)).toMatchObject({ answer: { status: "error", reason: "agent_failed" } });
+  });
+});
+
+describe("pipeline: verification through the real checker", () => {
+  it("passes the job's signal: a cancel during verification ends the job at once, discarded at the verify stage", async () => {
+    const ac = new AbortController();
+    const fetches: string[] = [];
+    // A site that never answers: without the signal, verification would wait out its 4 s budget.
+    const hang: VerifyFetch = (url) => {
+      fetches.push(url);
+      return new Promise(() => {});
+    };
+    const { base } = input(ok("c0", "c1"), {
+      signal: ac.signal,
+      clock: { now: () => Date.now() },
+      visitDeadline: Date.now() + 25_000,
+      verify: (c, o) => verifyTargets(c, { origin: o.origin, budgetMs: o.budgetMs, clock: o.clock, signal: o.signal, fetch: hang }),
+    });
+    const started = Date.now();
+    const job = runJob(base);
+    await new Promise((r) => setTimeout(r, 20));
+    expect(fetches).toHaveLength(2);
+    ac.abort("paused");
+    expect(await job).toMatchObject({ kind: "discard", stage: "verify", why: "cancelled" });
+    expect(Date.now() - started).toBeLessThan(500);
+  });
+
+  it("a pick whose target is off the visit's origin is dropped unfetched; the rest are shown", async () => {
+    const offOrigin: Candidate = { id: "c5", sourceUrl: "https://evil.example/billing", title: "Elsewhere", labelQuality: "published", provenance: "llms.txt" };
+    const candidates = [...CANDIDATES, offOrigin];
+    const fetched: string[] = [];
+    const fetch: VerifyFetch = async (url) => {
+      fetched.push(url);
+      return { kind: "ok", status: 200, finalUrl: url, contentType: "text/html", body: "<title>Page</title>" } as never;
+    };
+    const { base } = input(ok("c5", "c1"), {
+      snapshot: { ...snapshot, candidates: snapshotCandidates(candidates) },
+      candidates,
+      verify: (c, o) => verifyTargets(c, { origin: o.origin, budgetMs: o.budgetMs, clock: o.clock, signal: o.signal, fetch }),
+    });
+    const run = await runJob(base);
+    expect(run).toMatchObject({ kind: "answer", answer: { status: "ok", items: [{ candidateId: "c1", href: `${ORIGIN}/b` }] }, verify: { picked: 2, verified: 1 } });
+    expect(fetched.every((u) => u.startsWith(`${ORIGIN}/`))).toBe(true);
+    expect(JSON.stringify(run)).not.toContain("evil.example");
   });
 });
 

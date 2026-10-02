@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import { createSnapshotRegistry, type SnapshotReleaseReason } from "./activity/snapshots.js";
 import type { StoredActivity } from "./activity/store.js";
 import { createAgentAuth } from "./agentApi/auth.js";
-import type { JobDetails, JobOutcome, JobRunOptions } from "./agents/adapter.js";
+import { MIN_LAUNCH_MS, type JobDetails, type JobOutcome, type JobRunOptions } from "./agents/adapter.js";
 import type { Ending } from "./agents/jobStop.js";
 import type { PromptActivity } from "./agents/prompt.js";
 import { emptyState } from "./capabilities/decisions.js";
@@ -11,7 +11,7 @@ import type { CatalogResolution } from "./catalog/resolveCatalog.js";
 import type { DiagnosticFields, Diagnostics } from "./diagnostics.js";
 import { createJobScheduler, type JobSchedulerOptions, MIN_JOB_MS } from "./jobScheduler.js";
 import { createPanelChannel, type PanelStore } from "./panelChannel.js";
-import type { JobAnswer, VerifyFn } from "./pipeline.js";
+import { type JobAnswer, VERIFY_RESERVE_MS, type VerifyFn } from "./pipeline.js";
 import { createResultRegistry } from "./results.js";
 import { createJobResumeCache } from "./resumeCache.js";
 
@@ -271,6 +271,21 @@ describe("job scheduler: one job, its order, and its answer", () => {
     expect(h.frames.at(-1)).toMatchObject({ reason: "no_time_left" });
   });
 
+  it("one launch threshold: exactly MIN_JOB_MS left starts a job the adapter's launch floor accepts; a millisecond less starts none", () => {
+    expect(MIN_JOB_MS).toBe(MIN_LAUNCH_MS + VERIFY_RESERVE_MS);
+    const h = harness();
+    h.settle(h.clock.t - (30_000 - MIN_JOB_MS));
+    expect(h.agent.calls).toHaveLength(1);
+    const { request, options } = h.agent.calls[0]!;
+    // What the adapter checks against its floor: exactly MIN_LAUNCH_MS, never less.
+    expect(options.deadline! - h.clock.t).toBe(MIN_LAUNCH_MS);
+    expect(request.deadlineMs).toBe(MIN_LAUNCH_MS);
+    const g = harness();
+    g.settle(g.clock.t - (30_000 - MIN_JOB_MS + 1));
+    expect(g.agent.calls).toHaveLength(0);
+    expect(g.frames.at(-1)).toMatchObject({ type: "results", status: "unavailable", reason: "no_time_left" });
+  });
+
   it("the job gets what remains of the visit budget, less the verification reserve", () => {
     const h = harness();
     h.settle(h.clock.t - 10_000);
@@ -420,10 +435,10 @@ describe("job scheduler: replacement", () => {
     expect(h.agent.calls[0]!.options.signal?.aborted).toBe(false);
   });
 
-  it("no replacement once the budget is under 5 s: the job keeps running", () => {
+  it("no replacement once the budget is under MIN_JOB_MS: the job keeps running", () => {
     const h = harness();
-    h.settle(h.clock.t - 22_000);
-    h.clock.t += 4_000;
+    h.settle(h.clock.t - (30_000 - MIN_JOB_MS));
+    h.clock.t += 1;
     h.scheduler.onActivityAccepted(2);
     expect(h.agent.calls[0]!.options.signal?.aborted).toBe(false);
   });
@@ -487,6 +502,73 @@ describe("job scheduler: replacement", () => {
   });
 });
 
+describe("job scheduler: more cancellation paths", () => {
+  it("a replacement cancelled by a visit change publishes nothing and starts no third job", async () => {
+    const h = harness();
+    h.settle();
+    h.scheduler.onActivityAccepted(2);
+    await flush();
+    const replacement = h.agent.calls[1]!;
+    expect(replacement.request.requestId).toBe("job2");
+    h.world.visit = { ...h.world.visit!, epoch: 4 } as ActiveVisit;
+    h.scheduler.onVisitChanged();
+    expect(replacement.options.signal?.reason).toBe("visit_changed");
+    await flush();
+    expect(h.agent.calls).toHaveLength(2);
+    expect(h.frames.some((f) => f.type === "results")).toBe(false);
+    expect(h.scheduler.running).toBeNull();
+    expect(h.named("job_cancelled").map((f) => f.reason)).toEqual(["superseded", "visit_changed"]);
+    expect(h.releases.map((r) => r.reason)).toEqual(["cancelled", "released", "cancelled", "released"]);
+  });
+
+  it("shutdown during verification ends the job at once: verification gets the job's signal, nothing is published", async () => {
+    let verifySignal: AbortSignal | undefined;
+    const h = harness({
+      verify: (_c, o) =>
+        new Promise((resolve) => {
+          verifySignal = o.signal;
+          // A checker that honours the signal (as verifyTargets does) and otherwise never ends.
+          o.signal.addEventListener("abort", () => resolve({ verified: [], dropped: [], ms: 0 }));
+        }),
+    });
+    h.settle();
+    h.agent.calls[0]!.answer(ok(["c0"]));
+    await flush();
+    expect(verifySignal?.aborted).toBe(false);
+    h.scheduler.stop();
+    expect(verifySignal?.aborted).toBe(true);
+    await h.scheduler.settled();
+    expect(h.scheduler.running).toBeNull();
+    expect(h.frames.some((f) => f.type === "results")).toBe(false);
+    expect(h.named("job_finished")).toEqual([expect.objectContaining({ status: "cancelled", reason: "shutdown" })]);
+  });
+
+  it("pause, resume, and a second settle of the same visit start a fresh budget and a fresh replacement allowance", async () => {
+    const h = harness();
+    h.settle(h.clock.t - 10_000);
+    h.scheduler.onActivityAccepted(2);
+    await flush();
+    expect(h.scheduler.running).toMatchObject({ jobId: "job2", replacementUsed: true });
+    h.world.paused = true;
+    h.scheduler.onPause();
+    await flush();
+    expect(h.scheduler.running).toBeNull();
+    // Resume: the same visit (same epoch) settles again after its dwell.
+    h.world.paused = false;
+    h.clock.t += 3_000;
+    h.settle();
+    expect(h.agent.calls).toHaveLength(3);
+    expect(h.named("job_started").at(-1)).toMatchObject({ epoch: 3, deadlineMs: 30_000, replacement: false });
+    expect(h.agent.calls[2]!.request.deadlineMs).toBe(30_000 - VERIFY_RESERVE_MS);
+    expect(h.scheduler.running).toMatchObject({ jobId: "job3", replacementUsed: false });
+    // The replacement allowance is back.
+    h.scheduler.onActivityAccepted(3);
+    await flush();
+    expect(h.agent.calls).toHaveLength(4);
+    expect(h.named("job_replaced")).toHaveLength(2);
+  });
+});
+
 describe("job scheduler: discards", () => {
   it.each<[string, (h: ReturnType<typeof harness>) => void, string]>([
     ["the visit epoch moved", (h) => void (h.world.visit = { ...h.world.visit!, epoch: 9 } as ActiveVisit), "visit"],
@@ -530,6 +612,34 @@ describe("job scheduler: discards", () => {
 });
 
 describe("job scheduler: resume cache", () => {
+  it("a replacement whose key hits the cache publishes the cached answer once the cancelled run ends, in order: working, idle, results", async () => {
+    const cache = createJobResumeCache<JobAnswer>({ clock: { now: () => 0 } });
+    const h = harness({ resumeCache: cache });
+    // An earlier job answered for the newer activity (same page, same everything else).
+    const newer = [{ ...ISSUE, title: "Newer issue" }, ISSUE];
+    h.world.activity = newer;
+    h.settle();
+    h.agent.calls[0]!.answer(ok(["c3"]));
+    await flush();
+    // A new visit to the same page with the older activity: a model call (another key).
+    h.world.activity = [ISSUE];
+    h.world.visit = { ...h.world.visit!, epoch: 4 } as ActiveVisit;
+    h.scheduler.onVisitChanged();
+    h.settle();
+    expect(h.agent.calls).toHaveLength(2);
+    const before = h.states().length;
+    // The newer issue is read again: the job is replaced, and the replacement's key hits.
+    h.world.activity = newer;
+    h.scheduler.onActivityAccepted(5);
+    await flush();
+    expect(h.agent.calls).toHaveLength(2);
+    expect(h.states().slice(before)).toEqual(["working:job3", "idle", "results:ok:job3"]);
+    expect(h.frames.at(-1)).toMatchObject({ type: "results", status: "ok", jobId: "job3", items: [{ candidateId: "c3" }] });
+    expect(h.named("job_finished").at(-1)).toMatchObject({ cached: true });
+    // The cancelled run published nothing.
+    expect(h.frames.some((f) => f.type === "results" && f.jobId === "job2")).toBe(false);
+  });
+
   it("an answer is reused within 30 s for the same key, through the same order; extra user tools never reuse a browser-only answer", async () => {
     const cache = createJobResumeCache<JobAnswer>({ clock: { now: () => 0 } });
     const h = harness({ resumeCache: cache });
