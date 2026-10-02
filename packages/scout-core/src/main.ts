@@ -27,6 +27,11 @@
 // Scout's window gets its capability view, previews, command acks, the context-read audit,
 // and the browser-context grant from the panel channel (panelChannel.ts), which starts right
 // after the coordinator and stops right after it, before the sockets and the store close.
+// Panel frames go to every attached sink (panelSinks.ts): the app's stdout (the `stdio` sink,
+// registered here at start) and, while a protocol-3 native host is connected, the Chrome side
+// panel through it (the `relay` sink the coordinator registers). A command's answer (`ack`,
+// `preview`) goes only to the sink that sent it; commands read from stdin come from the stdio
+// sink.
 // Recommendation results live in one registry (results.ts) shared by the channel (frames,
 // `open_link`) and the coordinator (which clears them with their visit); results may be
 // published only for the coordinator's current, unpaused, permitted visit.
@@ -103,6 +108,7 @@ import { createDiagnostics, defaultDiagnosticsPath, type Diagnostics, scoutHome 
 import { DWELL_MS } from "./dwell.js";
 import { InstalledRecordError, readInstalledRecord } from "./installedRecord.js";
 import { createPanelChannel, type PanelChannel } from "./panelChannel.js";
+import { createPanelSinks, type PanelSink } from "./panelSinks.js";
 import { createResultRegistry } from "./results.js";
 import { createSocketServer, SocketServerError } from "./socketServer.js";
 import { unlinkIfSameInode } from "./localSocketFiles.js";
@@ -209,10 +215,19 @@ export async function runStdio(deps: StdioDeps): Promise<StdioCore> {
   gcTimer.unref();
 
   let stdoutOpen = true;
+  const sinks = createPanelSinks({ diagnostics });
+  const stdioSink: PanelSink = {
+    id: "stdio",
+    kind: "stdio",
+    send(frame) {
+      if (!stdoutOpen) return;
+      deps.stdout.write(`${JSON.stringify(frame)}\n`);
+    },
+  };
+  sinks.add(stdioSink);
   const emitPanel = (state: PanelState): void => {
     jobs?.observePanel(state);
-    if (!stdoutOpen) return;
-    deps.stdout.write(`${JSON.stringify(state)}\n`);
+    sinks.emit(state);
   };
 
   // Context reads over agent.sock; each one re-sends Scout's window its (debounced) audit view.
@@ -301,6 +316,7 @@ export async function runStdio(deps: StdioDeps): Promise<StdioCore> {
       discover: (origin, session) => discoverer.discover(origin, { session }),
     },
     panel: panelChannel,
+    sinks,
     results,
     jobs: scheduler,
   });
@@ -471,7 +487,7 @@ export async function runStdio(deps: StdioDeps): Promise<StdioCore> {
       diagnostics.event("native_command_invalid", { count: invalidLines });
       return;
     }
-    coordinator.handleNativeCommand(parsed.data);
+    coordinator.handleNativeCommand(parsed.data, stdioSink);
   });
   // stdin closing means the app is gone: never outlive it.
   rl.on("close", () => void shutdown("stdin-closed"));

@@ -8,7 +8,7 @@
 // states are sent once, and idle-to-idle visit changes (unpermitted page to unpermitted
 // page) send nothing.
 //
-// Bridge protocol 2, per connection: on attach the core first sends a capture-disabled
+// Bridge protocol 3, per connection: on attach the core first sends a capture-disabled
 // `capture_policy` (revision 0), which the relay delivers before `ready`. Grants come only
 // from the live connection's permissions snapshot (permissionState.ts). Each later policy
 // has the next revision and is sent only when `paused` or `captureEnabled` changes;
@@ -43,24 +43,38 @@
 // snapshot applied or cleared (offers follow Chrome's grants), the visit changed, or an ingest
 // committed (and again when its export sync settles).
 //
+// Window surfaces (panelSinks.ts, `sinks`): every command arrives with the sink that sent it
+// (the app's stdio, or the live connection's relay sink), and its answer goes back only there.
+// A relay sink may not send `frontmost` or `shutdown`: each is refused with a scalar
+// `native_command_refused` event and, when the frame carried a commandId, a `not_permitted` ack,
+// and never applied. `pause`/`resume` and the window commands are accepted from both. Each
+// connection that completes its hello becomes the relay sink (the one it replaces is removed;
+// a closed one too) and is repainted at once: `grant`, a fresh `capabilities` (sent to every
+// sink, so its revision stays one sequence), `audit`, the current state, and the current
+// `results` frame if one is held, so a side panel opened on a new connection shows the window
+// as it is. Commands and frames from a replaced connection are ignored.
+//
 // Recommendation results (results.ts) live only as long as their visit: a visit change (which
 // includes losing the origin's grant, which clears them first), pause, disconnect (or a
 // replacing sensor), and stop clear them. These clears are silent: the state frame each sends
 // next (the new visit's idle, paused, disconnected) is what makes the window drop them, and
 // stop sends nothing. `resendState` is for P3.2's job clears within one visit.
 
-import type {
-  ActiveVisit,
-  BrowserObservation,
-  FocusObservation,
-  NativeCommand,
-  PageTextObservation,
-  PanelState,
+import {
+  type ActiveVisit,
+  type BrowserObservation,
+  type FocusObservation,
+  type NativeCommand,
+  type PageTextObservation,
+  type PanelState,
+  STDIO_ONLY_COMMANDS,
+  type StdioOnlyCommandType,
 } from "@scout/contracts";
 import { type ActivityStore, canonicalIssueUrl, createActivityStore } from "./activity/store.js";
 import type { AgentView } from "./agentApi/handlers.js";
 import type { JobScheduler } from "./jobScheduler.js";
 import type { PanelChannel } from "./panelChannel.js";
+import type { PanelSink, PanelSinks } from "./panelSinks.js";
 import type { ResultRegistry } from "./results.js";
 import type { Clock, Timers } from "./clock.js";
 import type { Diagnostics } from "./diagnostics.js";
@@ -99,7 +113,13 @@ export interface CoordinatorOptions {
   /** Resource discovery on settled visits. Without it a settle is only logged. */
   capabilities?: CoordinatorCapabilities;
   /** Scout's window commands and capability view. Without it those commands are refused. */
-  panel?: Pick<PanelChannel, "handle" | "capabilitiesChanged">;
+  panel?: Pick<PanelChannel, "handle" | "capabilitiesChanged"> & Partial<Pick<PanelChannel, "repaint">>;
+  /**
+   * Where the window's frames go (main.ts registers the app's stdio sink). The coordinator
+   * registers each live connection as a relay sink, and records which sink sent each command
+   * so its answer goes back there. Without it frames go only through `emitPanel`.
+   */
+  sinks?: Pick<PanelSinks, "add" | "remove" | "routeCommand">;
   /** Recommendation results, cleared whenever their visit stops being current. */
   results?: Pick<ResultRegistry, "clear">;
   /** Recommendation jobs. Without it a settled visit only runs discovery. */
@@ -109,8 +129,12 @@ export interface CoordinatorOptions {
 export type CoordinatorCapabilities = DiscoveryCapabilities;
 
 export interface Coordinator {
-  handleNativeCommand(cmd: NativeCommand): void;
-  /** A native host completed a protocol-2 hello. The most recent one is the live sensor. */
+  /**
+   * One command from Scout's window. `from` is the sink that sent it (its answer goes there);
+   * a `relay` sink may not send `frontmost` or `shutdown`.
+   */
+  handleNativeCommand(cmd: NativeCommand, from?: PanelSink): void;
+  /** A native host completed a protocol-3 hello. The most recent one is the live sensor and the relay sink. */
   attachClient(client: SocketClient): void;
   /** Stop handling input and cancel pending dwell and discovery. Idempotent. */
   stop(): void;
@@ -153,9 +177,13 @@ export function createCoordinator(options: CoordinatorOptions): Coordinator {
   let paused = false;
   let stopped = false;
   let liveClient: SocketClient | null = null;
+  /** The live connection's panel sink, while `sinks` is given. */
+  let liveSink: PanelSink | null = null;
   let latestFocus: FocusObservation | null = null;
   let frontmostBundleId: string | null = null;
   let lastEmitted: string | null = null;
+  /** The last state frame sent (a new sink is repainted with it). */
+  let lastState: PanelState | null = null;
   /** The last capture policy sent to the live client, and its revision. */
   let lastPolicy: { revision: number; paused: boolean; captureEnabled: boolean } | null = null;
 
@@ -163,6 +191,7 @@ export function createCoordinator(options: CoordinatorOptions): Coordinator {
     const key = JSON.stringify(state);
     if (key === lastEmitted) return;
     lastEmitted = key;
+    lastState = state;
     try {
       options.emitPanel(state);
     } catch {
@@ -175,10 +204,23 @@ export function createCoordinator(options: CoordinatorOptions): Coordinator {
     return { type: "state", status: "idle", visitEpoch, detail: new URL(visit.origin).hostname, permitted: true };
   };
 
-  const emitCurrent = (): void => {
-    if (paused) emit({ type: "state", status: "paused" });
-    else if (liveClient === null) emit({ type: "state", status: "disconnected" });
-    else emit(idleState(tracker.epoch, tracker.current()));
+  const currentState = (): PanelState => {
+    if (paused) return { type: "state", status: "paused" };
+    if (liveClient === null) return { type: "state", status: "disconnected" };
+    return idleState(tracker.epoch, tracker.current());
+  };
+  const emitCurrent = (): void => emit(currentState());
+
+  /** frontmost or shutdown from the relay: never applied; acked `not_permitted` when the frame named a commandId. */
+  const refuseStdioOnly = (type: StdioOnlyCommandType, commandId: string | undefined, from: PanelSink): void => {
+    diagnostics.event("native_command_refused", { type, sink: from.kind, ...(commandId === undefined ? {} : { acked: true }) });
+    if (commandId === undefined) return;
+    options.sinks?.routeCommand(commandId, from);
+    try {
+      options.emitPanel({ type: "ack", commandId, ok: false, code: "not_permitted" });
+    } catch {
+      diagnostics.event("panel_emit_failed", {});
+    }
   };
 
   const captureEnabled = (): boolean => !paused && permissions.githubCapture && permissions.isPermitted(GITHUB_ORIGIN);
@@ -384,8 +426,13 @@ export function createCoordinator(options: CoordinatorOptions): Coordinator {
       lastEmitted = null;
       emitCurrent();
     },
-    handleNativeCommand(cmd) {
+    handleNativeCommand(cmd, from) {
       if (stopped) return;
+      if (from?.kind === "relay" && (STDIO_ONLY_COMMANDS as readonly string[]).includes(cmd.type)) {
+        refuseStdioOnly(cmd.type as StdioOnlyCommandType, "commandId" in cmd && typeof cmd.commandId === "string" ? cmd.commandId : undefined, from);
+        return;
+      }
+      if (from !== undefined && "commandId" in cmd) options.sinks?.routeCommand(cmd.commandId, from);
       switch (cmd.type) {
         case "frontmost":
           frontmostBundleId = cmd.bundleId;
@@ -427,25 +474,49 @@ export function createCoordinator(options: CoordinatorOptions): Coordinator {
         return;
       }
       dropConnectionState();
+      if (liveSink !== null) options.sinks?.remove(liveSink);
+      liveSink = null;
       liveClient = client;
       // The handshake ack: capture-disabled until this connection's snapshot is validated.
       syncPolicy();
       // A new host starts from scratch; its permissions snapshot and focus will follow.
       resetFocus();
       diagnostics.event("sensor_connected", { conn: client.id });
+      const sink: PanelSink = {
+        id: `relay-${client.id}`,
+        kind: "relay",
+        send: (state) => client.send({ type: "panel", state }),
+      };
       client.onFrame((frame) => {
         if (liveClient !== client) {
           diagnostics.event("stale_sensor_frame", { conn: client.id });
           return;
         }
-        handleObservation(frame.observation, client);
+        switch (frame.type) {
+          case "observation":
+            handleObservation(frame.observation, client);
+            return;
+          case "command":
+            coordinator.handleNativeCommand(frame.command, sink);
+            return;
+          case "refused_command":
+            if (!stopped) refuseStdioOnly(frame.command, frame.commandId, sink);
+            return;
+        }
       });
       client.onClose(() => {
+        options.sinks?.remove(sink);
+        if (liveSink === sink) liveSink = null;
         if (liveClient !== client || stopped) return;
         diagnostics.event("sensor_disconnected", { conn: client.id });
         sensorLost();
       });
       emitCurrent();
+      if (options.sinks) {
+        options.sinks.add(sink);
+        liveSink = sink;
+        options.panel?.repaint?.(sink, lastState ?? currentState());
+      }
     },
     stop() {
       if (stopped) return;

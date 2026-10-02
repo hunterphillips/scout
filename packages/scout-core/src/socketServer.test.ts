@@ -3,8 +3,8 @@ import { spawn } from "node:child_process";
 import { connect, createServer, Server, Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { ToChromeFrame } from "@scout/contracts";
-import { encodeFrame, FrameDecoder, frameHeader, MAX_FRAME_FROM_CHROME, MAX_FRAME_TO_CHROME } from "@scout/contracts/frame";
+import { BRIDGE_PROTOCOL, type ToChromeFrame } from "@scout/contracts";
+import { encodeFrame, frameHeader, MAX_FRAME_FROM_CHROME, MAX_FRAME_TO_CHROME, toChromeDecoder } from "@scout/contracts/frame";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { DiagnosticFields, Diagnostics } from "./diagnostics.js";
 import { createSocketServer, type SocketClient, type SocketServer, SocketServerError } from "./socketServer.js";
@@ -25,7 +25,7 @@ async function rawClient(path: string) {
     sock.once("error", reject);
   });
   const frames: Array<Record<string, unknown>> = [];
-  const dec = new FrameDecoder({ maxBytes: MAX_FRAME_FROM_CHROME });
+  const dec = toChromeDecoder();
   sock.on("data", (c: Buffer) => {
     for (const r of dec.push(c)) if (r.ok) frames.push(r.value);
   });
@@ -190,7 +190,7 @@ describe("socketServer", () => {
     expect(st.mode & 0o777).toBe(0o600);
     const c = await rawClient(s.socketPath);
     extra.push(c.sock);
-    c.send({ type: "hello", protocol: 2 });
+    c.send({ type: "hello", protocol: BRIDGE_PROTOCOL });
     await until(() => clients.length === 1);
   });
 
@@ -282,7 +282,7 @@ describe("socketServer", () => {
     expect(events).toContainEqual({ name: "bridge_rejected", fields: { conn: 1, code: "invalid-json" } });
   });
 
-  it.each([1, 3])("answers a protocol-%i hello with upgrade_required, then closes", async (protocol) => {
+  it.each([1, 2, 4])("answers a protocol-%i hello with upgrade_required, then closes", async (protocol) => {
     const clients: SocketClient[] = [];
     const { server: s, events } = await start((cl) => clients.push(cl));
     const c = await rawClient(s.socketPath);
@@ -294,17 +294,17 @@ describe("socketServer", () => {
       ]),
     );
     await c.closed;
-    expect(c.frames).toEqual([{ type: "upgrade_required", protocol: 2 }]);
+    expect(c.frames).toEqual([{ type: "upgrade_required", protocol: BRIDGE_PROTOCOL }]);
     expect(clients).toHaveLength(0);
     expect(events).toContainEqual({ name: "bridge_rejected", fields: { conn: 1, code: "upgrade_required", protocol } });
   });
 
-  it("a protocol-2 hello reaches onClient", async () => {
+  it("a protocol-3 hello reaches onClient", async () => {
     const clients: SocketClient[] = [];
     const { server: s } = await start((cl) => clients.push(cl));
     const c = await rawClient(s.socketPath);
     extra.push(c.sock);
-    c.send({ type: "hello", protocol: 2 });
+    c.send({ type: "hello", protocol: BRIDGE_PROTOCOL });
     await until(() => clients.length === 1);
     expect(c.frames).toEqual([]);
   });
@@ -315,7 +315,7 @@ describe("socketServer", () => {
     const { server: s, events } = await start((cl) => {
       client = cl;
       cl.onFrame((f) => {
-        received.push(f.observation);
+        if (f.type === "observation") received.push(f.observation);
         cl.send({ type: "ack", seq: 42 } satisfies ToChromeFrame);
       });
     });
@@ -323,12 +323,12 @@ describe("socketServer", () => {
     // hello and the first observation in one write: both must be handled.
     c.sock.write(
       Buffer.concat([
-        encodeFrame({ type: "hello", protocol: 2 }, MAX_FRAME_FROM_CHROME),
+        encodeFrame({ type: "hello", protocol: BRIDGE_PROTOCOL }, MAX_FRAME_FROM_CHROME),
         encodeFrame({ type: "observation", observation: FOCUS }, MAX_FRAME_FROM_CHROME),
       ]),
     );
     c.send({ type: "observation", observation: { kind: "bogus" } });
-    c.send({ type: "hello", protocol: 2 });
+    c.send({ type: "hello", protocol: BRIDGE_PROTOCOL });
     c.sock.write(Buffer.concat([frameHeader(2), Buffer.from("[]")]));
     c.send({ type: "observation", observation: { ...FOCUS, seq: 2 } });
     await until(() => received.length === 2 && c.frames.length === 2);
@@ -346,7 +346,7 @@ describe("socketServer", () => {
     const received: unknown[] = [];
     const { server: s } = await start((cl) => cl.onFrame((f) => received.push(f)));
     const c = await rawClient(s.socketPath);
-    c.send({ type: "hello", protocol: 2 });
+    c.send({ type: "hello", protocol: BRIDGE_PROTOCOL });
     // Control characters JSON-escape to six bytes each: an 8 KiB body becomes a ~48 KiB frame.
     const text = "\u0001".repeat(8 * 1024);
     const obs = {
@@ -378,13 +378,53 @@ describe("socketServer", () => {
     });
     const a = await rawClient(s.socketPath);
     const b = await rawClient(s.socketPath);
-    a.send({ type: "hello", protocol: 2 });
-    b.send({ type: "hello", protocol: 2 });
+    a.send({ type: "hello", protocol: BRIDGE_PROTOCOL });
+    b.send({ type: "hello", protocol: BRIDGE_PROTOCOL });
     await until(() => clients.length === 2);
     a.sock.end();
     await until(() => closed.length === 1);
     b.sock.destroy();
     await until(() => closed.length === 2);
     expect(closed.toSorted()).toEqual(clients.map((c) => c.id).toSorted());
+  });
+
+  it("hands window commands to the client, refuses frontmost/shutdown as refused_command frames, and drops invalid ones", async () => {
+    const received: unknown[] = [];
+    const { server: s, events } = await start((cl) => cl.onFrame((f) => received.push(f)));
+    const c = await rawClient(s.socketPath);
+    c.send({ type: "hello", protocol: BRIDGE_PROTOCOL });
+    c.send({ type: "command", command: { type: "pause", extra: 1 } });
+    c.send({ type: "command", command: { type: "frontmost", bundleId: "com.google.Chrome", at: 1 } });
+    c.send({ type: "command", command: { type: "shutdown", commandId: "sp-9" } });
+    c.send({ type: "command", command: { type: "shutdown", commandId: "not valid!" } });
+    c.send({ type: "command", command: { type: "approve", commandId: "a" } }); // incomplete
+    c.send({ type: "command", command: { type: "refresh_capabilities", commandId: "sp-1" } });
+    await until(() => received.length === 5);
+    expect(received).toEqual([
+      { type: "command", command: { type: "pause" } },
+      { type: "refused_command", command: "frontmost" },
+      { type: "refused_command", command: "shutdown", commandId: "sp-9" },
+      { type: "refused_command", command: "shutdown" },
+      { type: "command", command: { type: "refresh_capabilities", commandId: "sp-1" } },
+    ]);
+    expect(events.filter((e) => e.name === "bridge_command_refused").map((e) => e.fields.type)).toEqual(["frontmost", "shutdown", "shutdown"]);
+    expect(events.filter((e) => e.name === "bridge_frame_dropped").map((e) => e.fields.code)).toEqual(["schema"]);
+  });
+
+  it("sends panel frames up to 1 MiB and refuses other frames over 16 KiB", async () => {
+    let client: SocketClient | null = null;
+    const { server: s, events } = await start((cl) => (client = cl));
+    const c = await rawClient(s.socketPath);
+    c.send({ type: "hello", protocol: BRIDGE_PROTOCOL });
+    await until(() => client !== null);
+    const audit = (n: number) => ({ type: "audit" as const, entries: Array.from({ length: n }, (_, i) => ({ at: i, role: "job" as const, method: "current_site" as const, outcome: "ok" as const, origin: `https://${"o".repeat(200)}.example` })) });
+    const big = { type: "panel" as const, state: audit(200) }; // ~50 KiB: over the 16 KiB default
+    client!.send(big);
+    client!.send({ type: "capture_policy", revision: 1, paused: false, captureEnabled: false, pad: "x".repeat(MAX_FRAME_TO_CHROME) } as unknown as ToChromeFrame);
+    client!.send({ type: "ack", seq: 1 });
+    await until(() => c.frames.length === 2);
+    expect(c.frames.map((f) => f.type)).toEqual(["panel", "ack"]);
+    expect(JSON.stringify(big).length).toBeGreaterThan(MAX_FRAME_TO_CHROME);
+    expect(events.filter((e) => e.name === "bridge_send_failed").map((e) => e.fields.type)).toEqual(["capture_policy"]);
   });
 });
