@@ -36,7 +36,7 @@ export function runPreflightInWorker(input: PreflightInput, options: { entrypoin
   return new Promise((resolve) => {
     let worker: Worker;
     try {
-      worker = new Worker(options.entrypoint ?? defaultPreflightWorkerEntrypoint(), { workerData: input });
+      worker = new Worker(options.entrypoint ?? defaultPreflightWorkerEntrypoint(), { workerData: input, execArgv: [] });
     } catch {
       resolve(failed("internal: preflight worker failed to start"));
       return;

@@ -98,13 +98,18 @@ export function parseLlmsTxt(text: string, origin: string, baseUrl: string = `${
  * are not followed. Each file is capped at 512 KiB. Relative links resolve against the
  * URL each file was finally served from (after redirects), not the URL requested.
  */
-export async function fetchLlmsTxt(origin: string, fetch: CatalogFetch): Promise<FetchedLlmsTxt> {
+export async function fetchLlmsTxt(
+  origin: string,
+  fetch: CatalogFetch,
+  /** Where each file is parsed; defaults to `parseLlmsTxt` inline (the core passes its parse worker). */
+  parse: (text: string, origin: string, baseUrl: string) => ParsedLlmsTxt | Promise<ParsedLlmsTxt> = parseLlmsTxt,
+): Promise<FetchedLlmsTxt> {
   const rootUrl = `${origin}/llms.txt`;
   const root = await fetch(rootUrl, { maxBytes: TEXT_SOURCE_MAX_BYTES, accept: LLMS_TXT_ACCEPT });
   if (root.kind === "absent") return { found: false, source: "absent" };
   if (root.kind !== "ok") return { found: false, source: "error" };
 
-  const parsed = parseLlmsTxt(root.body, origin, root.finalUrl);
+  const parsed = await parse(root.body, origin, root.finalUrl);
   const entries = [...parsed.entries];
   let droppedOffOrigin = parsed.droppedOffOrigin;
   let skippedLines = parsed.skippedLines;
@@ -119,7 +124,7 @@ export async function fetchLlmsTxt(origin: string, fetch: CatalogFetch): Promise
       continue;
     }
     filesFetched += 1;
-    const child = parseLlmsTxt(result.body, origin, result.finalUrl);
+    const child = await parse(result.body, origin, result.finalUrl);
     entries.push(...child.entries);
     droppedOffOrigin += child.droppedOffOrigin;
     skippedLines += child.skippedLines;

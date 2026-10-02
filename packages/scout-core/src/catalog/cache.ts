@@ -8,7 +8,7 @@ import { type Diagnostics, scoutHome } from "../diagnostics.js";
 import { CACHE_STALE_MAX_MS, cacheFileName, checkPrivateDir, type DirRefusal, fsErrorCode } from "../privateCacheFile.js";
 import { type CatalogFetchOptions, nextValidators, SITEMAP_MAX_BYTES } from "./catalogFetch.js";
 import { isRefusal, type PacedFetch } from "./pacing.js";
-import { type CatalogResource, discoverCatalog, type Discovery, type DiscoverOptions } from "./resolver.js";
+import { type CatalogParsers, type CatalogResource, discoverCatalog, type Discovery, type DiscoverOptions } from "./resolver.js";
 
 /** Bump when the file shape or the resolver's output changes meaning; every older file is then ignored. */
 export const CATALOG_CACHE_SCHEMA_VERSION = 3;
@@ -73,6 +73,8 @@ export interface ResolveWithCacheOptions {
    * `isCancelled`). Checked before every write: a cancelled pass's catalog is never saved.
    */
   isCancelled?: () => boolean;
+  /** Off-thread parsers for discovery; without them files are parsed inline. */
+  parsers?: CatalogParsers;
   /** Test hook; defaults to `discoverCatalog`. */
   discover?: (options: DiscoverOptions) => Promise<Discovery>;
 }
@@ -316,7 +318,7 @@ export function createCatalogCache(options: CatalogCacheOptions): CatalogCache {
     let discovery: Discovery | null = null;
     startWindow();
     try {
-      discovery = await discover({ origin, fetch: request.fetch, clock, ...(diagnostics ? { diagnostics } : {}) });
+      discovery = await discover({ origin, fetch: request.fetch, clock, ...(diagnostics ? { diagnostics } : {}), ...(request.parsers ? { parsers: request.parsers } : {}) });
     } catch {
       discovery = null;
     }
