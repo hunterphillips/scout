@@ -198,7 +198,7 @@ export function createPageTextGate(deps: GateDeps): PageTextGate {
     const c = await checkPageText(msg, sender);
     if ("reason" in c) return drop(c.reason);
     if (epoch !== state.cancelEpoch || state.paused || !policyAllowsCapture(state)) return drop("cancelled");
-    if (!state.port) return drop("bridge-disconnected");
+    if (!state.port || !state.policy) return drop("bridge-disconnected");
     const obs: PageTextObservation = {
       kind: "page_text",
       seq: state.seq + 1,
@@ -210,6 +210,8 @@ export function createPageTextGate(deps: GateDeps): PageTextGate {
       title: msg.title,
       text: msg.text,
       truncated: msg.truncated,
+      // The core accepts text only under the policy revision it last sent.
+      policyRevision: state.policy.revision,
     };
     if (!PageTextObservationSchema.safeParse(obs).success) return drop("payload");
     state.seq++;

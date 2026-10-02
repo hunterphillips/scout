@@ -14,8 +14,19 @@ describe("page_text gate (through the background)", () => {
     expect(await pageText(bg, f, { url: "https://github.com/acme/widgets", documentId: "doc-1" })).toEqual({ ok: true });
     const obs = observations(f, "page_text");
     expect(obs).toEqual([
-      { kind: "page_text", seq: expect.any(Number), at: expect.any(Number), tabId: 10, documentId: "doc-1", url: ISSUE1, source: "github_issue", title: "One", text: "body", truncated: false },
+      { kind: "page_text", seq: expect.any(Number), at: expect.any(Number), tabId: 10, documentId: "doc-1", url: ISSUE1, source: "github_issue", title: "One", text: "body", truncated: false, policyRevision: 2 },
     ]);
+    expect(BrowserObservationSchema.safeParse(obs[0]).success).toBe(true);
+  });
+
+  it("stamps page text with the latest capture_policy revision the port received", async () => {
+    const { f, bg } = await setup();
+    f._.ports.at(-1)!.onMessage.emit({ type: "capture_policy", revision: 7, paused: false, captureEnabled: true });
+    expect((await approve(bg, f)).approved).toBe(true);
+    expect(await pageText(bg, f)).toEqual({ ok: true });
+    const obs = observations(f, "page_text");
+    expect(obs).toHaveLength(1);
+    expect(obs[0]).toMatchObject({ policyRevision: 7 });
     expect(BrowserObservationSchema.safeParse(obs[0]).success).toBe(true);
   });
 

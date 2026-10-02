@@ -38,6 +38,11 @@ export const PageTextObservationSchema = z.object({
     message: `text exceeds ${PAGE_TEXT_BODY_MAX_BYTES} bytes`,
   }),
   truncated: z.boolean(),
+  /**
+   * The latest core `capture_policy` revision the extension had when it captured this text.
+   * The core accepts text only under its current policy revision; missing means never.
+   */
+  policyRevision: z.int().nonnegative().optional(),
 });
 
 /**
