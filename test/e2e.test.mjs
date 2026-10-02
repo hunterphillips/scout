@@ -403,12 +403,16 @@ describe.skipIf(!BUILT)("host <-> core end to end", () => {
     // Hermetic: every lookup went to the stub, and only for the test site.
     expect(dns.hosts().length).toBeGreaterThan(0);
     expect(new Set(dns.hosts())).toEqual(new Set(["docs.scout-e2e.invalid"]));
-    // Nothing a page, the issue or the model wrote, and no URL beyond the origin, in any log.
+    // Nothing a page, the issue or the model wrote, and no URL beyond the origin, in any log:
+    // run metadata is redacted status, timing and counts only (P3.4). The fixture's candidate
+    // titles, the issue's title and body, both picks' reasons, and every candidate href.
+    expect(first[results].items[1].reason).toBe("Fits the open billing work");
+    const fixtureText = [TITLE, BODY, ...candidates.map((c) => c.title), "Fits the open billing work", "lookup:metered", "Matches", ...candidates.map((c) => c.sourceUrl), "/docs/", "/issues/"];
     for (const [name, text] of [
       ["core stderr", coreErr],
       ["diagnostics", diag],
     ]) {
-      for (const secret of [TITLE, BODY, "lookup:metered", "Matches", "/docs/", "/issues/"]) {
+      for (const secret of fixtureText) {
         expect(text.includes(secret), `${name} contains ${secret}`).toBe(false);
       }
     }
