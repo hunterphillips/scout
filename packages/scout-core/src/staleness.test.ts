@@ -27,7 +27,11 @@ import { DWELL_MS } from "./dwell.js";
 import { createJobScheduler } from "./jobScheduler.js";
 import { createPanelChannel, type PanelStore } from "./panelChannel.js";
 import { createResultRegistry } from "./results.js";
+import type { PanelSink } from "./panelSinks.js";
 import type { SocketClient } from "./socketServer.js";
+
+/** The native app's stdio sink: the sender of every command these tests hand in. */
+const STDIO: PanelSink = { id: "stdio", kind: "stdio", send: () => {} };
 
 const ORIGIN = "https://docs.stripe.com";
 const PAGE = `${ORIGIN}/billing`;
@@ -233,11 +237,11 @@ function core() {
 
   // The sensor: GitHub and the docs site granted; Chrome frontmost; the docs page focused.
   const handlers: Array<(f: ObservationFrame) => void> = [];
-  const sensor: SocketClient = { id: 1, send: (_f: ToChromeFrame) => {}, onFrame: (h) => void handlers.push(h), onClose: () => {}, close: () => {} };
+  const sensor: SocketClient = { id: 1, send: (_f: ToChromeFrame) => {}, onFrame: (h) => void handlers.push(h), onClose: () => {}, onDrained: () => {}, close: () => {} };
   const observe = (o: BrowserObservation) => handlers.forEach((h) => h({ type: "observation", observation: o }));
   coordinator.attachClient(sensor);
   observe({ kind: "permissions", revision: 1, at: clock.t, granted: [`${ORIGIN}/*`], githubCapture: false });
-  coordinator.handleNativeCommand({ type: "frontmost", bundleId: "com.google.Chrome", at: clock.t });
+  coordinator.handleNativeCommand({ type: "frontmost", bundleId: "com.google.Chrome", at: clock.t }, STDIO);
   let seq = 0;
   const focus = (tabId: number, documentId: string) =>
     observe({ kind: "focus", seq: ++seq, at: clock.t, browserFocused: true, windowId: 1, tabId, url: PAGE, documentId, title: "Billing", incognito: false, permissionsRevision: 1 });
@@ -246,7 +250,7 @@ function core() {
   let commands = 0;
   const openLink = async (identity: { visitEpoch: number; jobId: string; candidateId: string }) => {
     const commandId = `open-${++commands}`;
-    coordinator.handleNativeCommand({ type: "open_link", commandId, coreInstanceId: CORE, ...identity });
+    coordinator.handleNativeCommand({ type: "open_link", commandId, coreInstanceId: CORE, ...identity }, STDIO);
     await flush();
     return frames.find((f) => f.type === "ack" && f.commandId === commandId);
   };
@@ -263,7 +267,7 @@ type Core = ReturnType<typeof core>;
 const SWITCHES: Array<[string, (c: Core) => void, boolean]> = [
   ["another tab (same URL)", (c) => c.focus(11, "doc-t"), true],
   ["another document in the same tab (same URL)", (c) => c.focus(10, "doc-b"), true],
-  ["another app (Chrome leaves the foreground)", (c) => c.coordinator.handleNativeCommand({ type: "frontmost", bundleId: "com.apple.Terminal", at: c.clock.t }), false],
+  ["another app (Chrome leaves the foreground)", (c) => c.coordinator.handleNativeCommand({ type: "frontmost", bundleId: "com.apple.Terminal", at: c.clock.t }, STDIO), false],
 ];
 
 /** Drive the visit to the stage, recording the job identity a window could hold by then. */
@@ -366,7 +370,7 @@ describe("B11: a tab, document or app switch at every stage refuses the old visi
           expect(await c.openLink({ visitEpoch: c.coordinator.tracker.epoch, jobId: jobId!, candidateId: "c0" })).toMatchObject({ ok: false, code: "stale_revision" });
         } else {
           // Back to Chrome on the same tab and document: a new visit, and the old link stays refused.
-          c.coordinator.handleNativeCommand({ type: "frontmost", bundleId: "com.google.Chrome", at: c.clock.t });
+          c.coordinator.handleNativeCommand({ type: "frontmost", bundleId: "com.google.Chrome", at: c.clock.t }, STDIO);
           expect(c.coordinator.tracker.epoch).toBeGreaterThan(epoch);
           expect(await c.openLink({ visitEpoch: epoch, jobId: jobId!, candidateId: "c0" })).toMatchObject({ ok: false, code: "stale_revision" });
         }

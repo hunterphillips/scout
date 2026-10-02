@@ -1,0 +1,6 @@
+{
+  "type": "command",
+  "command": {
+    "type": "pause"
+  }
+}

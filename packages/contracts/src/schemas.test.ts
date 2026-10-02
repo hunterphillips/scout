@@ -37,11 +37,12 @@ describe("contract schemas", () => {
     expect(BrowserObservationSchema.safeParse({ ...pageText, text: "😀".repeat(2049) }).success).toBe(false);
   });
 
-  it("wraps observations in bridge frames and accepts only a protocol 2 hello", () => {
+  it("wraps observations in bridge frames and accepts only a protocol 3 hello", () => {
     const observation = { kind: "permissions", revision: 0, at: 1, granted: [], githubCapture: false };
     expect(BridgeFrameSchema.parse({ type: "observation", observation })).toEqual({ type: "observation", observation });
-    expect(BRIDGE_PROTOCOL).toBe(2);
-    expect(BridgeFrameSchema.parse({ type: "hello", protocol: 2 })).toEqual({ type: "hello", protocol: 2 });
+    expect(BRIDGE_PROTOCOL).toBe(3);
+    expect(BridgeFrameSchema.parse({ type: "hello", protocol: 3 })).toEqual({ type: "hello", protocol: 3 });
+    expect(HelloSchema.safeParse({ type: "hello", protocol: 2 }).success).toBe(false);
     expect(HelloSchema.safeParse({ type: "hello", protocol: 1 }).success).toBe(false);
     expect(BridgeFrameSchema.safeParse({ type: "hello", protocol: 1 }).success).toBe(false);
     expect(AnyHelloSchema.parse({ type: "hello", protocol: 1 })).toEqual({ type: "hello", protocol: 1 });

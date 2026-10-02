@@ -6,12 +6,35 @@
 // bytes are discarded as they arrive and one `oversized` drop is reported.
 // Every decoded value must be a plain JSON object; anything else is dropped,
 // counted, and never handed to the caller as a message.
+//
+// Core -> Chrome frames have a per-type cap (bridge protocol 3): a `panel` frame may
+// reach MAX_PANEL_FRAME_BYTES, every other frame MAX_FRAME_TO_CHROME. A decoder for
+// that direction is built with `toChromeDecoder()`: it refuses a length prefix over
+// MAX_PANEL_FRAME_BYTES before reading the body, then refuses a decoded non-panel
+// frame over MAX_FRAME_TO_CHROME, so a peer cannot pass off a 1 MiB observation or ack.
 
 import { Buffer } from "node:buffer";
 import { endianness } from "node:os";
 
 export const MAX_FRAME_FROM_CHROME = 64 * 1024;
 export const MAX_FRAME_TO_CHROME = 16 * 1024;
+/** Cap for one core -> Chrome `panel` frame (Chrome's own host -> extension limit is 1 MiB). */
+export const MAX_PANEL_FRAME_BYTES = 1024 * 1024;
+
+/** The cap for one core -> Chrome frame of this shape: `panel` frames get MAX_PANEL_FRAME_BYTES. */
+export function toChromeFrameLimit(frame: { readonly type?: unknown }): number {
+  return frame.type === "panel" ? MAX_PANEL_FRAME_BYTES : MAX_FRAME_TO_CHROME;
+}
+
+/** Encode one core -> Chrome frame under its per-type cap. Throws `outgoing-oversized` over it. */
+export function encodeToChromeFrame(frame: { readonly type: string }): Buffer {
+  return encodeFrame(frame, toChromeFrameLimit(frame));
+}
+
+/** A decoder for core -> Chrome frames: 1 MiB for `panel`, MAX_FRAME_TO_CHROME for the rest. */
+export function toChromeDecoder(): FrameDecoder {
+  return new FrameDecoder({ maxBytes: MAX_PANEL_FRAME_BYTES, limitFor: toChromeFrameLimit });
+}
 
 const LITTLE = endianness() === "LE";
 
@@ -81,7 +104,10 @@ export function decodeBody(body: Buffer): FrameResult {
  * the stream stays in sync after it.
  */
 export class FrameDecoder {
+  /** No body over this is ever read: the length prefix alone refuses it. */
   readonly maxBytes: number;
+  /** A decoded frame over its own limit (at most maxBytes) is dropped as `oversized`. */
+  private readonly limitFor: ((value: Record<string, unknown>) => number) | undefined;
   readonly dropped: Record<DropCode, number> = {
     oversized: 0,
     "invalid-utf8": 0,
@@ -96,8 +122,9 @@ export class FrameDecoder {
   private bodyFill = 0;
   private skipRemaining = 0;
 
-  constructor({ maxBytes = MAX_FRAME_FROM_CHROME }: { maxBytes?: number } = {}) {
+  constructor({ maxBytes = MAX_FRAME_FROM_CHROME, limitFor }: { maxBytes?: number; limitFor?: (value: Record<string, unknown>) => number } = {}) {
     this.maxBytes = maxBytes;
+    this.limitFor = limitFor;
   }
 
   /** Total frames dropped so far, all reasons. */
@@ -151,7 +178,9 @@ export class FrameDecoder {
         const body = this.body;
         this.body = null;
         this.bodyFill = 0;
-        emit(decodeBody(body));
+        const r = decodeBody(body);
+        if (r.ok && this.limitFor !== undefined && r.bytes > this.limitFor(r.value)) emit({ ok: false, code: "oversized", bytes: r.bytes });
+        else emit(r);
       }
     }
     return out;

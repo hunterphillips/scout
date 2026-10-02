@@ -1,0 +1,10 @@
+{
+  "type": "command",
+  "command": {
+    "type": "approve",
+    "commandId": "app-3",
+    "resourceId": "res_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "version": "1111111111111111111111111111111111111111111111111111111111111111",
+    "expectedRevision": 1
+  }
+}

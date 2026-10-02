@@ -7,8 +7,8 @@ import { PassThrough } from "node:stream";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
-import { encodeFrame, FrameDecoder, MAX_FRAME_FROM_CHROME } from "@scout/contracts/frame";
-import { AGENT_PROTOCOL_VERSION, NATIVE_COMMAND_MAX_BYTES } from "@scout/contracts";
+import { encodeFrame, MAX_FRAME_FROM_CHROME, toChromeDecoder } from "@scout/contracts/frame";
+import { AGENT_PROTOCOL_VERSION, BRIDGE_PROTOCOL, NATIVE_COMMAND_MAX_BYTES } from "@scout/contracts";
 import { createSocketBackend } from "@scout/scout-mcp/client";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { SnapshotRegistry } from "./activity/snapshots.js";
@@ -120,7 +120,7 @@ describe("main --stdio", () => {
     await new Promise<void>((r) => sock.once("connect", () => r()));
     // The core answers hello with a capture_policy; read it so the socket can see its close.
     sock.resume();
-    sock.write(encodeFrame({ type: "hello", protocol: 2 }, MAX_FRAME_FROM_CHROME));
+    sock.write(encodeFrame({ type: "hello", protocol: BRIDGE_PROTOCOL }, MAX_FRAME_FROM_CHROME));
     await until(() => c.lines.some((l) => (l as { status?: string }).status === "idle"));
     const hostClosed = new Promise<void>((r) => sock.once("close", () => r()));
     const closedAt = Date.now();
@@ -284,16 +284,24 @@ describe("main --stdio", () => {
     sock.on("error", () => {});
     await new Promise<void>((r) => sock.once("connect", () => r()));
     const received: Array<{ type: string }> = [];
-    const dec = new FrameDecoder({ maxBytes: MAX_FRAME_FROM_CHROME });
+    // The window's frames (protocol 3) for the connected side panel, kept apart.
+    const panelFrames: Array<{ type: string }> = [];
+    const dec = toChromeDecoder();
     sock.on("data", (chunk: Buffer) => {
-      for (const r of dec.push(chunk)) if (r.ok) received.push(r.value as { type: string });
+      for (const r of dec.push(chunk)) {
+        if (!r.ok) continue;
+        if (r.value["type"] === "panel") panelFrames.push(r.value["state"] as { type: string });
+        else received.push(r.value as { type: string });
+      }
     });
     const acks = () => received.filter((f) => f.type === "ack");
     const send = (o: object) => sock.write(encodeFrame(o, MAX_FRAME_FROM_CHROME));
-    send({ type: "hello", protocol: 2 });
+    send({ type: "hello", protocol: BRIDGE_PROTOCOL });
     await until(() => states().length >= 2 && received.length >= 1);
     expect(states()[1]).toEqual({ type: "state", status: "idle", visitEpoch: 0, permitted: false });
     expect(received).toEqual([{ type: "capture_policy", revision: 0, paused: false, captureEnabled: false }]);
+    await until(() => panelFrames.length >= 4);
+    expect(panelFrames.slice(0, 4).map((f) => f.type)).toEqual(["grant", "capabilities", "audit", "state"]);
     send({
       type: "observation",
       observation: { kind: "permissions", revision: 1, at: 1, granted: ["https://docs.stripe.com/*", "https://github.com/*"], githubCapture: true },

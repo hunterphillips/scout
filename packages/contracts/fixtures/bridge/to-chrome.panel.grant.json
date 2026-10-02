@@ -1,0 +1,7 @@
+{
+  "type": "panel",
+  "state": {
+    "type": "grant",
+    "agentBrowserContext": true
+  }
+}

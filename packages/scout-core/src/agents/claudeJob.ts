@@ -6,7 +6,10 @@
 // instructions.md, agent-token), plus bridge.json when the profile selects user tools (the
 // bridge's job file, holding the backend environment bindings but never their values, which
 // only the bridge resolves, in memory, at spawn); the CLI is spawned argv-only, detached, with the request on
-// stdin; the job dir is removed when the job ends, however it ends. From the spawn on, the job dir
+// stdin; the job dir is removed when the job ends, however it ends. The CLI itself runs from one
+// stable cwd, `SCOUT_HOME/run/agent-cwd` (localSocketFiles.ts ensureAgentCwd: 0700, created when the adapter is built
+// and checked before each spawn, never swept), so the real CLI's per-cwd `~/.claude/projects`
+// folder appears once, not once per job; every path in its argv still names the job dir. From the spawn on, the job dir
 // also holds `tree.json` (0600, written atomically: the CLI's pid and group, its spawn time, and
 // every owned process ps has shown, pid and start time only): a core hard-killed mid-job cannot
 // stop the tree, so the next start kills what still matches it (main.ts sweepJobDirs).
@@ -86,6 +89,7 @@ import { MODEL_RE, profileFingerprint, type AgentProfile } from "./profile.js";
 import { buildJobInstructions, buildJobPrompt, type PromptActivity } from "./prompt.js";
 import { JOB_TREE_FILE, type JobTreeRecord, type ProcessTracker } from "./processTree.js";
 import { createStreamMonitor } from "./streamMonitor.js";
+import { ensureAgentCwd } from "../localSocketFiles.js";
 import { checkManagedPolicy, defaultBridgeEntrypoint, managedMcpFilesFor, planJobTools, type JobManagedPaths, type ManagedPolicyResult, type ToolPlanOptions } from "./toolPolicy.js";
 
 export type { SpawnFn, SnapshotFn } from "./childSupervisor.js";
@@ -320,6 +324,11 @@ export function createClaudeJobAdapter(deps: ClaudeJobDeps): ClaudeJobAdapter {
   const maxStdout = deps.maxStdoutBytes ?? MAX_STDOUT_BYTES;
   const minLaunchMs = deps.minLaunchMs ?? MIN_LAUNCH_MS;
   const jobsRoot = join(deps.home, "run", "jobs");
+  try {
+    ensureAgentCwd(deps.home);
+  } catch {
+    deps.diagnostics?.event("agent_cwd_unusable", {}); // each job checks again before its spawn
+  }
   const profile = deps.profile;
   const fingerprint = profileFingerprint(profile);
   let preflight: PreflightState = { verdict: "unchecked", reasons: [] };
@@ -567,13 +576,19 @@ export function createClaudeJobAdapter(deps: ClaudeJobDeps): ClaudeJobAdapter {
     stop: JobStop,
   ): Promise<Out> {
     const startedAt = clock.now();
+    let cwd: string;
+    try {
+      cwd = ensureAgentCwd(deps.home);
+    } catch {
+      return { result: { status: "error", reason: "agent_failed" }, termination: "process_error", detail: "setup_failed" };
+    }
     let sup: SupervisedChild;
     try {
       sup = startChild({
         spawn,
         command: launch.claudePath,
         args: buildJobArgv(launch.model, jobDir, surface.allowedToolsArg),
-        options: { cwd: jobDir, env: { ...launch.env }, stdio: ["pipe", "pipe", "pipe"] },
+        options: { cwd, env: { ...launch.env }, stdio: ["pipe", "pipe", "pipe"] },
         killGraceMs,
         ...(deps.psSnapshot ? { snapshot: deps.psSnapshot } : {}),
         ...(deps.processTracker ? { tracker: deps.processTracker } : {}),

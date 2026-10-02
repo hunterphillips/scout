@@ -1,0 +1,7 @@
+{
+  "type": "command",
+  "command": {
+    "type": "refresh_capabilities",
+    "commandId": "app-11"
+  }
+}

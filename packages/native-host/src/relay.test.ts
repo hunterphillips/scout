@@ -5,8 +5,8 @@ import { createServer, connect as netConnect, type Server, type Socket } from "n
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough, Writable } from "node:stream";
-import { AnyHelloSchema, BRIDGE_PROTOCOL } from "@scout/contracts";
-import { encodeFrame, FrameDecoder, frameHeader, MAX_FRAME_FROM_CHROME } from "@scout/contracts/frame";
+import { AnyHelloSchema, BRIDGE_PROTOCOL, NATIVE_COMMAND_MAX_BYTES } from "@scout/contracts";
+import { encodeFrame, FrameDecoder, frameHeader, MAX_FRAME_FROM_CHROME, MAX_FRAME_TO_CHROME, MAX_PANEL_FRAME_BYTES } from "@scout/contracts/frame";
 import { afterEach, describe, expect, it } from "vitest";
 import { checkRuntimeDir, coreSocketPath } from "./config.js";
 import {
@@ -30,7 +30,7 @@ const focus = { kind: "focus", seq: 1, at: 1000, browserFocused: true, windowId:
 const permissions = { kind: "permissions", revision: 5, at: 999, granted: ["https://github.com/*"], githubCapture: false } as const;
 /** The core's answer to hello: capture disabled until it has the extension's snapshot. */
 const POLICY = { type: "capture_policy", revision: 1, paused: false, captureEnabled: false } as const;
-const HELLO = { type: "hello", protocol: 2 } as const;
+const HELLO = { type: "hello", protocol: BRIDGE_PROTOCOL } as const;
 const UNREACHABLE = { type: "core_unavailable", reason: "unreachable" } as const;
 const UNSAFE = { type: "core_unavailable", reason: "unsafe" } as const;
 
@@ -228,7 +228,7 @@ describe("relay", () => {
     h.last().feed({ type: "ack", seq: 2 });
     await settle();
     expect(h.toChrome()).toEqual([POLICY, { type: "ready" }, { type: "ack", seq: 2 }]);
-    expect(h.host.drops().fromCore).toEqual({ forwarded: 2, invalid: 3 });
+    expect(h.host.drops().fromCore).toEqual({ forwarded: 2, invalid: 3, oversized: 0 });
   });
 
   it("relays later capture_policy frames from the core to Chrome", async () => {
@@ -325,7 +325,131 @@ describe("relay", () => {
   });
 });
 
-describe("protocol-2 handshake", () => {
+describe("protocol-3 window commands and panel frames", () => {
+  const pause = { type: "command", command: { type: "pause" } } as const;
+  const approve = {
+    type: "command",
+    command: { type: "approve", commandId: "sp-1", resourceId: `res_${"a".repeat(64)}`, version: "1".repeat(64), expectedRevision: 2 },
+  } as const;
+  const openLink = {
+    type: "command",
+    command: { type: "open_link", commandId: "sp-2", coreInstanceId: "core-1", visitEpoch: 3, jobId: "job-1", candidateId: "c1" },
+  } as const;
+  const grant = { type: "panel", state: { type: "grant", agentBrowserContext: false } } as const;
+  /** What Chrome got, read with the panel cap. */
+  const decodeAll = (out: Buffer[]) => new FrameDecoder({ maxBytes: MAX_PANEL_FRAME_BYTES }).push(Buffer.concat(out));
+
+  it("forwards validated commands as command bridge frames, re-encoded without extra keys", async () => {
+    const h = harness();
+    h.last().handshake();
+    h.stdin.write(encodeFrame({ ...pause, extra: 1 }));
+    h.stdin.write(encodeFrame({ type: "command", command: { ...openLink.command, href: "https://evil.example/" } })); // strict: refused
+    h.stdin.write(encodeFrame(openLink));
+    await settle();
+    expect(h.last().frames().slice(1)).toEqual([pause, openLink]);
+    expect(h.host.drops().fromChrome).toMatchObject({ forwarded: 2, commandsHandedOff: 2, invalid: 1 });
+  });
+
+  it("refuses frontmost and shutdown from the extension and counts them, never forwarding", async () => {
+    const h = harness();
+    h.last().handshake();
+    h.stdin.write(encodeFrame({ type: "command", command: { type: "frontmost", bundleId: "com.google.Chrome", at: 1 } }));
+    h.stdin.write(encodeFrame({ type: "command", command: { type: "shutdown" } }));
+    h.stdin.write(encodeFrame({ type: "command", command: { type: "shutdown", commandId: "x" } }));
+    h.stdin.write(encodeFrame({ type: "command", command: { type: "teleport" } }));
+    await settle();
+    expect(h.last().frames()).toEqual([HELLO]);
+    expect(h.host.drops().fromChrome).toMatchObject({ forwarded: 0, commandsHandedOff: 0, refusedCommand: 3, invalid: 1 });
+  });
+
+  it("forwards the largest valid command: every relay command fits NATIVE_COMMAND_MAX_BYTES (the size check is a guard)", async () => {
+    const h = harness();
+    h.last().handshake();
+    const origin = `https://${"a".repeat(63)}.${"b".repeat(63)}.${"c".repeat(63)}.${"d".repeat(61)}:65535`;
+    const big = {
+      type: "command",
+      command: { type: "set_auto_acquire", commandId: "x".repeat(64), origin, enabled: true, expectedEnabled: false, acknowledgeRisk: true },
+    };
+    h.stdin.write(encodeFrame(big));
+    await settle();
+    expect(Buffer.byteLength(`${JSON.stringify(big.command)}\n`)).toBeLessThan(NATIVE_COMMAND_MAX_BYTES);
+    expect(h.host.drops().fromChrome).toMatchObject({ commandOversized: 0, invalid: 0, forwarded: 1 });
+  });
+
+  it("never buffers a command before ready: dropped and counted, and none reach the core after the handshake", async () => {
+    const h = harness();
+    h.stdin.write(encodeFrame(pause));
+    h.stdin.write(encodeFrame(approve));
+    await settle();
+    h.last().succeed(); // connected, hello sent, no policy yet
+    h.stdin.write(encodeFrame(pause));
+    await settle();
+    h.last().feed(POLICY);
+    await settle();
+    expect(h.last().frames()).toEqual([HELLO]);
+    expect(h.host.drops().fromChrome).toMatchObject({ commandBeforeReady: 3, forwarded: 0 });
+    h.stdin.write(encodeFrame(pause));
+    await settle();
+    expect(h.last().frames()).toEqual([HELLO, pause]);
+  });
+
+  it("relays validated panel frames to Chrome after ready, and drops invalid ones", async () => {
+    const h = harness();
+    h.last().succeed();
+    h.last().feed(grant); // before the policy: not relayed
+    h.last().feed(POLICY);
+    h.last().feed({ ...grant, extra: 1 });
+    h.last().feed({ type: "panel", state: { type: "results", status: "ok" } }); // invalid state
+    h.last().feed({ type: "panel", state: { type: "ack", commandId: "sp-2", ok: true, revision: 0, approvalRevision: 0, target: { href: "https://docs.example/a" } } });
+    await settle();
+    expect(h.toChrome()).toEqual([
+      POLICY,
+      { type: "ready" },
+      grant,
+      { type: "panel", state: { type: "ack", commandId: "sp-2", ok: true, revision: 0, approvalRevision: 0, target: { href: "https://docs.example/a" } } },
+    ]);
+    expect(h.host.drops().fromCore).toMatchObject({ forwarded: 3, invalid: 2 });
+  });
+
+  it("carries a panel frame up to 1 MiB to Chrome, drops a larger one unread, and drops any other frame over 16 KiB", async () => {
+    const out: Buffer[] = [];
+    const stdout = new Writable({
+      write(chunk: Buffer, _enc, cb) {
+        out.push(chunk);
+        cb();
+      },
+    });
+    const h = harness({ stdout });
+    h.last().handshake();
+    // A preview chunk carries the bulk: its text is free-form.
+    const chunk = (textBytes: number) => ({
+      type: "panel",
+      state: {
+        type: "preview",
+        commandId: "sp-3",
+        resourceId: `res_${"a".repeat(64)}`,
+        version: "1".repeat(64),
+        seq: 0,
+        offset: 0,
+        totalBytes: 1,
+        text: "t".repeat(textBytes),
+        sha256: "b".repeat(64),
+        descriptor: { kind: "llms_txt", siteOrigin: "https://docs.example", sourceUrl: "https://docs.example/llms.txt" },
+      },
+    });
+    const overhead = Buffer.byteLength(JSON.stringify(chunk(0)));
+    const fits = chunk(MAX_PANEL_FRAME_BYTES - overhead);
+    const tooBig = chunk(MAX_PANEL_FRAME_BYTES - overhead + 1);
+    const fatPolicy = { type: "capture_policy", revision: 2, paused: false, captureEnabled: false, pad: "p".repeat(MAX_FRAME_TO_CHROME) };
+    h.last().emit("data", Buffer.concat([encodeFrame(fits, MAX_PANEL_FRAME_BYTES), encodeFrame(tooBig, MAX_PANEL_FRAME_BYTES + 1), encodeFrame(fatPolicy, MAX_PANEL_FRAME_BYTES), encodeFrame(grant)]));
+    await settle();
+    const got = decodeAll(out).map((r) => (r.ok ? (r.value["type"] as string) : r.code));
+    expect(got).toEqual(["capture_policy", "ready", "panel", "panel"]);
+    expect(h.host.drops().decoderDrops.fromCore).toMatchObject({ oversized: 2 });
+  });
+});
+
+describe("protocol-3 handshake", () => {
   const pageText = {
     kind: "page_text", seq: 3, at: 1002, tabId: 3, documentId: "doc-a", url: "https://github.com/o/r/issues/1",
     source: "github_issue", title: "Issue", text: "body", truncated: false,
@@ -425,7 +549,7 @@ describe("protocol-2 handshake", () => {
     await settle();
     expect(h.toChrome()).toEqual([{ type: "core_unavailable", reason: "upgrade_required" }]);
     expect(h.exits).toEqual([EXIT_CORE_UNAVAILABLE]);
-    expect(h.host.drops().fromCore).toEqual({ forwarded: 0, invalid: 0 });
+    expect(h.host.drops().fromCore).toEqual({ forwarded: 0, invalid: 0, oversized: 0 });
     expect(h.timers.pending).toBe(0);
   });
 
@@ -570,7 +694,7 @@ describe("shutdown", () => {
 });
 
 /**
- * A fake core on a real Unix socket. It reads hello the way the protocol-2 core does: any
+ * A fake core on a real Unix socket. It reads hello the way the protocol-3 core does: any
  * hello parses, a mismatched protocol gets upgrade_required and a close, a matching one the
  * initial capture-disabled policy. `protocol: 1` with `oldCore` models a protocol-1 core,
  * which closes on a hello it does not know without sending anything.
@@ -661,7 +785,7 @@ describe("mixed bridge versions fail closed", () => {
     return { path, core };
   };
 
-  it("a protocol-1 relay's hello gets upgrade_required from a protocol-2 core, then a close", async () => {
+  it("a protocol-1 relay's hello gets upgrade_required from a protocol-3 core, then a close", async () => {
     const { path } = await start({});
     const got: unknown[] = [];
     const client = netConnect({ path });
@@ -672,11 +796,11 @@ describe("mixed bridge versions fail closed", () => {
     const closed = new Promise<void>((r) => client.on("close", () => r()));
     client.write(encodeFrame({ type: "hello", protocol: 1 }));
     await closed;
-    expect(got).toEqual([{ type: "upgrade_required", protocol: 2 }]);
+    expect(got).toEqual([{ type: "upgrade_required", protocol: BRIDGE_PROTOCOL }]);
   });
 
   it("this relay against a newer core: core_unavailable{upgrade_required}, exit 1, no retry", async () => {
-    const { path, core } = await start({ protocol: 3 });
+    const { path, core } = await start({ protocol: BRIDGE_PROTOCOL + 1 });
     let connects = 0;
     const h = harness({
       socketPath: path,

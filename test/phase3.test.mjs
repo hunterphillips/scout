@@ -485,16 +485,25 @@ describe.skipIf(!BUILT)("Phase 3 verification e2e: B10 outcomes and B11 click au
     expect(shown.get("quota")).toBe(shown.get("auth"));
   });
 
-  it("B8/B9 no prescribed personal paths: every job ran in its own dir under run/jobs, its argv names only that dir, and its prompt names no path or personal source", () => {
+  it("B8/B9 no prescribed personal paths: every job ran from the one stable run/agent-cwd, its argv names only its own dir under run/jobs, and its prompt names no path or personal source", () => {
     const jobsRoot = join(realpathSync(home), "run", "jobs");
+    const agentCwd = join(realpathSync(home), "run", "agent-cwd");
     const launches = b.fake().filter((l) => Array.isArray(l.argv));
     expect(launches.length).toBeGreaterThan(5);
+    const jobDirs = new Set();
     for (const l of launches) {
-      expect(l.cwd.startsWith(`${jobsRoot}/`), l.cwd).toBe(true);
-      for (const a of l.argv.filter((x) => typeof x === "string" && x.startsWith("/"))) expect(a.startsWith(`${l.cwd}/`), a).toBe(true);
+      expect(l.cwd, l.cwd).toBe(agentCwd);
+      const paths = l.argv.filter((x) => typeof x === "string" && x.startsWith("/"));
+      expect(paths.length).toBeGreaterThan(0);
+      const dir = paths[0].slice(0, paths[0].indexOf("/", jobsRoot.length + 1));
+      expect(dir.startsWith(`${jobsRoot}/`), dir).toBe(true);
+      for (const a of paths) expect(a.startsWith(`${dir}/`), a).toBe(true);
+      jobDirs.add(dir);
       expect(l.envKeys.some((k) => /PERSONAL_CONTEXT|SCOUT_HOME/.test(k)), l.envKeys.join(",")).toBe(false);
       expect(l.violations).toEqual([]);
     }
+    // One private dir per job, while the CLI's cwd stayed the same.
+    expect(jobDirs.size).toBe(launches.length);
     const prompts = b.fake().filter((l) => typeof l.prompt === "string").map((l) => l.prompt);
     expect(prompts.length).toBeGreaterThan(5);
     for (const p of prompts) {

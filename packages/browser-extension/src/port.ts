@@ -9,8 +9,14 @@
 // new or lost port clears the policy, so capture starts disabled until the
 // core sends one. A core_unavailable with reason upgrade_required is sticky
 // until a later port is ready: mixed versions show as such, not as "down".
+//
+// Bridge protocol 3 carries Scout's window over the same port: each `panel` frame
+// from the core (validated with ToChromeFrameSchema) goes to onPanel, and
+// sendCommand posts a window command ({type:"command", command}) once the port is
+// ready and the core is not reported unavailable. Commands are never queued: otherwise
+// sendCommand returns false.
 
-import { type CapturePolicy, ToChromeFrameSchema } from "@scout/contracts";
+import { type CapturePolicy, CommandFrameSchema, type PanelState, type RelayCommand, ToChromeFrameSchema } from "@scout/contracts";
 import { HOST_NAME } from "./hosts.js";
 import type { LinkState } from "./messages.js";
 import { type Clock, createReconnectPolicy, type ReconnectPolicy, type SeriesState, type SeriesStore } from "./reconnect.js";
@@ -27,6 +33,11 @@ export interface PortLink {
   /** The popup's Reconnect: drop any port and start a series now. */
   manualReconnect(): void;
   linkState(): LinkState;
+  /**
+   * Post one window command to the core. False (nothing sent) when the command is not a valid
+   * relay command, no port is ready, or the host reports the core unavailable; never queued.
+   */
+  sendCommand(command: RelayCommand): boolean;
 }
 
 export interface PortDeps {
@@ -40,6 +51,8 @@ export interface PortDeps {
   onPolicy(policy: CapturePolicy): void;
   /** The port is gone: stop in-flight reads (bumps the cancel epoch). */
   onLost(): void;
+  /** One of Scout's window frames from the core (protocol 3). Defaults to a no-op. */
+  onPanel?(frame: PanelState): void;
 }
 
 const isSeries = (v: unknown): v is SeriesState => {
@@ -124,6 +137,9 @@ export function createPortLink(deps: PortDeps): PortLink {
         break;
       case "upgrade_required":
         break; // the host turns this into core_unavailable; never expected here
+      case "panel":
+        deps.onPanel?.(parsed.data.state);
+        break;
       case "ack":
         ready = true;
         coreUnavailable = false;
@@ -160,5 +176,19 @@ export function createPortLink(deps: PortDeps): PortLink {
     policy.manual();
   }
 
-  return { policy, start: () => policy.start(), trigger, manualReconnect, linkState };
+  function sendCommand(command: RelayCommand): boolean {
+    const p = state.port;
+    // The host reports the core gone (it is retrying, or exiting): nothing would reach it.
+    if (!p || !ready || coreUnavailable) return false;
+    const frame = CommandFrameSchema.safeParse({ type: "command", command });
+    if (!frame.success) return false;
+    try {
+      p.postMessage(frame.data);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  return { policy, start: () => policy.start(), trigger, manualReconnect, linkState, sendCommand };
 }

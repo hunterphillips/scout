@@ -146,6 +146,26 @@ describe("panel channel", () => {
       expect(s.frames.at(-1)).toMatchObject({ type: "ack", commandId: "o1", ok: true, target: { href: `${SITE}/webhooks` } });
     });
 
+    it("repaints a new sink with grant, capabilities (to every sink), audit, the given state, and the held result, without hrefs", () => {
+      const results = registry();
+      const s = setup({ results });
+      s.audit.push({ at: 5, role: "job", method: "current_site", outcome: "ok" });
+      results.beginJob("job-1");
+      results.publish(result);
+      s.frames.length = 0;
+      const got: PanelState[] = [];
+      const state: PanelState = { type: "state", status: "idle", visitEpoch: 2, detail: "docs.example.com", permitted: true };
+      s.channel.repaint({ id: "relay-1", kind: "relay", send: (f) => void got.push(f) }, state);
+      expect(got.map((f) => f.type)).toEqual(["grant", "audit", "state", "results"]);
+      expect(got[1]).toEqual({ type: "audit", entries: [{ at: 5, role: "job", method: "current_site", outcome: "ok" }] });
+      expect(got[2]).toBe(state);
+      expect(got[3]).toMatchObject({ type: "results", jobId: "job-1", status: "ok" });
+      expect(JSON.stringify(got)).not.toContain("/webhooks");
+      // The capabilities refresh went through the channel's own emit (every sink), alone.
+      expect(s.frames.map((f) => f.type)).toEqual(["capabilities"]);
+      expect(s.events).toContainEqual({ name: "panel_repainted", fields: { sink: "relay", results: 1 } });
+    });
+
     it("a clear re-sends the coordinator's state instead of a stand-in empty frame", () => {
       const results = registry();
       let resent = 0;

@@ -1,12 +1,29 @@
 import { z } from "zod";
 import { BrowserObservationSchema } from "./browser.js";
+import {
+  ApproveCommandSchema,
+  CommandIdSchema,
+  DeclineCommandSchema,
+  type NativeCommand,
+  OpenLinkCommandSchema,
+  PanelStateSchema,
+  PauseCommandSchema,
+  PreviewCommandSchema,
+  RefreshCapabilitiesCommandSchema,
+  ResumeCommandSchema,
+  RevokeCommandSchema,
+  SetAgentBrowserContextCommandSchema,
+  SetAutoAcquireCommandSchema,
+} from "./panel.js";
 
 /**
  * Protocol 2: the core answers hello with a capture-disabled capture_policy, and the
  * extension's permissions snapshot carries a revision and the GitHub-capture setting.
- * Mixed versions fail closed with upgrade_required.
+ * Protocol 3 adds Scout's window over the relay: the extension may send window commands
+ * (`command`) and the core sends it the window's frames (`panel`), so a Chrome side panel
+ * can be the UI. Mixed versions fail closed with upgrade_required.
  */
-export const BRIDGE_PROTOCOL = 2;
+export const BRIDGE_PROTOCOL = 3;
 
 /** Native host -> core, first frame on each socket connection. */
 export const HelloSchema = z.object({
@@ -26,8 +43,60 @@ export const ObservationFrameSchema = z.object({
   observation: BrowserObservationSchema,
 });
 
+/**
+ * Native-app commands the browser may never send: only the app knows which application is
+ * frontmost, and only the app may quit the core. The host refuses them (they are not in
+ * RelayCommandSchema) and the core answers them with a `not_permitted` ack.
+ */
+export const STDIO_ONLY_COMMANDS = ["frontmost", "shutdown"] as const;
+export type StdioOnlyCommandType = (typeof STDIO_ONLY_COMMANDS)[number];
+
+/**
+ * The window commands the browser side panel may send: every NativeCommand member except
+ * STDIO_ONLY_COMMANDS, built from the same member schemas. A command added to panel.ts must be
+ * listed here or in STDIO_ONLY_COMMANDS (bridge.test.ts checks every member is in exactly one).
+ */
+export const RelayCommandSchema = z.discriminatedUnion("type", [
+  PauseCommandSchema,
+  ResumeCommandSchema,
+  PreviewCommandSchema,
+  ApproveCommandSchema,
+  DeclineCommandSchema,
+  RevokeCommandSchema,
+  SetAutoAcquireCommandSchema,
+  SetAgentBrowserContextCommandSchema,
+  RefreshCapabilitiesCommandSchema,
+  OpenLinkCommandSchema,
+]);
+export type RelayCommand = z.infer<typeof RelayCommandSchema>;
+
+// Compile-time half of the classification check: every NativeCommand type is relayed or stdio-only.
+type Unclassified = Exclude<NativeCommand["type"], RelayCommand["type"] | StdioOnlyCommandType>;
+const _everyCommandClassified: [Unclassified] extends [never] ? true : never = true;
+void _everyCommandClassified;
+
+/**
+ * Extension -> core, one window command (protocol 3). Each must still fit the native app's
+ * NATIVE_COMMAND_MAX_BYTES as a JSONL line; the relay and the core check it.
+ */
+export const CommandFrameSchema = z.object({
+  type: z.literal("command"),
+  command: RelayCommandSchema,
+});
+
+/**
+ * A `command` frame naming a native-app-only command (STDIO_ONLY_COMMANDS). Never a valid
+ * BridgeFrame: the host refuses it, and the core reads it only to answer it `not_permitted`
+ * (with the `commandId` it carried, when that is a valid one), never to apply it.
+ */
+export const StdioOnlyCommandFrameSchema = z.object({
+  type: z.literal("command"),
+  command: z.object({ type: z.enum(STDIO_ONLY_COMMANDS), commandId: CommandIdSchema.optional() }),
+});
+export type StdioOnlyCommandFrame = z.infer<typeof StdioOnlyCommandFrameSchema>;
+
 /** Everything the core accepts on the bridge socket; the core validates each socket frame against this. */
-export const BridgeFrameSchema = z.discriminatedUnion("type", [HelloSchema, ObservationFrameSchema]);
+export const BridgeFrameSchema = z.discriminatedUnion("type", [HelloSchema, ObservationFrameSchema, CommandFrameSchema]);
 
 export const CORE_UNAVAILABLE_REASONS = ["upgrade_required", "unreachable", "unsafe"] as const;
 
@@ -60,6 +129,16 @@ export const CapturePolicySchema = z.object({
 export const UpgradeRequiredSchema = z.object({ type: z.literal("upgrade_required"), protocol: z.int() });
 
 /**
+ * Core -> extension (protocol 3): one of the window's frames, exactly as the native app gets it
+ * on stdout. Up to MAX_PANEL_FRAME_BYTES on the wire (`@scout/contracts/frame`); every other
+ * to-Chrome frame stays under MAX_FRAME_TO_CHROME.
+ */
+export const PanelFrameSchema = z.object({
+  type: z.literal("panel"),
+  state: PanelStateSchema,
+});
+
+/**
  * Everything the core sends on the bridge socket, which is also everything the extension
  * accepts from the native host (upgrade_required is turned into core_unavailable by the
  * host, so the extension never sees it, but it validates here either way).
@@ -70,6 +149,7 @@ export const ToChromeFrameSchema = z.discriminatedUnion("type", [
   ReadySchema,
   CapturePolicySchema,
   UpgradeRequiredSchema,
+  PanelFrameSchema,
 ]);
 
 export type Hello = z.infer<typeof HelloSchema>;
@@ -83,3 +163,5 @@ export type CoreUnavailable = z.infer<typeof CoreUnavailableSchema>;
 export type Ack = z.infer<typeof AckSchema>;
 export type Ready = z.infer<typeof ReadySchema>;
 export type ToChromeFrame = z.infer<typeof ToChromeFrameSchema>;
+export type CommandFrame = z.infer<typeof CommandFrameSchema>;
+export type PanelFrame = z.infer<typeof PanelFrameSchema>;

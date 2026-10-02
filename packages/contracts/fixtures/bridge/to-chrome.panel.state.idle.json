@@ -1,0 +1,10 @@
+{
+  "type": "panel",
+  "state": {
+    "type": "state",
+    "status": "idle",
+    "visitEpoch": 3,
+    "detail": "docs.example.com",
+    "permitted": true
+  }
+}

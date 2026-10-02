@@ -1,0 +1,9 @@
+{
+  "type": "command",
+  "command": {
+    "type": "revoke",
+    "commandId": "app-7",
+    "resourceId": "res_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "expectedRevision": 5
+  }
+}

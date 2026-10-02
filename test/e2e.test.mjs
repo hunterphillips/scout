@@ -234,7 +234,7 @@ describe.skipIf(!BUILT)("host <-> core end to end", () => {
     await new Promise((r) => sock.once("connect", r));
     sock.write(frame({ type: "hello", protocol: 1 }));
     await closed;
-    expect(frames).toEqual([{ type: "upgrade_required", protocol: 2 }]);
+    expect(frames).toEqual([{ type: "upgrade_required", protocol: 3 }]);
 
     core.stdin.end();
     expect(await exitOf(core)).toBe(0);

@@ -251,7 +251,7 @@ describe.skipIf(!BUILT)("core shutdown with a job running (each trigger on its o
     expect(await new Promise((r) => core.once("exit", r))).toBe(0);
   }, 60_000);
 
-  it("a profile edit while a job runs: the job is cancelled `superseded` (published) and its whole tree reaped", async () => {
+  it("a profile edit while a job runs: the job is cancelled `superseded`, its whole tree reaped, and the visit's one replacement runs on the new profile", async () => {
     const run = await startWithRunningJob(children);
     home = run.home;
     const profilePath = join(run.home, "agent-profile.json");
@@ -260,18 +260,26 @@ describe.skipIf(!BUILT)("core shutdown with a job running (each trigger on its o
     const tmp = join(run.home, ".agent-profile.tmp");
     writeFileSync(tmp, JSON.stringify(profile), { mode: 0o600 });
     renameSync(tmp, profilePath);
-    await until(() => readLines(join(run.home, "logs", "diagnostics.jsonl")).some((e) => e.event === "job_finished"), "the job to finish", 10_000);
-    const events = readLines(join(run.home, "logs", "diagnostics.jsonl"));
+    const diag = () => readLines(join(run.home, "logs", "diagnostics.jsonl"));
+    await until(() => diag().filter((e) => e.event === "job_started").length === 2, "the replacement to start", 10_000);
+    const events = diag();
     expect(events.find((e) => e.event === "agent_profile_changed")).toMatchObject({ usable: true, toolsRevision: 2 });
     expect(events.find((e) => e.event === "job_cancelled")).toMatchObject({ reason: "superseded" });
-    expect(events.filter((e) => e.event === "job_finished").map((e) => [e.status, e.reason])).toEqual([["cancelled", "superseded"]]);
-    // Published to the window, unlike a shutdown's cancel.
-    expect(run.stdout()).toContain('"superseded"');
+    expect(events.find((e) => e.event === "job_replaced")).toMatchObject({ reason: "superseded" });
+    expect(events.filter((e) => e.event === "job_started").map((e) => e.replacement)).toEqual([false, true]);
+    // The cancelled run published nothing: the replacement's answer is what the window waits for.
+    expect(run.stdout()).not.toContain('"superseded"');
     await until(() => !run.pids.some(alive), "the old job's tree to be reaped", 5_000);
-    expect(readdirSync(run.jobsRoot)).toEqual([]);
+    // The replacement launches a second CLI once the new adapter's preflight passed; only its dir is left.
+    await until(() => readLines(join(run.home, "fake.log")).filter((l) => Array.isArray(l.argv)).length === 2, "the replacement's CLI", 10_000);
+    expect(readdirSync(run.jobsRoot).filter((n) => !n.startsWith("preflight-"))).toHaveLength(1);
     run.core.stdin.end();
     const { code } = await run.exited;
     expect(code).toBe(0);
+    expect(diag().filter((e) => e.event === "job_finished").map((e) => [e.status, e.reason])).toEqual([
+      ["cancelled", "superseded"],
+      ["cancelled", "shutdown"],
+    ]);
   }, 60_000);
 });
 

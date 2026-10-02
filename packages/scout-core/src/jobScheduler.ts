@@ -33,7 +33,10 @@
 //     later revocation publishes `cancelled: revoked`. Repeated changes never chain calls.
 //   - irrelevant: any other permissions or grant change. The job's baselines move to the new
 //     revisions, so its answer still counts.
-//   - a profile change: `cancelled: superseded`, published (a new profile needs a new adapter).
+//   - a profile change (a new profile needs a new adapter): the job is cancelled `superseded`
+//     and, under the same one-replacement rule and budget, the visit's replacement starts on
+//     the new profile once the cancelled run has ended. With the replacement used, or under
+//     MIN_JOB_MS left, the cancel is published (`cancelled: superseded`) instead.
 // Every cancel aborts the adapter's signal with the reason and releases the snapshot at once
 // (its token is revoked, so the agent's next read is refused), with release reason
 // `cancelled`. A job that ends on its own releases its snapshot with reason `released` once
@@ -143,8 +146,9 @@ export interface JobScheduler {
   onResourceRevoked(resourceId: string): void;
   /**
    * The agent profile changed (a new fingerprint, or new tools): the running job is cancelled
-   * `superseded` (published), and later jobs and resume-cache keys use the new profile. A bare
-   * fingerprint keeps the tools fields as they were.
+   * `superseded` and the visit's one replacement starts on the new profile (or, with the
+   * replacement used or no time left, the cancel is published); later jobs and resume-cache
+   * keys use the new profile. A bare fingerprint keeps the tools fields as they were.
    */
   onProfileChanged(next: string | SchedulerProfile): void;
   /** Cancel the running job (`shutdown`) and start none from now on. Idempotent. */
@@ -409,16 +413,20 @@ export function createJobScheduler(options: JobSchedulerOptions): JobScheduler {
   const relevantChange = (reason: JobCancelReason): void => {
     const job = running;
     if (job === null || job.cancelled !== null) return;
-    const b = budget;
-    if (b !== null && b.visit.epoch === job.visit.epoch && !b.replacementUsed && b.deadline - clock.now() >= MIN_JOB_MS) {
-      b.replacementUsed = true;
-      b.pending = true;
-      event("job_replaced", { reason, epoch: job.visit.epoch });
-      cancel(reason, "drop");
-      return;
-    }
+    if (replace(job, reason)) return;
     if (reason === "superseded") return;
     cancel(reason, "publish");
+  };
+
+  /** Cancel `job` for its visit's one replacement, if unused and there is time for it; false otherwise. */
+  const replace = (job: Running, reason: JobCancelReason): boolean => {
+    const b = budget;
+    if (b === null || b.visit.epoch !== job.visit.epoch || b.replacementUsed || b.deadline - clock.now() < MIN_JOB_MS) return false;
+    b.replacementUsed = true;
+    b.pending = true;
+    event("job_replaced", { reason, epoch: job.visit.epoch });
+    cancel(reason, "drop");
+    return true;
   };
 
   return {
@@ -490,7 +498,10 @@ export function createJobScheduler(options: JobSchedulerOptions): JobScheduler {
     onProfileChanged(next) {
       if (typeof next === "string") profile.fingerprint = next;
       else Object.assign(profile, next);
-      cancel("superseded", "publish");
+      const job = running;
+      if (job === null || job.cancelled !== null) return;
+      // Unlike new activity, a new profile always ends the job: its adapter is retired.
+      if (!replace(job, "superseded")) cancel("superseded", "publish");
     },
     stop() {
       if (stopped) return;

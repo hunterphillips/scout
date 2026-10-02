@@ -100,13 +100,16 @@ export {
   HELLO_TIMEOUT_MS,
   SOCKET_NAME,
   SocketServerError,
+  type RefusedCommandFrame,
   type SocketClient,
+  type SocketClientFrame,
   type SocketServer,
   type SocketServerErrorCode,
   type SocketServerOptions,
 } from "./socketServer.js";
 export { ConfigError, type CoreConfig, DEFAULT_DESTINATIONS, readConfig, readDestinations } from "./config.js";
 export { runStdio, type StdioCore, type StdioDeps } from "./main.js";
+export { createPanelSinks, type PanelSink, type PanelSinks, type PanelSinksOptions } from "./panelSinks.js";
 export { SCOUT_VERSION } from "./version.js";
 export {
   DEFAULT_ACCEPT,
