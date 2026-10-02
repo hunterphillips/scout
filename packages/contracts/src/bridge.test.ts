@@ -11,6 +11,7 @@ import {
   PanelStateSchema,
   RelayCommandSchema,
   STDIO_ONLY_COMMANDS,
+  StdioOnlyCommandFrameSchema,
   ToChromeFrameSchema,
 } from "./index.js";
 import { MAX_FRAME_TO_CHROME, MAX_PANEL_FRAME_BYTES } from "./frame.js";
@@ -110,6 +111,19 @@ describe("bridge fixtures", () => {
   it.each(refused.map((f) => [f.file, f] as const))("%s is refused", (_f, { value }) => {
     expect(BridgeFrameSchema.safeParse(value).success).toBe(false);
     expect(ToChromeFrameSchema.safeParse(value).success).toBe(false);
+    // A refused command is still recognised as one, so the core can answer it not_permitted.
+    const isCommand = (value as { type?: string }).type === "command";
+    expect(StdioOnlyCommandFrameSchema.safeParse(value).success).toBe(isCommand);
+  });
+
+  it("recognises a stdio-only command frame with or without a valid commandId, and nothing else", () => {
+    expect(StdioOnlyCommandFrameSchema.parse({ type: "command", command: { type: "shutdown", commandId: "s-1" } })).toEqual({
+      type: "command",
+      command: { type: "shutdown", commandId: "s-1" },
+    });
+    expect(StdioOnlyCommandFrameSchema.parse({ type: "command", command: { type: "frontmost", bundleId: "x", at: 1 } })).toEqual({ type: "command", command: { type: "frontmost" } });
+    expect(StdioOnlyCommandFrameSchema.safeParse({ type: "command", command: { type: "shutdown", commandId: "bad id!" } }).success).toBe(false);
+    expect(StdioOnlyCommandFrameSchema.safeParse({ type: "command", command: { type: "pause" } }).success).toBe(false);
   });
 
   it("covers every bridge frame, to-Chrome frame and relay command", () => {

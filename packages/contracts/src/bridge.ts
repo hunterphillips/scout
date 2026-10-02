@@ -2,6 +2,7 @@ import { z } from "zod";
 import { BrowserObservationSchema } from "./browser.js";
 import {
   ApproveCommandSchema,
+  CommandIdSchema,
   DeclineCommandSchema,
   type NativeCommand,
   OpenLinkCommandSchema,
@@ -82,6 +83,17 @@ export const CommandFrameSchema = z.object({
   type: z.literal("command"),
   command: RelayCommandSchema,
 });
+
+/**
+ * A `command` frame naming a native-app-only command (STDIO_ONLY_COMMANDS). Never a valid
+ * BridgeFrame: the host refuses it, and the core reads it only to answer it `not_permitted`
+ * (with the `commandId` it carried, when that is a valid one), never to apply it.
+ */
+export const StdioOnlyCommandFrameSchema = z.object({
+  type: z.literal("command"),
+  command: z.object({ type: z.enum(STDIO_ONLY_COMMANDS), commandId: CommandIdSchema.optional() }),
+});
+export type StdioOnlyCommandFrame = z.infer<typeof StdioOnlyCommandFrameSchema>;
 
 /** Everything the core accepts on the bridge socket; the core validates each socket frame against this. */
 export const BridgeFrameSchema = z.discriminatedUnion("type", [HelloSchema, ObservationFrameSchema, CommandFrameSchema]);
