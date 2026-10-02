@@ -1,6 +1,8 @@
-// Scout's floating window. Compact: one line (status, current host, offer badge) and a
-// disclosure button. Expanded, by the user's click only: Offers, Library, Preview, Settings,
-// Activity, Problems. It renders a `PanelModel` and reports clicks as `PanelAction`s; every
+// Scout's floating window. Compact: one line (status, current host, results, offer badge) and
+// a disclosure button. Expanded, by the user's click only: Results, Offers, Library, Preview,
+// Settings, Activity, Problems. A result is a button; clicking it asks the core for the
+// target, and only that answer, checked again by LinkOpener, opens anything. Results arriving
+// never open, expand, or focus anything. It renders a `PanelModel` and reports clicks as `PanelAction`s; every
 // decision lives in ScoutKit. It never activates the app and never brings itself forward on
 // a new frame; the preview pane changes content only when the user picks another preview.
 // Approve lives only in the Preview pane, bound to the shown version, so a list reordering
@@ -22,6 +24,7 @@ enum PanelAction {
     case refresh
     case retry(String)
     case dismiss(String)
+    case openResult(candidateId: String)
 }
 
 @MainActor
@@ -239,7 +242,7 @@ final class ScoutPanel: NSObject {
 
     private func renderHeader(_ model: PanelModel) {
         // The offer count is the badge, so the label shows the compact line without it.
-        statusLabel.stringValue = model.statusLine
+        statusLabel.stringValue = model.headerLine
         let count = model.currentOffers.count
         badge.isHidden = count == 0
         badge.stringValue = " \(count) "
@@ -271,6 +274,7 @@ final class ScoutPanel: NSObject {
         listStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
         let rows: [NSView]
         switch model.section {
+        case .results: rows = resultRows(model)
         case .offers: rows = offerRows(model)
         case .library: rows = libraryRows(model)
         case .settings: rows = settingsRows(model)
@@ -291,6 +295,13 @@ final class ScoutPanel: NSObject {
         let caps = model.capabilities
         let running = model.sidecar == .running
         switch model.section {
+        case .results:
+            let display = model.resultsDisplay
+            var links = ""
+            if case let .ready(items) = display {
+                links = items.map { "\(String(describing: model.linkRecord($0.candidateId)))" }.joined()
+            }
+            return "results|\(running)|\(display)|\(links)"
         case .offers:
             let keys = caps.offers.map { PreviewKey(resourceId: $0.resourceId, version: $0.version) }
             return "offers|\(running)|\(model.currentHost ?? "")|\(caps.offers)|\(caps.capabilities?.truncated ?? false)|"
@@ -309,6 +320,42 @@ final class ScoutPanel: NSObject {
             return "problems|\(model.problems)"
         case .preview:
             return "preview"
+        }
+    }
+
+    private func resultRows(_ model: PanelModel) -> [NSView] {
+        let display = model.resultsDisplay
+        let summary = Self.secondary(display.explanation)
+        summary.setAccessibilityLabel("Results: \(display.explanation)")
+        switch display {
+        case .working:
+            let spinner = NSProgressIndicator()
+            spinner.style = .spinning
+            spinner.controlSize = .small
+            spinner.startAnimation(nil)
+            spinner.setAccessibilityLabel("Looking for links")
+            return [hstack([spinner, summary])]
+        case .unavailable, .timeout, .error:
+            summary.textColor = .systemOrange
+            return [summary]
+        case let .ready(items):
+            var rows: [NSView] = [summary]
+            for item in items {
+                let record = model.linkRecord(item.candidateId)
+                let open = button(item.title, id: "result.\(item.candidateId)",
+                                  label: "Open \(item.title) on \(item.hostname)") { [onAction] in
+                    onAction(.openResult(candidateId: item.candidateId))
+                }
+                open.lineBreakMode = .byTruncatingTail
+                open.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+                open.isEnabled = model.sidecar == .running && record?.state != .pending
+                let controls = [open] + commandStatus(record, what: "opening \(item.title)", model)
+                rows.append(row([hstack(controls), Self.secondary(item.hostname), Self.secondary(item.reason)],
+                                summary: "\(item.title), on \(item.hostname). \(item.reason)"))
+            }
+            return rows
+        case .none, .paused, .disconnected, .empty, .cancelled:
+            return [summary]
         }
     }
 
@@ -474,6 +521,12 @@ final class ScoutPanel: NSObject {
                     onAction(.dismiss(record.id))
                 })
                 return row([Self.secondary(text), hstack(controls)], summary: text)
+            case let .link(commandId, refusal):
+                let text = "Scout did not open a link: \(refusal.text)."
+                let dismiss = button("Dismiss", id: "problem.\(commandId).link", label: "Dismiss link problem") { [onAction] in
+                    onAction(.dismiss(commandId))
+                }
+                return row([Self.secondary(text), dismiss], summary: text)
             case let .preview(key, failure):
                 let text = "Preview of version \(key.version.prefix(12)) failed: \(Self.describe(failure))"
                 let again = button("Load again", id: "problem.preview.\(key.resourceId).\(key.version)",
@@ -745,6 +798,7 @@ final class ScoutPanel: NSObject {
             return "\(enabled ? "Turning on" : "Turning off") auto-acquire for \(CapabilityModel.host(of: origin) ?? origin)"
         case let .setAgentBrowserContext(enabled, _): return "\(enabled ? "Allowing" : "Stopping") browser-context reads"
         case .refreshCapabilities: return "Refresh"
+        case .openLink: return "Opening a link"
         }
     }
 

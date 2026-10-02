@@ -23,6 +23,23 @@ import Testing
             == .state(status: .working, visitEpoch: 3, detail: nil, permitted: nil))
     }
 
+    @Test func resultsFramesForEveryStatus() throws {
+        let frame = { (outcome: ResultsOutcome) in
+            PanelState.results(ResultsFrame(coreInstanceId: "core-7f3a9c", visitEpoch: 3, origin: F.origin, jobId: "job-3a", outcome: outcome))
+        }
+        #expect(try F.frame("frame.results.ok.json") == frame(.ok([
+            ResultItem(candidateId: "c1", title: "Webhooks", reason: "You were reading about retry handling.", hostname: "docs.example.com"),
+            ResultItem(candidateId: "c2f", title: "Testing webhooks locally", reason: "Covers the CLI you used.", hostname: "docs.example.com"),
+        ])))
+        #expect(try F.frame("frame.results.empty.json") == frame(.empty))
+        #expect(try F.frame("frame.results.unavailable.json") == frame(.unavailable(.agentUnavailable)))
+        #expect(try F.frame("frame.results.error.json") == frame(.error(.invalidOutput)))
+        #expect(try F.frame("frame.results.timeout.json") == frame(.error(.timeout)))
+        #expect(try F.frame("frame.results.cancelled.json") == frame(.cancelled(.superseded)))
+        #expect(try F.frame("frame.state.working-job.json")
+            == .state(status: .working, visitEpoch: 3, detail: nil, permitted: nil, jobId: "job-3a"))
+    }
+
     @Test func capabilitiesWithOptionalFieldsAbsent() throws {
         guard case let .capabilities(caps) = try F.frame("frame.capabilities.minimal.json") else {
             Issue.record("not capabilities"); return
@@ -70,6 +87,8 @@ import Testing
     @Test func acks() throws {
         #expect(try F.frame("frame.ack.ok.json") == .ack(.ok(commandId: "app-3", revision: 2, approvalRevision: 5)))
         #expect(try F.frame("frame.ack.ok-nonresource.json") == .ack(.ok(commandId: "app-4", revision: 0, approvalRevision: 5)))
+        #expect(try F.frame("frame.ack.ok-target.json")
+            == .ack(.ok(commandId: "app-12", revision: 0, approvalRevision: 5, target: "https://docs.example.com/webhooks")))
         #expect(try F.frame("frame.ack.failed.json") == .ack(.failed(commandId: "app-3", code: .staleRevision, revision: 4)))
         #expect(try F.frame("frame.ack.failed-norevision.json") == .ack(.failed(commandId: "app-5", code: .notPermitted, revision: nil)))
         #expect(try F.frame("frame.ack.failed-invalid.json") == .ack(.failed(commandId: "app-10", code: .invalid, revision: nil)))

@@ -22,23 +22,59 @@ import Testing
         #expect(ignored == 0)
     }
 
+    static let resultsHead = #"{"type":"results","coreInstanceId":"core-1","visitEpoch":2,"origin":"https://docs.stripe.com","jobId":"j1","#
+
     @Test func decodesEveryResultsVariant() {
-        let item = #"{"candidateId":"c1","title":"Webhooks","href":"https://docs.stripe.com/webhooks","reason":"matches"}"#
+        let item = #"{"candidateId":"c1","title":"Webhooks","reason":"matches","hostname":"docs.stripe.com"}"#
+        let head = Self.resultsHead
         let (states, ignored) = parse([
-            #"{"type":"results","visitEpoch":2,"status":"ok","items":["# + item + "]}\n",
-            #"{"type":"results","visitEpoch":2,"status":"empty","items":[]}"# + "\n",
-            #"{"type":"results","visitEpoch":3,"status":"unavailable","reason":"service down"}"# + "\n",
-            #"{"type":"results","visitEpoch":3,"status":"error","reason":"timeout"}"# + "\n",
+            head + #""status":"ok","items":["# + item + "]}\n",
+            head + #""status":"empty"}"# + "\n",
+            head + #""status":"unavailable","reason":"busy"}"# + "\n",
+            head + #""status":"error","reason":"timeout"}"# + "\n",
+            head + #""status":"cancelled","reason":"visit_changed"}"# + "\n",
         ])
+        let frame = { (outcome: ResultsOutcome) in
+            PanelState.results(ResultsFrame(coreInstanceId: "core-1", visitEpoch: 2, origin: "https://docs.stripe.com", jobId: "j1", outcome: outcome))
+        }
         #expect(states == [
-            .results(visitEpoch: 2, outcome: .ok([ResultItem(
-                candidateId: "c1", title: "Webhooks",
-                href: "https://docs.stripe.com/webhooks", reason: "matches")])),
-            .results(visitEpoch: 2, outcome: .empty),
-            .results(visitEpoch: 3, outcome: .unavailable("service down")),
-            .results(visitEpoch: 3, outcome: .error("timeout")),
+            frame(.ok([ResultItem(candidateId: "c1", title: "Webhooks", reason: "matches", hostname: "docs.stripe.com")])),
+            frame(.empty),
+            frame(.unavailable(.busy)),
+            frame(.error(.timeout)),
+            frame(.cancelled(.visitChanged)),
         ])
         #expect(ignored == 0)
+    }
+
+    @Test func dropsResultsFramesOutsideTheContract() {
+        let head = Self.resultsHead
+        let item = #"{"candidateId":"c1","title":"t","reason":"r","hostname":"docs.stripe.com"}"#
+        let bad = [
+            head + #""status":"ok","items":[]}"#,                                                         // no items
+            head + #""status":"ok","items":["# + [item, item].joined(separator: ",") + "]}",               // duplicate ids
+            head + #""status":"ok","items":["# + Array(repeating: item, count: 4).joined(separator: ",") + "]}",
+            head + #""status":"ok","items":[{"candidateId":"c1","title":"t","reason":"r","hostname":"h","href":"https://x"}]}"#,
+            head + #""status":"ok","href":"https://x","items":["# + item + "]}",                          // extra key
+            head + #""status":"ok","items":[{"candidateId":"x1","title":"t","reason":"r","hostname":"h"}]}"#,
+            head + #""status":"ok","items":[{"candidateId":"c1","title":"","reason":"r","hostname":"h"}]}"#,
+            head + #""status":"ok","items":[{"candidateId":"c1","title":"t","reason":"\#(String(repeating: "r", count: 141))","hostname":"h"}]}"#,
+            head + #""status":"empty","items":[]}"#,
+            head + #""status":"unavailable","reason":"service down"}"#,
+            head + #""status":"error","reason":"busy"}"#,
+            head + #""status":"cancelled"}"#,
+            head + #""status":"nothing"}"#,
+            #"{"type":"results","visitEpoch":2,"origin":"https://docs.stripe.com","jobId":"j1","status":"empty"}"#,
+            #"{"type":"results","coreInstanceId":"core-1","visitEpoch":2,"origin":"https://docs.stripe.com/x","jobId":"j1","status":"empty"}"#,
+            #"{"type":"results","coreInstanceId":"core-1","visitEpoch":-1,"origin":"https://docs.stripe.com","jobId":"j1","status":"empty"}"#,
+            #"{"type":"results","coreInstanceId":"core-1","visitEpoch":2,"origin":"https://docs.stripe.com","jobId":"j 1","status":"empty"}"#,
+            #"{"type":"state","status":"idle","visitEpoch":2,"jobId":"j1"}"#,                            // jobId only on working
+        ]
+        for line in bad {
+            #expect(PanelState.decode(line: Data(line.utf8)) == nil, "\(line)")
+        }
+        #expect(PanelState.decode(line: Data(#"{"type":"state","status":"working","visitEpoch":2,"jobId":"j1"}"#.utf8))
+            == .state(status: .working, visitEpoch: 2, detail: nil, permitted: nil, jobId: "j1"))
     }
 
     @Test func joinsLinesSplitAcrossChunks() {
@@ -67,11 +103,11 @@ import Testing
             #"{"type":"hello"}"# + "\n",                                           // unknown type
             #"{"type":"state","status":"sleeping"}"# + "\n",                       // unknown status
             #"{"type":"state"}"# + "\n",                                           // missing status
-            #"{"type":"results","status":"ok","items":[]}"# + "\n",                // missing visitEpoch
-            #"{"type":"results","visitEpoch":1,"status":"ok"}"# + "\n",            // missing items
-            #"{"type":"results","visitEpoch":1,"status":"error"}"# + "\n",         // missing reason
+            #"{"type":"results","status":"ok","items":[]}"# + "\n",                // missing identity
+            Self.resultsHead + #""status":"ok"}"# + "\n",                         // missing items
+            Self.resultsHead + #""status":"error"}"# + "\n",                      // missing reason
             #"{"type":"results","visitEpoch":"1","status":"empty","items":[]}"# + "\n", // wrong type
-            #"{"type":"results","visitEpoch":1,"status":"ok","items":[{"title":"x"}]}"# + "\n",
+            Self.resultsHead + #""status":"ok","items":[{"title":"x"}]}"# + "\n",
             #"{"type":"state","status":"idle"}"# + "\n",
         ])
         #expect(states == [.state(status: .idle, visitEpoch: nil, detail: nil)])

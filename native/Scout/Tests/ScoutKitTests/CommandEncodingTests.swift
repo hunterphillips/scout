@@ -28,6 +28,7 @@ import Testing
             ("command.set-auto-acquire.json", .panel(commandId: "app-8", .setAutoAcquire(origin: F.origin, enabled: true, acknowledgeRisk: true, expectedEnabled: false))),
             ("command.set-agent-browser-context.json", .panel(commandId: "app-10", .setAgentBrowserContext(enabled: false, expectedEnabled: true))),
             ("command.refresh-capabilities.json", .panel(commandId: "app-11", .refreshCapabilities)),
+            ("command.open-link.json", .panel(commandId: "app-12", .openLink(coreInstanceId: "core-7f3a9c", visitEpoch: 3, jobId: "job-3a", candidateId: "c1"))),
         ]
         #expect(Set(cases.map(\.0)) == Set(try F.names(prefix: "command.")))
         for (name, command) in cases {
@@ -64,6 +65,7 @@ import Testing
             .setAutoAcquire(origin: origin, enabled: false, acknowledgeRisk: false, expectedEnabled: false),
             .setAgentBrowserContext(enabled: false, expectedEnabled: false),
             .refreshCapabilities,
+            .openLink(coreInstanceId: id, visitEpoch: rev, jobId: id, candidateId: "c" + String(repeating: "z", count: 31)),
         ]
         for request in requests {
             let size = NativeCommand.panel(commandId: id, request).jsonLine().count

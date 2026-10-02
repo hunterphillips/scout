@@ -10,6 +10,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var model = PanelModel()
     private var panel: ScoutPanel?
     private var resendTimer: Timer?
+    /// Opens only links the core authorized for a click; never anything on its own.
+    private let linkOpener = LinkOpener { url in _ = NSWorkspace.shared.open(url) }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let panel = ScoutPanel { [weak self] action in self?.handle(action) }
@@ -28,6 +30,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         sidecar.onPanelState = { [weak self] state in
             guard let self else { return }
             send(model.apply(state))
+            openAuthorizedLinks()
         }
         frontmost.onChange = { [weak self] bundleId in
             self?.sidecar.send(.frontmost(bundleId: bundleId, date: Date()))
@@ -84,6 +87,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             send(model.retry(id))
         case let .dismiss(id):
             model.dismiss(id)
+        case let .openResult(candidateId):
+            send(model.openResult(candidateId))
         }
         render()
     }
@@ -95,6 +100,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private func send(_ commands: [NativeCommand]) {
         for command in commands {
             model.markSent(command, sidecar.send(command))
+        }
+        render()
+    }
+
+    /// Opens what the core authorized for the user's clicks (open_link acks), each checked again.
+    private func openAuthorizedLinks() {
+        let requests = model.takeLinksToOpen()
+        guard !requests.isEmpty else { return }
+        for request in requests {
+            if let refusal = linkOpener.open(request.href, origin: request.origin) {
+                model.linkRefused(commandId: request.commandId, refusal)
+            }
         }
         render()
     }
