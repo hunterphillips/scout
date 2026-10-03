@@ -77,21 +77,25 @@ test run out of `~/.scout`.
    next to a site (GitHub and Stripe are listed) or type another host. Scout asks Chrome
    for that one site only. Clicking the button again closes the panel.
 
-To get suggestions on a site, open **This site** while you're on it and turn on
-**Suggest links from this site**. It applies at once, including on the page in front of
-you. Each settled visit to that site then spends one short job on Hunter's subscription.
-Every site starts with it off.
+To get suggestions on a site, open **Page** while you're on it and turn on
+**Suggest on <host>** in the tray at the bottom. It applies at once, including on the
+page in front of you. Each settled visit to that site then spends one short job on
+Hunter's subscription. Every site starts with it off.
 
-What you should see: **This site** names the current host and says whether Scout is
-allowed there. After three seconds on an allowed site that publishes `llms.txt`, its
-**Offers** list shows the resource; the preview streams the exact text, and Approve
-enables once the whole text has arrived and its hash checks out. **Approved for your
-agent** lists what you approved, each with Revoke. **Settings** has Pause, GitHub issue
-capture, and the switch that lets the agent read the current site and recent GitHub
-issues. **Activity**
-lists the agent's reads; **Problems** lists failed commands and export conflicts. On a
-destination, **Results** shows the suggested links after the job finishes, or says why
-there are none; a link opens in a new tab only when clicked. Pause from the panel or the menu bar; both show the same
+What you should see: the panel has four destinations in its bottom nav: **Page**,
+**Sites**, **Activity**, **Settings**. On **Page**, the tray names the current host: an
+**Allow Scout on <host>** row if Scout isn't allowed there, otherwise the suggestions
+switch. After three seconds on an allowed site that publishes `llms.txt`, a pill says the
+site has files for your agent; **Review** opens a card that streams the exact text, and
+Approve enables once the whole text has arrived and its hash checks out (**Not now**
+declines; **Next** steps through the files). Below it, what you approved is listed, each
+with Revoke. **Settings** has Pause, GitHub issue capture, the switch that lets the agent
+read the current site and recent GitHub issues, and Diagnostics. **Activity** lists
+problems (failed commands, export conflicts) first, then the agent's reads. On a
+destination, **Page** shows up to three suggested links after the job finishes, or says
+why there are none; a link opens in a new tab only when clicked. With the panel closed,
+the toolbar badge counts new links (blue) or files to review (amber), and the icon turns
+grey while Scout is paused. Pause from the panel or the menu bar; both show the same
 state. Quitting the app makes the panel say the core is unavailable; relaunching
 reconnects on its own.
 
