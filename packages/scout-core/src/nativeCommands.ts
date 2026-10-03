@@ -1,5 +1,5 @@
 // Executes the mutation commands Scout's window sends (approve, decline, revoke, auto-acquire,
-// the browser-context grant, refresh) and answers each with exactly one ack.
+// the browser-context grant, a site's recommendations switch, refresh) and answers each with exactly one ack.
 //
 // Order: a success ack goes out only after the change is persisted (the store's write, or the
 // config.json rename), and before the export sync it may start has finished (the store's
@@ -35,6 +35,10 @@
 //   as the agent API reads it; an enable that the agent API does not read back as on (another
 //   invalid key in config.json) puts the previous config.json back and acks `invalid`, so a
 //   later repair of that key cannot turn the grant on without the user.
+//   set_destination (P4.6, the side panel's per-site recommendations switch) compares with
+//   config.json `destinations` as it is on disk (wiring/destinations.ts); `invalid` when the list
+//   is full or the file's `destinations` is malformed, `store_error` when config.json is not a
+//   regular file the user owns or the write failed, `unavailable` without a writer.
 //   Toggles carry no revision, so a boolean compare cannot tell a retried enable from a new one
 //   after an intervening disable (enable, disable, retried enable). Within one core the ID cache
 //   answers the retry; the app never retries a toggle across a core restart.
@@ -54,6 +58,7 @@ import { DecisionError, StaleApprovalError } from "./capabilities/decisions.js";
 import { type CapabilityStore, type ExportSync, StoreReadOnlyError } from "./capabilities/store.js";
 import type { Diagnostics } from "./diagnostics.js";
 import type { ResultRegistry } from "./results.js";
+import type { SetDestinationOutcome } from "./wiring/destinations.js";
 
 export const COMMAND_CACHE_SIZE = 256;
 
@@ -71,6 +76,12 @@ export interface NativeCommandsOptions {
   onStoreChanged: () => void;
   /** The browser-context grant was written; `enabled` is what the agent API now reads. */
   onGrantChanged: (enabled: boolean) => void;
+  /**
+   * `set_destination`: write and apply one host's recommendations switch (compare-and-set on
+   * `expectedEnabled`); its `grant` frame goes out from the caller. Without it the command acks
+   * `unavailable`.
+   */
+  setDestination?: (origin: string, enabled: boolean, expectedEnabled: boolean) => SetDestinationOutcome;
   /** `refresh_capabilities`: send the capabilities view now. */
   refreshCapabilities: () => void;
   /** Resolves `open_link`; without it every `open_link` acks `unavailable`. */
@@ -184,6 +195,11 @@ export function createNativeCommands(options: NativeCommandsOptions): NativeComm
         options.onGrantChanged(cmd.enabled);
         return { ack: ok(id, 0) };
       }
+      case "set_destination": {
+        if (!options.setDestination) return { ack: failed(id, "unavailable") };
+        const r = options.setDestination(cmd.origin, cmd.enabled, cmd.expectedEnabled);
+        return { ack: r.ok ? ok(id, 0) : failed(id, r.code) };
+      }
       case "refresh_capabilities":
         options.refreshCapabilities();
         return { ack: ok(id, 0) };
@@ -224,7 +240,7 @@ export function createNativeCommands(options: NativeCommandsOptions): NativeComm
       if (!ack.ok && cache.get(key)?.result === attempt) cache.delete(key);
       emit(ack, cmd.type);
       // The changed view follows the ack; the export outcome (conflicts) follows the sync.
-      if (ack.ok && cmd.type !== "set_agent_browser_context" && cmd.type !== "refresh_capabilities" && cmd.type !== "open_link") {
+      if (ack.ok && cmd.type !== "set_agent_browser_context" && cmd.type !== "set_destination" && cmd.type !== "refresh_capabilities" && cmd.type !== "open_link") {
         options.onStoreChanged();
         void cleanup?.then(options.onStoreChanged);
       }

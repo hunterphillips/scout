@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { GRANT_DESTINATIONS_MAX, PanelStateSchema, PREVIEW_CHUNK_MAX_BYTES, type PanelCapabilities, type PanelPreviewChunk, type PanelState } from "@scout/contracts";
@@ -9,7 +9,8 @@ import { emptyState } from "./capabilities/decisions.js";
 import { createCapabilityStore } from "./capabilities/store.js";
 import type { Timers } from "./clock.js";
 import type { DiagnosticFields, Diagnostics } from "./diagnostics.js";
-import { createPanelChannel, type PanelStore } from "./panelChannel.js";
+import { createPanelChannel, type PanelChannelOptions, type PanelStore } from "./panelChannel.js";
+import { createLiveDestinations } from "./wiring/destinations.js";
 import { createResultRegistry, type ResultRegistry } from "./results.js";
 
 function fakeTimers() {
@@ -59,6 +60,7 @@ function setup(
     results?: ResultRegistry;
     resendState?: () => void;
     readDestinations?: () => readonly string[];
+    setDestination?: PanelChannelOptions["setDestination"];
   } = {},
 ) {
   const t = fakeTimers();
@@ -81,6 +83,7 @@ function setup(
     ...(overrides.results ? { results: overrides.results } : {}),
     ...(overrides.resendState ? { resendState: overrides.resendState } : {}),
     ...(overrides.readDestinations ? { readDestinations: overrides.readDestinations } : {}),
+    ...(overrides.setDestination ? { setDestination: overrides.setDestination } : {}),
     clock: { now: () => 0 },
     timers: t.timers,
     diagnostics,
@@ -113,6 +116,43 @@ describe("panel channel", () => {
     const got: PanelState[] = [];
     s.channel.repaint({ id: "relay-1", kind: "relay", send: (f) => void got.push(f) }, { type: "state", status: "disconnected" });
     expect(got[0]).toMatchObject({ type: "grant", destinations: expect.arrayContaining(["https://www.peakdesign.com"]) });
+  });
+
+  it("set_destination (P4.6): writes config.json, sends the new list as a grant frame before the ack, idempotent per sender; stale is stale_revision", async () => {
+    const home = mkdtempSync(join(tmpdir(), "spc-dst-"));
+    try {
+      writeFileSync(join(home, "config.json"), JSON.stringify({ agentBrowserContext: true, destinations: [] }));
+      let channel: ReturnType<typeof setup>["channel"] | null = null;
+      const live = createLiveDestinations({ home, initial: [], onChanged: () => channel?.destinationsChanged(), diagnostics: { failures: 0, event: () => {} }, timers: { setTimeout: () => 0, clearTimeout: () => {} }, watch: () => ({ close: () => {} }) });
+      const s = setup({ readDestinations: () => live.current(), setDestination: (o, e, x) => live.set(o, e, x) });
+      channel = s.channel;
+      s.channel.start();
+      expect(s.frames[0]).toEqual({ type: "grant", agentBrowserContext: true, destinations: [] });
+      s.frames.length = 0;
+      const on = { type: "set_destination" as const, commandId: "d1", origin: "https://docs.stripe.com", enabled: true, expectedEnabled: false };
+      await s.channel.handle(on, "relay-1");
+      expect(s.frames).toEqual([
+        { type: "grant", agentBrowserContext: true, destinations: ["https://docs.stripe.com"] },
+        { type: "ack", commandId: "d1", ok: true, revision: 0, approvalRevision: 0 },
+      ]);
+      expect(JSON.parse(readFileSync(join(home, "config.json"), "utf8"))).toEqual({ agentBrowserContext: true, destinations: ["docs.stripe.com"] });
+      // The same ID from the same sender: the first ack again, nothing written.
+      s.frames.length = 0;
+      await s.channel.handle(on, "relay-1");
+      expect(s.frames).toEqual([{ type: "ack", commandId: "d1", ok: true, revision: 0, approvalRevision: 0 }]);
+      // A new command from what the user saw before: stale.
+      await s.channel.handle({ ...on, commandId: "d2" }, "relay-1");
+      expect(s.frames.at(-1)).toEqual({ type: "ack", commandId: "d2", ok: false, code: "stale_revision" });
+      live.close();
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("set_destination without a writer acks unavailable", async () => {
+    const s = setup();
+    await s.channel.handle({ type: "set_destination", commandId: "d1", origin: "https://docs.stripe.com", enabled: true, expectedEnabled: false });
+    expect(s.frames).toEqual([{ type: "ack", commandId: "d1", ok: false, code: "unavailable" }]);
   });
 
   it("sends an empty destinations list when none is configured", () => {

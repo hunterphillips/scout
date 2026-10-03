@@ -1,5 +1,6 @@
 // When recommendation jobs run. One job at a time per core, for the current visit only, and
-// only for a recommendation-enabled host (`config.destinations`). The coordinator tells the
+// only for a recommendation-enabled host (`config.destinations`; since P4.6 the list is live:
+// `onDestinationsChanged` replaces it, and the next settle reads the new one). The coordinator tells the
 // scheduler about settles, visit changes, pause, sensor loss, permissions, accepted activity,
 // the browser-context grant, revoked resources, profile changes and stop; the scheduler talks
 // only to the result registry, the snapshot registry, the job pipeline (pipeline.ts), and the
@@ -33,6 +34,10 @@
 //     later revocation publishes `cancelled: revoked`. Repeated changes never chain calls.
 //   - irrelevant: any other permissions or grant change. The job's baselines move to the new
 //     revisions, so its answer still counts.
+//   - the job's host taken off the destinations (the side panel's switch, or a hand edit of
+//     config.json): the job is cancelled `revoked` and the cancel is published, with no
+//     replacement (the visit's budget is dropped). Recommendations being turned off is a
+//     withdrawn consent, the same code as a revoked grant.
 //   - a profile change (a new profile needs a new adapter): the job is cancelled `superseded`
 //     and, under the same one-replacement rule and budget, the visit's replacement starts on
 //     the new profile once the cancelled run has ended. With the replacement used, or under
@@ -145,6 +150,11 @@ export interface JobScheduler {
   /** A resource was revoked (the snapshot registry already released the snapshots pinning it). */
   onResourceRevoked(resourceId: string): void;
   /**
+   * The recommendation-enabled hosts changed. Later settles use the new list; a running job (and
+   * the visit's budget) whose host is no longer on it is cancelled `revoked`, published.
+   */
+  onDestinationsChanged(hosts: readonly string[]): void;
+  /**
    * The agent profile changed (a new fingerprint, or new tools): the running job is cancelled
    * `superseded` and the visit's one replacement starts on the new profile (or, with the
    * replacement used or no time left, the cancel is published); later jobs and resume-cache
@@ -197,7 +207,7 @@ function toEntries(stored: readonly StoredActivity[]): ActivityEntry[] {
 export function createJobScheduler(options: JobSchedulerOptions): JobScheduler {
   const { clock, diagnostics, view } = options;
   const profile = { ...options.profile };
-  const destinations = new Set(options.destinations);
+  let destinations = new Set(options.destinations);
   let budget: Budget | null = null;
   let running: Running | null = null;
   let stopped = false;
@@ -494,6 +504,13 @@ export function createJobScheduler(options: JobSchedulerOptions): JobScheduler {
       const job = running;
       if (job === null || job.cancelled !== null || job.snapshot === null) return;
       if (job.snapshot.approved.some((a) => a.resourceId === resourceId)) relevantChange("revoked");
+    },
+    onDestinationsChanged(hosts) {
+      destinations = new Set(hosts);
+      if (budget !== null && !isEnabled(budget.visit.origin)) budget = null;
+      const job = running;
+      if (job === null || job.cancelled !== null || isEnabled(job.visit.origin)) return;
+      cancel("revoked", "publish");
     },
     onProfileChanged(next) {
       if (typeof next === "string") profile.fingerprint = next;

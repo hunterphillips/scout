@@ -2,10 +2,14 @@
 //
 // `destinations` is the list of hosts where recommendations are enabled (consumed in
 // Phase 3). It no longer decides which sites are visits or can have capabilities: that is
-// Chrome's per-origin grant, reported by the extension's permissions snapshot.
+// Chrome's per-origin grant, reported by the extension's permissions snapshot. Since P4.6 the
+// core writes it too (`writeDestinations`, the side panel's per-site switch) and picks up a
+// hand edit while it runs (wiring/destinations.ts).
 
-import { readFileSync } from "node:fs";
+import { lstatSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { GRANT_DESTINATIONS_MAX } from "@scout/contracts";
+import { writeFileAtomic } from "./capabilities/atomicWrite.js";
 import { CHROME_BUNDLE_ID } from "./visitTracker.js";
 
 // Recommendations start off for every origin: a destination spends the user's agent quota on
@@ -98,4 +102,75 @@ function isBareHost(d: unknown): boolean {
 /** The `destinations` field alone; see readConfig. */
 export function readDestinations(home: string): readonly string[] {
   return readConfig(home).destinations;
+}
+
+/** Why `writeDestinations` wrote nothing. */
+export class DestinationsWriteError extends Error {
+  constructor(
+    readonly code:
+      /** config.json is a symlink, a directory or anything but a regular file, or another user's. */
+      | "not_regular"
+      /** Unreadable, not JSON, not an object, or its `destinations` is malformed. */
+      | "invalid"
+      /** Enabling one more host would pass GRANT_DESTINATIONS_MAX. */
+      | "full"
+      | "io",
+  ) {
+    super(code);
+    this.name = "DestinationsWriteError";
+  }
+}
+
+/**
+ * Turn recommendations for `host` on or off in config.json `destinations` and return the list as
+ * written. The rest of the file is kept: every other key, unknown ones included, with its value
+ * (re-serialized, two-space indent). The list is deduped in order; an enable appends. A missing
+ * file becomes one holding only `destinations`. The write is atomic (a 0600 temp file renamed
+ * over the target). Refuses (writing nothing) when config.json is not a regular file this user
+ * owns, when it or its `destinations` is malformed, or when the list would pass
+ * GRANT_DESTINATIONS_MAX. `check` gets the list read from disk before the change (the caller's
+ * compare-and-set); when it returns false nothing is written and `written` is false.
+ */
+export function writeDestinations(home: string, host: string, enabled: boolean, check?: (current: readonly string[]) => boolean): { written: boolean; destinations: string[] } {
+  const path = join(home, "config.json");
+  let raw: string | null = null;
+  try {
+    const st = lstatSync(path);
+    if (!st.isFile() || (typeof process.getuid === "function" && st.uid !== process.getuid())) throw new DestinationsWriteError("not_regular");
+    raw = readFileSync(path, "utf8");
+  } catch (e) {
+    if (e instanceof DestinationsWriteError) throw e;
+    if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw new DestinationsWriteError("invalid");
+  }
+  let config: Record<string, unknown> = {};
+  if (raw !== null) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      throw new DestinationsWriteError("invalid");
+    }
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) throw new DestinationsWriteError("invalid");
+    config = parsed as Record<string, unknown>;
+  }
+  let current: string[] = [];
+  if ("destinations" in config) {
+    const d = config.destinations;
+    if (!Array.isArray(d) || !d.every(isBareHost)) throw new DestinationsWriteError("invalid");
+    current = [...new Set(d as string[])];
+  }
+  if (check && !check(current)) return { written: false, destinations: current };
+  let next: string[];
+  if (enabled) {
+    if (current.includes(host)) next = current;
+    else if (current.length >= GRANT_DESTINATIONS_MAX) throw new DestinationsWriteError("full");
+    else next = [...current, host];
+  } else next = current.filter((h) => h !== host);
+  config.destinations = next;
+  try {
+    writeFileAtomic(path, `${JSON.stringify(config, null, 2)}\n`);
+  } catch {
+    throw new DestinationsWriteError("io");
+  }
+  return { written: true, destinations: next };
 }

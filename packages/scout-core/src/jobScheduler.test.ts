@@ -470,6 +470,54 @@ describe("job scheduler: cancellation", () => {
   });
 });
 
+describe("job scheduler: live destinations (P4.6)", () => {
+  it("a host enabled while the core runs gets a job on its next settle; until then it is not_enabled", () => {
+    const h = harness({ destinations: [] });
+    h.settle();
+    expect(h.agent.calls).toHaveLength(0);
+    expect(h.named("job_skipped")).toEqual([{ epoch: 3, reason: "not_enabled" }]);
+    h.scheduler.onDestinationsChanged(["docs.stripe.com"]);
+    expect(h.scheduler.isEnabled(ORIGIN)).toBe(true);
+    expect(h.agent.calls).toHaveLength(0); // the next settle, not this one
+    h.world.visit = { ...h.world.visit!, epoch: 4 } as ActiveVisit;
+    h.scheduler.onVisitChanged();
+    h.settle();
+    expect(h.agent.calls).toHaveLength(1);
+    expect(h.states()).toEqual(["working:job1"]);
+  });
+
+  it("the running job's host turned off: cancelled revoked and published, no replacement, the budget gone", async () => {
+    const h = harness();
+    h.settle();
+    const call = h.agent.calls[0]!;
+    h.scheduler.onDestinationsChanged([]);
+    expect(call.options.signal?.aborted).toBe(true);
+    expect(call.options.signal?.reason).toBe("revoked");
+    expect(h.releases[0]).toMatchObject({ reason: "cancelled" });
+    await flush();
+    expect(h.states()).toEqual(["working:job1", "idle", "results:cancelled:job1"]);
+    expect(h.frames.at(-1)).toMatchObject({ type: "results", status: "cancelled", reason: "revoked" });
+    expect(h.agent.calls).toHaveLength(1);
+    expect(h.named("job_cancelled")).toEqual([{ reason: "revoked", epoch: 3 }]);
+    expect(h.scheduler.running).toBeNull();
+    // Off means off: a later settle for the host is not_enabled.
+    h.settle();
+    expect(h.agent.calls).toHaveLength(1);
+    expect(h.named("job_skipped")).toEqual([{ epoch: 3, reason: "not_enabled" }]);
+  });
+
+  it("another host's change leaves the running job alone", async () => {
+    const h = harness();
+    h.settle();
+    h.scheduler.onDestinationsChanged(["docs.stripe.com", "www.peakdesign.com"]);
+    h.scheduler.onDestinationsChanged(["docs.stripe.com"]);
+    expect(h.agent.calls[0]!.options.signal?.aborted).toBe(false);
+    h.agent.calls[0]!.answer(ok(["c1"]));
+    await flush();
+    expect(h.states()).toEqual(["working:job1", "idle", "results:ok:job1"]);
+  });
+});
+
 describe("job scheduler: replacement", () => {
   it("an activity accept the job could see cancels it (superseded) and starts ONE replacement with a fresh snapshot; a second accept is ignored", async () => {
     const h = harness();

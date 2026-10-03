@@ -14,10 +14,13 @@
 //        running job (its token refused on agent.sock, its process gone, the window out of
 //        `working`), GitHub grant loss clears captured activity, and no fixture text reaches
 //        the diagnostics file or the core's stderr.
+//   P4.6: the side panel's per-site recommendations switch (`set_destination`) and a hand edit
+//        of config.json take effect in the running core: a job on the next settled visit after
+//        on, a running job cancelled `revoked` by off, the grant frame carrying the new list.
 
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { endianness, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -134,12 +137,12 @@ function saveProfile(home, json) {
 }
 
 /** A temp home: the fake agent (mode per launch from `fake-mode`), its backend, a fresh cached catalog, the site enabled. */
-async function makeHome(prefix, { browserContext = true } = {}) {
+async function makeHome(prefix, { browserContext = true, destinations = [HOSTNAME] } = {}) {
   const home = mkdtempSync(join(tmpdir(), prefix));
   const userHome = join(home, "u");
   mkdirSync(join(userHome, ".claude"), { recursive: true });
   mkdirSync(join(home, "bin"));
-  writeFileSync(join(home, "config.json"), JSON.stringify({ extensionId: EXT_ID, destinations: [HOSTNAME], agentBrowserContext: browserContext }));
+  writeFileSync(join(home, "config.json"), JSON.stringify({ extensionId: EXT_ID, destinations, agentBrowserContext: browserContext }));
   writeFileSync(join(home, "fake-mode"), "ok");
   writeFileSync(join(home, "backend-mode"), "honest");
   const claudePath = join(home, "bin", "claude");
@@ -682,4 +685,105 @@ describe.skipIf(!BUILT)("Phase 3 verification e2e: B7/B12/B13 closing paths end 
     expect(leaked(b, home, [...SECRETS, "P3V-SECRET-RESOURCE"])).toBeUndefined();
     expect(new Set(b.dns.hosts())).toEqual(new Set([HOSTNAME]));
   }, 60_000);
+});
+
+describe.skipIf(!BUILT)("P4.6 recommendations switch: set_destination and a hand edit act on the running core, no restart", () => {
+  const children = [];
+  let home;
+  let b;
+  let page = 0;
+  const nextPage = () => `/docs/switch-${++page}`;
+  const config = () => JSON.parse(readFileSync(join(home, "config.json"), "utf8"));
+  const grants = () => b.panel().filter((f) => f.type === "grant");
+  let ids = 0;
+  /** Send set_destination and wait for its ack. */
+  async function setDestination(enabled, expectedEnabled) {
+    const commandId = `dst-${++ids}`;
+    b.command({ type: "set_destination", commandId, origin: SITE, enabled, expectedEnabled });
+    await until(() => b.panel().some((f) => f.type === "ack" && f.commandId === commandId), `the ${commandId} ack`);
+    return b.panel().find((f) => f.type === "ack" && f.commandId === commandId);
+  }
+  const launches = () => b.fake().filter((l) => typeof l.pid === "number" && Array.isArray(l.argv));
+
+  beforeAll(async () => {
+    ({ home } = await makeHome("scout-p46-", { destinations: [] }));
+    const env = { PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: join(home, "u"), USER: "p3v", LOGNAME: "p3v", LANG: "en_US.UTF-8", TMPDIR: tmpdir(), SCOUT_HOME: home };
+    b = await boot(home, env, children);
+    b.dns.set("loopback");
+    b.grant([`${SITE}/*`], false);
+  }, 60_000);
+
+  afterAll(async () => {
+    if (b && b.core.exitCode === null) {
+      b.core.stdin.end();
+      await Promise.race([b.exited, new Promise((r) => setTimeout(r, 8_000))]);
+    }
+    for (const c of children.splice(0)) if (c.exitCode === null && c.signalCode === null) c.kill("SIGKILL");
+    if (home) rmSync(home, { recursive: true, force: true });
+  });
+
+  it("off by default: a settled visit runs no job; turning it on writes config.json (other keys kept, 0600), sends the grant frame, and the next settled visit runs a job", async () => {
+    expect(grants().at(-1)).toMatchObject({ destinations: [] });
+    b.focus(8, nextPage());
+    await until(() => b.diagEvents().some((e) => e.event === "job_skipped" && e.reason === "not_enabled"), "job_skipped not_enabled");
+    expect(b.panel().some((f) => f.type === "state" && f.status === "working")).toBe(false);
+
+    writeFileSync(join(home, "fake-mode"), "ok");
+    const ack = await setDestination(true, false);
+    expect(ack).toMatchObject({ ok: true, revision: 0 });
+    expect(grants().at(-1)).toMatchObject({ type: "grant", agentBrowserContext: true, destinations: [SITE] });
+    expect(config()).toEqual({ extensionId: EXT_ID, destinations: [HOSTNAME], agentBrowserContext: true });
+    expect(statSync(join(home, "config.json")).mode & 0o777).toBe(0o600);
+    expect(b.diagEvents().find((e) => e.event === "destination_set")).toMatchObject({ origin: SITE, enabled: true });
+
+    const { jobId } = await startJob(b, 8, nextPage());
+    expect((await resultsOf(b, jobId)).jobId).toBe(jobId);
+    expect(b.core.exitCode).toBeNull();
+  }, 60_000);
+
+  it("turning it off cancels the running job for the host (cancelled revoked), ends its CLI, and a stale switch is stale_revision", async () => {
+    writeFileSync(join(home, "fake-mode"), "hang");
+    const n = launches().length;
+    const { jobId, epoch } = await startJob(b, 8, nextPage());
+    await until(() => launches().length > n, "the job's CLI");
+    const pid = launches().at(-1).pid;
+    expect(await setDestination(false, true)).toMatchObject({ ok: true });
+    await until(() => b.diagEvents().some((e) => e.event === "job_finished" && e.epoch === epoch), "job_finished");
+    expect(b.diagEvents().find((e) => e.event === "job_finished" && e.epoch === epoch)).toMatchObject({ status: "cancelled", reason: "revoked" });
+    expect(await resultsOf(b, jobId)).toMatchObject({ status: "cancelled", reason: "revoked" });
+    await until(() => !alive(pid), "the cancelled CLI to end", 5_000);
+    expect(grants().at(-1)).toMatchObject({ destinations: [] });
+    expect(config().destinations).toEqual([]);
+    expect(await setDestination(false, true)).toMatchObject({ ok: false, code: "stale_revision" });
+  }, 60_000);
+
+  it("a hand edit of config.json is picked up live: on starts jobs, off cancels the running one", async () => {
+    const save = (json) => {
+      writeFileSync(join(home, ".config.tmp"), JSON.stringify(json), { mode: 0o600 });
+      renameSync(join(home, ".config.tmp"), join(home, "config.json"));
+    };
+    const before = grants().length;
+    save({ ...config(), destinations: [HOSTNAME] });
+    await until(() => grants().slice(before).some((g) => g.destinations?.[0] === SITE), "the grant frame for the hand edit");
+    const n = launches().length;
+    const { jobId, epoch } = await startJob(b, 8, nextPage());
+    await until(() => launches().length > n, "the job's CLI");
+    save({ ...config(), destinations: [] });
+    await until(() => b.diagEvents().some((e) => e.event === "job_finished" && e.epoch === epoch), "job_finished after the hand edit");
+    expect(await resultsOf(b, jobId)).toMatchObject({ status: "cancelled", reason: "revoked" });
+    expect(b.diagEvents().filter((e) => e.event === "destinations_changed").length).toBeGreaterThanOrEqual(2);
+  }, 60_000);
+
+  it("a config.json that is not a regular file is refused with store_error and left alone", async () => {
+    const real = join(home, "real-config.json");
+    writeFileSync(real, JSON.stringify(config()), { mode: 0o600 });
+    rmSync(join(home, "config.json"));
+    symlinkSync(real, join(home, "config.json"));
+    const before = readFileSync(real, "utf8");
+    expect(await setDestination(true, false)).toMatchObject({ ok: false, code: "store_error" });
+    expect(readFileSync(real, "utf8")).toBe(before);
+    expect(lstatSync(join(home, "config.json")).isSymbolicLink()).toBe(true);
+    rmSync(join(home, "config.json"));
+    writeFileSync(join(home, "config.json"), before, { mode: 0o600 });
+  }, 30_000);
 });

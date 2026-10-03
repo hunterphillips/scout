@@ -5,8 +5,9 @@
 // registry of every job process tree the core started (agents/processTree.ts ProcessTracker).
 //
 // The preflight starts at once only when some host is recommendation-enabled
-// (`config.destinations`); otherwise no `claude` runs at start, and the first job (after the
-// first enabled settle) starts it and waits for it (claudeJob.ts).
+// (`config.destinations`), or (P4.6) as soon as the first host is enabled while the core runs;
+// otherwise no `claude` runs, and the first job (after the first enabled settle) starts it and
+// waits for it (claudeJob.ts).
 //
 // The browser-context grant reaches the scheduler through the `grant` frames the panel channel
 // emits (the same signal the window gets): `observePanel` sees every frame, and each change
@@ -71,7 +72,7 @@ export interface JobWiringOptions {
   home: string;
   /** The core's environment (the adapter's launch profile and preflight read it). */
   env: NodeJS.ProcessEnv;
-  /** Recommendation-enabled hosts (`config.destinations`). */
+  /** Recommendation-enabled hosts at start (`config.destinations`); later lists come through `destinationsChanged`. */
   destinations: readonly string[];
   coreInstanceId: string;
   clock: Clock;
@@ -98,6 +99,11 @@ export interface JobWiring {
   createFetchSession(origin: string): OriginFetchSession;
   /** The parsers for a session `createFetchSession` made: refused once it is cancelled. */
   parsersFor(session: OriginFetchSession): CatalogParsers;
+  /**
+   * The recommendation-enabled hosts changed (wiring/destinations.ts): the scheduler gets the new
+   * list, and the first host enabled while none was starts the preflight.
+   */
+  destinationsChanged(hosts: readonly string[]): void;
   /** Every panel frame passes here: a browser-context grant change reaches the scheduler. */
   observePanel(state: PanelState): void;
   /** Rises on every browser-context grant change after the first frame. */
@@ -167,7 +173,8 @@ export function createJobWiring(o: JobWiringOptions): JobWiring {
   /** Replaced adapters' abortAll(), awaited by abortJobs(). */
   const retired = new Set<Promise<void>>();
   // Off the event loop; the first job waits for it. With no enabled host, the first job starts it.
-  if (o.destinations.length > 0) void adapter?.refreshPreflightAsync();
+  let destinations = o.destinations;
+  if (destinations.length > 0) void adapter?.refreshPreflightAsync();
 
   // The grant as the window was last told it.
   let shownGrant: boolean | null = null;
@@ -225,7 +232,7 @@ export function createJobWiring(o: JobWiringOptions): JobWiring {
       retired.add(p);
       void p.finally(() => retired.delete(p));
     }
-    if (adapter !== null && o.destinations.length > 0) void adapter.refreshPreflightAsync();
+    if (adapter !== null && destinations.length > 0) void adapter.refreshPreflightAsync();
   };
 
   const sessions = new WeakMap<OriginFetchSession, CatalogParsers>();
@@ -270,6 +277,13 @@ export function createJobWiring(o: JobWiringOptions): JobWiring {
     },
     parsersFor(session) {
       return sessions.get(session) ?? parsePool.parsers;
+    },
+    destinationsChanged(hosts) {
+      if (stopped) return;
+      const wasNone = destinations.length === 0;
+      destinations = hosts;
+      scheduler.onDestinationsChanged(hosts);
+      if (wasNone && hosts.length > 0) void adapter?.refreshPreflightAsync();
     },
     observePanel(state) {
       if (state.type !== "grant" || state.agentBrowserContext === shownGrant) return;

@@ -112,6 +112,7 @@ import { createPanelSinks, type PanelSink } from "./panelSinks.js";
 import { createResultRegistry } from "./results.js";
 import { createSocketServer, SocketServerError } from "./socketServer.js";
 import { unlinkIfSameInode } from "./localSocketFiles.js";
+import { createLiveDestinations } from "./wiring/destinations.js";
 import { createJobWiring, type JobWiring } from "./wiring/jobs.js";
 
 /** Hard cap on shutdown: exit anyway if closing takes longer. */
@@ -256,12 +257,25 @@ export async function runStdio(deps: StdioDeps): Promise<StdioCore> {
     isPermitted: (origin) => coordinator.permissions.isPermitted(origin),
     diagnostics,
   });
+  // Recommendation destinations, live (P4.6): the side panel's switch writes them, a hand edit of
+  // config.json is picked up; each change reaches the scheduler first (a running job for a host
+  // turned off is cancelled), then every sink as a `grant` frame.
+  const destinations = createLiveDestinations({
+    home,
+    initial: config.destinations,
+    onChanged: (hosts) => {
+      jobs?.destinationsChanged(hosts);
+      panel?.destinationsChanged();
+    },
+    diagnostics,
+  });
   panel = createPanelChannel({
     store,
     coreInstanceId,
     exportConflicts: () => exporter?.manifest().conflicts ?? [],
     readBrowserContextGrant: () => readBrowserContextGrant(home),
-    readDestinations: () => config.destinations,
+    readDestinations: () => destinations.current(),
+    setDestination: (origin, enabled, expectedEnabled) => destinations.set(origin, enabled, expectedEnabled),
     writeBrowserContextGrant: (enabled) => writeBrowserContextGrant(home, enabled),
     getAudit: () => audit.entries(),
     isPermitted: (origin) => coordinator.permissions.isPermitted(origin),
@@ -283,7 +297,7 @@ export async function runStdio(deps: StdioDeps): Promise<StdioCore> {
   const jobWiring = createJobWiring({
     home,
     env: deps.env,
-    destinations: config.destinations,
+    destinations: destinations.current(),
     coreInstanceId,
     clock,
     diagnostics,
@@ -447,6 +461,7 @@ export async function runStdio(deps: StdioDeps): Promise<StdioCore> {
   const stopAccepting = (): void => {
     coordinator.stop();
     panelChannel.stop();
+    destinations.close();
     rl.close();
     // Before anything is awaited: a preflight child blocked on `claude` must never hold the exit.
     jobWiring.killPreflight();

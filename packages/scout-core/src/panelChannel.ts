@@ -7,7 +7,8 @@
 // out (debounced) whenever `capabilitiesChanged()` is called (the coordinator calls it on
 // permission, visit, and ingest changes; commands call it after their ack), `audit` (debounced
 // AUDIT_DEBOUNCE_MS, skipped when unchanged) on `auditChanged()`, and `grant` when the user
-// toggles it. A `preview` command answers with a chunk, or with a failure ack.
+// toggles it or the recommendation destinations change (`destinationsChanged()`, P4.6).
+// A `preview` command answers with a chunk, or with a failure ack.
 //
 // Recommendation results (results.ts): a publish goes out as a `results` frame (hrefs
 // stripped); a non-silent clear that dropped a result asks the coordinator to send its current
@@ -41,6 +42,7 @@ import { createCapabilitiesEmitter } from "./panelCapabilities.js";
 import { createPreviewStream, type PreviewStore } from "./previewStream.js";
 import type { PanelSink } from "./panelSinks.js";
 import { type ResultRegistry, toFrame } from "./results.js";
+import type { SetDestinationOutcome } from "./wiring/destinations.js";
 
 export const AUDIT_DEBOUNCE_MS = 250;
 
@@ -60,6 +62,8 @@ export interface PanelChannelOptions {
    */
   readDestinations?: () => readonly string[];
   writeBrowserContextGrant: (enabled: boolean) => GrantWrite;
+  /** `set_destination` (wiring/destinations.ts `set`); without it the command acks `unavailable`. */
+  setDestination?: (origin: string, enabled: boolean, expectedEnabled: boolean) => SetDestinationOutcome;
   getAudit: () => readonly ReadAuditEntry[];
   isPermitted: (origin: string) => boolean;
   currentOrigin: () => string | null;
@@ -87,6 +91,8 @@ export interface PanelChannel {
   handle(cmd: PanelCommand, scope?: string): Promise<void>;
   capabilitiesChanged(): void;
   auditChanged(): void;
+  /** The recommendation destinations changed: send a `grant` frame carrying the new list to every sink. */
+  destinationsChanged(): void;
   /** Release the pins of abandoned previews. */
   sweepExpired(): void;
   /** Stop sending frames and release every preview pin. Idempotent. */
@@ -158,6 +164,7 @@ export function createPanelChannel(options: PanelChannelOptions): PanelChannel {
     onStoreChanged: () => capabilities.changed(),
     onGrantChanged: (enabled) => emit(grantFrame(enabled)),
     refreshCapabilities: () => capabilities.refresh(),
+    ...(options.setDestination ? { setDestination: options.setDestination } : {}),
     ...(options.results ? { results: options.results } : {}),
     diagnostics,
   });
@@ -204,6 +211,7 @@ export function createPanelChannel(options: PanelChannelOptions): PanelChannel {
     auditChanged: () => {
       if (!stopped) audit.schedule();
     },
+    destinationsChanged: () => emit(grantFrame()),
     sweepExpired: () => previews.sweepExpired(),
     stop() {
       if (stopped) return;
