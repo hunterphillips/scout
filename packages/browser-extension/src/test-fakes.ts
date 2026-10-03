@@ -323,6 +323,8 @@ export function makeChrome({
     createFails: false as boolean | "placed",
     /** sidePanel.open calls. */
     opened: [] as Array<{ windowId?: number; tabId?: number }>,
+    /** sidePanel.close calls (Chrome 141+; a test deletes sidePanel.close to model an older Chrome). */
+    closed: [] as Array<{ windowId?: number; tabId?: number }>,
   };
   const panelPorts: LinkedPort[] = [];
   const created: chrome.tabs.CreateProperties[] = [];
@@ -424,6 +426,9 @@ export function makeChrome({
       },
       async open(o: { windowId?: number; tabId?: number }) {
         state.opened.push(o);
+      },
+      async close(o: { windowId?: number; tabId?: number }) {
+        state.closed.push(o);
       },
       onOpened: ev(),
     },

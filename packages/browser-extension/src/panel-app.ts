@@ -167,6 +167,7 @@ export function createPanelApp(deps: PanelAppDeps): PanelApp {
     }
     port = p;
     p.onMessage.addListener((m: unknown) => onWorker(m as WorkerToPanel));
+    reportWindow();
     p.onDisconnect.addListener(() => {
       void ch.runtime.lastError;
       if (port !== p) return;
@@ -178,6 +179,16 @@ export function createPanelApp(deps: PanelAppDeps): PanelApp {
       renderSoon();
       later(connect, RECONNECT_MS);
     });
+  }
+
+  /** Tells the worker this panel's window, so a toolbar click there closes the panel. */
+  function reportWindow(): void {
+    if (windowId === null) return;
+    try {
+      port?.postMessage({ type: "window", windowId });
+    } catch {
+      // the disconnect handler reconnects, and reports again
+    }
   }
 
   // ---------- effects of frames ----------
@@ -370,6 +381,7 @@ export function createPanelApp(deps: PanelAppDeps): PanelApp {
     connect();
     const win = await ch.windows.getCurrent().catch(() => null);
     windowId = typeof win?.id === "number" ? win.id : null;
+    reportWindow();
     ch.tabs.onActivated.addListener((info) => {
       if (info.windowId === windowId) void refreshSite();
     });

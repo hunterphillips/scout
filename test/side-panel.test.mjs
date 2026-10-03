@@ -93,7 +93,7 @@ describe.skipIf(SKIP !== null)(SKIP ? `Scout's side panel in Chrome for Testing 
     if (home) rmSync(home, { recursive: true, force: true });
   });
 
-  it("the toolbar opens the panel, which shows the site, Allow's result, a settled visit's results, and opens the clicked link in a new tab", async () => {
+  it("the toolbar opens the panel, which shows the site, Allow's result, a settled visit's results, and opens the clicked link in a new tab; a second click closes the panel", async () => {
     const steps = {};
     const { default: puppeteer } = await import("puppeteer-core");
     const { extensionIdFromPem, generateKeyPem, manifestKey } = await import(pathToFileURL(join(ROOT, "scripts/lib/extension-key.mjs")).href);
@@ -291,6 +291,22 @@ describe.skipIf(SKIP !== null)(SKIP ? `Scout's side panel in Chrome for Testing 
     expect(await sw.evaluate(() => chrome.storage.local.get("paused").then((s) => s.paused ?? null))).toBeNull();
     await until(async () => (await text()).includes("Resume"), "the control to offer Resume");
     steps.pause = "headless";
+
+    // 6. The toolbar icon toggles: a second click closes the panel (sidePanel.close, Chrome 141+),
+    // a third opens it again.
+    if (panelTarget) {
+      const panelUrl = `chrome-extension://${extId}/panel.html`;
+      const sidePanels = () => sw.evaluate(() => chrome.runtime.getContexts({ contextTypes: ["SIDE_PANEL"] }).then((c) => c.length));
+      const canClose = await sw.evaluate(() => typeof chrome.sidePanel.close === "function");
+      expect(canClose).toBe(true);
+      await site.bringToFront();
+      await extension.triggerAction(site);
+      await until(async () => !browser.targets().some((t) => t.url() === panelUrl) && (await sidePanels()) === 0, "the second click to close the panel");
+      await extension.triggerAction(site);
+      await browser.waitForTarget((t) => t.url() === panelUrl, { timeout: 5_000 });
+      await until(async () => (await sidePanels()) === 1, "the third click to open the panel again");
+      steps.toggle = "headless: close, then open";
+    }
 
     console.log(`side-panel e2e steps: ${JSON.stringify(steps)}`);
     await browser.close();
