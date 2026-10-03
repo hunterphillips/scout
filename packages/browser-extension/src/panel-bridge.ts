@@ -19,15 +19,21 @@
 // connecting (or Chrome's sidePanel.onOpened, where present) and every `state` frame clear it.
 // The panel never opens itself: Chrome allows that only from a user gesture.
 //
-// Toolbar click: the worker opens the panel itself from action.onClicked (sidePanel.open for
-// the click's window, called synchronously inside the gesture) rather than through
-// setPanelBehavior({openPanelOnActionClick: true}). Checked in Chrome for Testing 154: with
-// openPanelOnActionClick the click opens the panel but grants no activeTab, so the panel could
-// never learn an ungranted tab's site; through onClicked the same click also grants activeTab
-// for that tab, and the worker tells open panels to look at their site again.
+// Toolbar click: the icon toggles the click's window's panel, handled in action.onClicked
+// rather than through setPanelBehavior({openPanelOnActionClick: true}). Checked in Chrome for
+// Testing 154: with openPanelOnActionClick the click opens the panel but grants no activeTab,
+// so the panel could never learn an ungranted tab's site; through onClicked the same click
+// also grants activeTab for that tab, and the worker tells open panels to look at their site
+// again. Each panel port reports its window (a `window` message on connect); the click closes
+// the panel (sidePanel.close) when a port has reported the click's window, and opens it
+// (sidePanel.open) otherwise, including for a port that has not reported yet. sidePanel.close
+// exists from Chrome 141; without it every click opens, as before. Either call is the
+// handler's first synchronous statement, inside the gesture. A close reaches the worker as the
+// port's onDisconnect, exactly like the panel's own close button.
 
 import type { PanelState } from "@scout/contracts";
 import { type LinkState, PANEL_PORT_NAME, type PanelPortRequest, type PanelToWorker, type StatusSnapshot, type WorkerToPanel } from "./messages.js";
+import { iconClickAction } from "./panel/toggle.js";
 
 export const PANEL_PAGE = "panel.html";
 export const BADGE_TEXT = "•";
@@ -67,6 +73,8 @@ export function createPanelBridge(deps: PanelBridgeDeps): PanelBridge {
   const { ch } = deps;
   const cache = new Map<Cached["type"], Cached>();
   const ports = new Set<chrome.runtime.Port>();
+  /** The window each side-panel port reported as its own (a port without an entry counts as no window). */
+  const portWindow = new Map<chrome.runtime.Port, number>();
   let lastLink: LinkState | null = null;
 
   const post = (p: chrome.runtime.Port, m: WorkerToPanel): void => {
@@ -74,8 +82,14 @@ export function createPanelBridge(deps: PanelBridgeDeps): PanelBridge {
       p.postMessage(m);
     } catch {
       ports.delete(p);
+      portWindow.delete(p);
     }
   };
+
+  function panelOpenIn(windowId: number): boolean {
+    for (const p of ports) if (portWindow.get(p) === windowId) return true;
+    return false;
+  }
   const broadcast = (m: WorkerToPanel): void => {
     for (const p of [...ports]) post(p, m);
   };
@@ -170,11 +184,17 @@ export function createPanelBridge(deps: PanelBridgeDeps): PanelBridge {
     p.onDisconnect.addListener(() => {
       void ch.runtime.lastError;
       ports.delete(p); // the panel was closed (or its page reloaded)
+      portWindow.delete(p);
     });
     p.onMessage.addListener((m: unknown) => {
       if (!isObj(m)) return;
       const msg = m as unknown as PanelToWorker;
       if (msg.type === "hb") return; // a message on the port is all a heartbeat needs to be
+      if (msg.type === "window") {
+        // panel.html opened in a tab is not the window's side panel: the click must still open that.
+        if (Number.isInteger(msg.windowId) && p.sender?.tab === undefined && ports.has(p)) portWindow.set(p, msg.windowId);
+        return;
+      }
       if (msg.type !== "request" || typeof msg.id !== "number" || !isObj(msg.request)) return;
       deps.handle(msg.request).then(
         (result) => ports.has(p) && post(p, { type: "reply", id: msg.id, result }),
@@ -186,11 +206,15 @@ export function createPanelBridge(deps: PanelBridgeDeps): PanelBridge {
     for (const state of cached()) post(p, { type: "frame", state });
   }
 
-  /** The toolbar click: open the panel in the click's window (first, within the gesture), then recheck sites. */
+  /** The toolbar click: toggle the panel in the click's window (first, within the gesture), then recheck sites. */
   function onActionClicked(tab: chrome.tabs.Tab | undefined): void {
     if (typeof tab?.windowId === "number") {
+      const windowId = tab.windowId;
       try {
-        void Promise.resolve(ch.sidePanel?.open?.({ windowId: tab.windowId })).catch(() => {});
+        const sp = ch.sidePanel;
+        const close = typeof sp?.close === "function" ? sp.close.bind(sp) : null;
+        const action = iconClickAction({ panelOpenInWindow: panelOpenIn(windowId), canClose: close !== null });
+        void Promise.resolve(action === "close" ? close!({ windowId }) : sp?.open?.({ windowId })).catch(() => {});
       } catch {
         // no side panel API: nothing to open
       }

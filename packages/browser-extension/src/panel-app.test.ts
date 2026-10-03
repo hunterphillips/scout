@@ -28,6 +28,7 @@ async function harness({ granted = [DOCS], host = "ok" as "ok" | "silent" | "mis
   const dom = new JSDOM(`<!doctype html><body><p id="header-line"></p><div id="root"></div></body>`, { pretendToBeVisual: true });
   const doc = dom.window.document;
   const intervals: Array<{ fn: () => void; ms: number }> = [];
+  const timeouts: Array<{ fn: () => void; ms: number }> = [];
   const time = { now: 0 };
   const app = createPanelApp({
     now: () => time.now,
@@ -35,7 +36,7 @@ async function harness({ granted = [DOCS], host = "ok" as "ok" | "silent" | "mis
     doc,
     root: doc.getElementById("root")!,
     setInterval: (fn, ms) => intervals.push({ fn, ms }),
-    setTimeout: () => 0,
+    setTimeout: (fn, ms) => timeouts.push({ fn, ms }),
   });
   await app.start();
   const settle = async () => {
@@ -65,7 +66,7 @@ async function harness({ granted = [DOCS], host = "ok" as "ok" | "silent" | "mis
     for (const i of intervals) if (i.ms === 1000) i.fn();
     await settle();
   };
-  return { f, bg, app, doc, dom, core, settle, $, byKey, click, text, intervals, clock, tick };
+  return { f, bg, app, doc, dom, core, settle, $, byKey, click, text, intervals, timeouts, clock, tick };
 }
 
 async function withResults(h: Awaited<ReturnType<typeof harness>>) {
@@ -423,6 +424,21 @@ describe("side panel page", () => {
     await h.settle();
     expect(commandsPosted(h.f).filter((c) => c["type"] === "open_link")).toEqual([]);
     expect(h.text()).toContain("Couldn't open it");
+  });
+
+  it("reports its own window to the worker on every connect, so the toolbar click there closes it", async () => {
+    const h = await harness();
+    const first = h.f._.panelPorts.at(-1)!;
+    expect(first.peer!.posted).toContainEqual({ type: "window", windowId: 1 });
+    h.f.action.onClicked.emit({ id: 13, windowId: 1 } as chrome.tabs.Tab);
+    await h.settle();
+    expect(h.f._.state.closed).toEqual([{ windowId: 1 }]);
+    first.disconnect(); // the worker restarted
+    await h.settle();
+    h.timeouts.splice(0).forEach((t) => t.fn()); // the panel's reconnect
+    await h.settle();
+    expect(h.f._.panelPorts).toHaveLength(2);
+    expect(h.f._.panelPorts.at(-1)!.peer!.posted).toContainEqual({ type: "window", windowId: 1 });
   });
 
   it("posts a heartbeat on its port every 15 s", async () => {

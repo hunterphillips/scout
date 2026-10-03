@@ -70,6 +70,81 @@ describe("toolbar and panel port", () => {
     expect(f._.state.badge).toBe("");
   });
 
+  it("the click closes the panel in a window whose panel port reported it, and opens it again once that port is gone", async () => {
+    const { f } = await setup();
+    const p = await openPanel(f);
+    p.port.postMessage({ type: "window", windowId: 1 });
+    await flush();
+    f.action.onClicked.emit({ id: 12, windowId: 1 } as chrome.tabs.Tab);
+    await flush();
+    expect(f._.state.closed).toEqual([{ windowId: 1 }]);
+    expect(f._.state.opened).toEqual([]);
+    p.port.disconnect(); // Chrome closed the panel: its port goes, as with the panel's own X
+    await flush();
+    f.action.onClicked.emit({ id: 12, windowId: 1 } as chrome.tabs.Tab);
+    await flush();
+    expect(f._.state.opened).toEqual([{ windowId: 1 }]);
+    expect(f._.state.closed).toHaveLength(1);
+  });
+
+  it("the click opens where Chrome has no sidePanel.close (before 141), even over an open panel", async () => {
+    const { f } = await setup();
+    delete (f.sidePanel as { close?: unknown }).close;
+    const p = await openPanel(f);
+    p.port.postMessage({ type: "window", windowId: 1 });
+    await flush();
+    f.action.onClicked.emit({ id: 12, windowId: 1 } as chrome.tabs.Tab);
+    await flush();
+    expect(f._.state.opened).toEqual([{ windowId: 1 }]);
+    expect(f._.state.closed).toEqual([]);
+  });
+
+  it("windows are independent: a panel open in one window never closes another's", async () => {
+    const { f } = await setup();
+    const one = await openPanel(f);
+    one.port.postMessage({ type: "window", windowId: 1 });
+    const two = await openPanel(f);
+    two.port.postMessage({ type: "window", windowId: 2 });
+    await flush();
+    f.action.onClicked.emit({ id: 30, windowId: 3 } as chrome.tabs.Tab);
+    await flush();
+    expect(f._.state.opened).toEqual([{ windowId: 3 }]);
+    f.action.onClicked.emit({ id: 20, windowId: 2 } as chrome.tabs.Tab);
+    await flush();
+    expect(f._.state.closed).toEqual([{ windowId: 2 }]);
+    two.port.disconnect();
+    await flush();
+    f.action.onClicked.emit({ id: 20, windowId: 2 } as chrome.tabs.Tab);
+    f.action.onClicked.emit({ id: 12, windowId: 1 } as chrome.tabs.Tab);
+    await flush();
+    expect(f._.state.opened).toEqual([{ windowId: 3 }, { windowId: 2 }]);
+    expect(f._.state.closed).toEqual([{ windowId: 2 }, { windowId: 1 }]);
+  });
+
+  it("a panel port that never reported its window counts as closed: the click opens", async () => {
+    const { f, bg } = await setup();
+    await openPanel(f);
+    expect(bg.panel.openPanels).toBe(1);
+    f.action.onClicked.emit({ id: 12, windowId: 1 } as chrome.tabs.Tab);
+    await flush();
+    expect(f._.state.opened).toEqual([{ windowId: 1 }]);
+    expect(f._.state.closed).toEqual([]);
+  });
+
+  it("panel.html in a tab, or a malformed window report, never makes the click close", async () => {
+    const { f } = await setup();
+    const inTab = await openPanel(f, { id: EXT_ID, url: `chrome-extension://${EXT_ID}/panel.html`, tab: { id: 40, windowId: 1 } as chrome.tabs.Tab });
+    inTab.port.postMessage({ type: "window", windowId: 1 });
+    const odd = await openPanel(f);
+    odd.port.postMessage({ type: "window", windowId: "1" });
+    odd.port.postMessage({ type: "window", windowId: 1.5 });
+    await flush();
+    f.action.onClicked.emit({ id: 12, windowId: 1 } as chrome.tabs.Tab);
+    await flush();
+    expect(f._.state.opened).toEqual([{ windowId: 1 }]);
+    expect(f._.state.closed).toEqual([]);
+  });
+
   it("a panel that connects gets the status, then the cached frames in repaint order, at once", async () => {
     const { f } = await repainted();
     frame(f, ACK);

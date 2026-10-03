@@ -64,7 +64,11 @@ export interface CommandReply {
   invalid?: true;
 }
 
-export type PanelToWorker = { type: "hb" } | { type: "request"; id: number; request: PanelPortRequest };
+export type PanelToWorker =
+  | { type: "hb" }
+  /** The panel's own window (windows.getCurrent), sent on every connect once known: the toolbar toggle. */
+  | { type: "window"; windowId: number }
+  | { type: "request"; id: number; request: PanelPortRequest };
 
 export type WorkerToPanel =
   | { type: "status"; status: StatusSnapshot }
