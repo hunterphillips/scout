@@ -316,6 +316,8 @@ export function makeChrome({
     sidePanels: 0,
     badge: "",
     badgeColor: null as string | null,
+    /** The last action.setIcon paths; null until one. */
+    icon: null as Record<string, string> | null,
     panelBehavior: null as unknown,
     /** What permissions.request answers (Chrome's prompt); a yes adds the pattern. */
     grantOnRequest: true,
@@ -418,6 +420,9 @@ export function makeChrome({
       },
       async setBadgeBackgroundColor({ color }: { color: string }) {
         state.badgeColor = color;
+      },
+      async setIcon({ path }: { path: Record<string, string> }) {
+        state.icon = path;
       },
     },
     sidePanel: {

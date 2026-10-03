@@ -15,9 +15,14 @@
 // visit's `state` before its `results`).
 //
 // Badge: a `results ok` frame while no side panel is open (runtime.getContexts SIDE_PANEL, or
-// no connected panel port where getContexts is missing) sets a dot on the toolbar icon; a panel
-// connecting (or Chrome's sidePanel.onOpened, where present) and every `state` frame clear it.
-// The panel never opens itself: Chrome allows that only from a user gesture.
+// no connected panel port where getContexts is missing) sets the link count on the toolbar icon
+// (blue); a panel connecting (or Chrome's sidePanel.onOpened, where present) and every `state`
+// frame clear it. Files to review (offers for the core's current visit, from the cached
+// `capabilities` and `state`) set their count in amber the same way, unless links are showing
+// (links win) or the panel was open, or the icon clicked, since those offers arrived. A paused
+// core (its `state` frame) swaps in the grey paused icon; any other state, or the native port's
+// loss, puts the mark back. The panel never opens itself: Chrome allows that only from a user
+// gesture.
 //
 // Toolbar click: the icon toggles the click's window's panel, handled in action.onClicked
 // rather than through setPanelBehavior({openPanelOnActionClick: true}). Checked in Chrome for
@@ -33,11 +38,16 @@
 
 import type { PanelState } from "@scout/contracts";
 import { type LinkState, PANEL_PORT_NAME, type PanelPortRequest, type PanelToWorker, type StatusSnapshot, type WorkerToPanel } from "./messages.js";
+import { hostOf } from "./panel/capabilities.js";
 import { iconClickAction } from "./panel/toggle.js";
 
 export const PANEL_PAGE = "panel.html";
-export const BADGE_TEXT = "•";
-export const BADGE_COLOR = "#1a73e8";
+/** Links found: the count on the accent blue. */
+export const LINKS_BADGE_COLOR = "#1F5FCC";
+/** Files for the user's agent to review: the count on the attention amber. */
+export const FILES_BADGE_COLOR = "#A35D00";
+export const ICON_PATHS = { 16: "icons/icon-16.png", 32: "icons/icon-32.png" } as const;
+export const PAUSED_ICON_PATHS = { 16: "icons/paused-16.png", 32: "icons/paused-32.png" } as const;
 
 type Cached = Extract<PanelState, { type: "grant" | "capabilities" | "audit" | "state" | "results" }>;
 /** Repaint order: the core's own (grant, capabilities, audit, state), then the visit's results. */
@@ -100,15 +110,66 @@ export function createPanelBridge(deps: PanelBridgeDeps): PanelBridge {
     broadcast({ type: "status", status });
   }
 
-  function setBadge(text: string): void {
+  /** Items of the `results ok` frame the badge counts; 0 once a panel showed them or a state frame cleared them. */
+  let links = 0;
+  /** Offers (`resourceId@version`) a panel was open for, or the icon clicked over: they set no badge again. */
+  const seenOffers = new Set<string>();
+  let badgeSeq = 0;
+  let pausedIcon = false;
+
+  function setBadge(text: string, color?: string): void {
     const a = ch.action;
     if (!a?.setBadgeText) return;
     Promise.resolve()
       .then(async () => {
-        if (text !== "") await a.setBadgeBackgroundColor?.({ color: BADGE_COLOR });
+        if (text !== "" && color) await a.setBadgeBackgroundColor?.({ color });
         await a.setBadgeText({ text });
       })
       .catch(() => {});
+  }
+
+  function setPausedIcon(paused: boolean): void {
+    if (paused === pausedIcon) return;
+    pausedIcon = paused;
+    const a = ch.action;
+    if (!a?.setIcon) return;
+    Promise.resolve(a.setIcon({ path: { ...(paused ? PAUSED_ICON_PATHS : ICON_PATHS) } })).catch(() => {});
+  }
+
+  /** Offers for the core's current visit: an idle state naming a host Chrome permits. */
+  function currentOffers(): string[] {
+    const st = cache.get("state");
+    const caps = cache.get("capabilities");
+    if (st?.type !== "state" || caps?.type !== "capabilities" || st.status !== "idle" || st.permitted === false || !st.detail) return [];
+    return caps.offers.filter((o) => hostOf(o.siteOrigin) === st.detail).map((o) => `${o.resourceId}@${o.version}`);
+  }
+
+  /** The panel is (or was just) open, or the icon clicked: what it shows needs no badge. */
+  function seen(): void {
+    links = 0;
+    for (const o of currentOffers()) seenOffers.add(o);
+    badgeSeq++;
+    setBadge("");
+  }
+
+  /** Links win over files; nothing while a panel is open (asked of Chrome; a panel connecting meanwhile wins). */
+  function refreshBadge(): void {
+    const seq = ++badgeSeq;
+    const offers = currentOffers();
+    const want = links > 0 ? { text: String(links), color: LINKS_BADGE_COLOR } : offers.some((o) => !seenOffers.has(o)) ? { text: String(offers.length), color: FILES_BADGE_COLOR } : null;
+    if (ports.size > 0) {
+      seen();
+      return;
+    }
+    if (want === null) {
+      setBadge("");
+      return;
+    }
+    void panelOpen().then((open) => {
+      if (seq !== badgeSeq) return;
+      if (open || ports.size > 0) seen();
+      else setBadge(want.text, want.color);
+    });
   }
 
   async function panelOpen(): Promise<boolean> {
@@ -129,20 +190,24 @@ export function createPanelBridge(deps: PanelBridgeDeps): PanelBridge {
       case "state":
         cache.set("state", state);
         cache.delete("results");
-        setBadge("");
+        links = 0;
+        setPausedIcon(state.status === "paused");
+        refreshBadge();
         break;
       case "results":
         cache.set("results", state);
+        // A newer state frame or results frame replaces the count; a panel that connected while
+        // Chrome was asked shows it (refreshBadge's sequence check).
         if (state.status === "ok") {
-          void panelOpen().then((open) => {
-            // Still the shown result (no state frame since), and no panel to show it (none
-            // connected while Chrome was asked: a panel that connected meanwhile shows it).
-            if (!open && ports.size === 0 && cache.get("results") === state) setBadge(BADGE_TEXT);
-          });
+          links = state.items.length;
+          refreshBadge();
         }
         break;
-      case "grant":
       case "capabilities":
+        cache.set(state.type, state);
+        refreshBadge();
+        break;
+      case "grant":
       case "audit":
         cache.set(state.type, state);
         break;
@@ -155,7 +220,10 @@ export function createPanelBridge(deps: PanelBridgeDeps): PanelBridge {
   /** The status push follows from port.ts's onLinkChange, once the reconnect plan is known. */
   function onLinkLost(): void {
     cache.clear();
+    links = 0;
+    badgeSeq++;
     setBadge("");
+    setPausedIcon(false);
   }
 
   function cached(): PanelState[] {
@@ -180,7 +248,7 @@ export function createPanelBridge(deps: PanelBridgeDeps): PanelBridge {
       return;
     }
     ports.add(p);
-    setBadge("");
+    seen();
     p.onDisconnect.addListener(() => {
       void ch.runtime.lastError;
       ports.delete(p); // the panel was closed (or its page reloaded)
@@ -219,14 +287,14 @@ export function createPanelBridge(deps: PanelBridgeDeps): PanelBridge {
         // no side panel API: nothing to open
       }
     }
-    setBadge("");
+    seen();
     broadcast({ type: "site-check" }); // the click granted activeTab for this tab
   }
 
   function install(): void {
     ch.runtime.onConnect?.addListener(onConnect);
     ch.action?.onClicked?.addListener(onActionClicked);
-    ch.sidePanel?.onOpened?.addListener(() => setBadge(""));
+    ch.sidePanel?.onOpened?.addListener(() => seen());
   }
 
   async function configureAction(): Promise<void> {

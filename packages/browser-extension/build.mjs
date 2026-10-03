@@ -1,9 +1,11 @@
 // Builds the unpacked extension into dist/:
 //   manifest.json  background.js  panel.html  panel.js  content/github-issue.js
+//   icons/*.png (rendered from assets/mark.svg by scripts/render-icons.mjs, committed)
+//   fonts/figtree-latin-wght.woff2 + fonts/OFL.txt (the panel's font; MV3 CSP forbids remote fonts)
 // The manifest has no `key`; scripts/setup.mjs adds it to dist/manifest.json
 // so the extension id is stable. A rebuild keeps a key already in dist/.
 // SCOUT_EXT_DIST overrides the output dir (tests).
-import { copyFile, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { copyFile, cp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
@@ -21,6 +23,8 @@ await build({ ...common, format: "esm", entryPoints: { background: "src/backgrou
 // Registered content scripts are classic scripts, not modules.
 await build({ ...common, format: "iife", entryPoints: { "content/github-issue": "src/content/github-issue.ts" }, outdir: dist, absWorkingDir: root });
 await copyFile(join(root, "src/panel.html"), join(dist, "panel.html"));
+await cp(join(root, "icons"), join(dist, "icons"), { recursive: true });
+await cp(join(root, "assets/fonts"), join(dist, "fonts"), { recursive: true });
 const manifest = JSON.parse(await readFile(join(root, "manifest.json"), "utf8"));
 if (typeof key === "string") manifest.key = key;
 await writeFile(join(dist, "manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`);

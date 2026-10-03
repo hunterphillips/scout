@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" role="img" aria-label="Scout">
+  <!-- Scout's mark, "Sightline": a lens (the ring) with something spotted in it (the dot, up and
+       to the right). scripts/render-icons.mjs renders every extension icon from this file; the
+       side panel header and the Mac menu bar draw the same geometry. -->
+  <circle id="ring" cx="12" cy="12" r="8" fill="none" stroke="#1B1F24" stroke-width="2.6"/>
+  <circle id="dot" cx="15" cy="9" r="3" fill="#1F5FCC"/>
+</svg>
