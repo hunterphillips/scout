@@ -131,7 +131,39 @@ describe("panel view", () => {
     m.apply(state("disconnected"));
     render();
     grab();
-    expect(seen.size).toBe(10);
+    for (const link of ["disconnected", "core_unavailable", "upgrade_required"] as const) {
+      m.applyLink(link);
+      render();
+      grab();
+    }
+    expect(seen.size).toBe(13);
+  });
+
+  it("Results says Scout can't be reached while the link is down, and goes back to the results state on reconnect", () => {
+    const m = running();
+    m.apply(results(1, { status: "empty" }));
+    const { root, render } = view(m);
+    const explanation = () => root.querySelector("#results-explanation")!;
+    expect(explanation().className).toBe("state state-empty");
+    for (const [link, words] of [
+      ["core_unavailable", "Scout isn't running."],
+      ["disconnected", "native host isn't reachable"],
+    ] as const) {
+      m.applyLink(link);
+      render();
+      expect(explanation().className).toBe("state state-link_down");
+      expect(explanation().textContent).toContain(words);
+      expect(explanation().textContent).not.toContain("No links for this page yet");
+      m.applyLink("connected");
+      render();
+      expect(explanation().className).toBe("state state-none");
+      expect(explanation().textContent).toContain("No links for this page yet");
+      m.apply(capabilities({ offers: [offer()], origins: [originSetting()] }));
+      m.apply(state("idle", { epoch: 1, detail: "docs.example.com", permitted: true }));
+      m.apply(results(1, { status: "empty" }));
+      render();
+      expect(explanation().className).toBe("state state-empty");
+    }
   });
 
   it("Sites marks the sites with recommendations on, including one Chrome does not grant", () => {

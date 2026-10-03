@@ -11,6 +11,7 @@
 
 import type { PanelResultItem, PanelResults, PanelStatusState } from "@scout/contracts";
 import { type CommandTracker, type PanelCommand, sameRequest } from "./commands.js";
+import type { LinkState } from "../messages.js";
 import { checkLink, type LinkRefusal } from "./links.js";
 
 export type CoreStatus = PanelStatusState["status"];
@@ -18,6 +19,17 @@ type Reason<S extends PanelResults["status"]> = Extract<PanelResults, { status: 
 export type UnavailableReason = Reason<"unavailable">;
 export type ErrorReason = Reason<"error">;
 export type CancelledReason = Reason<"cancelled">;
+/** A link to the core that is down rather than on its way up. */
+export type LinkDown = Extract<LinkState, "disconnected" | "core_unavailable" | "upgrade_required">;
+
+/** Why the core can't be reached, for Results and Problems. */
+export const LINK_DOWN_TEXT: Record<LinkDown, string> = {
+  disconnected: "Scout's native host isn't reachable. Check that Scout is installed, then Reconnect in Settings.",
+  core_unavailable: "Scout isn't running. Start the Scout app; the panel reconnects on its own.",
+  upgrade_required: "Scout's parts are different versions. Run Scout's setup again, then reload the extension.",
+};
+
+export const isLinkDown = (link: LinkState): link is LinkDown => link in LINK_DOWN_TEXT;
 
 export interface ResultsIdentity {
   readonly coreInstanceId: string;
@@ -38,6 +50,8 @@ export type ResultsPhase =
 /** What the Results section shows. Each state is distinct; "nothing relevant" is never a failure. */
 export type ResultsDisplay =
   | { kind: "none" }
+  /** The panel can't reach the core (the link, not the core's own status). */
+  | { kind: "link_down"; link: LinkDown }
   | { kind: "paused" }
   | { kind: "disconnected" }
   | { kind: "working" }
@@ -73,7 +87,8 @@ const CANCELLED_TEXT: Record<CancelledReason, string> = {
 export function displaySummary(d: ResultsDisplay): string | null {
   switch (d.kind) {
     case "none":
-      return null;
+    case "link_down":
+      return null; // the status line already says it
     case "paused":
       return "Paused";
     case "disconnected":
@@ -100,6 +115,8 @@ export function displayExplanation(d: ResultsDisplay): string {
   switch (d.kind) {
     case "none":
       return "No links for this page yet. Scout looks once you stay on a site Chrome lets it read.";
+    case "link_down":
+      return LINK_DOWN_TEXT[d.link];
     case "paused":
       return "Scout is paused. Resume it to get links.";
     case "disconnected":

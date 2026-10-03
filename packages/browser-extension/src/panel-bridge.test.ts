@@ -6,7 +6,7 @@ import { PANEL_PORT_NAME, type StatusSnapshot, type WorkerToPanel } from "./mess
 import { BADGE_TEXT } from "./panel-bridge.js";
 import { F } from "./panel/test-frames.js";
 import { activate, asChrome, EXT_ID, type FakeChrome, fakeClock, flush, makeChrome } from "./test-fakes.js";
-import { commandsPosted, corePolicy, dropPort, lastPort, setup } from "./test-harness.js";
+import { approve, commandsPosted, corePolicy, dropPort, lastPort, pageText, setup } from "./test-harness.js";
 
 const GRANT = F.frame("frame.grant.json");
 const CAPS = F.frame("frame.capabilities.minimal.json");
@@ -375,6 +375,24 @@ describe("panel requests", () => {
     await Promise.all(f.permissions.onAdded.emit({ origins: ["https://docs.stripe.com/*"] } as never));
     await flush();
     expect(p.got.filter((m) => m.type === "status").at(-1)).toMatchObject({ status: { granted: ["https://docs.stripe.com/*"] } });
+  });
+});
+
+describe("Settings counters reach open panels", () => {
+  it("issue text forwarded to the core is pushed to an open panel without a request, once per change", async () => {
+    const { f, bg } = await setup();
+    const p = await openPanel(f);
+    const n = p.statuses.length;
+    expect((await approve(bg, f)).approved).toBe(true);
+    expect(await pageText(bg, f)).toEqual({ ok: true });
+    await flush();
+    expect(p.statuses.at(-1)!.counters.forwarded).toBe(1);
+    lastPort(f).onMessage.emit({ type: "ack", seq: 1 });
+    lastPort(f).onMessage.emit({ type: "ack", seq: 2 });
+    await flush();
+    expect(p.statuses.at(-1)!.counters).toMatchObject({ forwarded: 1, acked: 2 });
+    // Two acks in one tick: one push for both.
+    expect(p.statuses.slice(n).map((s) => s.counters.acked)).toEqual([0, 2]);
   });
 });
 

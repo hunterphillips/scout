@@ -20,7 +20,7 @@ import { type CommandRecord, CommandTracker, isDecision, isMutation, isToggle, t
 import type { LinkRefusal } from "./links.js";
 import { PauseState } from "./pause.js";
 import { keyId, PreviewAssembler, type PreviewFailure, type PreviewKey, sameKey } from "./preview.js";
-import { type CoreStatus, displaySummary, type LinkOpenRequest, type ResultsDisplay, ResultsModel } from "./results.js";
+import { type CoreStatus, displaySummary, isLinkDown, LINK_DOWN_TEXT, type LinkOpenRequest, type ResultsDisplay, ResultsModel } from "./results.js";
 
 export type PanelSection = "results" | "sites" | "site" | "settings" | "activity" | "problems";
 export const SECTIONS: ReadonlyArray<{ id: PanelSection; title: string }> = [
@@ -39,12 +39,6 @@ export type Problem =
   | { kind: "preview"; key: PreviewKey; failure: PreviewFailure }
   /** The core answered a click with a target the panel would not open, or Chrome did not open it. */
   | { kind: "linkRefused"; commandId: string; refusal: LinkRefusal };
-
-const LINK_PROBLEM: Partial<Record<LinkState, string>> = {
-  disconnected: "Scout's native host isn't reachable. Check that Scout is installed, then Reconnect in Settings.",
-  core_unavailable: "Scout isn't running. Start the Scout app; the panel reconnects on its own.",
-  upgrade_required: "Scout's parts are different versions. Run Scout's setup again, then reload the extension.",
-};
 
 export const MISSING_CAPABILITIES = "Scout core's list of site offers and approvals didn't arrive, so This site can't show them. Refresh in Settings to try again.";
 
@@ -216,7 +210,9 @@ export class PanelModel {
     return this.resultsModel.phase;
   }
 
+  /** A link that is down says so; one still coming up (`connecting`) shows nothing yet. */
   get resultsDisplay(): ResultsDisplay {
+    if (isLinkDown(this.link)) return { kind: "link_down", link: this.link };
     if (!this.running) return { kind: "none" };
     return this.resultsModel.display(this.core);
   }
@@ -428,8 +424,7 @@ export class PanelModel {
 
   get problems(): Problem[] {
     const out: Problem[] = [];
-    const linkText = LINK_PROBLEM[this.link];
-    if (linkText) out.push({ kind: "link", text: linkText });
+    if (isLinkDown(this.link)) out.push({ kind: "link", text: LINK_DOWN_TEXT[this.link] });
     // The core repaints grant, capabilities, audit, then state: a state without capabilities
     // means that frame never arrived (one over the relay's 1 MiB cap is dropped by the core).
     if (this.missingCapabilities) out.push({ kind: "link", text: MISSING_CAPABILITIES });

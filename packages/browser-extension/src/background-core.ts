@@ -84,7 +84,16 @@ export function createBackground(ch: typeof chrome, deps: BackgroundDeps = {}): 
   const clock = deps.clock ?? defaultClock();
   const windowIdNone = ch.windows?.WINDOW_ID_NONE ?? WINDOW_ID_NONE;
   const state = createSharedState(clock);
-  const counters = newCounters();
+  // Settings' "Sent" row: a counter change pushes the status to open panels, once per tick.
+  let countersPush = false;
+  const counters = newCounters(() => {
+    if (countersPush) return;
+    countersPush = true;
+    queueMicrotask(() => {
+      countersPush = false;
+      panel.pushStatus();
+    });
+  });
   let loaded: Promise<void> | null = null;
   let chain: Promise<boolean> = Promise.resolve(false);
 

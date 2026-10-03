@@ -70,7 +70,23 @@ export const corePaused = (state: SharedState): boolean => state.policy?.paused 
 export const policyAllowsCapture = (state: SharedState): boolean =>
   state.policy !== null && state.policy.captureEnabled && !state.policy.paused;
 
-export const newCounters = (): Counters => ({ focus: 0, forwarded: 0, dropped: 0, acked: 0, denied: 0 });
+/** Fresh counters; with `onChange`, every write calls it (the worker pushes the status to open panels). */
+export function newCounters(onChange?: () => void): Counters {
+  const values: Counters = { focus: 0, forwarded: 0, dropped: 0, acked: 0, denied: 0 };
+  if (!onChange) return values;
+  const out = {} as Counters;
+  for (const k of Object.keys(values) as Array<keyof Counters>) {
+    Object.defineProperty(out, k, {
+      enumerable: true,
+      get: () => values[k],
+      set: (v: number) => {
+        values[k] = v;
+        onChange();
+      },
+    });
+  }
+  return out;
+}
 
 export const defaultClock = (): Clock => ({
   now: () => Date.now(),

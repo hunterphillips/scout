@@ -146,8 +146,27 @@ describe("side panel page", () => {
     await h.settle();
     expect(h.$("#header-line")!.textContent).toContain("Scout isn't running");
     expect(h.byKey("open-c1")).toBeNull();
+    // Results says so too, never the idle "No links for this page yet".
+    expect(h.$("#results-explanation")!.textContent).toBe("Scout isn't running. Start the Scout app; the panel reconnects on its own.");
     await h.click("nav-problems");
     expect(h.text()).toContain("Scout isn't running. Start the Scout app; the panel reconnects on its own.");
+    // The core comes back: Results leaves the down state and shows the repainted results.
+    await h.click("nav-results");
+    lastPort(h.f).onMessage.emit({ type: "ready" });
+    await h.settle();
+    expect(h.$("#results-explanation")!.textContent).toContain("No links for this page yet");
+    await withResults(h); // the core's repaint, then a job's results
+    expect(h.byKey("open-c1")).not.toBeNull();
+  });
+
+  it("Settings' Sent counters follow the worker as they change, with no panel action", async () => {
+    const h = await harness();
+    await h.click("nav-settings");
+    const sent = () => [...h.doc.querySelectorAll("dt")].find((dt) => dt.textContent === "Sent")!.nextElementSibling!.textContent;
+    expect(sent()).toContain("acked 0");
+    lastPort(h.f).onMessage.emit({ type: "ack", seq: 1 }); // the core acknowledged an observation
+    await h.settle();
+    expect(sent()).toContain("acked 1");
   });
 
   it("repaints at once from the worker's cache when the panel opens after the frames", async () => {

@@ -7,6 +7,7 @@ import { describe, expect, it } from "vitest";
 import { BLOCKER_TEXT } from "./capabilities.js";
 import type { PanelCommand } from "./commands.js";
 import { MISSING_CAPABILITIES, PanelModel } from "./model.js";
+import { displayExplanation, LINK_DOWN_TEXT } from "./results.js";
 import { ackFailed, ackOk, answer, applyVerified, capabilities, chunks, entry, F, offer, originSetting, results, state, tracker, withId } from "./test-frames.js";
 
 const key = { resourceId: F.rid, version: F.v1 };
@@ -24,6 +25,28 @@ describe("PanelModel (PanelModelTests)", () => {
     expect(m.problems[0]).toMatchObject({ kind: "link", text: expect.stringContaining("isn't running") });
     m.applyLink("disconnected");
     expect(m.problems[0]).toMatchObject({ kind: "link", text: expect.stringContaining("native host") });
+  });
+
+  it("Results says the link is down (never idle) while the core can't be reached, and shows results again on reconnect", () => {
+    const m = new PanelModel();
+    expect(m.resultsDisplay).toEqual({ kind: "none" }); // connecting: nothing to say yet
+    for (const link of ["disconnected", "core_unavailable", "upgrade_required"] as const) {
+      m.applyLink(link);
+      expect(m.resultsDisplay).toEqual({ kind: "link_down", link });
+      expect(displayExplanation(m.resultsDisplay)).toBe(LINK_DOWN_TEXT[link]);
+      expect(m.problems[0]).toEqual({ kind: "link", text: LINK_DOWN_TEXT[link] });
+      expect(m.headerLine).toBe(m.statusLine); // no results summary next to the link state
+    }
+    m.applyLink("connected");
+    expect(m.resultsDisplay).toEqual({ kind: "none" });
+    m.apply(capabilities({ instance: "core-1" }));
+    m.apply(state("idle", { epoch: 1 }));
+    m.apply(results(1, { status: "empty" }));
+    expect(m.resultsDisplay).toEqual({ kind: "empty" });
+    m.applyLink("core_unavailable");
+    expect(m.resultsDisplay).toEqual({ kind: "link_down", link: "core_unavailable" });
+    m.applyLink("connected");
+    expect(m.resultsDisplay).toEqual({ kind: "none" });
   });
 
   it("runningShowsCoreStatusAndResults", () => {
