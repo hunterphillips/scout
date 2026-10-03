@@ -122,7 +122,7 @@ describe("ResultsModel (ResultsModelTests.swift)", () => {
     m = ready();
     m.applyLink("connecting");
     expect(m.results).toBeNull();
-    expect(m.resultsDisplay).toEqual({ kind: "none" });
+    expect(m.resultsDisplay).toEqual({ kind: "connecting" });
   });
 
   it("aLateResultNeverReplacesANewerOne", () => {

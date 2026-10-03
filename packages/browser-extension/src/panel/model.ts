@@ -210,10 +210,10 @@ export class PanelModel {
     return this.resultsModel.phase;
   }
 
-  /** A link that is down says so; one still coming up (`connecting`) shows nothing yet. */
+  /** Results never reads as idle without a core: a down link and one coming up each say so. */
   get resultsDisplay(): ResultsDisplay {
     if (isLinkDown(this.link)) return { kind: "link_down", link: this.link };
-    if (!this.running) return { kind: "none" };
+    if (this.link === "connecting") return { kind: "connecting" };
     return this.resultsModel.display(this.core);
   }
 

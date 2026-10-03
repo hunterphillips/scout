@@ -52,6 +52,8 @@ export type ResultsDisplay =
   | { kind: "none" }
   /** The panel can't reach the core (the link, not the core's own status). */
   | { kind: "link_down"; link: LinkDown }
+  /** The link is on its way up (also the whole retry schedule while the host is unreachable). */
+  | { kind: "connecting" }
   | { kind: "paused" }
   | { kind: "disconnected" }
   | { kind: "working" }
@@ -88,6 +90,7 @@ export function displaySummary(d: ResultsDisplay): string | null {
   switch (d.kind) {
     case "none":
     case "link_down":
+    case "connecting":
       return null; // the status line already says it
     case "paused":
       return "Paused";
@@ -117,6 +120,8 @@ export function displayExplanation(d: ResultsDisplay): string {
       return "No links for this page yet. Scout looks once you stay on a site Chrome lets it read.";
     case "link_down":
       return LINK_DOWN_TEXT[d.link];
+    case "connecting":
+      return "Connecting to Scout…";
     case "paused":
       return "Scout is paused. Resume it to get links.";
     case "disconnected":

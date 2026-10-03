@@ -29,7 +29,9 @@ describe("PanelModel (PanelModelTests)", () => {
 
   it("Results says the link is down (never idle) while the core can't be reached, and shows results again on reconnect", () => {
     const m = new PanelModel();
-    expect(m.resultsDisplay).toEqual({ kind: "none" }); // connecting: nothing to say yet
+    expect(m.resultsDisplay).toEqual({ kind: "connecting" });
+    expect(displayExplanation(m.resultsDisplay)).toBe("Connecting to Scout…");
+    expect(m.headerLine).toBe("Connecting…"); // no results summary
     for (const link of ["disconnected", "core_unavailable", "upgrade_required"] as const) {
       m.applyLink(link);
       expect(m.resultsDisplay).toEqual({ kind: "link_down", link });
@@ -45,6 +47,8 @@ describe("PanelModel (PanelModelTests)", () => {
     expect(m.resultsDisplay).toEqual({ kind: "empty" });
     m.applyLink("core_unavailable");
     expect(m.resultsDisplay).toEqual({ kind: "link_down", link: "core_unavailable" });
+    m.applyLink("connecting"); // e.g. the host unreachable through the retry schedule
+    expect(m.resultsDisplay).toEqual({ kind: "connecting" });
     m.applyLink("connected");
     expect(m.resultsDisplay).toEqual({ kind: "none" });
   });

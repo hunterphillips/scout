@@ -131,27 +131,28 @@ describe("panel view", () => {
     m.apply(state("disconnected"));
     render();
     grab();
-    for (const link of ["disconnected", "core_unavailable", "upgrade_required"] as const) {
+    for (const link of ["disconnected", "core_unavailable", "upgrade_required", "connecting"] as const) {
       m.applyLink(link);
       render();
       grab();
     }
-    expect(seen.size).toBe(13);
+    expect(seen.size).toBe(14);
   });
 
-  it("Results says Scout can't be reached while the link is down, and goes back to the results state on reconnect", () => {
+  it("Results says Scout can't be reached (or is connecting) while the link isn't up, and goes back to the results state on reconnect", () => {
     const m = running();
     m.apply(results(1, { status: "empty" }));
     const { root, render } = view(m);
     const explanation = () => root.querySelector("#results-explanation")!;
     expect(explanation().className).toBe("state state-empty");
-    for (const [link, words] of [
-      ["core_unavailable", "Scout isn't running."],
-      ["disconnected", "native host isn't reachable"],
+    for (const [link, words, kind] of [
+      ["core_unavailable", "Scout isn't running.", "link_down"],
+      ["disconnected", "native host isn't reachable", "link_down"],
+      ["connecting", "Connecting to Scout…", "connecting"],
     ] as const) {
       m.applyLink(link);
       render();
-      expect(explanation().className).toBe("state state-link_down");
+      expect(explanation().className).toBe(`state state-${kind}`);
       expect(explanation().textContent).toContain(words);
       expect(explanation().textContent).not.toContain("No links for this page yet");
       m.applyLink("connected");
