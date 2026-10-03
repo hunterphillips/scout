@@ -176,7 +176,7 @@ describe("panel view", () => {
     expect(row("docs.example.com").querySelector(".site-state")!.textContent).toBe("Allowed · Recommendations on");
     expect(row("docs.stripe.com").querySelector(".site-state")!.textContent).toBe("Not allowed · Recommendations on");
     expect(row("docs.stripe.com").querySelector('[data-key="allow-docs.stripe.com"]')).not.toBeNull();
-    expect(root.textContent).toContain("Turn on suggestions from This site.");
+    expect(root.textContent).toContain("Turn on suggestions in the This site section.");
     expect(root.textContent).not.toContain("config.json");
     expect(root.textContent).not.toContain("Recommendations run only");
   });

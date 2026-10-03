@@ -77,10 +77,10 @@ test run out of `~/.scout`.
    next to a site (GitHub and Stripe are listed) or type another host. Scout asks Chrome
    for that one site only. Clicking the button again closes the panel.
 
-To turn recommendations on for a site, add its host to `destinations` in
-`~/.scout/config.json`, for example `"destinations": ["docs.stripe.com"]`, and relaunch
-Scout. Every settled visit to a destination then spends one short job on Hunter's
-subscription. The list ships empty.
+To get suggestions on a site, open **This site** while you're on it and turn on
+**Suggest links from this site**. It applies at once, including on the page in front of
+you. Each settled visit to that site then spends one short job on Hunter's subscription.
+Every site starts with it off.
 
 What you should see: **This site** names the current host and says whether Scout is
 allowed there. After three seconds on an allowed site that publishes `llms.txt`, its

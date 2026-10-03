@@ -228,7 +228,7 @@ function sitesSection(doc: Document, v: ViewState, on: PanelHandlers): HTMLEleme
   const form = el(doc, "form", { class: "add-site", "data-submit": "site-add" }, el(doc, "label", { for: "site-input", text: "Allow another site" }), el(doc, "div", { class: "row" }, input, el(doc, "button", { type: "submit", "data-key": "site-add", text: "Allow" })));
   box.append(form, el(doc, "p", { id: "site-input-note", class: v.ui.siteInputError ? "error" : "note", text: v.ui.siteInputError ?? "Chrome asks you to confirm each site." }));
   if (v.status?.broadGrantIgnored) box.append(el(doc, "p", { class: "note", text: BROAD_GRANT_TEXT }));
-  box.append(el(doc, "p", { class: "note", text: "Turn on suggestions from This site." }));
+  box.append(el(doc, "p", { class: "note", text: "Turn on suggestions in the This site section." }));
   return box;
 }
 
