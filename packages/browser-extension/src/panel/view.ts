@@ -703,7 +703,7 @@ function build(doc: Document, root: HTMLElement, v: ViewState, on: PanelHandlers
 
   const m = v.model;
   const c = m.pauseState.control;
-  const working = m.section === "page" && m.resultsDisplay.kind === "working";
+  const working = m.resultsDisplay.kind === "working";
   const header = el(
     doc,
     "header",

@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { JSDOM } from "jsdom";
 import { describe, expect, it, vi } from "vitest";
 import type { StatusSnapshot } from "../messages.js";
@@ -256,6 +257,31 @@ describe("panel view", () => {
     details.open = false;
     render();
     expect(details.open).toBe(false);
+  });
+
+  it("the mark's dot pulses while Scout is looking for links, in every view", () => {
+    const m = running();
+    const { root, render } = view(m);
+    const mark = () => root.querySelector("header .mark")!;
+    expect(mark().classList.contains("working")).toBe(false);
+    m.apply(state("working", { epoch: 1, jobId: "job-1" }));
+    render();
+    expect(mark().classList.contains("working")).toBe(true);
+    for (const section of ["sites", "activity", "settings"] as const) {
+      m.select(section);
+      render();
+      expect(mark().classList.contains("working")).toBe(true);
+    }
+    m.apply(results(1, { status: "empty" }));
+    render();
+    expect(mark().classList.contains("working")).toBe(false);
+  });
+
+  it("panel.html animates only the working mark's dot, and prefers-reduced-motion turns every animation off", () => {
+    const css = readFileSync(new URL("../panel.html", import.meta.url), "utf8");
+    expect(css).toMatch(/\.mark\.working \.mark-dot \{[^}]*animation: pulse/);
+    const reduced = css.slice(css.indexOf("@media (prefers-reduced-motion: reduce)"));
+    expect(reduced).toMatch(/^@media \(prefers-reduced-motion: reduce\) \{\s*\*, \*::before, \*::after \{ animation: none !important;/);
   });
 
   it("every results state renders its own sentence and its own heading", () => {
