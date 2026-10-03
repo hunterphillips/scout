@@ -62,9 +62,12 @@ describe("createCatalogResolver on a shared session", () => {
     const cancelled = await pass(cancelling.guardedFetch, (s) => (session = s));
 
     expect(cancelling.paths).not.toContain("/sitemap.xml");
-    expect(cancelled.result.ok && cancelled.result.catalog.errors).toContain("fetch:refused");
+    // Since P4.4 the resolver's pass also stops at its first yield once cancelled, so nothing usable comes back.
+    expect(cancelled.result).toMatchObject({ ok: false, code: "discover_failed" });
+    expect(!cancelled.result.ok && cancelled.result.errors).toEqual(expect.arrayContaining(["pass:cancelled", "fetch:refused"]));
     expect(existsSync(cacheFile())).toBe(false);
-    expect(events.filter((e) => e.name === "catalog_cache_skipped").map((e) => e.fields)).toEqual([{ origin: ORIGIN, reason: "cancelled" }]);
+    // An empty cancelled catalog is a failed discovery: nothing to persist, so no skip either.
+    expect(events.filter((e) => e.name === "catalog_cache").map((e) => e.fields["source"])).toEqual(["failed"]);
 
     events = [];
     const live = site({ "/llms.txt": LLMS, "/sitemap.xml": SITEMAP });

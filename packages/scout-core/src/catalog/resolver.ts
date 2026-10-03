@@ -33,7 +33,8 @@ export interface CatalogParsers {
  * to 50,000 entries across the thread boundary, itself a main-thread cost of the same order.
  */
 export const PASS_SLICE_MS = 8;
-const SLICE_CHECK_EVERY = 16;
+/** Entries between reads of the pass clock. */
+export const SLICE_CHECK_EVERY = 16;
 const yieldToLoop = (): Promise<void> => new Promise((resolve) => setImmediate(resolve));
 
 /** Most candidates in one catalog. */
@@ -122,6 +123,15 @@ export interface DiscoverOptions {
   fetch: CatalogFetch & { setCrawlDelay?: (ms: number | undefined) => void; readonly refused?: number };
   clock: Clock;
   diagnostics?: Diagnostics;
+  /**
+   * Checked at each of the pass's yields: false stops it there (the pass was cancelled; the
+   * caller discards the result). The catalog is then truncated and `errors` holds
+   * `pass:cancelled`.
+   */
+  shouldContinue?: () => boolean;
+  /** Test seams for the pass's time slicing: its clock (default `performance.now`) and a hook per yield. */
+  passClock?: () => number;
+  onPassYield?: (slice: { startedAt: number; yieldedAt: number; examined: number }) => void;
   /** Off-thread parsers; without them each file is parsed inline. */
   parsers?: CatalogParsers;
   /** Test hooks for the caps. */
@@ -283,14 +293,29 @@ export async function discoverCatalog(options: DiscoverOptions): Promise<Discove
   const kept: Draft[] = [];
   let bytes = 0;
   let truncated = false;
+  const passClock = options.passClock ?? (() => performance.now());
+  let cancelled = false;
+  /** Give the event loop back; false when the pass must stop (cancelled meanwhile). */
+  const yieldNow = async (startedAt: number, examined: number): Promise<boolean> => {
+    options.onPassYield?.({ startedAt, yieldedAt: passClock(), examined });
+    await yieldToLoop();
+    if (options.shouldContinue && !options.shouldContinue()) cancelled = true;
+    return !cancelled;
+  };
   // Building the priority lists above is its own stretch (up to 50,000 entries); give the loop back before the pass.
-  await yieldToLoop();
-  let sliceStart = performance.now();
+  let sliceStart = passClock();
   let examined = 0;
-  for (const entry of [...published, ...imageTitled, ...slugged]) {
-    if (++examined % SLICE_CHECK_EVERY === 0 && performance.now() - sliceStart >= PASS_SLICE_MS) {
-      await yieldToLoop();
-      sliceStart = performance.now();
+  const all = [...published, ...imageTitled, ...slugged];
+  if (!(await yieldNow(sliceStart, 0))) stats.capped += all.length;
+  else sliceStart = passClock();
+  for (const entry of cancelled ? [] : all) {
+    if (++examined % SLICE_CHECK_EVERY === 0 && passClock() - sliceStart >= PASS_SLICE_MS) {
+      if (!(await yieldNow(sliceStart, examined))) {
+        truncated = true;
+        stats.capped += all.length - examined + 1;
+        break;
+      }
+      sliceStart = passClock();
     }
     // Once a cap is hit everything after it is dropped unexamined, so the kept set is a prefix of the priority order.
     if (truncated) {
@@ -343,6 +368,10 @@ export async function discoverCatalog(options: DiscoverOptions): Promise<Discove
   }
 
   const errors: string[] = [];
+  if (cancelled) {
+    truncated = true;
+    errors.push("pass:cancelled");
+  }
   if (robots.source === "error") errors.push("robots:error");
   if (!llms.found && llms.source === "error") errors.push("llms:error");
   if (llms.found && llms.nestedFailed > 0) errors.push("llms:nested_failed");

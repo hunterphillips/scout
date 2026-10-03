@@ -318,7 +318,15 @@ export function createCatalogCache(options: CatalogCacheOptions): CatalogCache {
     let discovery: Discovery | null = null;
     startWindow();
     try {
-      discovery = await discover({ origin, fetch: request.fetch, clock, ...(diagnostics ? { diagnostics } : {}), ...(request.parsers ? { parsers: request.parsers } : {}) });
+      const isCancelled = request.isCancelled;
+      discovery = await discover({
+        origin,
+        fetch: request.fetch,
+        clock,
+        ...(diagnostics ? { diagnostics } : {}),
+        ...(request.parsers ? { parsers: request.parsers } : {}),
+        ...(isCancelled ? { shouldContinue: () => !isCancelled() } : {}),
+      });
     } catch {
       discovery = null;
     }
