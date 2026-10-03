@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -80,6 +80,43 @@ describe("createCatalogResolver on a shared session", () => {
     const again = await pass(site({}).guardedFetch);
     expect(again.result).toMatchObject({ ok: true, source: "fresh" });
     expect(again.result.ok && again.result.catalog.candidates.length).toBe(resolved.result.ok ? resolved.result.catalog.candidates.length : -1);
+  });
+
+  it("a pass cancelled after its last fetch answered (empty but not failed) is not saved: catalog_cache_skipped", async () => {
+    let session!: OriginFetchSession;
+    // Every file is absent: an empty catalog with no request error. The cancel lands as the last file answers.
+    const s = site({}, (path) => {
+      if (path === "/sitemap.xml") session.cancel();
+    });
+    const cancelled = await pass(s.guardedFetch, (x) => (session = x));
+    expect(s.paths.at(-1)).toBe("/sitemap.xml");
+    expect(cancelled.result).toMatchObject({ ok: true, source: "miss" });
+    expect(cancelled.result.ok && cancelled.result.catalog.errors).toContain("pass:cancelled");
+    expect(existsSync(cacheFile())).toBe(false);
+    expect(events.filter((e) => e.name === "catalog_cache_skipped").map((e) => e.fields)).toEqual([{ origin: ORIGIN, reason: "cancelled" }]);
+  });
+
+  it("a cancel during revalidation leaves the cached file untouched: catalog_cache_skipped", async () => {
+    const first = await pass(site({}).guardedFetch);
+    expect(first.result).toMatchObject({ ok: true, source: "miss" });
+    const before = readFileSync(cacheFile(), "utf8");
+    const mtime = statSync(cacheFile()).mtimeMs;
+    events = [];
+    let session!: OriginFetchSession;
+    // Revalidation asks for each stored file again; the cancel lands as the last one answers (still absent).
+    const s = site({}, (path) => {
+      if (path === "/sitemap.xml") session.cancel();
+    });
+    const session2 = createOriginFetchSession({ origin: ORIGIN, clock, guardedFetch: s.guardedFetch, sleep: async () => undefined });
+    session = session2;
+    session2.startWindow();
+    const resolver = createCatalogResolver({ scoutHome: home, clock, diagnostics, guardedFetch: s.guardedFetch, sleep: async () => undefined });
+    const again = await resolver.resolve(ORIGIN, { session: session2, refresh: true });
+    expect(s.paths.at(-1)).toBe("/sitemap.xml");
+    expect(again.result).toMatchObject({ ok: true, source: "not_modified" });
+    expect(readFileSync(cacheFile(), "utf8")).toBe(before);
+    expect(statSync(cacheFile()).mtimeMs).toBe(mtime);
+    expect(events.filter((e) => e.name === "catalog_cache_skipped").map((e) => e.fields)).toEqual([{ origin: ORIGIN, reason: "cancelled" }]);
   });
 
   it("still caches a live pass whose sitemap failed, from its llms.txt", async () => {
