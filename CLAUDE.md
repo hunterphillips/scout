@@ -184,7 +184,7 @@ the plan's phase log):
   `CapabilityModel`, `PanelModel`, `PauseState`; `view.ts` renders text only, with one
   delegated `click`/`submit`/`input` listener on the panel root dispatching on
   `data-action`/`data-submit`/`data-input`, and a keyed patch (tag + full-id `data-key`)
-  so unchanged controls keep their nodes, focus and selection. Results shows the link copy
+  so unchanged controls keep their nodes, focus and selection. Page's results heading shows the link copy
   (`link_down`, same text as Problems) while the link is disconnected, core_unavailable or
   upgrade_required, and "Connecting to Scout…" while connecting, never the idle text;
   counter writes push the status to open panels once per tick. Layout (P4.7, the Quiet

@@ -83,9 +83,9 @@ page in front of you. Each settled visit to that site then spends one short job 
 Hunter's subscription. Every site starts with it off.
 
 What you should see: the panel has four destinations in its bottom nav: **Page**,
-**Sites**, **Activity**, **Settings**. On **Page**, the tray names the current host: an
-**Allow Scout on <host>** row if Scout isn't allowed there, otherwise the suggestions
-switch. After three seconds on an allowed site that publishes `llms.txt`, a pill says the
+**Sites**, **Activity**, **Settings**. On **Page**, the tray asks you to click the Scout
+icon to check an unknown site; after that click it names the current host: an **Allow
+Scout on <host>** row if Scout isn't allowed there, otherwise the suggestions switch. After three seconds on an allowed site that publishes `llms.txt`, a pill says the
 site has files for your agent; **Review** opens a card that streams the exact text, and
 Approve enables once the whole text has arrived and its hash checks out (**Not now**
 declines; **Next** steps through the files). Below it, what you approved is listed, each
