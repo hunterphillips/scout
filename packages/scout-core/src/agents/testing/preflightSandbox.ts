@@ -2,10 +2,10 @@
 // that is never executed (spawnSync is faked), and a gateway-shaped parent env. Adapted
 // from packages/personal-context-mcp/src/test-support/preflightSandbox.ts (removed in P4.4).
 
-import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
-import type { ManagedPaths, SpawnSyncFn } from "../authPreflight.js";
+import { dirname, join, sep } from "node:path";
+import type { ManagedPaths, PreflightFs, SpawnSyncFn } from "../authPreflight.js";
 
 /** Fake secrets. None of these may ever appear in a report or a log. */
 export const SENTINELS = [
@@ -37,17 +37,35 @@ export interface FakeCall {
   envNames: string[];
 }
 
+export interface FakeClaudeOptions {
+  /** The `auth status --json` answer: an object (serialized) or raw stdout. */
+  status?: unknown;
+  version?: string;
+  statusExit?: number;
+  /** `auth status --json` hits the spawn timeout (as spawnSync reports it: ETIMEDOUT, SIGKILL). */
+  statusTimeout?: boolean;
+  helpAuth?: string;
+  helpStatus?: string;
+}
+
 /** A spawnSync stand-in answering the four allowlisted invocations; records every call. */
-export function fakeSpawnSync(opts: { status?: unknown; version?: string } = {}): { spawnSync: SpawnSyncFn; calls: FakeCall[] } {
+export function fakeSpawnSync(opts: FakeClaudeOptions = {}): { spawnSync: SpawnSyncFn; calls: FakeCall[] } {
   const calls: FakeCall[] = [];
   const spawnSync: SpawnSyncFn = (command, args, options) => {
     calls.push({ command, args: [...args], cwd: options.cwd, envNames: Object.keys(options.env).sort() });
     const ok = (stdout: string) => ({ status: 0, signal: null, stdout });
     const key = args.join(" ");
     if (key === "--version") return ok(`${opts.version ?? "2.1.286"} (Claude Code)\n`);
-    if (key === "auth --help") return ok(HELP_AUTH);
-    if (key === "auth status --help") return ok(HELP_STATUS);
-    if (key === "auth status --json") return ok(JSON.stringify(opts.status ?? SUBSCRIPTION_STATUS));
+    if (key === "auth --help") return ok(opts.helpAuth ?? HELP_AUTH);
+    if (key === "auth status --help") return ok(opts.helpStatus ?? HELP_STATUS);
+    if (key === "auth status --json") {
+      if (opts.statusTimeout) {
+        const error = Object.assign(new Error("spawnSync ETIMEDOUT"), { code: "ETIMEDOUT" });
+        return { status: null, signal: "SIGKILL", stdout: "", error };
+      }
+      const st = opts.status ?? SUBSCRIPTION_STATUS;
+      return { status: opts.statusExit ?? 0, signal: null, stdout: typeof st === "string" ? st : JSON.stringify(st) };
+    }
     return { status: 99, signal: null, stdout: "" };
   };
   return { spawnSync, calls };
@@ -56,12 +74,16 @@ export function fakeSpawnSync(opts: { status?: unknown; version?: string } = {})
 export interface Sandbox {
   root: string;
   home: string;
+  /** root/work: a child cwd inside the sandbox (the project-settings walk stops at root). */
+  cwd: string;
   scoutHome: string;
   jobsRoot: string;
   claudePath: string;
   managedPaths: ManagedPaths;
   writeUserSettings(obj: unknown, name?: string): void;
   writeFile(relPath: string, text: string): string;
+  /** HOME and a PATH holding only the sandbox's `claude`, plus `extra`. */
+  baseEnv(extra?: Record<string, string>): Record<string, string>;
 }
 
 const created: string[] = [];
@@ -78,12 +100,14 @@ export function makeSandbox(): Sandbox {
   mkdirSync(join(home, ".claude"), { recursive: true });
   mkdirSync(scoutHome, { mode: 0o700 });
   mkdirSync(join(root, "bin"));
+  mkdirSync(join(root, "work"));
   const claudePath = join(root, "bin", "claude");
   writeFileSync(claudePath, "#!/bin/sh\nexit 97\n");
   chmodSync(claudePath, 0o755);
   return {
     root,
     home,
+    cwd: join(root, "work"),
     scoutHome,
     jobsRoot: join(scoutHome, "run", "jobs"),
     claudePath,
@@ -100,6 +124,28 @@ export function makeSandbox(): Sandbox {
       mkdirSync(dirname(p), { recursive: true });
       writeFileSync(p, text);
       return p;
+    },
+    baseEnv(extra = {}) {
+      return { HOME: home, PATH: join(root, "bin"), ...extra };
+    },
+  };
+}
+
+/**
+ * A PreflightFs that answers every path outside `root` with hostile settings (an API key and
+ * an apiKeyHelper) and records it, so a test can prove the host's own files are never read.
+ */
+export function hostileOutside(root: string): { fs: PreflightFs; probedOutside: string[] } {
+  const roots = [root, realpathSync(root)];
+  const inside = (p: string): boolean => roots.some((r) => p.startsWith(r + sep));
+  const probedOutside: string[] = [];
+  const hostile = JSON.stringify({ apiKeyHelper: "SENTINEL-HELPER-CMD-44d0", env: { ANTHROPIC_API_KEY: "SENTINEL-API-KEY-7f3a" } });
+  return {
+    probedOutside,
+    fs: {
+      readFileSync: (p, enc) => (inside(p) ? readFileSync(p, enc) : (probedOutside.push(p), hostile)),
+      readdirSync: (p) => (inside(p) ? readdirSync(p) : (probedOutside.push(p), ["evil.json"])),
+      statSync: (p) => (inside(p) ? statSync(p) : (probedOutside.push(p), statSync(root))),
     },
   };
 }
