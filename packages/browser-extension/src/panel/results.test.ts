@@ -156,7 +156,7 @@ describe("ResultsModel (ResultsModelTests.swift)", () => {
     const offers = m.currentOffers;
     m.apply(results(1, { status: "ok", items }));
     expect(m.takeLinksToOpen()).toEqual([]);
-    expect(m.section).toBe("results");
+    expect(m.section).toBe("page");
     expect(m.shownPreview).toBeNull();
     expect(m.commands.records).toEqual([]);
     expect(m.currentOffers).toEqual(offers);
