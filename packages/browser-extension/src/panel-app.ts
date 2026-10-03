@@ -249,7 +249,6 @@ export function createPanelApp(deps: PanelAppDeps): PanelApp {
     if (windowId === null) return;
     const r = await request<CurrentSite>({ type: "site", windowId });
     site = r ?? { kind: "none" };
-    if (ui.ackSheet !== null && (site.kind !== "ok" || site.origin !== ui.ackSheet)) ui.ackSheet = null;
     renderSoon();
   }
 
@@ -263,6 +262,7 @@ export function createPanelApp(deps: PanelAppDeps): PanelApp {
 
   const handlers: PanelHandlers = {
     select(section) {
+      if (section !== "sites") ui.ackSheet = null; // the auto-approve sheet belongs to its Sites row
       model.select(section);
       render();
     },
@@ -400,8 +400,10 @@ export function createPanelApp(deps: PanelAppDeps): PanelApp {
     ch.permissions.onRemoved.addListener(() => void refreshSite());
     doc.addEventListener("keydown", (e) => {
       if (e.key !== "Escape") return;
+      // The innermost thing first: the sheet, then the review card, then back to Page.
       if (ui.ackSheet !== null) ui.ackSheet = null;
-      else model.select("results"); // the preview stays put; only its pane is out of view
+      else if (model.section === "page" && model.shownPreview !== null) model.closePreview();
+      else model.select("page"); // a review card stays open on Page
       render();
     });
     every(() => {
