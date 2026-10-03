@@ -61,6 +61,8 @@ it("dist holds exactly the background, the side panel, the GitHub content script
     const html = readFileSync(join(dist, "panel.html"), "utf8");
     expect(html).toContain('<script type="module" src="panel.js"></script>');
     expect(html).not.toMatch(/<script(?![^>]*src="panel\.js")/); // MV3 CSP: no inline script
+    expect(html).toContain('url("fonts/figtree-latin-wght.woff2")');
+    expect(html).not.toMatch(/https?:\/\//); // nothing remote: no font, stylesheet or script from the network
     const m = JSON.parse(readFileSync(join(dist, "manifest.json"), "utf8")) as Record<string, unknown>;
     expect(m["side_panel"]).toEqual({ default_path: "panel.html" });
     expect(m["action"]).not.toHaveProperty("default_popup");
