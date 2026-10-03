@@ -153,14 +153,14 @@ describe("config.json destinations, live", () => {
   });
 
   it("refuses with invalid, writing nothing and changing nothing held, when another key in config.json is malformed", () => {
-    const { d, changes } = live([]);
+    const { d, changes } = live(["www.peakdesign.com"]);
     for (const bad of [{ agentBrowserContext: "yes" }, { chromeBundleId: "not a bundle id" }]) {
-      const text = JSON.stringify({ ...bad, destinations: [] });
+      const text = JSON.stringify({ ...bad, destinations: ["www.peakdesign.com"] });
       writeFileSync(path, text);
       expect(d.set("https://docs.stripe.com", true, false)).toEqual({ ok: false, code: "invalid" });
       expect(readFileSync(path, "utf8")).toBe(text);
     }
-    expect(d.current()).toEqual([]);
+    expect(d.current()).toEqual(["www.peakdesign.com"]);
     expect(changes).toEqual([]);
     expect(events.filter((e) => e.name === "destination_set")).toEqual([]);
     expect(events.filter((e) => e.name === "destination_set_failed").map((e) => e.fields.code)).toEqual([

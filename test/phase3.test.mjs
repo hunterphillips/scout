@@ -806,11 +806,14 @@ describe.skipIf(!BUILT)("P4.6 recommendations switch: set_destination and a hand
     const good = readFileSync(join(home, "config.json"), "utf8");
     const broken = JSON.stringify({ ...JSON.parse(good), agentBrowserContext: "yes" });
     writeFileSync(join(home, "config.json"), broken, { mode: 0o600 });
-    expect(await setDestination(true, false)).toMatchObject({ ok: false, code: "invalid" });
-    expect(readFileSync(join(home, "config.json"), "utf8")).toBe(broken);
-    await new Promise((r) => setTimeout(r, 1_000));
-    expect(b.diagEvents().some((e) => e.event === "job_started" && e.epoch === epoch)).toBe(false);
-    expect(b.diagEvents().filter((e) => e.event === "destination_set_failed").at(-1)).toMatchObject({ origin: SITE, code: "config-invalid-agent-browser-context" });
-    writeFileSync(join(home, "config.json"), good, { mode: 0o600 });
+    try {
+      expect(await setDestination(true, false)).toMatchObject({ ok: false, code: "invalid" });
+      expect(readFileSync(join(home, "config.json"), "utf8")).toBe(broken);
+      await new Promise((r) => setTimeout(r, 1_000));
+      expect(b.diagEvents().some((e) => e.event === "job_started" && e.epoch === epoch)).toBe(false);
+      expect(b.diagEvents().filter((e) => e.event === "destination_set_failed").at(-1)).toMatchObject({ origin: SITE, code: "config-invalid-agent-browser-context" });
+    } finally {
+      writeFileSync(join(home, "config.json"), good, { mode: 0o600 });
+    }
   }, 30_000);
 });
