@@ -106,11 +106,12 @@ describe("setup --agent-integration", () => {
     // The core's reader accepts what setup wrote.
     expect(readInstalledRecord(L.scoutHome)).toEqual({ skillsRoot });
     expect(r.text()).toMatch(/all of your Claude Code sessions/);
-    expect(r.text()).toMatch(/Browser context .* separate opt-in, off by default: turn it on in Scout's settings \(it is `agentBrowserContext` in ~\/\.scout\/config\.json\)/);
+    expect(r.text()).toMatch(/Browser context .* separate opt-in, off by default: turn it on in the Scout side panel's Settings/);
     expect(r.text()).toMatch(/Start a new Claude Code session/);
     expect(r.text()).not.toMatch(/P2\.\d/);
     expect(template()).not.toMatch(/P2\.\d/);
-    expect(template()).toMatch(/`agentBrowserContext` in ~\/\.scout\/config\.json/);
+    expect(template()).toMatch(/switch in the Scout side panel's Settings/);
+    expect(template()).not.toMatch(/toggle is coming|config\.json/);
 
     const checks = integrationChecks(doctor());
     expect(checks.length).toBe(3);
