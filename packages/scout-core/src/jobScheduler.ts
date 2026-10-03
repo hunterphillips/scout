@@ -34,6 +34,11 @@
 //     later revocation publishes `cancelled: revoked`. Repeated changes never chain calls.
 //   - irrelevant: any other permissions or grant change. The job's baselines move to the new
 //     revisions, so its answer still counts.
+//   - a host put on the destinations while the current visit there has settled (its catalog is
+//     ready; it was skipped `not_enabled`, or its job was cancelled by turning the host off): that
+//     visit's job starts at once, through `onSettled` with a fresh budget from now. A visit that
+//     has not settled yet runs when it settles. Pause, a visit change, sensor loss and stop forget
+//     the settle.
 //   - the job's host taken off the destinations (the side panel's switch, or a hand edit of
 //     config.json): the job is cancelled `revoked` and the cancel is published, with no
 //     replacement (the visit's budget is dropped). Recommendations being turned off is a
@@ -209,6 +214,8 @@ export function createJobScheduler(options: JobSchedulerOptions): JobScheduler {
   const profile = { ...options.profile };
   let destinations = new Set(options.destinations);
   let budget: Budget | null = null;
+  /** The current visit's last settle with candidates, kept so enabling its host starts its job. */
+  let skipped: { visit: ActiveVisit; catalog: CatalogResolution } | null = null;
   let running: Running | null = null;
   let stopped = false;
 
@@ -439,9 +446,10 @@ export function createJobScheduler(options: JobSchedulerOptions): JobScheduler {
     return true;
   };
 
-  return {
+  const api: JobScheduler = {
     onSettled(visit, catalog, settledAt) {
       if (stopped) return;
+      skipped = catalog.result.ok && catalog.result.catalog.candidates.length > 0 ? { visit, catalog } : null;
       if (!isEnabled(visit.origin)) {
         event("job_skipped", { epoch: visit.epoch, reason: "not_enabled" });
         return;
@@ -470,14 +478,17 @@ export function createJobScheduler(options: JobSchedulerOptions): JobScheduler {
     },
     onVisitChanged() {
       budget = null;
+      skipped = null;
       cancel("visit_changed", "drop");
     },
     onPause() {
       budget = null;
+      skipped = null;
       cancel("paused", "drop");
     },
     onSensorLost() {
       budget = null;
+      skipped = null;
       cancel("visit_changed", "drop");
     },
     onPermissionsChanged() {
@@ -506,11 +517,23 @@ export function createJobScheduler(options: JobSchedulerOptions): JobScheduler {
       if (job.snapshot.approved.some((a) => a.resourceId === resourceId)) relevantChange("revoked");
     },
     onDestinationsChanged(hosts) {
+      const wasEnabled = skipped !== null && isEnabled(skipped.visit.origin);
       destinations = new Set(hosts);
       if (budget !== null && !isEnabled(budget.visit.origin)) budget = null;
       const job = running;
-      if (job === null || job.cancelled !== null || isEnabled(job.visit.origin)) return;
-      cancel("revoked", "publish");
+      if (job !== null && job.cancelled === null && !isEnabled(job.visit.origin)) cancel("revoked", "publish");
+      // The current, settled visit's host was just enabled: its job starts now, with a fresh budget.
+      const s = skipped;
+      if (stopped || s === null || wasEnabled || !isEnabled(s.visit.origin)) return;
+      const current = view.visit();
+      if (current === null || current.epoch !== s.visit.epoch || current.origin !== s.visit.origin) {
+        skipped = null;
+        return;
+      }
+      // Its job (or the one being cancelled) still owns the visit: the settle path waits for it.
+      if (budget !== null && budget.visit.epoch === s.visit.epoch) return;
+      event("job_enabled_mid_visit", { epoch: s.visit.epoch });
+      api.onSettled(s.visit, s.catalog, clock.now());
     },
     onProfileChanged(next) {
       if (typeof next === "string") profile.fingerprint = next;
@@ -524,6 +547,7 @@ export function createJobScheduler(options: JobSchedulerOptions): JobScheduler {
       if (stopped) return;
       stopped = true;
       budget = null;
+      skipped = null;
       cancel("shutdown", "drop");
     },
     isEnabled,
@@ -542,4 +566,5 @@ export function createJobScheduler(options: JobSchedulerOptions): JobScheduler {
       while (running !== null) await running.done;
     },
   };
+  return api;
 }

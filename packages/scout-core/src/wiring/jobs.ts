@@ -282,8 +282,9 @@ export function createJobWiring(o: JobWiringOptions): JobWiring {
       if (stopped) return;
       const wasNone = destinations.length === 0;
       destinations = hosts;
-      scheduler.onDestinationsChanged(hosts);
+      // The preflight first: a job the change starts at once shares this run instead of starting its own.
       if (wasNone && hosts.length > 0) void adapter?.refreshPreflightAsync();
+      scheduler.onDestinationsChanged(hosts);
     },
     observePanel(state) {
       if (state.type !== "grant" || state.agentBrowserContext === shownGrant) return;

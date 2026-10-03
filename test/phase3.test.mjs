@@ -722,13 +722,15 @@ describe.skipIf(!BUILT)("P4.6 recommendations switch: set_destination and a hand
     if (home) rmSync(home, { recursive: true, force: true });
   });
 
-  it("off by default: a settled visit runs no job; turning it on writes config.json (other keys kept, 0600), sends the grant frame, and the next settled visit runs a job", async () => {
+  it("off by default: a settled visit runs no job; turning it on mid-visit writes config.json (other keys kept, 0600), sends the grant frame, and starts that visit's job at once", async () => {
     expect(grants().at(-1)).toMatchObject({ destinations: [] });
     b.focus(8, nextPage());
     await until(() => b.diagEvents().some((e) => e.event === "job_skipped" && e.reason === "not_enabled"), "job_skipped not_enabled");
+    const epoch = b.diagEvents().find((e) => e.event === "job_skipped" && e.reason === "not_enabled").epoch;
     expect(b.panel().some((f) => f.type === "state" && f.status === "working")).toBe(false);
 
     writeFileSync(join(home, "fake-mode"), "ok");
+    const before = b.panel().length;
     const ack = await setDestination(true, false);
     expect(ack).toMatchObject({ ok: true, revision: 0 });
     expect(grants().at(-1)).toMatchObject({ type: "grant", agentBrowserContext: true, destinations: [SITE] });
@@ -736,8 +738,11 @@ describe.skipIf(!BUILT)("P4.6 recommendations switch: set_destination and a hand
     expect(statSync(join(home, "config.json")).mode & 0o777).toBe(0o600);
     expect(b.diagEvents().find((e) => e.event === "destination_set")).toMatchObject({ origin: SITE, enabled: true });
 
-    const { jobId } = await startJob(b, 8, nextPage());
-    expect((await resultsOf(b, jobId)).jobId).toBe(jobId);
+    // The same visit, no navigation: its job starts now.
+    await until(() => b.diagEvents().some((e) => e.event === "job_started" && e.epoch === epoch), "job_started for the same epoch");
+    const working = b.panel().slice(before).find((f) => f.type === "state" && f.status === "working");
+    expect(working).toMatchObject({ visitEpoch: epoch });
+    expect((await resultsOf(b, working.jobId)).visitEpoch).toBe(epoch);
     expect(b.core.exitCode).toBeNull();
   }, 60_000);
 

@@ -471,19 +471,48 @@ describe("job scheduler: cancellation", () => {
 });
 
 describe("job scheduler: live destinations (P4.6)", () => {
-  it("a host enabled while the core runs gets a job on its next settle; until then it is not_enabled", () => {
+  it("a host enabled while its visit is settled starts that visit's job at once, with a fresh budget", () => {
     const h = harness({ destinations: [] });
-    h.settle();
+    h.settle(h.clock.t - 29_000); // settled long ago: the old budget would be spent
     expect(h.agent.calls).toHaveLength(0);
     expect(h.named("job_skipped")).toEqual([{ epoch: 3, reason: "not_enabled" }]);
     h.scheduler.onDestinationsChanged(["docs.stripe.com"]);
     expect(h.scheduler.isEnabled(ORIGIN)).toBe(true);
-    expect(h.agent.calls).toHaveLength(0); // the next settle, not this one
-    h.world.visit = { ...h.world.visit!, epoch: 4 } as ActiveVisit;
-    h.scheduler.onVisitChanged();
+    expect(h.agent.calls).toHaveLength(1);
+    expect(h.agent.calls[0]!.request).toMatchObject({ visitEpoch: 3, deadlineMs: 30_000 - 4_000 });
+    expect(h.states()).toEqual(["working:job1"]);
+    expect(h.named("job_enabled_mid_visit")).toEqual([{ epoch: 3 }]);
+    // A second change for the same visit starts nothing more.
+    h.scheduler.onDestinationsChanged(["docs.stripe.com", "x.example"]);
+    expect(h.agent.calls).toHaveLength(1);
+  });
+
+  it("enabling starts nothing for a visit that has not settled, has changed, or is paused; the next settle runs as normal", () => {
+    const h = harness({ destinations: [] });
+    h.scheduler.onDestinationsChanged(["docs.stripe.com"]); // not settled yet
+    expect(h.agent.calls).toHaveLength(0);
     h.settle();
     expect(h.agent.calls).toHaveLength(1);
-    expect(h.states()).toEqual(["working:job1"]);
+
+    const g = harness({ destinations: [] });
+    g.settle();
+    g.world.visit = { ...g.world.visit!, epoch: 4 } as ActiveVisit;
+    g.scheduler.onVisitChanged();
+    g.scheduler.onDestinationsChanged(["docs.stripe.com"]);
+    expect(g.agent.calls).toHaveLength(0);
+
+    const p = harness({ destinations: [] });
+    p.settle();
+    p.world.paused = true;
+    p.scheduler.onPause();
+    p.scheduler.onDestinationsChanged(["docs.stripe.com"]);
+    expect(p.agent.calls).toHaveLength(0);
+
+    const q = harness({ destinations: [] });
+    q.settle();
+    q.scheduler.stop();
+    q.scheduler.onDestinationsChanged(["docs.stripe.com"]);
+    expect(q.agent.calls).toHaveLength(0);
   });
 
   it("the running job's host turned off: cancelled revoked and published, no replacement, the budget gone", async () => {
@@ -504,6 +533,20 @@ describe("job scheduler: live destinations (P4.6)", () => {
     h.settle();
     expect(h.agent.calls).toHaveLength(1);
     expect(h.named("job_skipped")).toEqual([{ epoch: 3, reason: "not_enabled" }]);
+    // On again for the same visit: a fresh job for it.
+    h.scheduler.onDestinationsChanged(["docs.stripe.com"]);
+    expect(h.agent.calls).toHaveLength(2);
+    expect(h.agent.calls[1]!.request.visitEpoch).toBe(3);
+  });
+
+  it("off then on while the cancelled run is still ending: the new job starts once it has ended", async () => {
+    const h = harness();
+    h.settle();
+    h.scheduler.onDestinationsChanged([]);
+    h.scheduler.onDestinationsChanged(["docs.stripe.com"]);
+    await flush();
+    expect(h.agent.calls).toHaveLength(2);
+    expect(h.states()).toEqual(["working:job1", "idle", "results:cancelled:job1", "working:job2"]);
   });
 
   it("another host's change leaves the running job alone", async () => {
