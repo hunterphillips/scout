@@ -2,7 +2,7 @@ import { JSDOM } from "jsdom";
 import { describe, expect, it, vi } from "vitest";
 import type { StatusSnapshot } from "../messages.js";
 import { PanelModel } from "./model.js";
-import { capabilities, F, offer, originSetting, results, state, tracker } from "./test-frames.js";
+import { capabilities, entry, F, offer, originSetting, results, state, tracker } from "./test-frames.js";
 import { type PanelHandlers, renderPanel, statusRows, type ViewState } from "./view.js";
 
 const STATUS: StatusSnapshot = {
@@ -222,5 +222,51 @@ describe("panel view", () => {
     expect(input.selectionStart).toBe(4);
     root.querySelector("form")!.dispatchEvent(new doc.defaultView!.Event("submit", { bubbles: true, cancelable: true }));
     expect(on.allowTyped).toHaveBeenCalledWith("docs.stri");
+  });
+
+  it("data-keys (also the click dispatch keys) never collide: an offer and its library re-approve, resources sharing a prefix", () => {
+    const twin = `res_${F.rid.slice(4, 16)}${"f".repeat(52)}`;
+    const m = new PanelModel(tracker("t"));
+    m.applyLink("connected");
+    m.apply(
+      capabilities({
+        offers: [offer()],
+        library: [entry({ state: "blocked", defaultVersion: null, versions: [[F.v1, "revoked"]] }), entry({ rid: twin })],
+        origins: [originSetting()],
+      }),
+    );
+    m.apply(state("idle", { epoch: 1, detail: "docs.example.com", permitted: true }));
+    m.select("site");
+    const { root, on } = view(m);
+    const keys = [...root.querySelectorAll("[data-key]")].map((e) => e.getAttribute("data-key")!);
+    expect(new Set(keys).size).toBe(keys.length);
+    expect(keys).toContain(`preview-${F.rid}-${F.v1}`);
+    expect(keys).toContain(`library-preview-${F.rid}-${F.v1}`);
+    root.querySelector<HTMLButtonElement>(`[data-key="library-preview-${F.rid}-${F.v1}"]`)!.click();
+    expect(on.showPreview).toHaveBeenCalledWith({ resourceId: F.rid, version: F.v1 });
+    expect(root.querySelector(`[data-key="revoke-${twin}"]`)).not.toBeNull();
+  });
+
+  it("a focused text box moved by the patch gets its focus and whole selection back (start, end, direction)", () => {
+    const m = new PanelModel(tracker("t"));
+    m.applyLink("connected");
+    m.apply(capabilities({ offers: [], origins: [] }));
+    m.select("sites");
+    const { doc, root, render, v } = view(m);
+    v.status = { ...STATUS, granted: [] };
+    render();
+    expect(root.textContent).toContain("No sites yet.");
+    const input = root.querySelector<HTMLInputElement>("#site-input")!;
+    input.focus();
+    input.value = "docs.example";
+    v.ui.siteInput = "docs.example";
+    input.setSelectionRange(2, 7, "backward");
+    // The "No sites yet" line above the box goes away: the patch moves the box's form forward with insertBefore.
+    m.apply(capabilities({ revision: 2, offers: [], origins: [originSetting(), originSetting("https://a.example")] }));
+    render();
+    expect(root.textContent).not.toContain("No sites yet.");
+    expect(root.querySelector("#site-input")).toBe(input);
+    expect(doc.activeElement).toBe(input);
+    expect([input.selectionStart, input.selectionEnd, input.selectionDirection]).toEqual([2, 7, "backward"]);
   });
 });

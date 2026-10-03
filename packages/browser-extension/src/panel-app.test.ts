@@ -258,7 +258,7 @@ describe("side panel page", () => {
     await withResults(h);
     await h.click("nav-site");
     const key = { resourceId: `res_${"a".repeat(64)}`, version: "1".repeat(64) };
-    const k = `${key.resourceId.slice(4, 16)}-${key.version.slice(0, 12)}`;
+    const k = `${key.resourceId}-${key.version}`;
     await h.click(`preview-${k}`);
     const first = lastCommand(h.f);
     expect(first).toEqual({ type: "preview", commandId: expect.stringMatching(/^sp-/), resourceId: key.resourceId, version: key.version });
@@ -288,7 +288,7 @@ describe("side panel page", () => {
     await withResults(h);
     await h.click("nav-site");
     const key = { resourceId: `res_${"a".repeat(64)}`, version: "1".repeat(64) };
-    const k = `${key.resourceId.slice(4, 16)}-${key.version.slice(0, 12)}`;
+    const k = `${key.resourceId}-${key.version}`;
     await h.click(`preview-${k}`);
     const [c] = chunks("not the real text", key, 1000);
     await h.core({ ...c, commandId: lastCommand(h.f)["commandId"], sha256: "f5f87631e2c65588499362cb033b1032a148944812890e2495605dc8a36efedf" });
@@ -405,7 +405,7 @@ describe("side panel page", () => {
     const native = lastPort(h.f);
     native.disconnected = true; // postMessage throws, as on a port Chrome just closed
     const key = { resourceId: `res_${"a".repeat(64)}`, version: "1".repeat(64) };
-    await h.click(`decline-offer-${key.resourceId.slice(4, 16)}-${key.version.slice(0, 12)}`);
+    await h.click(`decline-offer-${key.resourceId}-${key.version}`);
     expect(commandsPosted(h.f).filter((c) => c["type"] === "decline")).toEqual([]);
     const declined = h.app.model.commands.records.find((r) => r.request.type === "decline")!;
     expect(declined).toMatchObject({ state: "pending", sent: false });

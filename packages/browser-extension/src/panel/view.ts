@@ -173,7 +173,8 @@ function pathOf(url: string): string {
 function bytesText(n: number): string {
   return n < 1024 ? `${n} bytes` : `${(n / 1024).toFixed(n < 10240 ? 1 : 0)} KB`;
 }
-const keyOf = (k: PreviewKey): string => `${k.resourceId.slice(4, 16)}-${k.version.slice(0, 12)}`;
+/** The full resource id and version: a data-key is also the click dispatch key, so it must never collide. */
+const keyOf = (k: PreviewKey): string => `${k.resourceId}-${k.version}`;
 
 // ---------- sections ----------
 
@@ -344,8 +345,8 @@ function thisSiteSection(doc: Document, v: ViewState, on: PanelHandlers): HTMLEl
               doc,
               "div",
               { class: "row" },
-              m.canRevoke(e.resourceId) ? button(doc, `revoke-${e.resourceId.slice(4, 16)}`, "Revoke", () => on.revoke(e.resourceId), { "aria-label": `Revoke ${kindText(e.kind)}` }) : null,
-              reapprove ? button(doc, `preview-${keyOf(reapprove)}`, "Preview", () => on.showPreview(reapprove), { "aria-label": `Preview ${kindText(e.kind)}` }) : null,
+              m.canRevoke(e.resourceId) ? button(doc, `revoke-${e.resourceId}`, "Revoke", () => on.revoke(e.resourceId), { "aria-label": `Revoke ${kindText(e.kind)}` }) : null,
+              reapprove ? button(doc, `library-preview-${keyOf(reapprove)}`, "Preview", () => on.showPreview(reapprove), { "aria-label": `Preview ${kindText(e.kind)}` }) : null,
             ),
           ),
         );
@@ -531,7 +532,8 @@ function build(doc: Document, root: HTMLElement, v: ViewState, on: PanelHandlers
   const active = doc.activeElement as HTMLElement | null;
   const focusKey = active && root.contains(active) ? active.getAttribute("data-key") : null;
   const InputCtor = doc.defaultView!.HTMLInputElement;
-  const caret = active instanceof InputCtor && active.type === "text" ? { start: active.selectionStart } : null;
+  const caret =
+    active instanceof InputCtor && active.type === "text" ? { start: active.selectionStart, end: active.selectionEnd, direction: active.selectionDirection ?? undefined } : null;
   const scroll = new Map<string, number>();
   for (const e of root.querySelectorAll<HTMLElement>("[data-key]")) if (e.scrollTop) scroll.set(e.getAttribute("data-key")!, e.scrollTop);
 
@@ -566,11 +568,13 @@ function build(doc: Document, root: HTMLElement, v: ViewState, on: PanelHandlers
     const e = root.querySelector<HTMLElement>(`[data-key="${k}"]`);
     if (e && e.scrollTop !== top) e.scrollTop = top;
   }
-  if (focusKey && doc.activeElement?.getAttribute("data-key") !== focusKey) {
+  // A focused node that was replaced, or moved by insertBefore (which blurs it), gets its focus
+  // and its whole selection (start, end, direction) back.
+  if (focusKey) {
     const e = root.querySelector<HTMLElement>(`[data-key="${focusKey}"]`);
-    if (e) {
-      e.focus();
-      if (caret && caret.start !== null && e instanceof InputCtor) e.setSelectionRange(caret.start, caret.start);
+    if (e && doc.activeElement !== e) e.focus();
+    if (e instanceof InputCtor && caret && caret.start !== null && caret.end !== null && (e.selectionStart !== caret.start || e.selectionEnd !== caret.end)) {
+      e.setSelectionRange(caret.start, caret.end, caret.direction);
     }
   }
 }
