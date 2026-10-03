@@ -1,9 +1,12 @@
 import { readFileSync } from "node:fs";
+import { performance } from "node:perf_hooks";
 import { describe, expect, it } from "vitest";
 import type { Diagnostics, DiagnosticFields } from "../diagnostics.js";
 import type { GuardedFetchResult } from "../fetch/guardedFetch.js";
 import { type CatalogFetch, SITEMAP_MAX_BYTES, TEXT_SOURCE_MAX_BYTES } from "./catalogFetch.js";
-import { discoverCatalog, MAX_CANDIDATES, MAX_ROBOTS_CHECKS, MAX_ROBOTS_WORK, normalizeUrl, slugTitle } from "./resolver.js";
+import type { ParsedSitemap } from "./sitemap.js";
+import { MAX_SITEMAP_ENTRIES } from "./sitemap.js";
+import { discoverCatalog, MAX_CANDIDATES, MAX_ROBOTS_CHECKS, MAX_ROBOTS_WORK, normalizeUrl, PASS_SLICE_MS, SLICE_CHECK_EVERY, slugTitle } from "./resolver.js";
 import { compileRobots, MAX_RULES, MAX_WILDCARDS_PER_RULE, parseRobots } from "./robots.js";
 
 const ORIGIN = "https://shop.example";
@@ -319,6 +322,98 @@ describe("discoverCatalog", () => {
     expect(catalog.candidates).toHaveLength(MAX_CANDIDATES);
     expect(stats.capped).toBe(50_000 - MAX_CANDIDATES);
     expect(stats.disallowed + stats.duplicates + stats.unlabeled + stats.offOrigin).toBe(0);
+  });
+});
+
+// P4.4: the dedupe/robots pass stays on the main thread, time-sliced (PASS_SLICE_MS). Each shape
+// is the entry cap from one already-parsed sitemap (the parse itself runs in the worker in the
+// core), with robots.txt at the rule cap: all distinct and allowed (500 kept, then capped), all
+// spellings of one URL (a URL parse and a normalization each; ~60-70 ms unsliced), and all
+// disallowed (until MAX_ROBOTS_WORK). The slicing is checked on an injected clock, so the
+// assertions do not depend on machine load; a loose wall-clock backstop catches a pass that
+// never yields at all (measured ~11-13 ms idle, ~85 ms under 14 busy processes).
+describe("the resolver's main-thread pass is bounded", () => {
+  const BACKSTOP_MS = 150;
+  const shapes = {
+    distinct: (n: number) => `${ORIGIN}/g/section-${n % 10}/page-${n}?a=1&b=2`,
+    duplicates: (n: number) => `${ORIGIN}/g/page?utm_source=${n}&a=1#f${n}`,
+    disallowed: (n: number) => `${ORIGIN}/g/section-${n % 10}/page-${n}`,
+  };
+  const setup = (shape: keyof typeof shapes) => {
+    const rules = Array.from({ length: MAX_RULES - 1 }, (_, i) => `Disallow: /*/nomatch-${i}/*/x*.pdf$`);
+    const last = shape === "disallowed" ? "Disallow: /g/" : "Allow: /";
+    const { fetch } = fakeFetch({ [`${ORIGIN}/robots.txt`]: `User-agent: *\n${rules.join("\n")}\n${last}\n`, [`${ORIGIN}/sitemap.xml`]: "parsed elsewhere" });
+    const entries = Array.from({ length: MAX_SITEMAP_ENTRIES }, (_, n) => ({ url: shapes[shape](n), images: [{ title: `Guide ${n} & more`, caption: "How to set up metered billing" }] }));
+    return { fetch, entries };
+  };
+  const parsersFor = (entries: { url: string; images: { title: string; caption: string }[] }[], onArrive: () => void = () => {}) => ({
+    sitemap: async (): Promise<ParsedSitemap> => {
+      await new Promise((r) => setTimeout(r, 2));
+      onArrive();
+      return { kind: "urlset", entries, droppedOffOrigin: 0 };
+    },
+    llmsTxt: async () => ({ found: false, source: "absent" }) as never,
+  });
+
+  it("on an injected clock (1 ms per read): it yields every PASS_SLICE_MS of pass time, and no slice runs longer", async () => {
+    const { fetch, entries } = setup("duplicates");
+    let t = 0;
+    const slices: { startedAt: number; yieldedAt: number; examined: number }[] = [];
+    const d = await discoverCatalog({ origin: ORIGIN, fetch, clock, parsers: parsersFor(entries), passClock: () => ++t, onPassYield: (s) => slices.push(s) });
+    expect(d.catalog.candidates).toHaveLength(1);
+    expect(d.stats.duplicates).toBe(MAX_SITEMAP_ENTRIES - 1);
+    // One clock read per SLICE_CHECK_EVERY entries, so a slice is at most PASS_SLICE_MS reads long.
+    expect(slices.length).toBeGreaterThanOrEqual(Math.floor(MAX_SITEMAP_ENTRIES / SLICE_CHECK_EVERY / (PASS_SLICE_MS + 1)));
+    for (const s of slices) expect(s.yieldedAt - s.startedAt).toBeLessThanOrEqual(PASS_SLICE_MS + 1);
+    for (let i = 1; i < slices.length; i++) expect(slices[i]!.examined - slices[i - 1]!.examined).toBeLessThanOrEqual(SLICE_CHECK_EVERY * (PASS_SLICE_MS + 1));
+  });
+
+  it("a pass cancelled while it yields stops there: truncated, pass:cancelled, the rest counted as capped", async () => {
+    const { fetch, entries } = setup("duplicates");
+    let t = 0;
+    let yields = 0;
+    const d = await discoverCatalog({
+      origin: ORIGIN,
+      fetch,
+      clock,
+      parsers: parsersFor(entries),
+      passClock: () => ++t,
+      onPassYield: () => void yields++,
+      shouldContinue: () => yields < 3,
+    });
+    expect(yields).toBe(3);
+    expect(d.catalog.truncated).toBe(true);
+    expect(d.catalog.errors).toContain("pass:cancelled");
+    expect(d.stats.duplicates + d.stats.capped + d.catalog.candidates.length).toBe(MAX_SITEMAP_ENTRIES);
+    expect(d.stats.capped).toBeGreaterThan(MAX_SITEMAP_ENTRIES / 2);
+  });
+
+  it.each(Object.keys(shapes) as (keyof typeof shapes)[])(`%s: 50,000 entries never hold the event loop ${BACKSTOP_MS} ms (wall-clock backstop)`, async (shape) => {
+    const { fetch, entries } = setup(shape);
+    let measuring = false;
+    let lastTick = 0;
+    let worst = 0;
+    const tick = setInterval(() => {
+      const now = performance.now();
+      if (measuring) worst = Math.max(worst, now - lastTick);
+      lastTick = now;
+    }, 1);
+    try {
+      const d = await discoverCatalog({
+        origin: ORIGIN,
+        fetch,
+        clock,
+        parsers: parsersFor(entries, () => {
+          measuring = true;
+          lastTick = performance.now();
+        }),
+      });
+      worst = Math.max(worst, performance.now() - lastTick);
+      expect(d.catalog.candidates.length).toBe(shape === "distinct" ? MAX_CANDIDATES : shape === "duplicates" ? 1 : 0);
+    } finally {
+      clearInterval(tick);
+    }
+    expect(worst).toBeLessThan(BACKSTOP_MS);
   });
 });
 

@@ -1,5 +1,4 @@
 import { spawn } from "node:child_process";
-import { OwnedTree as LegacyOwnedTree } from "personal-context-mcp";
 import { afterEach, describe, expect, it } from "vitest";
 import { jobTreeRecord, killRecordedTree, OwnedTree, parseJobTreeRecord, parsePsOutput, ProcessTracker, psSnapshot, psSnapshotAsync, type PsEntry, type PsSnapshot } from "./processTree.js";
 
@@ -58,22 +57,28 @@ describe("OwnedTree", () => {
     expect(tree.signalAll("SIGKILL")).toEqual({ groupSignalled: false, escapedSignalled: 0 });
   });
 
-  it("matches the legacy copy over a synthetic process table", () => {
+  // Pinned from the legacy personal-context copy before P4.4 removed it (git history has it).
+  it("matches the removed legacy copy over a synthetic process table (pinned)", () => {
     const e = (pid: number, ppid: number, pgid: number, state = "S"): [number, PsEntry] => [pid, { pid, ppid, pgid, state, start: `t${pid}` }];
     const steps: PsSnapshot[] = [
       new Map([e(100, 1, 100), e(101, 100, 100), e(102, 101, 102), e(200, 1, 200)]),
       new Map([e(100, 1, 100), e(101, 100, 100, "Z"), e(102, 1, 102), e(103, 102, 102), e(200, 1, 200)]),
       new Map([e(102, 1, 102), e(103, 102, 102), e(200, 1, 200)]),
     ];
+    const id = (pid: number, ppid: number, pgid: number) => ({ pid, ppid, pgid, start: `t${pid}` });
+    const all = [id(100, 1, 100), id(101, 100, 100), id(102, 101, 102), id(103, 102, 102)];
+    const legacy = [
+      { identities: all.slice(0, 3), escaped: [all[2]], alive: all.slice(0, 3) },
+      { identities: all, escaped: [all[2], all[3]], alive: [all[0], all[2], all[3]] },
+      { identities: all, escaped: [all[2], all[3]], alive: [all[2], all[3]] },
+    ];
     const ours = new OwnedTree(100, () => steps[0]!);
-    const legacy = new LegacyOwnedTree(100, () => steps[0]!);
-    for (const snap of steps) {
+    steps.forEach((snap, i) => {
       ours.poll(snap);
-      legacy.poll(snap);
-      expect(ours.identities()).toEqual(legacy.identities());
-      expect(ours.escaped()).toEqual(legacy.escaped());
-      expect(ours.alive(snap)).toEqual(legacy.alive(snap));
-    }
+      expect(ours.identities()).toEqual(legacy[i]!.identities);
+      expect(ours.escaped()).toEqual(legacy[i]!.escaped);
+      expect(ours.alive(snap)).toEqual(legacy[i]!.alive);
+    });
     expect(ours.alive(steps[2]!).map((i) => i.pid).sort()).toEqual([102, 103]);
     expect(psSnapshot().get(process.pid)).toMatchObject({ pid: process.pid });
   });

@@ -2,7 +2,7 @@ import { JSDOM } from "jsdom";
 import { describe, expect, it, vi } from "vitest";
 import type { StatusSnapshot } from "../messages.js";
 import { PanelModel } from "./model.js";
-import { capabilities, F, offer, originSetting, results, state, tracker } from "./test-frames.js";
+import { capabilities, entry, F, offer, originSetting, results, state, tracker } from "./test-frames.js";
 import { type PanelHandlers, renderPanel, statusRows, type ViewState } from "./view.js";
 
 const STATUS: StatusSnapshot = {
@@ -145,5 +145,128 @@ describe("panel view", () => {
     expect(row("docs.stripe.com").querySelector('[data-key="allow-docs.stripe.com"]')).not.toBeNull();
     expect(root.textContent).toContain("To turn recommendations on for a site, add it to destinations in Scout's config.json.");
     expect(root.textContent).not.toContain("Recommendations run only");
+  });
+
+  // P4.4: one delegated listener per event type on the root, and a keyed patch.
+  it("a re-render between mousedown and mouseup keeps the pressed button, so the click lands", () => {
+    const m = running();
+    m.apply(results(1, { status: "ok", items: [{ candidateId: "c1", title: "A", reason: "r", hostname: "docs.example.com" }] }));
+    const { doc, root, on, render } = view(m);
+    const pressed = root.querySelector<HTMLButtonElement>('[data-key="open-c1"]')!;
+    pressed.dispatchEvent(new doc.defaultView!.MouseEvent("mousedown", { bubbles: true }));
+    // A frame arrives mid-click and changes the panel around the button.
+    m.apply(results(1, { status: "ok", items: [{ candidateId: "c1", title: "A", reason: "r", hostname: "docs.example.com" }, { candidateId: "c2", title: "B", reason: "r2", hostname: "docs.example.com" }] }));
+    render();
+    expect(root.querySelector('[data-key="open-c2"]')).not.toBeNull();
+    expect(root.querySelector('[data-key="open-c1"]')).toBe(pressed);
+    pressed.dispatchEvent(new doc.defaultView!.MouseEvent("mouseup", { bubbles: true }));
+    pressed.click();
+    expect(on.open).toHaveBeenCalledWith("c1");
+  });
+
+  it("a render keeps every unchanged element and updates changed text in place", () => {
+    const m = running();
+    m.apply(results(1, { status: "ok", items: [{ candidateId: "c1", title: "A", reason: "first", hostname: "docs.example.com" }] }));
+    const { root, render } = view(m);
+    const nav = root.querySelector("nav")!;
+    const results0 = root.querySelector("#nav-results, [data-key='nav-results']")!;
+    const reason = root.querySelector("p.reason")!;
+    m.apply(results(1, { status: "ok", items: [{ candidateId: "c1", title: "A", reason: "second", hostname: "docs.example.com" }] }));
+    render();
+    expect(root.querySelector("nav")).toBe(nav);
+    expect(root.querySelector("[data-key='nav-results']")).toBe(results0);
+    expect(root.querySelector("p.reason")).toBe(reason);
+    expect(reason.textContent).toBe("second");
+  });
+
+  it("no rendered node carries its own listener: clicks dispatch from the root to the latest render's handlers", () => {
+    const m = running();
+    const first = view(m);
+    const next = handlers();
+    renderPanel(first.doc, first.root, first.v, next);
+    first.root.querySelector<HTMLButtonElement>('[data-key="nav-sites"]')!.click();
+    expect(next.select).toHaveBeenCalledWith("sites");
+    expect(first.on.select).not.toHaveBeenCalled();
+    // A button moved out of the root no longer reaches any handler.
+    const b = first.root.querySelector<HTMLButtonElement>('[data-key="nav-settings"]')!;
+    first.doc.body.append(b);
+    b.click();
+    expect(next.select).toHaveBeenCalledTimes(1);
+  });
+
+  it("a checkbox the user flipped shows the model's value again after a render; the typed site and its caret are kept", () => {
+    const m = running();
+    m.select("site");
+    const { doc, root, on, render, v } = view(m);
+    const box = root.querySelector<HTMLInputElement>("#auto-acquire")!;
+    expect(box.disabled).toBe(false);
+    const before = box.checked;
+    box.click();
+    expect(on.autoAcquire).toHaveBeenCalledWith(F.origin, !before, false);
+    render();
+    expect(root.querySelector("#auto-acquire")).toBe(box);
+    expect(box.checked).toBe(before);
+
+    m.select("sites");
+    render();
+    const input = root.querySelector<HTMLInputElement>("#site-input")!;
+    input.focus();
+    input.value = "docs.stri";
+    input.dispatchEvent(new doc.defaultView!.Event("input", { bubbles: true }));
+    expect(v.ui.siteInput).toBe("docs.stri");
+    input.setSelectionRange(4, 4);
+    render();
+    expect(root.querySelector("#site-input")).toBe(input);
+    expect(doc.activeElement).toBe(input);
+    expect(input.value).toBe("docs.stri");
+    expect(input.selectionStart).toBe(4);
+    root.querySelector("form")!.dispatchEvent(new doc.defaultView!.Event("submit", { bubbles: true, cancelable: true }));
+    expect(on.allowTyped).toHaveBeenCalledWith("docs.stri");
+  });
+
+  it("data-keys (also the click dispatch keys) never collide: an offer and its library re-approve, resources sharing a prefix", () => {
+    const twin = `res_${F.rid.slice(4, 16)}${"f".repeat(52)}`;
+    const m = new PanelModel(tracker("t"));
+    m.applyLink("connected");
+    m.apply(
+      capabilities({
+        offers: [offer()],
+        library: [entry({ state: "blocked", defaultVersion: null, versions: [[F.v1, "revoked"]] }), entry({ rid: twin })],
+        origins: [originSetting()],
+      }),
+    );
+    m.apply(state("idle", { epoch: 1, detail: "docs.example.com", permitted: true }));
+    m.select("site");
+    const { root, on } = view(m);
+    const keys = [...root.querySelectorAll("[data-key]")].map((e) => e.getAttribute("data-key")!);
+    expect(new Set(keys).size).toBe(keys.length);
+    expect(keys).toContain(`preview-${F.rid}-${F.v1}`);
+    expect(keys).toContain(`library-preview-${F.rid}-${F.v1}`);
+    root.querySelector<HTMLButtonElement>(`[data-key="library-preview-${F.rid}-${F.v1}"]`)!.click();
+    expect(on.showPreview).toHaveBeenCalledWith({ resourceId: F.rid, version: F.v1 });
+    expect(root.querySelector(`[data-key="revoke-${twin}"]`)).not.toBeNull();
+  });
+
+  it("a focused text box moved by the patch gets its focus and whole selection back (start, end, direction)", () => {
+    const m = new PanelModel(tracker("t"));
+    m.applyLink("connected");
+    m.apply(capabilities({ offers: [], origins: [] }));
+    m.select("sites");
+    const { doc, root, render, v } = view(m);
+    v.status = { ...STATUS, granted: [] };
+    render();
+    expect(root.textContent).toContain("No sites yet.");
+    const input = root.querySelector<HTMLInputElement>("#site-input")!;
+    input.focus();
+    input.value = "docs.example";
+    v.ui.siteInput = "docs.example";
+    input.setSelectionRange(2, 7, "backward");
+    // The "No sites yet" line above the box goes away: the patch moves the box's form forward with insertBefore.
+    m.apply(capabilities({ revision: 2, offers: [], origins: [originSetting(), originSetting("https://a.example")] }));
+    render();
+    expect(root.textContent).not.toContain("No sites yet.");
+    expect(root.querySelector("#site-input")).toBe(input);
+    expect(doc.activeElement).toBe(input);
+    expect([input.selectionStart, input.selectionEnd, input.selectionDirection]).toEqual([2, 7, "backward"]);
   });
 });

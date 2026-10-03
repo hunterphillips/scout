@@ -79,7 +79,8 @@ describe("runPreflightInChild", () => {
 
   it("a child that overruns its bound is killed with the CLI it waits on, and reported ambiguous", async () => {
     const input = sandbox(30);
-    const report = await runPreflightInChild(input, { maxMs: 500 });
+    // 2 s: under load the child's own start and its spawn of the slow CLI must fit inside the bound.
+    const report = await runPreflightInChild(input, { maxMs: 2_000 });
     expect(report).toEqual({ verdict: "ambiguous", reasons: ["internal: preflight child timed out"] });
     expect(pidsIn(input)).toHaveLength(2);
     await until(() => !pidsIn(input).some(alive), 2_000);

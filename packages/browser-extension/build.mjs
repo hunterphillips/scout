@@ -7,6 +7,7 @@ import { copyFile, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
+import { zodEnglishOnly } from "./zod-en-only.mjs";
 
 const root = dirname(fileURLToPath(import.meta.url));
 const dist = process.env.SCOUT_EXT_DIST ?? join(root, "dist");
@@ -15,7 +16,8 @@ const common = { bundle: true, target: "chrome116", platform: "browser", legalCo
 const key = await readFile(join(dist, "manifest.json"), "utf8").then((t) => JSON.parse(t).key).catch(() => undefined);
 await rm(dist, { recursive: true, force: true });
 await mkdir(join(dist, "content"), { recursive: true });
-await build({ ...common, format: "esm", entryPoints: { background: "src/background.ts", panel: "src/panel.ts" }, outdir: dist, absWorkingDir: root });
+// Only the worker carries zod; zod-en-only.mjs drops its non-English locales (~820 KB -> ~456 KB).
+await build({ ...common, format: "esm", entryPoints: { background: "src/background.ts", panel: "src/panel.ts" }, outdir: dist, absWorkingDir: root, plugins: [zodEnglishOnly] });
 // Registered content scripts are classic scripts, not modules.
 await build({ ...common, format: "iife", entryPoints: { "content/github-issue": "src/content/github-issue.ts" }, outdir: dist, absWorkingDir: root });
 await copyFile(join(root, "src/panel.html"), join(dist, "panel.html"));

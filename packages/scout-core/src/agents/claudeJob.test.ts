@@ -894,7 +894,11 @@ describe("claude job: the synthetic instruction marker", () => {
 
 // ---------- selected user tools through the bridge (B9/B13) ----------
 
-describe("claude job: selected tools through the per-job bridge", () => {
+// Each case here boots four to six Node processes (the fake CLI, scout-mcp, the bridge, one
+// or two backends) and waits for each by its log, not by a timer; under a loaded machine
+// that start alone can pass vitest's 5 s default (seen once on the cancel-tree case), so the
+// block sets its own bound. The stop bounds asserted inside (3 s after abort) are unchanged.
+describe("claude job: selected tools through the per-job bridge", { timeout: 20_000 }, () => {
   const BACKEND_SECRET = "SENTINEL-BACKEND-SECRET-6f70";
   const backends: FakeBackendDef[] = [];
   afterEach(() => {

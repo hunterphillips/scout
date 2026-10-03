@@ -2,7 +2,7 @@
   "name": "scout-workspace",
   "private": true,
   "version": "0.0.0",
-  "description": "Scout proof of concept workspace (Phases 1-3: plumbing, catalog discovery, personal-context service).",
+  "description": "Scout proof of concept workspace: the website agent (core, MCP adapter, browser extension, native host).",
   "type": "module",
   "engines": {
     "node": ">=22.12.0"
@@ -10,7 +10,6 @@
   "workspaces": [
     "packages/contracts",
     "packages/scout-mcp",
-    "packages/personal-context-mcp",
     "packages/scout-core",
     "packages/native-host",
     "packages/browser-extension"
@@ -18,9 +17,8 @@
   "scripts": {
     "build": "npm run build --workspaces",
     "typecheck": "npm run typecheck --workspaces",
-    "test": "npm run test --workspaces && npm run test:spikes && npm run test:scripts",
-    "test:spikes": "vitest run --root scripts/spikes",
-    "test:scripts": "vitest run --root scripts --exclude 'spikes/**'",
+    "test": "npm run test --workspaces && npm run test:scripts",
+    "test:scripts": "vitest run --root scripts",
     "test:e2e": "vitest run --root test",
     "test:agent-contract": "vitest run --root packages/scout-core src/agents src/capabilities && vitest run --root packages/scout-mcp && vitest run --root scripts agent-check",
     "test:pivot": "npm run build && npm run test:agent-contract && npm run test:e2e",
@@ -30,13 +28,7 @@
     "setup": "node scripts/setup.mjs",
     "doctor": "node scripts/doctor.mjs",
     "uninstall": "node scripts/uninstall.mjs",
-    "bundle-app": "node scripts/bundle-app.mjs",
-    "preflight:auth": "node scripts/spikes/auth-preflight.mjs",
-    "preflight:direct": "node scripts/spikes/direct-profile-preflight.mjs",
-    "smoke:agent": "node scripts/spikes/agent-smoke.mjs",
-    "spike:capture:prepare": "node scripts/spikes/github-capture/prepare.mjs",
-    "spike:bridge:server": "node scripts/spikes/bridge/echo-server.mjs",
-    "spike:bridge:echo-test": "node scripts/spikes/bridge/echo-test.mjs"
+    "bundle-app": "node scripts/bundle-app.mjs"
   },
   "devDependencies": {
     "@modelcontextprotocol/sdk": "^1.30.1",

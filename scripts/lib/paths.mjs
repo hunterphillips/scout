@@ -2,7 +2,6 @@
 //
 // Env overrides (used by tests; unset in normal use):
 //   SCOUT_HOME             replaces ~/.scout
-//   PERSONAL_CONTEXT_HOME  replaces ~/.personal-context-mcp
 //   CHROME_NMH_DIR         replaces ~/Library/Application Support/Google/Chrome/NativeMessagingHosts
 //   SCOUT_SKILLS_ROOT      replaces the Claude Code skills root (agent integration only)
 //   SCOUT_CLAUDE_BIN       the `claude` executable the agent integration runs (lib/agent-integration.mjs)
@@ -34,10 +33,6 @@ export const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", 
 
 export function scoutHome(env = process.env) {
   return env.SCOUT_HOME || join(env.HOME || homedir(), ".scout");
-}
-
-export function personalContextHome(env = process.env) {
-  return env.PERSONAL_CONTEXT_HOME || join(env.HOME || homedir(), ".personal-context-mcp");
 }
 
 export function chromeNmhDir(env = process.env) {
@@ -91,7 +86,9 @@ export function skillsRootFor(env = process.env) {
 /** All paths for one install, as absolute strings. */
 export function layout({ env = process.env, scoutRoot = REPO_ROOT } = {}) {
   const home = resolve(scoutHome(env));
-  const pcHome = resolve(personalContextHome(env));
+  // The legacy personal-context home (removed in P4.4). Setup never writes it; uninstall and
+  // doctor only recognise a pre-P4.3 `config-merged` record pointing at its config.json.
+  const legacyPcHome = resolve(join(env.HOME || homedir(), ".personal-context-mcp"));
   const nmhDir = resolve(chromeNmhDir(env));
   const agentsDir = resolve(launchAgentsDir(env));
   const root = resolve(scoutRoot);
@@ -104,8 +101,8 @@ export function layout({ env = process.env, scoutRoot = REPO_ROOT } = {}) {
     keyPem: join(home, "extension-key.pem"),
     installed: join(home, "installed.json"),
     wrapper: join(home, "bin", "scout-native-host"),
-    pcHome,
-    pcConfig: join(pcHome, "config.json"),
+    legacyPcHome,
+    legacyPcConfig: join(legacyPcHome, "config.json"),
     nmhDir,
     nmhManifest: join(nmhDir, `${HOST_NAME}.json`),
     scoutRoot: root,

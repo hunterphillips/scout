@@ -101,7 +101,7 @@ describe("installed record", () => {
 });
 
 describe("allowedPath", () => {
-  const L = layout({ env: { HOME: "/h", SCOUT_HOME: "/s", PERSONAL_CONTEXT_HOME: "/p", CHROME_NMH_DIR: "/n" }, scoutRoot: "/r" });
+  const L = layout({ env: { HOME: "/h", SCOUT_HOME: "/s", CHROME_NMH_DIR: "/n" }, scoutRoot: "/r" });
   it("accepts only paths setup writes for each kind", () => {
     expect(allowedPath("key", L.keyPem, L)).toBe(true);
     expect(allowedPath("key", "/etc/extension-key.pem", L)).toBe(false);
@@ -110,7 +110,7 @@ describe("allowedPath", () => {
     expect(allowedPath("wrapper", L.wrapper, L)).toBe(true);
     expect(allowedPath("nmh-manifest", "/elsewhere/dev.scout.bridge.json", L)).toBe(true);
     expect(allowedPath("nmh-manifest", "/elsewhere/other.json", L)).toBe(false);
-    expect(allowedPath("config-merged", L.pcConfig, L)).toBe(true);
+    expect(allowedPath("config-merged", L.legacyPcConfig, L)).toBe(true);
     expect(allowedPath("config-merged", "/u/.personal-context-mcp/config.json", L)).toBe(true);
     expect(allowedPath("config-merged", "/u/.ssh/config.json", L)).toBe(false);
     expect(allowedPath("extension-manifest-key", "/x/packages/browser-extension/dist/manifest.json", L)).toBe(true);

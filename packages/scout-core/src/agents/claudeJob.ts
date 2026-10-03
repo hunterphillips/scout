@@ -18,8 +18,8 @@
 // profile's selected tools. Before anything is written, managed policy is checked; a policy
 // that would defeat the job's restrictions is `unsupported_configuration`.
 //
-// Lifecycle (adapted from packages/personal-context-mcp/src/agentRunner.ts, temporary
-// duplicate until Phase 4), one unit each: jsonLineStream.ts parses stdout; streamMonitor.ts
+// Lifecycle (adapted from packages/personal-context-mcp/src/agentRunner.ts, removed in P4.4;
+// git history has it), one unit each: jsonLineStream.ts parses stdout; streamMonitor.ts
 // checks each event as it arrives (init, tools, hooks, auth); childSupervisor.ts spawns,
 // terminates and reaps the process tree; mapOutcome.ts turns the finished run into an
 // outcome; jobStop.ts holds the one stop decision. This file wires them per job and owns the

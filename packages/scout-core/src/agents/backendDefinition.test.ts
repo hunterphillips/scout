@@ -2,6 +2,7 @@
 // inspected-only records. The live inspection is covered end to end in profileCli.test.ts;
 // here only its auth-prompt rule, against fake-backend.mjs.
 
+import { spawn } from "node:child_process";
 import { chmodSync, existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -138,9 +139,9 @@ describe("toInspectedTool", () => {
 
 describe("inspectBackend", () => {
   const limits = { startupMs: 5000, overallMs: 10_000, stopGraceMs: 2000 };
-  const run = async (mode: string) => {
+  const run = async (mode: string, extra: string[] = [], lim = limits) => {
     const log = join(dir(), "backend.log");
-    const outcome = await inspectBackend({ command: process.execPath, args: [FAKE_BACKEND, "--mode", mode, "--log", log] }, {}, limits);
+    const outcome = await inspectBackend({ command: process.execPath, args: [FAKE_BACKEND, "--mode", mode, "--log", log, ...extra] }, {}, lim);
     const lines = existsSync(log)
       ? readFileSync(log, "utf8")
           .split("\n")
@@ -154,6 +155,67 @@ describe("inspectBackend", () => {
     const { outcome } = await run("honest");
     expect(outcome.ok && outcome.tools.map((t) => t.name)).toEqual(["lookup", "secret_tool", "peek"]);
   });
+
+  const alive = (pid: number): boolean => {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  /** Whether every pid is gone within `ms`; whatever is left is SIGKILLed so a failure never leaks. */
+  const allGone = async (pids: number[], ms: number): Promise<boolean> => {
+    const until = Date.now() + ms;
+    while (pids.some(alive) && Date.now() < until) await new Promise((r) => setTimeout(r, 25));
+    const left = pids.filter(alive);
+    for (const pid of left) {
+      try {
+        process.kill(pid, "SIGKILL");
+      } catch {
+        // gone
+      }
+    }
+    return left.length === 0;
+  };
+
+  // P4.4: the inspected backend runs detached in its own process group under the job supervisor.
+  it("a backend ignoring SIGTERM and EOF, with a helper in its group and one that escaped it: none outlives the inspection", async () => {
+    const t0 = Date.now();
+    const { outcome, lines } = await run("honest", ["--ignore-term", "--helpers"], { ...limits, stopGraceMs: 300 });
+    expect(outcome.ok && outcome.tools.map((t) => t.name)).toEqual(["lookup", "secret_tool", "peek"]);
+    const pids = [lines[0]!.pid!, ...lines.find((l) => l.helperPids)!.helperPids!];
+    expect(pids).toHaveLength(3);
+    // inspectBackend returns after the reap; the orphaned helpers' zombie entries go within moments.
+    expect(await allGone(pids, 1000)).toBe(true);
+    expect(Date.now() - t0).toBeLessThan(5000);
+  });
+
+  it("a backend that exits on EOF but leaves helpers behind: the helpers are stopped too", async () => {
+    const { outcome, lines } = await run("honest", ["--helpers"], { ...limits, stopGraceMs: 300 });
+    expect(outcome.ok).toBe(true);
+    const pids = [lines[0]!.pid!, ...lines.find((l) => l.helperPids)!.helperPids!];
+    expect(await allGone(pids, 1000)).toBe(true);
+  });
+
+  it("Ctrl-C during an inspection (SIGINT to the CLI) kills the detached backend and both helpers, then ends the CLI by that signal", async () => {
+    const log = join(dir(), "backend.log");
+    const dist = new URL("../../dist/agents/backendDefinition.js", import.meta.url).href;
+    const script = `const { inspectBackend } = await import(${JSON.stringify(dist)});
+await inspectBackend({ command: process.execPath, args: ${JSON.stringify([FAKE_BACKEND, "--mode", "hang-list", "--log", log, "--ignore-term", "--helpers"])} }, {}, { startupMs: 20000, overallMs: 60000, stopGraceMs: 2000 });`;
+    const cli = spawn(process.execPath, ["--input-type=module", "-e", script], { stdio: "ignore" });
+    const exited = new Promise<NodeJS.Signals | null>((r) => cli.once("exit", (_code, signal) => r(signal)));
+    const lines = () => (existsSync(log) ? readFileSync(log, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l) as BackendLogLine) : []);
+    const until = Date.now() + 10_000;
+    while (!(lines().some((l) => l.helperPids) && lines().some((l) => l.method === "tools/list"))) {
+      if (Date.now() > until) throw new Error("the backend never reached tools/list");
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    const pids = [lines()[0]!.pid!, ...lines().find((l) => l.helperPids)!.helperPids!];
+    cli.kill("SIGINT");
+    expect(await exited).toBe("SIGINT");
+    expect(await allGone(pids, 1000)).toBe(true);
+  }, 20_000);
 
   it("fails with auth_prompt, returning no tools, when the backend asks for input during initialize or tools/list", async () => {
     for (const mode of ["elicit-init", "sample-list"]) {

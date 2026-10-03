@@ -1,4 +1,3 @@
-import { cleanReason as legacyCleanReason } from "personal-context-mcp";
 import { describe, expect, it } from "vitest";
 import { cleanReason, validateJobOutput } from "./outputValidation.js";
 
@@ -67,17 +66,18 @@ describe("validateJobOutput", () => {
   });
 });
 
-describe("cleanReason parity with the legacy validator", () => {
+// Pinned from the legacy personal-context validator before P4.4 removed it (git history has it).
+describe("cleanReason parity with the removed legacy validator (pinned)", () => {
   it.each([
-    "Fits the open billing work",
-    "See https://evil.example/x?a=1 and www.evil.example now",
-    "javascript:alert(1) data:text/html,x mailto:a@b.example file:///etc/passwd",
-    "config file: README.md e.g. v1.2 foo/bar evil.com docs.example.org/path",
-    "tabs\tand\nnewlines​ and ‮ bidi",
-    "a-a-a-a-a-a-a-a-a-a-a-a-a-a-a-a-a-a-a-a-a-a-a-a-a-a-a-a-a-a-a-a-a-a-a-a-a.",
-    "Café naïve ✓ 日本 fits",
-    "x".repeat(150),
-  ])("%j", (reason) => {
-    expect(cleanReason(reason)).toBe(legacyCleanReason(reason));
+    ["Fits the open billing work", "Fits the open billing work"],
+    ["See https://evil.example/x?a=1 and www.evil.example now", "See and now"],
+    ["javascript:alert(1) data:text/html,x mailto:a@b.example file:///etc/passwd", ""],
+    ["config file: README.md e.g. v1.2 foo/bar evil.com docs.example.org/path", "config file: README.md e.g. v1.2 foo/bar"],
+    ["tabs\tand\nnewlines\u200b and \u202e bidi", "tabs and newlines and bidi"],
+    ["a-a-a-a-a-a-a-a-a-a-a-a-a-a-a-a-a-a-a-a-a-a-a-a-a-a-a-a-a-a-a-a-a-a-a-a-a.", "a-a-a-a-a-a-a-a-a-a-a-a-a-a-a-a-a-a-a-a-a-a-a-a-a-a-a-a-a-a-a-a-a-a-a-a-a."],
+    ["Café naïve ✓ 日本 fits", "Café naïve ✓ 日本 fits"],
+    ["x".repeat(150), "x".repeat(140)],
+  ])("%j", (reason, expected) => {
+    expect(cleanReason(reason)).toBe(expected);
   });
 });

@@ -1,8 +1,8 @@
 // Provenance: copied verbatim from packages/personal-context-mcp/src/authPreflight.ts
-// (itself lifted from scripts/spikes/auth-preflight.mjs). Temporary duplicate: the legacy
-// service keeps its own copy until Phase 4 removes it, and it must never import Scout.
-// Differences: none in behaviour; only this header. authPreflight.parity.test.ts runs both
-// copies over the same synthetic settings matrix and requires identical verdicts and reasons.
+// (itself lifted from scripts/spikes/auth-preflight.mjs). That package and the spike were
+// removed in P4.4 (git history has both); this is now the only copy. Differences: none in
+// behaviour; only this header. authPreflight.parity.test.ts pins the legacy copy's verdicts,
+// reasons and CLI calls over the same synthetic settings matrix.
 //
 // Billing preflight. Runs NO model calls.
 //

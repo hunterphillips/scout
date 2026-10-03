@@ -239,14 +239,14 @@ describe("side panel page", () => {
     expect(h.f._.requested.at(-1)).toEqual(["https://docs.example.com/*"]);
     const input = h.$("#site-input") as HTMLInputElement;
     input.value = "docs.stripe.com";
-    input.dispatchEvent(new h.dom.window.Event("input"));
-    h.$("form.add-site")!.dispatchEvent(new h.dom.window.Event("submit", { cancelable: true }));
+    input.dispatchEvent(new h.dom.window.Event("input", { bubbles: true }));
+    h.$("form.add-site")!.dispatchEvent(new h.dom.window.Event("submit", { bubbles: true, cancelable: true }));
     await h.settle();
     expect(h.f._.requested.at(-1)).toEqual(["https://docs.stripe.com/*"]);
     expect(h.byKey("remove-docs.stripe.com")).not.toBeNull();
     input.value = "http://plain.example";
     (h.$("#site-input") as HTMLInputElement).value = "http://plain.example";
-    h.$("form.add-site")!.dispatchEvent(new h.dom.window.Event("submit", { cancelable: true }));
+    h.$("form.add-site")!.dispatchEvent(new h.dom.window.Event("submit", { bubbles: true, cancelable: true }));
     await h.settle();
     expect(h.text()).toContain("Only https sites can use Scout.");
     await h.click("remove-github.com");
@@ -258,7 +258,7 @@ describe("side panel page", () => {
     await withResults(h);
     await h.click("nav-site");
     const key = { resourceId: `res_${"a".repeat(64)}`, version: "1".repeat(64) };
-    const k = `${key.resourceId.slice(4, 16)}-${key.version.slice(0, 12)}`;
+    const k = `${key.resourceId}-${key.version}`;
     await h.click(`preview-${k}`);
     const first = lastCommand(h.f);
     expect(first).toEqual({ type: "preview", commandId: expect.stringMatching(/^sp-/), resourceId: key.resourceId, version: key.version });
@@ -288,7 +288,7 @@ describe("side panel page", () => {
     await withResults(h);
     await h.click("nav-site");
     const key = { resourceId: `res_${"a".repeat(64)}`, version: "1".repeat(64) };
-    const k = `${key.resourceId.slice(4, 16)}-${key.version.slice(0, 12)}`;
+    const k = `${key.resourceId}-${key.version}`;
     await h.click(`preview-${k}`);
     const [c] = chunks("not the real text", key, 1000);
     await h.core({ ...c, commandId: lastCommand(h.f)["commandId"], sha256: "f5f87631e2c65588499362cb033b1032a148944812890e2495605dc8a36efedf" });
@@ -301,8 +301,7 @@ describe("side panel page", () => {
     await withResults(h);
     await h.click("nav-site");
     const box = h.$("#auto-acquire") as HTMLInputElement;
-    box.checked = true;
-    box.dispatchEvent(new h.dom.window.Event("change"));
+    box.click(); // a real toggle: flips the box, then a bubbling click the panel root handles
     await h.settle();
     expect(commandsPosted(h.f).some((c) => c["type"] === "set_auto_acquire")).toBe(false);
     expect(h.$("[role=dialog]")).not.toBeNull();
@@ -325,8 +324,7 @@ describe("side panel page", () => {
     expect(lastCommand(h.f)).toEqual({ type: "resume" });
     const ctx = h.$("#agent-context") as HTMLInputElement;
     expect(ctx.checked).toBe(true); // the grant fixture says on
-    ctx.checked = false;
-    ctx.dispatchEvent(new h.dom.window.Event("change"));
+    ctx.click();
     await h.settle();
     expect(lastCommand(h.f)).toMatchObject({ type: "set_agent_browser_context", enabled: false, expectedEnabled: true });
   });
@@ -407,7 +405,7 @@ describe("side panel page", () => {
     const native = lastPort(h.f);
     native.disconnected = true; // postMessage throws, as on a port Chrome just closed
     const key = { resourceId: `res_${"a".repeat(64)}`, version: "1".repeat(64) };
-    await h.click(`decline-offer-${key.resourceId.slice(4, 16)}-${key.version.slice(0, 12)}`);
+    await h.click(`decline-offer-${key.resourceId}-${key.version}`);
     expect(commandsPosted(h.f).filter((c) => c["type"] === "decline")).toEqual([]);
     const declined = h.app.model.commands.records.find((r) => r.request.type === "decline")!;
     expect(declined).toMatchObject({ state: "pending", sent: false });

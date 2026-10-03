@@ -9,7 +9,9 @@
 // through the coordinator's own input paths; each must reach the window (its panel state) within
 // 100 ms of arriving. A separate pass is left to run to the end while a 5 ms ticker measures the
 // longest the event loop is held at any point of the resolve (worker hand-off, the resolver's
-// dedupe/robots pass, the cache write): input would wait that long.
+// dedupe/robots pass, the cache write): input would wait that long. The dedupe/robots pass stays
+// on the main thread, time-sliced since P4.4 (resolver.ts PASS_SLICE_MS; resolver.test.ts bounds
+// its adversarial shapes under 50 ms).
 
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";

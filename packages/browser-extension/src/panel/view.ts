@@ -1,11 +1,18 @@
 // The side panel's DOM, rendered from the model, the worker's status and the current site.
 // No `chrome.*`: every action goes to an injected handler, so the view runs under jsdom.
 //
-// The whole panel is re-rendered on each change; focus and scroll position are carried over by
-// `data-key`, so a frame arriving while the user tabs through the panel, reads a preview, or
-// has a button focused never moves them. Text from the core and from sites only ever goes in
-// through textContent. Sections, in order: Results (default), Sites, This site, Settings,
-// Activity, Problems; Escape returns to Results (panel.ts).
+// Each change renders the whole panel into a detached tree, then patches the live one toward it
+// (P4.4): an element is kept when its tag and `data-key` match (unkeyed siblings match by tag, in
+// order), so its attributes and text are updated in place and an unchanged control is the same
+// node across renders. Focus, scroll and a click in progress (mousedown, a frame, mouseup) all
+// survive; focus and scroll are still restored by `data-key` for a node that was replaced.
+// Events are delegated: the root holds one `click`, one `submit` and one `input` listener
+// (installed once) that dispatch on `data-action` / `data-submit` / `data-input` to the latest
+// render's handlers, so no listener is attached to any rendered node. (No `keydown` listener is
+// needed: buttons and checkboxes turn Enter/Space into `click`, the site box submits its form;
+// Escape is panel-app.ts's document listener.) Text from the core and from sites only ever goes
+// in through textContent. Sections, in order: Results (default), Sites, This site, Settings,
+// Activity, Problems; Escape returns to Results (panel-app.ts).
 
 import type { StatusSnapshot } from "../messages.js";
 import { hostOf } from "./capabilities.js";
@@ -109,15 +116,48 @@ function el(doc: Document, tag: string, attrs: Attrs = {}, ...children: Child[])
   return e;
 }
 
+// ---------- delegated events ----------
+
+type Dispatch = (target: HTMLElement) => void;
+interface Actions {
+  click: Map<string, Dispatch>;
+  submit: Map<string, Dispatch>;
+  input: Map<string, Dispatch>;
+}
+/** The handlers of the render in progress (rendering is synchronous). */
+let building: Actions | null = null;
+/** Each root's latest handlers; the root's listeners read them at event time. */
+const rootActions = new WeakMap<HTMLElement, Actions>();
+
+function register(kind: keyof Actions, key: string, fn: Dispatch): void {
+  building?.[kind].set(key, fn);
+}
+
+function installDelegation(root: HTMLElement): void {
+  const dispatch = (kind: keyof Actions, attr: string, e: Event): boolean => {
+    const t = (e.target as Element | null)?.closest?.(`[${attr}]`) as HTMLElement | null | undefined;
+    if (!t || !root.contains(t)) return false;
+    const fn = rootActions.get(root)?.[kind].get(t.getAttribute(attr)!);
+    fn?.(t);
+    return fn !== undefined;
+  };
+  root.addEventListener("click", (e) => void dispatch("click", "data-action", e));
+  root.addEventListener("submit", (e) => {
+    e.preventDefault();
+    dispatch("submit", "data-submit", e);
+  });
+  root.addEventListener("input", (e) => void dispatch("input", "data-input", e));
+}
+
 function button(doc: Document, key: string, label: string, onClick: () => void, attrs: Attrs = {}): HTMLButtonElement {
-  const b = el(doc, "button", { type: "button", "data-key": key, ...attrs }, label) as HTMLButtonElement;
-  b.addEventListener("click", onClick);
-  return b;
+  register("click", key, onClick);
+  return el(doc, "button", { type: "button", "data-key": key, "data-action": key, ...attrs }, label) as HTMLButtonElement;
 }
 
 function checkbox(doc: Document, key: string, label: string, checked: boolean, enabled: boolean, onChange: (v: boolean) => void, note?: string): HTMLElement {
-  const input = el(doc, "input", { type: "checkbox", "data-key": key, id: key, disabled: !enabled, checked }) as HTMLInputElement;
-  input.addEventListener("change", () => onChange(input.checked));
+  // `click` fires after the box has flipped (pointer, Space, or its label), so `checked` is the new value.
+  register("click", key, (t) => onChange((t as HTMLInputElement).checked));
+  const input = el(doc, "input", { type: "checkbox", "data-key": key, "data-action": key, id: key, disabled: !enabled, checked }) as HTMLInputElement;
   return el(doc, "div", { class: "check" }, el(doc, "label", { for: key }, input, ` ${label}`), note ? el(doc, "p", { class: "note" }, note) : null);
 }
 
@@ -133,7 +173,8 @@ function pathOf(url: string): string {
 function bytesText(n: number): string {
   return n < 1024 ? `${n} bytes` : `${(n / 1024).toFixed(n < 10240 ? 1 : 0)} KB`;
 }
-const keyOf = (k: PreviewKey): string => `${k.resourceId.slice(4, 16)}-${k.version.slice(0, 12)}`;
+/** The full resource id and version: a data-key is also the click dispatch key, so it must never collide. */
+const keyOf = (k: PreviewKey): string => `${k.resourceId}-${k.version}`;
 
 // ---------- sections ----------
 
@@ -177,15 +218,12 @@ function sitesSection(doc: Document, v: ViewState, on: PanelHandlers): HTMLEleme
     list.append(el(doc, "li", {}, el(doc, "span", { class: "site-host", text: r.host }), el(doc, "span", { class: "site-state", text: state + extra }), action));
   }
   box.append(list);
-  const input = el(doc, "input", { type: "text", id: "site-input", "data-key": "site-input", placeholder: "docs.example.com", autocomplete: "off", spellcheck: "false", "aria-describedby": "site-input-note", value: v.ui.siteInput }) as HTMLInputElement;
-  input.addEventListener("input", () => {
-    v.ui.siteInput = input.value;
+  register("input", "site-input", (t) => {
+    v.ui.siteInput = (t as HTMLInputElement).value;
   });
-  const form = el(doc, "form", { class: "add-site" }, el(doc, "label", { for: "site-input", text: "Allow another site" }), el(doc, "div", { class: "row" }, input, el(doc, "button", { type: "submit", "data-key": "site-add", text: "Allow" })));
-  form.addEventListener("submit", (e) => {
-    e.preventDefault();
-    on.allowTyped(input.value);
-  });
+  register("submit", "site-add", (form) => on.allowTyped(form.querySelector<HTMLInputElement>("#site-input")?.value ?? ""));
+  const input = el(doc, "input", { type: "text", id: "site-input", "data-key": "site-input", "data-input": "site-input", placeholder: "docs.example.com", autocomplete: "off", spellcheck: "false", "aria-describedby": "site-input-note", value: v.ui.siteInput }) as HTMLInputElement;
+  const form = el(doc, "form", { class: "add-site", "data-submit": "site-add" }, el(doc, "label", { for: "site-input", text: "Allow another site" }), el(doc, "div", { class: "row" }, input, el(doc, "button", { type: "submit", "data-key": "site-add", text: "Allow" })));
   box.append(form, el(doc, "p", { id: "site-input-note", class: v.ui.siteInputError ? "error" : "note", text: v.ui.siteInputError ?? "Chrome asks you to confirm each site." }));
   if (v.status?.broadGrantIgnored) box.append(el(doc, "p", { class: "note", text: BROAD_GRANT_TEXT }));
   box.append(el(doc, "p", { class: "note", text: "To turn recommendations on for a site, add it to destinations in Scout's config.json." }));
@@ -307,8 +345,8 @@ function thisSiteSection(doc: Document, v: ViewState, on: PanelHandlers): HTMLEl
               doc,
               "div",
               { class: "row" },
-              m.canRevoke(e.resourceId) ? button(doc, `revoke-${e.resourceId.slice(4, 16)}`, "Revoke", () => on.revoke(e.resourceId), { "aria-label": `Revoke ${kindText(e.kind)}` }) : null,
-              reapprove ? button(doc, `preview-${keyOf(reapprove)}`, "Preview", () => on.showPreview(reapprove), { "aria-label": `Preview ${kindText(e.kind)}` }) : null,
+              m.canRevoke(e.resourceId) ? button(doc, `revoke-${e.resourceId}`, "Revoke", () => on.revoke(e.resourceId), { "aria-label": `Revoke ${kindText(e.kind)}` }) : null,
+              reapprove ? button(doc, `library-preview-${keyOf(reapprove)}`, "Preview", () => on.showPreview(reapprove), { "aria-label": `Preview ${kindText(e.kind)}` }) : null,
             ),
           ),
         );
@@ -421,14 +459,81 @@ function problemsSection(doc: Document, v: ViewState, on: PanelHandlers): HTMLEl
   return box;
 }
 
+// ---------- the keyed patch ----------
+
+const keyOfNode = (n: Node): string | null => (n.nodeType === 1 ? (n as Element).getAttribute("data-key") : null);
+
+function sameKind(a: Node, b: Node): boolean {
+  if (a.nodeType !== b.nodeType) return false;
+  if (a.nodeType !== 1) return true;
+  return (a as Element).tagName === (b as Element).tagName && keyOfNode(a) === keyOfNode(b);
+}
+
+/** Make `cur` (live) match `next` (detached) in place: attributes, form state, children. */
+function patchNode(cur: Node, next: Node): void {
+  if (cur.nodeType !== 1) {
+    if (cur.nodeValue !== next.nodeValue) cur.nodeValue = next.nodeValue;
+    return;
+  }
+  const c = cur as Element;
+  const n = next as Element;
+  for (const { name } of [...c.attributes]) if (!n.hasAttribute(name)) c.removeAttribute(name);
+  for (const { name, value } of [...n.attributes]) if (c.getAttribute(name) !== value) c.setAttribute(name, value);
+  if (c.tagName === "INPUT") {
+    const ci = c as HTMLInputElement;
+    // The model decides: a checkbox the user flipped shows the model's value until the core answers.
+    if (ci.type === "checkbox") ci.checked = n.hasAttribute("checked");
+    else if (ci.value !== (n.getAttribute("value") ?? "")) ci.value = n.getAttribute("value") ?? "";
+  }
+  patchChildren(c, n);
+}
+
+/** Reuse each live child that matches by tag and `data-key` (unkeyed: the first unused of its kind), in `next`'s order. */
+function patchChildren(parent: Element, nextParent: Element): void {
+  const nextKids = [...nextParent.childNodes];
+  const curKids = [...parent.childNodes];
+  const keyed = new Map<string, Node>();
+  for (const k of curKids) {
+    const key = keyOfNode(k);
+    if (key !== null && !keyed.has(key)) keyed.set(key, k);
+  }
+  const used = new Set<Node>();
+  nextKids.forEach((n, i) => {
+    const key = keyOfNode(n);
+    let match: Node | undefined = key !== null ? keyed.get(key) : curKids.find((k) => !used.has(k) && keyOfNode(k) === null && sameKind(k, n));
+    if (match !== undefined && (used.has(match) || !sameKind(match, n))) match = undefined;
+    let node: Node = n;
+    if (match !== undefined) {
+      used.add(match);
+      patchNode(match, n);
+      node = match;
+    }
+    if (parent.childNodes[i] !== node) parent.insertBefore(node, parent.childNodes[i] ?? null);
+  });
+  while (parent.childNodes.length > nextKids.length) parent.lastChild!.remove();
+}
+
 // ---------- the panel ----------
 
-/** Renders the whole panel into `root`, keeping focus and scroll positions by `data-key`. */
+/** Renders the panel into `root` by a keyed patch (see the header), with delegated events. */
 export function renderPanel(doc: Document, root: HTMLElement, v: ViewState, on: PanelHandlers): void {
+  if (!rootActions.has(root)) installDelegation(root);
+  const actions: Actions = { click: new Map(), submit: new Map(), input: new Map() };
+  building = actions;
+  try {
+    build(doc, root, v, on);
+  } finally {
+    building = null;
+  }
+  rootActions.set(root, actions);
+}
+
+function build(doc: Document, root: HTMLElement, v: ViewState, on: PanelHandlers): void {
   const active = doc.activeElement as HTMLElement | null;
   const focusKey = active && root.contains(active) ? active.getAttribute("data-key") : null;
   const InputCtor = doc.defaultView!.HTMLInputElement;
-  const caret = active instanceof InputCtor && active.type === "text" ? { start: active.selectionStart } : null;
+  const caret =
+    active instanceof InputCtor && active.type === "text" ? { start: active.selectionStart, end: active.selectionEnd, direction: active.selectionDirection ?? undefined } : null;
   const scroll = new Map<string, number>();
   for (const e of root.querySelectorAll<HTMLElement>("[data-key]")) if (e.scrollTop) scroll.set(e.getAttribute("data-key")!, e.scrollTop);
 
@@ -456,22 +561,20 @@ export function renderPanel(doc: Document, root: HTMLElement, v: ViewState, on: 
   const header = doc.getElementById("header-line");
   if (header && header.textContent !== m.headerLine) header.textContent = m.headerLine;
   const next = el(doc, "div", {}, nav, el(doc, "section", { id: "section", "aria-labelledby": "section-title" }, el(doc, "h2", { id: "section-title", text: title }), body));
-  // Nothing changed: keep the live nodes, so a click in progress (mousedown, then mouseup) on
-  // a button is never lost to a re-render that would only replace it with an identical one.
-  // (A checkbox the user flipped differs from its markup until the model answers: re-render it.)
-  const flipped = [...root.querySelectorAll<HTMLInputElement>("input[type=checkbox]")].some((i) => i.checked !== i.defaultChecked);
-  if (!flipped && next.innerHTML === root.innerHTML && root.childElementCount > 0) return;
-  root.replaceChildren(...next.childNodes);
+  patchChildren(root, next);
 
+  // A kept node keeps its scroll and focus; these restore them on a node that was replaced.
   for (const [k, top] of scroll) {
     const e = root.querySelector<HTMLElement>(`[data-key="${k}"]`);
-    if (e) e.scrollTop = top;
+    if (e && e.scrollTop !== top) e.scrollTop = top;
   }
+  // A focused node that was replaced, or moved by insertBefore (which blurs it), gets its focus
+  // and its whole selection (start, end, direction) back.
   if (focusKey) {
     const e = root.querySelector<HTMLElement>(`[data-key="${focusKey}"]`);
-    if (e) {
-      e.focus();
-      if (caret && caret.start !== null && e instanceof InputCtor) e.setSelectionRange(caret.start, caret.start);
+    if (e && doc.activeElement !== e) e.focus();
+    if (e instanceof InputCtor && caret && caret.start !== null && caret.end !== null && (e.selectionStart !== caret.start || e.selectionEnd !== caret.end)) {
+      e.setSelectionRange(caret.start, caret.end, caret.direction);
     }
   }
 }

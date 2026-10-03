@@ -14,8 +14,8 @@
 // an honest "nothing fits".
 //
 // Provenance: cleanReason and its URL_LIKE pattern are copied verbatim from
-// packages/personal-context-mcp/src/validateResponse.ts (temporary duplicate until Phase 4;
-// outputValidation.test.ts checks parity). The rest is new: no evidence IDs, labels or
+// packages/personal-context-mcp/src/validateResponse.ts, removed in P4.4 (git history has
+// it; outputValidation.test.ts pins the legacy results). The rest is new: no evidence IDs, labels or
 // audit map, which belonged to the legacy service's personal sources.
 
 import { JOB_MAX_PICKS, JOB_REASON_MAX_CHARS, type AgentPick, type JobRequest } from "@scout/contracts";

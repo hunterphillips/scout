@@ -46,8 +46,8 @@ const ORPHAN_CHECK_MS = 1_000;
 
 /**
  * Exit once on stdin EOF/close, a termination signal, or when the parent PID changes.
- * Adapted from personal-context-mcp's sourceTools/lifecycle.ts (not imported: scout-mcp
- * must not depend on that package).
+ * Adapted from personal-context-mcp's sourceTools/lifecycle.ts (that package was removed
+ * in P4.4; git history has it).
  */
 function watchLifecycle(onExit: () => void): void {
   const initialPpid = process.ppid;

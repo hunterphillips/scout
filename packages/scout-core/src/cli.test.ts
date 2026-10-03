@@ -297,13 +297,13 @@ describe("runCli", () => {
     expect(calls).toHaveLength(4);
   });
 
-  it("rank is a Phase 3 stub that exits 2 without touching anything", async () => {
+  it("rank is not a command (the legacy rank stub went in P4.4): usage, exit 1, nothing touched", async () => {
     const { runCli } = await import("./cli.js");
     const site = fakeSite();
     const run = io({ guardedFetch: site.guardedFetch });
 
-    expect(await runCli(["rank", ORIGIN], run.io)).toBe(2);
-    expect(run.err()).toContain("not available until Phase 3");
+    expect(await runCli(["rank", ORIGIN], run.io)).toBe(1);
+    expect(run.err()).toContain("usage:");
     expect(site.requests).toEqual([]);
     expect(readdirSync(home)).toEqual([]);
   });
