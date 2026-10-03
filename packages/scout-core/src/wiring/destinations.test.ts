@@ -152,6 +152,23 @@ describe("config.json destinations, live", () => {
     expect(events.filter((e) => e.name === "destination_set_failed").map((e) => e.fields.code)).toEqual(["not_regular", "not_regular", "invalid", "invalid", "invalid", "invalid"]);
   });
 
+  it("refuses with invalid, writing nothing and changing nothing held, when another key in config.json is malformed", () => {
+    const { d, changes } = live([]);
+    for (const bad of [{ agentBrowserContext: "yes" }, { chromeBundleId: "not a bundle id" }]) {
+      const text = JSON.stringify({ ...bad, destinations: [] });
+      writeFileSync(path, text);
+      expect(d.set("https://docs.stripe.com", true, false)).toEqual({ ok: false, code: "invalid" });
+      expect(readFileSync(path, "utf8")).toBe(text);
+    }
+    expect(d.current()).toEqual([]);
+    expect(changes).toEqual([]);
+    expect(events.filter((e) => e.name === "destination_set")).toEqual([]);
+    expect(events.filter((e) => e.name === "destination_set_failed").map((e) => e.fields.code)).toEqual([
+      "config-invalid-agent-browser-context",
+      "config-invalid-chrome-bundle-id",
+    ]);
+  });
+
   it("an unwritable home is store_error", () => {
     writeFileSync(path, JSON.stringify({ destinations: [] }));
     const { d } = live();
