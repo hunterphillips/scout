@@ -340,6 +340,11 @@ export function createPanelApp(deps: PanelAppDeps): PanelApp {
       if (c) send([c]);
       render();
     },
+    destination(origin, enabled) {
+      const c = model.setDestination(origin, enabled);
+      if (c) send([c]);
+      render();
+    },
     pause() {
       const pause = model.pauseState.request();
       if (pause === null) return;

@@ -53,6 +53,8 @@ export interface PanelHandlers {
   autoAcquire(origin: string, enabled: boolean, acknowledged: boolean): void;
   cancelSheet(): void;
   grant(enabled: boolean): void;
+  /** The site's background recommendations switch (`origin` is `https://host`). */
+  destination(origin: string, enabled: boolean): void;
   pause(): void;
   githubCapture(enabled: boolean): void;
   reconnect(): void;
@@ -226,7 +228,7 @@ function sitesSection(doc: Document, v: ViewState, on: PanelHandlers): HTMLEleme
   const form = el(doc, "form", { class: "add-site", "data-submit": "site-add" }, el(doc, "label", { for: "site-input", text: "Allow another site" }), el(doc, "div", { class: "row" }, input, el(doc, "button", { type: "submit", "data-key": "site-add", text: "Allow" })));
   box.append(form, el(doc, "p", { id: "site-input-note", class: v.ui.siteInputError ? "error" : "note", text: v.ui.siteInputError ?? "Chrome asks you to confirm each site." }));
   if (v.status?.broadGrantIgnored) box.append(el(doc, "p", { class: "note", text: BROAD_GRANT_TEXT }));
-  box.append(el(doc, "p", { class: "note", text: "To turn recommendations on for a site, add it to destinations in Scout's config.json." }));
+  box.append(el(doc, "p", { class: "note", text: "Turn on suggestions from This site." }));
   return box;
 }
 
@@ -276,6 +278,26 @@ function previewPane(doc: Document, v: ViewState, on: PanelHandlers, key: Previe
   return pane;
 }
 
+/**
+ * "Suggest links from this site": background recommendations for an https site. Off until the
+ * user turns it on; Chrome must allow the site to turn it on (turning it off never needs that).
+ * Its `data-key` carries the full origin.
+ */
+function destinationSwitch(doc: Document, v: ViewState, on: PanelHandlers, origin: string, granted: boolean): HTMLElement {
+  const m = v.model;
+  const enabled = m.isDestination(origin);
+  const rec = m.destinationRecord(origin);
+  const note =
+    rec?.state === "pending"
+      ? "Waiting for Scout core…"
+      : !granted && !enabled
+        ? "Allow this site first."
+        : m.capabilities.agentBrowserContext === null
+          ? "Waiting for Scout core."
+          : "Each visit runs a short job on your Claude subscription.";
+  return checkbox(doc, `destination-${origin}`, "Suggest links from this site", enabled, m.canToggleDestination(origin) && (granted || enabled), (x) => on.destination(origin, x), note);
+}
+
 function thisSiteSection(doc: Document, v: ViewState, on: PanelHandlers): HTMLElement {
   const m = v.model;
   const box = el(doc, "div", {});
@@ -293,6 +315,7 @@ function thisSiteSection(doc: Document, v: ViewState, on: PanelHandlers): HTMLEl
     } else {
       box.append(el(doc, "p", { text: "Scout is not allowed on this site." }), button(doc, "site-allow", "Allow Scout on this site", () => on.allow(s.pattern)));
     }
+    box.append(destinationSwitch(doc, v, on, s.origin, granted));
   }
   if (host !== null && s.kind === "ok") {
     if (!m.running) box.append(el(doc, "p", { class: "note", text: "Connect to Scout to see what this site offers." }));
@@ -425,6 +448,7 @@ const REQUEST_TEXT: Record<string, string> = {
   revoke: "Revoke",
   set_auto_acquire: "Auto-acquire",
   set_agent_browser_context: "Agent access",
+  set_destination: "Suggestions",
   refresh_capabilities: "Refresh",
   open_link: "Open link",
 };

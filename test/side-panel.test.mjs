@@ -114,7 +114,8 @@ describe.skipIf(SKIP !== null)(SKIP ? `Scout's side panel in Chrome for Testing 
     expect(built.status, built.stderr).toBe(0);
 
     // Scout's home: config, the fake agent, a fresh cached catalog for the site.
-    writeFileSync(join(home, "config.json"), JSON.stringify({ extensionId: extId, destinations: [HOSTNAME] }));
+    // Recommendations start off: the panel's switch turns them on (P4.6).
+    writeFileSync(join(home, "config.json"), JSON.stringify({ extensionId: extId, destinations: [] }));
     const claudePath = join(home, "bin", "claude");
     writeFileSync(claudePath, `#!/bin/sh\nFAKE_MODE=ok FAKE_VERSION=2.1.286 FAKE_LOG='${home}/fake.log' exec '${process.execPath}' '${FAKE_CLAUDE}' "$@"\n`);
     chmodSync(claudePath, 0o755);
@@ -233,6 +234,16 @@ describe.skipIf(SKIP !== null)(SKIP ? `Scout's side panel in Chrome for Testing 
     await until(async () => (await text()).includes("Scout is allowed on this site."), "This site to show the grant");
     expect(await sw.evaluate(() => chrome.permissions.getAll().then((p) => p.origins))).toEqual([`${SITE}/*`]);
     steps.allow = "headless: the panel's Allow → permissions.request (prompt pre-answered via developerPrivate; the prompt itself is a live check)";
+    // This site's switch turns recommendations on: the core writes config.json and its grant
+    // frame carries the site, with no restart.
+    const switchKey = `destination-${SITE}`;
+    await until(async () => (await text()).includes("Suggest links from this site"), "the recommendations switch");
+    expect(await panel.evaluate((k) => document.querySelector(`[data-key="${k}"]`).checked, switchKey)).toBe(false);
+    await click(switchKey);
+    await until(() => panel.evaluate((k) => document.querySelector(`[data-key="${k}"]`)?.checked === true, switchKey), "the switch to show on");
+    expect(JSON.parse(readFileSync(join(home, "config.json"), "utf8"))).toEqual({ extensionId: extId, destinations: [HOSTNAME] });
+    expect(app().filter((f) => f.type === "grant").at(-1)).toMatchObject({ destinations: [SITE] });
+    steps.recommendationsSwitch = "headless";
     // Sites: the site is one of config.json's destinations, carried on the core's grant frame.
     await click("nav-sites");
     await until(async () => (await text()).includes(`${HOSTNAME}`) && (await text()).includes("Recommendations on"), "Sites to show recommendations on");
@@ -240,6 +251,9 @@ describe.skipIf(SKIP !== null)(SKIP ? `Scout's side panel in Chrome for Testing 
     expect(steps.sitesRow).toBe("Allowed · Recommendations on");
     frontmost();
     await click("nav-results");
+    // The next settled visit after turning it on runs the job.
+    await site.goto(`${SITE}/docs/pricing`, { waitUntil: "domcontentloaded" });
+    await site.bringToFront();
 
     // 3. The settled visit: the fake agent's results reach the panel.
     await until(() => app().some((f) => f.type === "results"), "results from the core", 40_000);
@@ -266,7 +280,7 @@ describe.skipIf(SKIP !== null)(SKIP ? `Scout's side panel in Chrome for Testing 
     }, "the new tab to load");
     const to = tabs.filter((t) => t.id !== siteTab.id);
     expect(to).toEqual([{ id: expect.any(Number), url: target, openerTabId: siteTab.id, index: siteTab.index + 1 }]);
-    expect(await site.url()).toBe(`${SITE}/docs/billing`); // the current tab never navigates
+    expect(await site.url()).toBe(`${SITE}/docs/pricing`); // the current tab never navigates
     steps.openLink = "headless";
 
     // 5. Pause from the panel pauses the core; the extension follows the core's policy.

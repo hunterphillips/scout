@@ -172,6 +172,7 @@ export class PanelModel {
       else if (r.type === "revoke") moot = entry?.state === "blocked";
       else if (r.type === "set_auto_acquire") moot = this.capabilities.originSetting(r.origin)?.autoAcquire === r.enabled;
       else if (r.type === "set_agent_browser_context") moot = this.capabilities.agentBrowserContext === r.enabled;
+      else if (r.type === "set_destination") moot = this.isDestination(r.origin) === r.enabled;
       if (moot) this.commands.settle(rec.id);
     }
   }
@@ -339,6 +340,26 @@ export class PanelModel {
     return this.commands.issue({ type: "set_agent_browser_context", enabled, expectedEnabled: current });
   }
 
+  /** Background recommendations are on for `origin` (`https://host`), per the latest `grant` frame. */
+  isDestination(origin: string): boolean {
+    return this.capabilities.destinations.includes(origin);
+  }
+
+  /**
+   * The site's recommendations switch can be flipped: connected, a `grant` frame arrived (it
+   * carries the list the switch shows), and no switch for the site is waiting on the core.
+   * Whether Chrome allows the site is the view's check (the worker's grants, not the core's).
+   */
+  canToggleDestination(origin: string): boolean {
+    return this.running && this.capabilities.agentBrowserContext !== null && this.destinationRecord(origin)?.state !== "pending";
+  }
+
+  setDestination(origin: string, enabled: boolean): PanelCommand | null {
+    const current = this.isDestination(origin);
+    if (!this.canToggleDestination(origin) || current === enabled) return null;
+    return this.commands.issue({ type: "set_destination", origin, enabled, expectedEnabled: current });
+  }
+
   refreshCapabilities(): PanelCommand | null {
     return this.running ? this.commands.issue({ type: "refresh_capabilities" }) : null;
   }
@@ -397,6 +418,10 @@ export class PanelModel {
 
   autoAcquireRecord(origin: string): CommandRecord | undefined {
     return this.commands.latest((r) => r.type === "set_auto_acquire" && r.origin === origin);
+  }
+
+  destinationRecord(origin: string): CommandRecord | undefined {
+    return this.commands.latest((r) => r.type === "set_destination" && r.origin === origin);
   }
 
   get grantRecord(): CommandRecord | undefined {

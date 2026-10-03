@@ -17,7 +17,7 @@ const STATUS: StatusSnapshot = {
 
 function handlers(): PanelHandlers {
   const h = {} as Record<string, unknown>;
-  for (const k of ["select", "open", "allow", "remove", "allowTyped", "showPreview", "restartPreview", "closePreview", "approve", "decline", "revoke", "autoAcquire", "cancelSheet", "grant", "pause", "githubCapture", "reconnect", "refresh", "retry", "dismiss"])
+  for (const k of ["select", "open", "allow", "remove", "allowTyped", "showPreview", "restartPreview", "closePreview", "approve", "decline", "revoke", "autoAcquire", "cancelSheet", "grant", "destination", "pause", "githubCapture", "reconnect", "refresh", "retry", "dismiss"])
     h[k] = vi.fn();
   return h as unknown as PanelHandlers;
 }
@@ -176,8 +176,62 @@ describe("panel view", () => {
     expect(row("docs.example.com").querySelector(".site-state")!.textContent).toBe("Allowed · Recommendations on");
     expect(row("docs.stripe.com").querySelector(".site-state")!.textContent).toBe("Not allowed · Recommendations on");
     expect(row("docs.stripe.com").querySelector('[data-key="allow-docs.stripe.com"]')).not.toBeNull();
-    expect(root.textContent).toContain("To turn recommendations on for a site, add it to destinations in Scout's config.json.");
+    expect(root.textContent).toContain("Turn on suggestions from This site.");
+    expect(root.textContent).not.toContain("config.json");
     expect(root.textContent).not.toContain("Recommendations run only");
+  });
+
+  // P4.6: the per-site recommendations switch.
+  it("This site has a 'Suggest links from this site' switch, off by default, keyed by the full origin; a click sends set_destination", () => {
+    const m = running();
+    m.apply({ type: "grant", agentBrowserContext: false, destinations: [] });
+    m.select("site");
+    const { root, on, render } = view(m);
+    const box = () => root.querySelector<HTMLInputElement>('[data-key="destination-https://docs.example.com"]')!;
+    expect(box()).not.toBeNull();
+    expect(box().type).toBe("checkbox");
+    expect(box().checked).toBe(false);
+    expect(box().disabled).toBe(false);
+    expect(root.querySelector('label[for="destination-https://docs.example.com"]')!.textContent).toContain("Suggest links from this site");
+    expect(root.textContent).toContain("Each visit runs a short job on your Claude subscription.");
+    box().click();
+    expect(on.destination).toHaveBeenCalledWith("https://docs.example.com", true);
+    // The core's grant frame turns it on.
+    m.apply({ type: "grant", agentBrowserContext: false, destinations: ["https://docs.example.com"] });
+    render();
+    expect(box().checked).toBe(true);
+  });
+
+  it("the switch is disabled with 'Allow this site first.' when Chrome doesn't allow the site; one already on can still be turned off", () => {
+    const m = running();
+    m.apply({ type: "grant", agentBrowserContext: false, destinations: [] });
+    m.select("site");
+    const { root, v, render } = view(m);
+    v.status = { ...STATUS, granted: [] };
+    render();
+    const box = () => root.querySelector<HTMLInputElement>('[data-key="destination-https://docs.example.com"]')!;
+    expect(box().disabled).toBe(true);
+    expect(root.textContent).toContain("Allow this site first.");
+    m.apply({ type: "grant", agentBrowserContext: false, destinations: ["https://docs.example.com"] });
+    render();
+    expect(box().checked).toBe(true);
+    expect(box().disabled).toBe(false);
+    expect(root.textContent).not.toContain("Allow this site first.");
+  });
+
+  it("the switch waits for the core while its command is pending, and is disabled without a core", () => {
+    const m = running();
+    m.apply({ type: "grant", agentBrowserContext: false, destinations: [] });
+    m.select("site");
+    expect(m.setDestination("https://docs.example.com", true)).not.toBeNull();
+    const { root, render } = view(m);
+    const box = () => root.querySelector<HTMLInputElement>('[data-key="destination-https://docs.example.com"]')!;
+    expect(box().disabled).toBe(true);
+    expect(box().checked).toBe(false);
+    expect(root.textContent).toContain("Waiting for Scout core…");
+    m.applyLink("core_unavailable");
+    render();
+    expect(box().disabled).toBe(true);
   });
 
   // P4.4: one delegated listener per event type on the root, and a keyed patch.

@@ -480,6 +480,64 @@ describe("PanelModel capabilities (PanelModelCapabilityTests)", () => {
     expect(m.canToggleGrant).toBe(false);
   });
 
+  // P4.6: the per-site recommendations switch, a toggle like the grant.
+  it("set_destination is a compare-and-set toggle on the grant frame's destinations", () => {
+    const m = onSite();
+    const STRIPE = "https://docs.stripe.com";
+    expect(m.canToggleDestination(F.origin)).toBe(false); // no grant frame yet
+    expect(m.setDestination(F.origin, true)).toBeNull();
+    m.apply({ type: "grant", agentBrowserContext: false, destinations: [STRIPE] });
+    expect(m.isDestination(F.origin)).toBe(false);
+    expect(m.isDestination(STRIPE)).toBe(true);
+    expect(m.canToggleDestination(F.origin)).toBe(true);
+    expect(m.setDestination(F.origin, false)).toBeNull(); // already off
+    const on = m.setDestination(F.origin, true)!;
+    expect(on).toMatchObject({ type: "set_destination", origin: F.origin, enabled: true, expectedEnabled: false });
+    expect(on.commandId).toMatch(/^t/);
+    expect(m.canToggleDestination(F.origin)).toBe(false); // pending
+    expect(m.canToggleDestination(STRIPE)).toBe(true); // another site's switch is independent
+    expect(m.setDestination(F.origin, true)).toBeNull();
+    // The grant frame alone leaves the toggle pending; the ack settles it.
+    m.apply({ type: "grant", agentBrowserContext: false, destinations: [STRIPE, F.origin] });
+    expect(m.destinationRecord(F.origin)?.state).toBe("pending");
+    m.apply(ackOk(on.commandId));
+    expect(m.destinationRecord(F.origin)?.state).toBe("ok");
+    expect(m.setDestination(F.origin, false)).toMatchObject({ type: "set_destination", origin: F.origin, enabled: false, expectedEnabled: true });
+    m.applyLink("core_unavailable");
+    expect(m.canToggleDestination(F.origin)).toBe(false);
+  });
+
+  it("a stale set_destination the next grant frame shows done settles; otherwise it is a Problem without Retry", () => {
+    const m = onSite();
+    m.apply({ type: "grant", agentBrowserContext: false, destinations: [] });
+    const on = m.setDestination(F.origin, true)!;
+    m.apply(ackFailed(on.commandId, "stale_revision"));
+    expect(m.destinationRecord(F.origin)).toMatchObject({ state: "failed", code: "stale_revision" });
+    expect(m.problems.some((p) => p.kind === "command" && p.record.id === on.commandId)).toBe(true);
+    expect(m.canRetry(on.commandId)).toBe(false);
+    m.apply({ type: "grant", agentBrowserContext: false, destinations: [F.origin] });
+    expect(m.destinationRecord(F.origin)?.state).toBe("ok");
+    const off = m.setDestination(F.origin, false)!;
+    m.apply(ackFailed(off.commandId, "store_error"));
+    expect(m.canRetry(off.commandId)).toBe(false);
+    expect(m.problems.some((p) => p.kind === "command" && p.record.id === off.commandId)).toBe(true);
+  });
+
+  it("a pending set_destination settles unknown on expiry and on a core restart, never re-sent", () => {
+    const m = onSite();
+    m.apply({ type: "grant", agentBrowserContext: false, destinations: [] });
+    const a = m.setDestination(F.origin, true)!;
+    m.markSent(a, "written", 1000);
+    m.expirePending(1000 + 10_000);
+    expect(m.destinationRecord(F.origin)?.state).toBe("unknown");
+    m.apply({ type: "grant", agentBrowserContext: false, destinations: [] });
+    const b = m.setDestination(F.origin, true)!;
+    m.markSent(b, "written", 2000);
+    m.applyLink("core_unavailable");
+    expect(m.applyLink("connected")).toEqual([]);
+    expect(m.destinationRecord(F.origin)?.state).toBe("unknown");
+  });
+
   it("ackForAnUnknownCommandIsIgnored", async () => {
     const m = onSite();
     await loaded(m);

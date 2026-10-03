@@ -214,6 +214,32 @@ describe("side panel page", () => {
     expect(states).toEqual(["docs.example.comAllowed · Recommendations onRemove", "docs.stripe.comNot allowed · Recommendations onAllow"]);
   });
 
+  it("This site's recommendations switch sends set_destination from the click; the core's grant frame turns it on and Sites shows it", async () => {
+    const h = await harness();
+    await withResults(h);
+    await h.click("nav-site");
+    const KEY = "destination-https://docs.example.com";
+    expect(h.byKey(KEY)!.getAttribute("type")).toBe("checkbox");
+    expect((h.byKey(KEY) as unknown as HTMLInputElement).checked).toBe(false);
+    expect(h.text()).toContain("Suggest links from this site");
+    expect(h.text()).toContain("Each visit runs a short job on your Claude subscription.");
+    await h.click(KEY);
+    const cmd = lastCommand(h.f);
+    expect(cmd).toEqual({ type: "set_destination", commandId: expect.stringMatching(/^sp-/), origin: "https://docs.example.com", enabled: true, expectedEnabled: false });
+    expect(h.byKey(KEY)!.disabled).toBe(true);
+    expect((h.byKey(KEY) as unknown as HTMLInputElement).checked).toBe(false); // the model decides until the core answers
+    await h.core({ type: "grant", agentBrowserContext: false, destinations: ["https://docs.example.com"] });
+    await h.core({ type: "ack", commandId: cmd["commandId"], ok: true, revision: 0, approvalRevision: 0 });
+    expect((h.byKey(KEY) as unknown as HTMLInputElement).checked).toBe(true);
+    expect(h.byKey(KEY)!.disabled).toBe(false);
+    await h.click("nav-sites");
+    expect([...h.doc.querySelectorAll("ul.sites li")].map((li) => li.textContent)).toEqual(["docs.example.comAllowed · Recommendations onRemove"]);
+    // Off again.
+    await h.click("nav-site");
+    await h.click(KEY);
+    expect(lastCommand(h.f)).toMatchObject({ type: "set_destination", origin: "https://docs.example.com", enabled: false, expectedEnabled: true });
+  });
+
   it("the link going down clears the results and says so", async () => {
     const h = await harness();
     await withResults(h);

@@ -51,7 +51,7 @@ export const COMMAND_MAX_BYTES = 512;
 
 export const isMutation = (r: PanelRequest): boolean => r.type !== "preview";
 export const isDecision = (r: PanelRequest): boolean => r.type === "approve" || r.type === "decline" || r.type === "revoke";
-export const isToggle = (r: PanelRequest): boolean => r.type === "set_auto_acquire" || r.type === "set_agent_browser_context";
+export const isToggle = (r: PanelRequest): boolean => r.type === "set_auto_acquire" || r.type === "set_agent_browser_context" || r.type === "set_destination";
 /** Decisions and refreshes may be retried under their ID; previews, toggles and clicks never. */
 export const isRetryableRequest = (r: PanelRequest): boolean => isDecision(r) || r.type === "refresh_capabilities";
 export const isRetryableCode = (c: AckFailureCode): boolean => c === "unavailable" || c === "store_error";
