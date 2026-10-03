@@ -26,7 +26,9 @@
 // tracked descendant that left it (ps-polled OwnedTree), SIGKILL to both after
 // `stopGraceMs`, then a reap until nothing it owned is alive. So a backend that ignores
 // SIGTERM and EOF, or starts helpers (in its group or escaped from it), cannot outlive the
-// inspection. Only processes the backend owned are ever signalled.
+// inspection. Only processes the backend owned are ever signalled. Being detached, the group
+// misses the terminal's Ctrl-C: while it runs, SIGINT/SIGTERM/SIGHUP to this process SIGKILL
+// the group and the escaped helpers a blocking ps pass finds, then the signal is re-raised.
 //
 // Decision (P2.7, plan: "an auth prompt produces an unavailable connection; do not open a
 // hidden login flow"): any request the backend makes of Scout during inspection (sampling,
@@ -301,6 +303,17 @@ export async function inspectBackend(launch: Pick<Connection, "command" | "args"
     signalOnClose: false,
     spawn: (command, args, options) => (supervised = startChild({ spawn: nodeSpawn, command, args, options, killGraceMs: limits.stopGraceMs })).child,
   });
+  // The backend's detached group no longer gets the terminal's Ctrl-C, so a signal that ends
+  // this CLI first kills the backend's group and its escaped helpers, then is re-raised.
+  const onSignal = (signal: NodeJS.Signals): void => {
+    removeSignalHandlers();
+    supervised?.killAllSync();
+    process.kill(process.pid, signal);
+  };
+  const removeSignalHandlers = (): void => {
+    for (const sig of INSPECT_SIGNALS) process.off(sig, onSignal);
+  };
+  for (const sig of INSPECT_SIGNALS) process.on(sig, onSignal);
   const client = new Client({ name: "scout-setup", version: "0" }, { capabilities: {} });
   // The first backend request fails the inspection (see the header): `prompted` rejects,
   // which ends whichever stage is waiting, and the request itself gets an error reply.
@@ -351,9 +364,16 @@ export async function inspectBackend(launch: Pick<Connection, "command" | "args"
     if (askedForInput) return { ok: false, reason: "auth_prompt" };
     return { ok: false, reason: e instanceof Error && e.message === "timeout" ? "timed_out" : stage };
   } finally {
-    await stopBackend(client, supervised);
+    try {
+      await stopBackend(client, supervised);
+    } finally {
+      removeSignalHandlers();
+    }
   }
 }
+
+/** Signals that end `agent inspect|refresh` while a backend is running (see inspectBackend). */
+const INSPECT_SIGNALS = ["SIGINT", "SIGTERM", "SIGHUP"] as const;
 
 /**
  * Record the tree, end stdin, then the job stop: group + escaped descendants SIGTERM → grace →

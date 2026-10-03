@@ -18,7 +18,7 @@
 // again whenever ps shows a new owned process, so the caller can persist it for a later start.
 
 import type { ChildProcess, SpawnOptions } from "node:child_process";
-import { jobTreeRecord, OwnedTree, psSnapshotAsync, type JobTreeRecord, type ProcessTracker, type PsSnapshot } from "./processTree.js";
+import { jobTreeRecord, OwnedTree, psSnapshot, psSnapshotAsync, type JobTreeRecord, type ProcessTracker, type PsSnapshot } from "./processTree.js";
 
 export type SpawnFn = (command: string, args: readonly string[], options: SpawnOptions) => ChildProcess;
 export type SnapshotFn = () => PsSnapshot | Promise<PsSnapshot>;
@@ -61,6 +61,11 @@ export interface SupervisedChild {
   reap(): Promise<void>;
   /** A fresh ps pass now, recording every owned process it shows. */
   observe(): Promise<void>;
+  /**
+   * Synchronous, for a signal handler about to end this process: one blocking ps pass, then
+   * SIGKILL to the group (while unreaped) and to every live owned process outside it; then dispose().
+   */
+  killAllSync(): void;
   /** Clear every timer; SIGKILL the group if the CLI is still unreaped. Idempotent. */
   dispose(): void;
 }
@@ -205,6 +210,15 @@ export function startChild(o: ChildSupervisorOptions): SupervisedChild {
     },
     async observe() {
       if (tree) await fresh();
+    },
+    killAllSync() {
+      if (tree && !disposed) {
+        const snap = psSnapshot({ timeout: 1000 });
+        tree.poll(snap);
+        signalGroup("SIGKILL");
+        tree.signalAll("SIGKILL", snap);
+      }
+      this.dispose();
     },
     dispose() {
       if (disposed) return;

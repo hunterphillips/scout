@@ -2,6 +2,7 @@
 // inspected-only records. The live inspection is covered end to end in profileCli.test.ts;
 // here only its auth-prompt rule, against fake-backend.mjs.
 
+import { spawn } from "node:child_process";
 import { chmodSync, existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -196,6 +197,25 @@ describe("inspectBackend", () => {
     const pids = [lines[0]!.pid!, ...lines.find((l) => l.helperPids)!.helperPids!];
     expect(await allGone(pids, 1000)).toBe(true);
   });
+
+  it("Ctrl-C during an inspection (SIGINT to the CLI) kills the detached backend and both helpers, then ends the CLI by that signal", async () => {
+    const log = join(dir(), "backend.log");
+    const dist = new URL("../../dist/agents/backendDefinition.js", import.meta.url).href;
+    const script = `const { inspectBackend } = await import(${JSON.stringify(dist)});
+await inspectBackend({ command: process.execPath, args: ${JSON.stringify([FAKE_BACKEND, "--mode", "hang-list", "--log", log, "--ignore-term", "--helpers"])} }, {}, { startupMs: 20000, overallMs: 60000, stopGraceMs: 2000 });`;
+    const cli = spawn(process.execPath, ["--input-type=module", "-e", script], { stdio: "ignore" });
+    const exited = new Promise<NodeJS.Signals | null>((r) => cli.once("exit", (_code, signal) => r(signal)));
+    const lines = () => (existsSync(log) ? readFileSync(log, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l) as BackendLogLine) : []);
+    const until = Date.now() + 10_000;
+    while (!(lines().some((l) => l.helperPids) && lines().some((l) => l.method === "tools/list"))) {
+      if (Date.now() > until) throw new Error("the backend never reached tools/list");
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    const pids = [lines()[0]!.pid!, ...lines().find((l) => l.helperPids)!.helperPids!];
+    cli.kill("SIGINT");
+    expect(await exited).toBe("SIGINT");
+    expect(await allGone(pids, 1000)).toBe(true);
+  }, 20_000);
 
   it("fails with auth_prompt, returning no tools, when the backend asks for input during initialize or tools/list", async () => {
     for (const mode of ["elicit-init", "sample-list"]) {
