@@ -25,7 +25,7 @@ async function harness({ granted = [DOCS], host = "ok" as "ok" | "silent" | "mis
   const bg = createBackground(asChrome(f), { clock });
   await bg.start();
   await clock.advance(0);
-  const dom = new JSDOM(`<!doctype html><body><p id="header-line"></p><div id="root"></div></body>`, { pretendToBeVisual: true });
+  const dom = new JSDOM(`<!doctype html><body><div id="root"></div></body>`, { pretendToBeVisual: true });
   const doc = dom.window.document;
   const intervals: Array<{ fn: () => void; ms: number }> = [];
   const timeouts: Array<{ fn: () => void; ms: number }> = [];
@@ -60,13 +60,15 @@ async function harness({ granted = [DOCS], host = "ok" as "ok" | "silent" | "mis
     await settle();
   };
   const text = () => doc.body.textContent ?? "";
+  /** Settings' Diagnostics "Now" row (null outside Settings). */
+  const now = () => [...doc.querySelectorAll("details.diagnostics dt")].find((dt) => dt.textContent === "Now")?.nextElementSibling?.textContent ?? null;
   /** Moves the panel's clock on and runs its resend tick (pending expiry, resends). */
   const tick = async (ms: number) => {
     time.now += ms;
     for (const i of intervals) if (i.ms === 1000) i.fn();
     await settle();
   };
-  return { f, bg, app, doc, dom, core, settle, $, byKey, click, text, intervals, timeouts, clock, tick };
+  return { f, bg, app, doc, dom, core, settle, $, byKey, click, text, now, intervals, timeouts, clock, tick };
 }
 
 async function withResults(h: Awaited<ReturnType<typeof harness>>) {
@@ -83,7 +85,10 @@ describe("side panel page", () => {
   it("renders the results with labels, and a click opens only the ack's target in a new tab next to the current one", async () => {
     const h = await harness();
     await withResults(h);
-    expect(h.$("#header-line")!.textContent).toBe("Idle · docs.example.com · 1 offer · 2 links");
+    expect(h.$("#results-heading")!.textContent).toBe("Worth a look.");
+    await h.click("nav-settings");
+    expect(h.now()).toBe("Idle · docs.example.com · 1 offer · 2 links");
+    await h.click("nav-page");
     const open = h.byKey("open-c2")!;
     expect(open.getAttribute("aria-label")).toBe("Open Testing on docs.example.com");
     expect(h.text()).toContain("Covers the CLI.");
@@ -134,24 +139,26 @@ describe("side panel page", () => {
     await h.click("open-c2");
     const id3 = lastCommand(h.f)["commandId"] as string;
     await h.core({ type: "ack", commandId: id3, ok: true, revision: 0, approvalRevision: 0, target: { href: "https://docs.example.com/x" } });
-    await h.click("nav-problems");
+    await h.click("nav-activity");
     expect(h.text()).toContain("Chrome could not open it");
     expect(h.byKey(`problem-dismiss-${id3}`)).not.toBeNull();
   });
 
-  it("the host reporting the core gone reaches the panel's Problems as 'Scout isn't running'", async () => {
+  it("the host reporting the core gone reaches the panel's Problems (in Activity) as 'Scout isn't running'", async () => {
     const h = await harness();
     await withResults(h);
     lastPort(h.f).onMessage.emit({ type: "core_unavailable", reason: "unreachable" });
     await h.settle();
-    expect(h.$("#header-line")!.textContent).toContain("Scout isn't running");
+    expect(h.$("#results-heading")!.textContent).toBe("Scout isn't running");
     expect(h.byKey("open-c1")).toBeNull();
     // Results says so too, never the idle "No links for this page yet".
     expect(h.$("#results-explanation")!.textContent).toBe("Scout isn't running. Start the Scout app; the panel reconnects on its own.");
-    await h.click("nav-problems");
-    expect(h.text()).toContain("Scout isn't running. Start the Scout app; the panel reconnects on its own.");
+    await h.click("nav-settings");
+    expect(h.now()).toContain("Scout isn't running");
+    await h.click("nav-activity");
+    expect(h.$(".problems")!.textContent).toContain("Scout isn't running. Start the Scout app; the panel reconnects on its own.");
     // The core comes back: Results leaves the down state and shows the repainted results.
-    await h.click("nav-results");
+    await h.click("nav-page");
     lastPort(h.f).onMessage.emit({ type: "ready" });
     await h.settle();
     expect(h.$("#results-explanation")!.textContent).toContain("No links for this page yet");
@@ -159,10 +166,10 @@ describe("side panel page", () => {
     expect(h.byKey("open-c1")).not.toBeNull();
   });
 
-  it("Settings' Sent counters follow the worker as they change, with no panel action", async () => {
+  it("Activity's Sent counters follow the worker as they change, with no panel action", async () => {
     const h = await harness();
-    await h.click("nav-settings");
-    const sent = () => [...h.doc.querySelectorAll("dt")].find((dt) => dt.textContent === "Sent")!.nextElementSibling!.textContent;
+    await h.click("nav-activity");
+    const sent = () => h.$("#sent-line")!.textContent;
     expect(sent()).toContain("acked 0");
     lastPort(h.f).onMessage.emit({ type: "ack", seq: 1 }); // the core acknowledged an observation
     await h.settle();
@@ -179,7 +186,7 @@ describe("side panel page", () => {
     lastPort(f).onMessage.emit({ type: "panel", state: { type: "results", coreInstanceId: INSTANCE, visitEpoch: 3, origin: "https://docs.example.com", jobId: "job-3a", status: "ok", items: ITEMS } });
     await flush();
     expect(f._.state.badge).toBe("2"); // the two links
-    const dom = new JSDOM(`<!doctype html><body><p id="header-line"></p><div id="root"></div></body>`);
+    const dom = new JSDOM(`<!doctype html><body><div id="root"></div></body>`);
     const app = createPanelApp({ ch: asChrome(f), doc: dom.window.document, root: dom.window.document.getElementById("root")!, setInterval: () => 0, setTimeout: () => 0 });
     await app.start();
     for (let i = 0; i < 3; i++) {
@@ -191,7 +198,7 @@ describe("side panel page", () => {
     expect(f._.state.badge).toBe("");
   });
 
-  it("a panel opened after the grant frame shows the sites with recommendations on from the worker's cache", async () => {
+  it("a panel opened after the grant frame shows the sites with suggestions on from the worker's cache", async () => {
     const f = makeChrome({ granted: [DOCS] });
     const clock = fakeClock();
     await createBackground(asChrome(f), { clock }).start();
@@ -199,7 +206,7 @@ describe("side panel page", () => {
     for (const s of [{ type: "grant", agentBrowserContext: false, destinations: ["https://docs.example.com", "https://docs.stripe.com"] }, caps(), { type: "audit", entries: [] }, { type: "state", status: "idle", visitEpoch: 3, detail: "docs.example.com", permitted: true }])
       lastPort(f).onMessage.emit({ type: "panel", state: s });
     await flush();
-    const dom = new JSDOM(`<!doctype html><body><p id="header-line"></p><div id="root"></div></body>`);
+    const dom = new JSDOM(`<!doctype html><body><div id="root"></div></body>`);
     const doc = dom.window.document;
     const app = createPanelApp({ ch: asChrome(f), doc, root: doc.getElementById("root")!, setInterval: () => 0, setTimeout: () => 0 });
     await app.start();
@@ -210,18 +217,23 @@ describe("side panel page", () => {
     app.render();
     doc.querySelector<HTMLElement>('[data-key="nav-sites"]')!.click();
     app.render();
-    const states = [...doc.querySelectorAll("ul.sites li")].map((li) => li.textContent);
-    expect(states).toEqual(["docs.example.comAllowed · Recommendations onRemove", "docs.stripe.comNot allowed · Recommendations onAllow"]);
+    const rows = [...doc.querySelectorAll("ul.sites li")].map((li) => [li.querySelector(".site-host")!.textContent, li.querySelector(".site-state")!.textContent]);
+    expect(rows).toEqual([
+      ["docs.example.com", "Allowed · Suggestions on"],
+      ["docs.stripe.com", "Not allowed · Suggestions on"],
+    ]);
+    expect(doc.querySelector('[data-key="remove-docs.example.com"]')).not.toBeNull();
+    expect(doc.querySelector('[data-key="allow-docs.stripe.com"]')).not.toBeNull();
   });
 
-  it("This site's recommendations switch sends set_destination from the click; the core's grant frame turns it on and Sites shows it", async () => {
+  it("the Page tray's Suggest switch sends set_destination from the click; the core's grant frame turns it on and Sites shows it", async () => {
     const h = await harness();
     await withResults(h);
-    await h.click("nav-site");
     const KEY = "destination-https://docs.example.com";
     expect(h.byKey(KEY)!.getAttribute("type")).toBe("checkbox");
     expect((h.byKey(KEY) as unknown as HTMLInputElement).checked).toBe(false);
-    expect(h.text()).toContain("Suggest links from this site");
+    expect(h.byKey(KEY)!.closest(".tray")).not.toBeNull();
+    expect(h.text()).toContain("Suggest on docs.example.com");
     expect(h.text()).toContain("Each visit runs a short job on your Claude subscription.");
     await h.click(KEY);
     const cmd = lastCommand(h.f);
@@ -233,9 +245,9 @@ describe("side panel page", () => {
     expect((h.byKey(KEY) as unknown as HTMLInputElement).checked).toBe(true);
     expect(h.byKey(KEY)!.disabled).toBe(false);
     await h.click("nav-sites");
-    expect([...h.doc.querySelectorAll("ul.sites li")].map((li) => li.textContent)).toEqual(["docs.example.comAllowed · Recommendations onRemove"]);
+    expect([...h.doc.querySelectorAll("ul.sites .site-state")].map((e) => e.textContent)).toEqual(["Allowed · Suggestions on"]);
     // Off again.
-    await h.click("nav-site");
+    await h.click("nav-page");
     await h.click(KEY);
     expect(lastCommand(h.f)).toMatchObject({ type: "set_destination", origin: "https://docs.example.com", enabled: false, expectedEnabled: true });
   });
@@ -248,22 +260,26 @@ describe("side panel page", () => {
     p.onDisconnect.emit(p);
     await h.settle();
     expect(h.byKey("open-c1")).toBeNull();
-    expect(h.$("#header-line")!.textContent).not.toContain("links");
+    expect(h.$("#results-heading")!.textContent).toBe("Connecting…"); // the worker is already reconnecting
+    await h.click("nav-settings");
+    expect(h.now()).not.toContain("links");
   });
 
-  it("an ungranted site says to click the icon and shows no URL; with activeTab, Allow requests the exact pattern", async () => {
+  it("an ungranted site says to click the icon and shows no URL; with activeTab, the tray's Allow requests the exact pattern", async () => {
     const h = await harness({ granted: [] });
-    await h.click("nav-site");
     expect(h.text()).toContain("Click the Scout icon to check this site.");
     expect(h.text()).not.toContain("docs.example.com");
     h.f._.state.activeTabGrant = 13; // Chrome's grant for the toolbar click
     h.f.action.onClicked.emit({ id: 13, windowId: 1 } as chrome.tabs.Tab);
     await h.settle();
-    expect(h.text()).toContain("Scout is not allowed on this site.");
+    expect(h.$(".tray .allow-row")!.textContent).toBe("Allow Scout on docs.example.comAllow");
     await h.click("site-allow");
     expect(h.f._.requested).toEqual([["https://docs.example.com/*"]]);
-    expect(h.text()).toContain("Scout is allowed on this site.");
-    await h.click("site-remove");
+    // Allowed: the Allow row gives way to the site's Suggest switch; removing it is in Sites.
+    expect(h.byKey("site-allow")).toBeNull();
+    expect(h.text()).toContain("Suggest on docs.example.com");
+    await h.click("nav-sites");
+    await h.click("remove-docs.example.com");
     expect(h.f._.removedPerms).toEqual([["https://docs.example.com/*"]]);
   });
 
@@ -302,10 +318,9 @@ describe("side panel page", () => {
   it("preview before approval: chunks are assembled and hashed before Approve enables; Approve carries the version and revision", async () => {
     const h = await harness();
     await withResults(h);
-    await h.click("nav-site");
     const key = { resourceId: `res_${"a".repeat(64)}`, version: "1".repeat(64) };
     const k = `${key.resourceId}-${key.version}`;
-    await h.click(`preview-${k}`);
+    await h.click("review-open");
     const first = lastCommand(h.f);
     expect(first).toEqual({ type: "preview", commandId: expect.stringMatching(/^sp-/), resourceId: key.resourceId, version: key.version });
     expect(h.byKey(`approve-${k}`)!.disabled).toBe(true);
@@ -321,21 +336,27 @@ describe("side panel page", () => {
     expect(h.text()).toContain("117 bytes");
     await h.click(`approve-${k}`);
     expect(lastCommand(h.f)).toEqual({ type: "approve", commandId: expect.stringMatching(/^sp-/), resourceId: key.resourceId, version: key.version, expectedRevision: 1 });
-    // Escape returns to Results; the preview stays put for when the user comes back.
-    h.doc.dispatchEvent(new h.dom.window.KeyboardEvent("keydown", { key: "Escape" }));
-    await h.settle();
-    expect(h.byKey("nav-results")!.getAttribute("aria-current")).toBe("page");
-    await h.click("nav-site");
+    // Escape from another view returns to Page, where the card stays put; Escape on Page collapses it.
+    const escape = async () => {
+      h.doc.dispatchEvent(new h.dom.window.KeyboardEvent("keydown", { key: "Escape" }));
+      await h.settle();
+    };
+    await h.click("nav-settings");
+    await escape();
+    expect(h.byKey("nav-page")!.getAttribute("aria-current")).toBe("page");
     expect(h.$("#preview-pane")).not.toBeNull();
+    await escape();
+    expect(h.byKey("nav-page")!.getAttribute("aria-current")).toBe("page");
+    expect(h.$("#preview-pane")).toBeNull();
+    expect(h.byKey("review-open")).not.toBeNull();
   });
 
   it("a tampered preview never enables Approve", async () => {
     const h = await harness();
     await withResults(h);
-    await h.click("nav-site");
     const key = { resourceId: `res_${"a".repeat(64)}`, version: "1".repeat(64) };
     const k = `${key.resourceId}-${key.version}`;
-    await h.click(`preview-${k}`);
+    await h.click("review-open");
     const [c] = chunks("not the real text", key, 1000);
     await h.core({ ...c, commandId: lastCommand(h.f)["commandId"], sha256: "f5f87631e2c65588499362cb033b1032a148944812890e2495605dc8a36efedf" });
     expect(h.byKey(`approve-${k}`)!.disabled).toBe(true);
@@ -345,8 +366,8 @@ describe("side panel page", () => {
   it("auto-acquire asks for the acknowledgement first and carries expectedEnabled", async () => {
     const h = await harness();
     await withResults(h);
-    await h.click("nav-site");
-    const box = h.$("#auto-acquire") as HTMLInputElement;
+    await h.click("nav-sites");
+    const box = h.byKey("auto-acquire-https://docs.example.com") as unknown as HTMLInputElement;
     box.click(); // a real toggle: flips the box, then a bubbling click the panel root handles
     await h.settle();
     expect(commandsPosted(h.f).some((c) => c["type"] === "set_auto_acquire")).toBe(false);
@@ -417,7 +438,7 @@ describe("side panel page", () => {
       lastPort(f).onMessage.emit({ type: "panel", state: s });
     await clock.advance(0);
     expect(lastPort(f).posted).toEqual([]);
-    const dom = new JSDOM(`<!doctype html><body><p id="header-line"></p><div id="root"></div></body>`);
+    const dom = new JSDOM(`<!doctype html><body><div id="root"></div></body>`);
     const doc = dom.window.document;
     const app = createPanelApp({ ch: asChrome(f), doc, root: doc.getElementById("root")!, setInterval: () => 0, setTimeout: () => 0 });
     await app.start();
@@ -447,11 +468,12 @@ describe("side panel page", () => {
   it("a command refused for now is re-sent under the same ID; a click refused for now fails with Dismiss only", async () => {
     const h = await harness();
     await withResults(h);
-    await h.click("nav-site");
+    await h.click("review-open");
     const native = lastPort(h.f);
     native.disconnected = true; // postMessage throws, as on a port Chrome just closed
     const key = { resourceId: `res_${"a".repeat(64)}`, version: "1".repeat(64) };
-    await h.click(`decline-offer-${key.resourceId}-${key.version}`);
+    expect(h.byKey(`decline-${key.resourceId}-${key.version}`)!.textContent).toBe("Not now");
+    await h.click(`decline-${key.resourceId}-${key.version}`);
     expect(commandsPosted(h.f).filter((c) => c["type"] === "decline")).toEqual([]);
     const declined = h.app.model.commands.records.find((r) => r.request.type === "decline")!;
     expect(declined).toMatchObject({ state: "pending", sent: false });
@@ -462,7 +484,7 @@ describe("side panel page", () => {
     expect(sent).toEqual([{ type: "decline", commandId: declined.id, resourceId: key.resourceId, version: key.version, expectedRevision: 1 }]);
 
     native.disconnected = true;
-    await h.click("nav-results");
+    await h.click("nav-page");
     await h.click("open-c1");
     native.disconnected = false;
     h.intervals.find((i) => i.ms === 1000)!.fn();
