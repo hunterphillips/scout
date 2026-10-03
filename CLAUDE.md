@@ -33,7 +33,7 @@ Merged: P4.2 (menu-bar app), P4.0 (panel frames over the browser relay, bridge p
 order), P4.1b (Sites shows recommendation destinations), P4.4 (legacy personal-context
 path, spikes, rank client, `contracts/service.ts` removed; worker bundle 820 → 457 KB;
 `view.ts` event delegation; detached backend inspection; resolver pass time-sliced),
-P4.1c (toolbar click toggles the panel). Phase 4's gate is Hunter using Scout from the
+P4.1c (toolbar click toggles the panel), P4.1d (Results never reads idle while the core is down; live Sent counters). Agent-run live check 2026-10-02: 9/9 PASS (`../thoughts/shared/research/2026-10-02-scout-phase4-live-check/`). Phase 4's gate is Hunter using Scout from the
 side panel on his own machine.
 Recommendations run only for hosts listed in `config.json` `destinations` (empty by
 default); a destination spends Hunter's quota on every settled visit there.
@@ -182,7 +182,10 @@ the plan's phase log):
   `CapabilityModel`, `PanelModel`, `PauseState`; `view.ts` renders text only, with one
   delegated `click`/`submit`/`input` listener on the panel root dispatching on
   `data-action`/`data-submit`/`data-input`, and a keyed patch (tag + full-id `data-key`)
-  so unchanged controls keep their nodes, focus and selection. Sections: Results, Sites
+  so unchanged controls keep their nodes, focus and selection. Results shows the link copy
+  (`link_down`, same text as Problems) while the link is disconnected, core_unavailable or
+  upgrade_required, and "Connecting to Scout…" while connecting, never the idle text;
+  counter writes push the status to open panels once per tick. Sections: Results, Sites
   (marks `grant.destinations` as "Recommendations on", listing a destination even before
   Chrome grants it; destinations are set in `config.json`, read at core start), This
   site, Settings, Activity, Problems. No popup. Since pivot P2.1:
