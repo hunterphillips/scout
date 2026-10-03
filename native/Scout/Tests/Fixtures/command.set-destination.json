@@ -1,0 +1,7 @@
+{
+  "type": "set_destination",
+  "commandId": "sp-13",
+  "origin": "https://docs.example.com",
+  "enabled": true,
+  "expectedEnabled": false
+}

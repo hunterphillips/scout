@@ -30,11 +30,15 @@ import Testing
             ("command.refresh-capabilities.json", .panel(commandId: "app-11", .refreshCapabilities)),
             ("command.open-link.json", .panel(commandId: "app-12", .openLink(coreInstanceId: "core-7f3a9c", visitEpoch: 3, jobId: "job-3a", candidateId: "c1"))),
         ]
-        #expect(Set(cases.map(\.0)) == Set(try F.names(prefix: "command.")))
+        #expect(Set(cases.map(\.0)).union(Self.browserOnlyFixtures) == Set(try F.names(prefix: "command.")))
         for (name, command) in cases {
             #expect(try object(command) == F.object(name), "\(name)")
         }
     }
+
+    /// Commands only the Chrome side panel sends (P4.6 `set_destination`): the app has no case for
+    /// them, and the core sends their acks only to the panel, so the app never sees one.
+    static let browserOnlyFixtures: Set<String> = ["command.set-destination.json"]
 
     @Test func booleansEncodeAsJSONBooleans() {
         let line = String(decoding: NativeCommand.panel(commandId: "x",

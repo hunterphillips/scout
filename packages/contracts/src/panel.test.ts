@@ -182,6 +182,7 @@ describe("native commands (app -> core)", () => {
     { type: "revoke", commandId: "c4", resourceId: RES, expectedRevision: 3 },
     { type: "set_auto_acquire", commandId: "c5", origin: "https://docs.example.com", enabled: true, expectedEnabled: false, acknowledgeRisk: true },
     { type: "set_agent_browser_context", commandId: "c6", enabled: false, expectedEnabled: true },
+    { type: "set_destination", commandId: "c9", origin: "https://docs.stripe.com", enabled: true, expectedEnabled: false },
     { type: "refresh_capabilities", commandId: "c7" },
     { type: "open_link", commandId: "c8", coreInstanceId: "core-1", visitEpoch: 4, jobId: "job_1", candidateId: "c1a" },
   ];
@@ -205,6 +206,12 @@ describe("native commands (app -> core)", () => {
       { type: "set_auto_acquire", commandId: "c", origin: "https://x.example", enabled: true, acknowledgeRisk: true },
       { type: "set_agent_browser_context", commandId: "c", enabled: "yes", expectedEnabled: false },
       { type: "set_agent_browser_context", commandId: "c", enabled: true },
+      { type: "set_destination", commandId: "c", origin: "https://x.example", enabled: true },
+      { type: "set_destination", commandId: "c", origin: "http://x.example", enabled: true, expectedEnabled: false },
+      { type: "set_destination", commandId: "c", origin: "https://x.example/path", enabled: true, expectedEnabled: false },
+      { type: "set_destination", commandId: "c", origin: "x.example", enabled: true, expectedEnabled: false },
+      { type: "set_destination", commandId: "c", origin: "https://x.example", enabled: 1, expectedEnabled: false },
+      { type: "set_destination", commandId: "c", origin: "https://x.example", enabled: true, expectedEnabled: false, destinations: [] },
       { type: "preview", commandId: "c", resourceId: RES, version: HASH, cursor: "x".repeat(65) },
       { type: "refresh_capabilities", commandId: "c", config: {} },
       { type: "open_link", commandId: "c", coreInstanceId: "core-1", visitEpoch: 4, jobId: "job_1", candidateId: "c1", href: "https://x.example/" },
@@ -230,6 +237,7 @@ describe("native commands (app -> core)", () => {
       { type: "revoke", commandId: longest, resourceId: RES, expectedRevision: maxInt },
       { type: "set_auto_acquire", commandId: longest, origin, enabled: false, expectedEnabled: false, acknowledgeRisk: false },
       { type: "set_agent_browser_context", commandId: longest, enabled: false, expectedEnabled: false },
+      { type: "set_destination", commandId: longest, origin, enabled: false, expectedEnabled: false },
       { type: "refresh_capabilities", commandId: longest },
       { type: "open_link", commandId: longest, coreInstanceId: longest, visitEpoch: maxInt, jobId: longest, candidateId: `c${"z".repeat(31)}` },
     ];

@@ -341,6 +341,17 @@ export const SetAutoAcquireCommandSchema = cmd("set_auto_acquire", { origin: Hos
  * was and acks `invalid`.
  */
 export const SetAgentBrowserContextCommandSchema = cmd("set_agent_browser_context", { enabled: z.boolean(), expectedEnabled: z.boolean() });
+/**
+ * Background recommendations for one site (`config.json` `destinations`); compare-and-set on
+ * `expectedEnabled` exactly like `set_agent_browser_context`, with the same retry rule. The core
+ * writes `destinations` itself (every other key kept), applies it at once (the next settled visit
+ * to the host runs a job, or no longer does; turning it off cancels a running job for the host),
+ * then sends a `grant` frame with the new list. Codes: `stale_revision` (the current value
+ * differs), `invalid` (the list is full at GRANT_DESTINATIONS_MAX, or config.json's
+ * `destinations` is malformed), `store_error` (config.json is not a regular file the user owns,
+ * or the write failed), `unavailable` (no destinations writer). The Swift app never sends it.
+ */
+export const SetDestinationCommandSchema = cmd("set_destination", { origin: HostOriginSchema, enabled: z.boolean(), expectedEnabled: z.boolean() });
 export const RefreshCapabilitiesCommandSchema = cmd("refresh_capabilities", {});
 /**
  * The user clicked a recommended link: the identity the window displayed. The core checks it
@@ -377,6 +388,7 @@ export const NativeCommandSchema = z.discriminatedUnion("type", [
   RevokeCommandSchema,
   SetAutoAcquireCommandSchema,
   SetAgentBrowserContextCommandSchema,
+  SetDestinationCommandSchema,
   RefreshCapabilitiesCommandSchema,
   OpenLinkCommandSchema,
 ]);
