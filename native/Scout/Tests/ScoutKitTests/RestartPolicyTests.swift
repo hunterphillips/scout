@@ -21,7 +21,7 @@ import Testing
     }
 
     @Test func refusalsDoNotCountAsRestarts() {
-        let seconds = (0..<50).map(Double.init) + [60]
+        let seconds = (0..<50).map { Double($0) } + [60]
         let expected = Array(repeating: true, count: 3) + Array(repeating: false, count: 47) + [true]
         #expect(decisions(seconds) == expected)
     }
