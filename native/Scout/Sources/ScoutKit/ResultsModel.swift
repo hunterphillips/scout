@@ -56,7 +56,7 @@ public enum ResultsDisplay: Sendable, Equatable {
     public var explanation: String {
         switch self {
         case .none: return "No links for this page yet. Scout suggests links once you stay on a site with suggestions on."
-        case .paused: return "Scout is paused. It reads nothing from your browser until you resume."
+        case .paused: return "Scout is paused."
         case .disconnected: return "Scout can't see Chrome right now."
         case .working: return "Looking for links on this site…"
         case let .ready(items): return items.count == 1 ? "1 link for this page." : "\(items.count) links for this page."

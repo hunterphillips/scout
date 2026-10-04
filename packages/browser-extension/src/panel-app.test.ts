@@ -420,7 +420,7 @@ describe("side panel page", () => {
     corePolicy(h.f, true);
     await h.core({ type: "state", status: "paused" });
     expect(commandsPosted(h.f)).toEqual([]);
-    expect(h.text()).toContain("Scout is paused. It reads nothing from your browser until you resume.");
+    expect(h.text()).toContain("Scout is paused.");
     expect(h.byKey("open-c1")).toBeNull();
     await h.click("nav-settings");
     expect(h.byKey("pause")!.textContent).toBe("Resume");
@@ -445,7 +445,7 @@ describe("side panel page", () => {
     await flush(6);
     await app.idle();
     app.render();
-    expect(doc.body.textContent).toContain("Scout is paused. It reads nothing from your browser until you resume.");
+    expect(doc.body.textContent).toContain("Scout is paused.");
     expect(app.model.pauseState.control).toMatchObject({ title: "Resume", enabled: true });
   });
 
