@@ -3,7 +3,7 @@
 Scout is a proof of concept. When Hunter lands on a website, Scout quietly shows a few
 links from that site that fit what he is working on.
 
-**Status (2026-10-02): the website-agent pivot is built through Phase 4** (see the next
+**Status (2026-10-04): the website-agent plan is complete: all four phases passed** (see the next
 section). The original build's Phase 1 plumbing (extension sensor → native host → core
 over a Unix socket, bounded in-memory activity store) and Phase 2 catalog discovery (a
 site origin becomes up to 500 candidate links from llms.txt, sitemaps, robots; cached on
@@ -33,8 +33,12 @@ Merged: P4.2 (menu-bar app), P4.0 (panel frames over the browser relay, bridge p
 order), P4.1b (Sites shows recommendation destinations), P4.4 (legacy personal-context
 path, spikes, rank client, `contracts/service.ts` removed; worker bundle 820 → 457 KB;
 `view.ts` event delegation; detached backend inspection; resolver pass time-sliced),
-P4.1c (toolbar click toggles the panel), P4.1d (Results never reads idle while the core is down; live Sent counters). Agent-run live check 2026-10-02: 9/9 PASS (`../thoughts/shared/research/2026-10-02-scout-phase4-live-check/`). Phase 4's gate is Hunter using Scout from the
-side panel on his own machine.
+P4.1c (toolbar click toggles the panel), P4.1d (Results never reads idle while the core is down; live Sent counters). Agent-run live check 2026-10-02: 9/9 PASS (`../thoughts/shared/research/2026-10-02-scout-phase4-live-check/`). P4.6 (per-site "Suggest" switch, live), P4.7 (Quiet redesign, Sightline mark, count badge;
+mockups in `docs/design/2026-10-03-panel/`), the UI copy sweep (#7, #8). Phase 4 gate PASS
+2026-10-04 (Hunter's hands-on run). The repo is private GitHub `hunterphillips/scout`, enrolled
+in the factory (triage, monitor on `ci`, implement on `ready-for-agent`); CI is
+`.github/workflows/ci.yml` on macOS. Copy-only edits go straight to `main`; code changes go
+through a PR and CI.
 Recommendations run only for hosts listed in `config.json` `destinations` (empty by
 default); a destination spends Hunter's quota on every settled visit there.
 
