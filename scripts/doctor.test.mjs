@@ -163,10 +163,10 @@ describe("doctor report", () => {
     expect(lastPreflight(L.diagnosticsLog, { maxBytes: 1024 })).toBeNull();
   });
 
-  it("recommendations: empty destinations is off; listed hosts are on", () => {
-    expect(report().recommendations).toMatchObject({ status: "ok", summary: "off (no destinations in config.json)" });
+  it("suggestions: empty destinations is off; listed hosts are on", () => {
+    expect(report().suggestions).toMatchObject({ status: "ok", summary: "off (no destinations in config.json)" });
     writeFileSync(L.scoutConfig, JSON.stringify({ ...json(L.scoutConfig), destinations: ["docs.stripe.com"] }));
-    expect(report().recommendations.summary).toBe("on for docs.stripe.com");
+    expect(report().suggestions.summary).toBe("on for docs.stripe.com");
   });
 
   it("exits 1 when any section fails", () => {

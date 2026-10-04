@@ -18,7 +18,7 @@
 //                       Scout's flag set was verified with (advisory)
 //   billing             the core's last logged billing preflight verdict, or "not yet checked";
 //                       doctor never runs a preflight and never spends quota
-//   recommendations     config.json `destinations`; empty means off
+//   suggestions         config.json `destinations`; empty means off
 // Runs no model, connects to no socket, writes nothing. SCOUT_SKILLS_ROOT or SCOUT_CLAUDE_BIN
 // with the real ~/.scout is a failed check.
 //
@@ -43,7 +43,7 @@ import { coreLockHolder, inspectPrivate, lastPreflight } from "./lib/core-state.
 const oct = (m) => (m & 0o777).toString(8).padStart(4, "0");
 const CLI_VERSION_TIMEOUT_MS = 10_000;
 
-export const SECTIONS = ["install record", "Mac app", "core", "Chrome relay", "agent integration", "CLI", "billing", "recommendations"];
+export const SECTIONS = ["install record", "Mac app", "core", "Chrome relay", "agent integration", "CLI", "billing", "suggestions"];
 
 const tryRead = (fn) => {
   try {
@@ -231,7 +231,7 @@ export function runReport(env = process.env, { claudeFallbacks, mcpTimeoutMs, re
     const text = tryRead(() => readFileSync(L.agentProfile, "utf8")).value;
     if (recordedProfile && text != null && sha256(text) !== recordedProfile.sha256) add("OK", "agent profile", "edited since setup wrote it (yours now; uninstall leaves it)");
   } else {
-    add("WARN", "agent profile", profile.error ? `${L.agentProfile} unreadable` : `${L.agentProfile} missing: background recommendations are unavailable; re-run \`npm run setup\` once claude is installed`);
+    add("WARN", "agent profile", profile.error ? `${L.agentProfile} unreadable` : `${L.agentProfile} missing: suggestions are unavailable; re-run \`npm run setup\` once claude is installed`);
     // As setup: SCOUT_CLAUDE_BIN on a test home, never a claude found on PATH there.
     claudePath = integrationClaude(env, claudeFallbacks, realHome).path ?? null;
   }
@@ -251,9 +251,9 @@ export function runReport(env = process.env, { claudeFallbacks, mcpTimeoutMs, re
   if (!pre) add("WARN", "billing preflight", "not yet checked: the core runs it before the first job; doctor never runs one");
   else add(pre.verdict === "subscription" ? "OK" : "WARN", "billing preflight", `${pre.verdict} at ${new Date(pre.t).toISOString()}${pre.verdict === "subscription" ? "" : ": jobs run only on a subscription verdict"}`);
 
-  // ---- recommendations
+  // ---- suggestions
   const destinations = Array.isArray(scout?.destinations) ? scout.destinations : [];
-  section("recommendations", destinations.length ? `on for ${destinations.join(", ")}` : "off (no destinations in config.json)");
+  section("suggestions", destinations.length ? `on for ${destinations.join(", ")}` : "off (no destinations in config.json)");
   add("OK", "destinations", destinations.length ? `${destinations.length} host(s); every settled visit there spends your Claude quota` : "off");
 
   return [...sections.values()].map((s) => ({
