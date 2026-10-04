@@ -153,7 +153,7 @@ export function displayExplanation(d: ResultsDisplay): string {
     case "connecting":
       return "Connecting to Scout…";
     case "paused":
-      return "Scout is paused. It reads nothing from your browser until you resume.";
+      return "Scout is paused.";
     case "disconnected":
       return "Scout can't see Chrome right now.";
     case "working":
