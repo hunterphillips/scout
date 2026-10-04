@@ -97,7 +97,7 @@ export function captureText(s: StatusSnapshot): string {
   return s.policy.captureEnabled ? "on" : "waiting for Scout";
 }
 
-export const BROAD_GRANT_TEXT = "All-sites access is ignored; only sites allowed here count.";
+export const BROAD_GRANT_TEXT = "Scout ignores Chrome's all-sites access. It works only on sites you allow here.";
 
 export function statusRows(s: StatusSnapshot): Array<[string, string]> {
   return [
@@ -108,35 +108,28 @@ export function statusRows(s: StatusSnapshot): Array<[string, string]> {
   ];
 }
 
-/** Activity's footer: what the extension has sent the core (metadata counts only). */
+/** Activity's footer: what the extension has sent Scout (metadata counts only). */
 export function sentText(s: StatusSnapshot): string {
   const c = s.counters;
-  return `Sent: focus ${c.focus} · issues ${c.forwarded} · acked ${c.acked} · dropped ${c.dropped} · denied ${c.denied}`;
+  return `Sent to Scout: tab updates ${c.focus} · issues ${c.forwarded} · received ${c.acked} · dropped ${c.dropped} · blocked ${c.denied}`;
 }
 
 // ---------- names ----------
 
 const kindText = (k: string): string => (k === "llms_txt" ? "llms.txt" : k === "agents_md" ? "AGENTS.md" : k === "skill" ? "Skill" : k);
 
-const SUBDOMAINS = new Set(["www", "docs", "doc", "developer", "developers", "dev", "api", "help", "support", "learn", "platform", "en"]);
-
 /**
- * A site's name for a sentence, from its host alone: the registrable label, capitalized
- * ("docs.stripe.com" → "Stripe"; "bbc.co.uk" → "Bbc"). Never fetched, never guessed further.
+ * A site's name for a sentence: its host as written, without a leading "www."
+ * ("docs.stripe.com", "backblaze.com"). Never guessed from the host's labels, so it is
+ * right for any site.
  */
-export function publisherOf(host: string): string {
-  const labels = host.split(".").filter((l) => l !== "");
-  if (labels.length < 2) return host;
-  // A two-letter country code under a short second level (co.uk, com.au) takes one more label.
-  const cc = labels.length >= 3 && labels.at(-1)!.length === 2 && labels.at(-2)!.length <= 3;
-  const rest = labels.slice(0, cc ? -2 : -1).filter((l, i, all) => !(SUBDOMAINS.has(l) && i < all.length - 1));
-  const name = rest.at(-1) ?? labels[0]!;
-  return name.charAt(0).toUpperCase() + name.slice(1);
+export function siteName(host: string): string {
+  return host.replace(/^www\./, "");
 }
 
 /** The review card's title: what the site made for the user's agent, by kind. */
 export function reviewTitle(kind: string, host: string): string {
-  const who = publisherOf(host);
+  const who = siteName(host);
   if (kind === "agents_md") return `${who} wrote a guide for your agent`;
   if (kind === "llms_txt") return `${who} listed its docs for your agent`;
   if (kind === "skill") return `${who} made a skill for your agent`;
@@ -387,7 +380,7 @@ function filesBlock(doc: Document, v: ViewState, on: PanelHandlers, host: string
         el(doc, "span", { class: "attention-dot", "aria-hidden": "true" }),
         () => on.showPreview({ resourceId: first.resourceId, version: first.version }),
         { class: "review-pill", "aria-expanded": "false" },
-        `${publisherOf(host)} has ${n === 1 ? "1 file" : `${n} files`} for your agent · Review`,
+        `${siteName(host)} has ${n === 1 ? "1 file" : `${n} files`} for your agent · Review`,
       ),
     );
   }
@@ -407,12 +400,12 @@ function destinationSwitch(doc: Document, v: ViewState, on: PanelHandlers, origi
   const rec = m.destinationRecord(origin);
   const note =
     rec?.state === "pending"
-      ? "Waiting for Scout core…"
+      ? "Waiting for Scout…"
       : !granted && !enabled
         ? "Allow this site first."
         : m.capabilities.agentBrowserContext === null
-          ? "Waiting for Scout core."
-          : "Each visit runs a short job on your Claude subscription.";
+          ? "Waiting for Scout…"
+          : "When you stay on a page here, Scout runs a short job on your Claude subscription.";
   const label = el(doc, "span", { class: "site-label" }, siteTile(doc, host), el(doc, "span", { text: `Suggest on ${host}` }));
   return toggle(doc, `destination-${origin}`, label, enabled, m.canToggleDestination(origin) && (granted || enabled), (x) => on.destination(origin, x), note, "switch-label site-switch");
 }
@@ -479,7 +472,7 @@ function sitesView(doc: Document, v: ViewState, on: PanelHandlers): HTMLElement[
     if (setting) {
       const rec = m.autoAcquireRecord(r.origin);
       li.append(
-        toggle(doc, `auto-acquire-${r.origin}`, "Approve new files automatically", setting.autoAcquire, m.canToggleAutoAcquire(r.origin), (x) => on.autoAcquire(r.origin, x, false), rec?.state === "pending" ? "Waiting for Scout core…" : "New versions are approved without a preview."),
+        toggle(doc, `auto-acquire-${r.origin}`, "Approve new files automatically", setting.autoAcquire, m.canToggleAutoAcquire(r.origin), (x) => on.autoAcquire(r.origin, x, false), rec?.state === "pending" ? "Waiting for Scout…" : "New files and updates from this site are approved without a preview."),
       );
       if (v.ui.ackSheet === r.origin) {
         li.append(
@@ -488,7 +481,7 @@ function sitesView(doc: Document, v: ViewState, on: PanelHandlers): HTMLElement[
             "div",
             { class: "sheet", role: "dialog", "aria-modal": "false", "aria-labelledby": "sheet-title" },
             el(doc, "h3", { id: "sheet-title", text: "Approve this site's files without asking?" }),
-            el(doc, "p", { text: `Scout will approve every new llms.txt, AGENTS.md and skill from ${r.host} for your agent without showing you a preview first. A site can change these files at any time.` }),
+            el(doc, "p", { text: `Scout will approve every new llms.txt, AGENTS.md, skill and update from ${r.host} for your agent without showing you a preview first. A site can change these files at any time.` }),
             el(doc, "div", { class: "row" }, button(doc, "sheet-cancel", "Cancel", () => on.cancelSheet(), { class: "secondary" }), button(doc, "sheet-confirm", "Turn on", () => on.autoAcquire(r.origin, true, true), { class: "primary" })),
           ),
         );
@@ -520,7 +513,7 @@ const REQUEST_TEXT: Record<string, string> = {
   set_auto_acquire: "Auto-approve",
   set_agent_browser_context: "Agent access",
   set_destination: "Suggestions",
-  refresh_capabilities: "Refresh",
+  refresh_capabilities: "Refresh files",
   open_link: "Open link",
 };
 
@@ -559,7 +552,7 @@ function activityView(doc: Document, v: ViewState, on: PanelHandlers): HTMLEleme
   const list = el(doc, "ul", { class: "activity" });
   for (const e of entries) {
     const when = new Date(e.at).toLocaleTimeString();
-    const who = e.role === "job" ? "Background job" : "Your agent";
+    const who = e.role === "job" ? "Suggestion job" : "Your agent";
     list.append(el(doc, "li", { text: `${when} · ${who} · ${e.method.replace(/_/g, " ")} · ${e.outcome.replace(/_/g, " ")}${e.origin ? ` · ${hostOf(e.origin) ?? e.origin}` : ""}` }));
   }
   reads.append(list);
@@ -589,7 +582,7 @@ function settingsView(doc: Document, v: ViewState, on: PanelHandlers): HTMLEleme
         grant === true,
         m.canToggleGrant,
         (x) => on.grant(x),
-        grec?.state === "pending" ? "Waiting for Scout core…" : grant === null ? "Waiting for Scout core." : undefined,
+        grec?.state === "pending" || grant === null ? "Waiting for Scout…" : undefined,
       ),
     ),
     el(

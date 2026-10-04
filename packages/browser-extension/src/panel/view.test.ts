@@ -4,7 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { StatusSnapshot } from "../messages.js";
 import { PanelModel } from "./model.js";
 import { capabilities, entry, F, offer, originSetting, results, state, tracker } from "./test-frames.js";
-import { type PanelHandlers, renderPanel, sentText, statusRows, type ViewState } from "./view.js";
+import { type PanelHandlers, renderPanel, reviewTitle, sentText, siteName, statusRows, type ViewState } from "./view.js";
 
 const STATUS: StatusSnapshot = {
   link: "connected",
@@ -120,7 +120,13 @@ describe("panel view", () => {
       ["Allowed sites", "docs.example.com"],
       ["Issue text", "off"],
     ]);
-    expect(sentText(STATUS)).toBe("Sent: focus 1 · issues 0 · acked 0 · dropped 0 · denied 0");
+    expect(sentText(STATUS)).toBe("Sent to Scout: tab updates 1 · issues 0 · received 0 · dropped 0 · blocked 0");
+  });
+
+  it("names a site by its host, for any host", () => {
+    expect(["www.backblaze.com", "developers.cloudflare.com", "github.com", "bbc.co.uk"].map(siteName)).toEqual(["backblaze.com", "developers.cloudflare.com", "github.com", "bbc.co.uk"]);
+    expect(reviewTitle("agents_md", "www.backblaze.com")).toBe("backblaze.com wrote a guide for your agent");
+    expect(reviewTitle("skill", "github.com")).toBe("github.com made a skill for your agent");
   });
 
   it("Activity ends with the Sent line, and only Activity shows it", () => {
@@ -163,7 +169,7 @@ describe("panel view", () => {
     m.apply(capabilities({ revision: 2, offers: [offer(), offer({ rid: F.rid2, version: F.v2 })], origins: [originSetting()] }));
     const { root, on, render } = view(m);
     const pill = root.querySelector<HTMLButtonElement>('[data-key="review-open"]')!;
-    expect(pill.textContent).toContain("Example has 2 files for your agent · Review");
+    expect(pill.textContent).toContain("docs.example.com has 2 files for your agent · Review");
     expect(pill.getAttribute("aria-expanded")).toBe("false");
     pill.click();
     expect(on.showPreview).toHaveBeenCalledWith({ resourceId: F.rid, version: F.v1 });
@@ -329,7 +335,7 @@ describe("panel view", () => {
     expect(explanation().className).toBe("state state-empty");
     for (const [link, words, kind] of [
       ["core_unavailable", "Scout isn't running.", "link_down"],
-      ["disconnected", "native host isn't reachable", "link_down"],
+      ["disconnected", "Chrome can't reach Scout", "link_down"],
       ["connecting", "Connecting to Scout…", "connecting"],
     ] as const) {
       m.applyLink(link);
@@ -376,7 +382,7 @@ describe("panel view", () => {
     expect(box().disabled).toBe(false);
     expect(root.querySelector('label[for="destination-https://docs.example.com"]')!.textContent).toContain("Suggest on docs.example.com");
     expect(box().closest(".tray")).not.toBeNull();
-    expect(root.textContent).toContain("Each visit runs a short job on your Claude subscription.");
+    expect(root.textContent).toContain("When you stay on a page here, Scout runs a short job on your Claude subscription.");
     box().click();
     expect(on.destination).toHaveBeenCalledWith("https://docs.example.com", true);
     // The core's grant frame turns it on.
@@ -415,7 +421,7 @@ describe("panel view", () => {
     const box = () => root.querySelector<HTMLInputElement>('[data-key="destination-https://docs.example.com"]')!;
     expect(box().disabled).toBe(true);
     expect(box().checked).toBe(false);
-    expect(root.textContent).toContain("Waiting for Scout core…");
+    expect(root.textContent).toContain("Waiting for Scout…");
     m.applyLink("core_unavailable");
     render();
     expect(box().disabled).toBe(true);
