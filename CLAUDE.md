@@ -39,8 +39,9 @@ mockups in `docs/design/2026-10-03-panel/`), the UI copy sweep (#7, #8). Phase 4
 in the factory (triage, monitor on `ci`, implement on `ready-for-agent`); CI is
 `.github/workflows/ci.yml` on macOS. Copy-only edits go straight to `main`; code changes go
 through a PR and CI.
-Recommendations run only for hosts listed in `config.json` `destinations` (empty by
-default); a destination spends Hunter's quota on every settled visit there.
+Suggestions run only for sites switched on in the panel ("Suggest on <host>", stored as
+`config.json` `destinations`, empty by default); each settled visit there spends one job
+on Hunter's subscription.
 
 Pivot Phase 1 additions (all tested hermetically with a fake `claude`; live evidence in
 the plan's phase log):
