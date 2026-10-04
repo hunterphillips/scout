@@ -3,11 +3,36 @@
   "name": "Scout Sensor",
   "version": "0.1.0",
   "description": "Scout's browser sensor and side panel: reports the focused tab on sites you allow and, when you turn it on, GitHub issue text, to the local Scout app, and shows Scout's links for the page.",
+  "icons": {
+    "16": "icons/icon-16.png",
+    "32": "icons/icon-32.png",
+    "48": "icons/icon-48.png",
+    "128": "icons/icon-128.png"
+  },
   "minimum_chrome_version": "116",
   "incognito": "not_allowed",
-  "permissions": ["activeTab", "nativeMessaging", "scripting", "storage", "sidePanel"],
-  "optional_host_permissions": ["https://*/*"],
-  "background": { "service_worker": "background.js", "type": "module" },
-  "action": { "default_title": "Scout" },
-  "side_panel": { "default_path": "panel.html" }
+  "permissions": [
+    "activeTab",
+    "nativeMessaging",
+    "scripting",
+    "storage",
+    "sidePanel"
+  ],
+  "optional_host_permissions": [
+    "https://*/*"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "Scout",
+    "default_icon": {
+      "16": "icons/icon-16.png",
+      "32": "icons/icon-32.png"
+    }
+  },
+  "side_panel": {
+    "default_path": "panel.html"
+  }
 }

@@ -118,7 +118,10 @@ describe("PanelModel capabilities (PanelModelCapabilityTests)", () => {
   it("offersNeverMoveThePanel (offersNeverExpandThePanel)", () => {
     const m = onSite();
     m.apply(capabilities({ revision: 2, offers: [offer(), offer({ rid: F.rid2 })] }));
-    expect(m.section).toBe("results");
+    expect(m.section).toBe("page");
+    m.select("sites");
+    m.apply(capabilities({ revision: 3, offers: [offer(), offer({ rid: F.rid2, version: F.v2 })] }));
+    expect(m.section).toBe("sites");
     expect(m.shownPreview).toBeNull();
   });
 
@@ -129,7 +132,7 @@ describe("PanelModel capabilities (PanelModelCapabilityTests)", () => {
     expect(m.canDecline(key)).toBe(true);
     const first = m.showPreview(key)!;
     expect(first).not.toBeNull();
-    expect(m.section).toBe("site");
+    expect(m.section).toBe("page");
     expect(m.shownPreview).toEqual(key);
     expect(m.showPreview(key)).toBeNull();
     expect(m.approveBlocker(key)).toBe("Preview is still loading.");
@@ -179,7 +182,7 @@ describe("PanelModel capabilities (PanelModelCapabilityTests)", () => {
     m.apply(capabilities({ revision: 2, offers: [offer({ rid: F.rid2, version: F.v2 })] }));
     m.apply(state("idle", { epoch: 9, detail: "other.example.org", permitted: true }));
     m.apply(state("working", { epoch: 9 }));
-    expect(m.section).toBe("site");
+    expect(m.section).toBe("page");
     expect(m.shownPreview).toEqual(key);
     expect(m.preview(key)).toBe(before);
     expect(m.preview(key)?.text).toBe("the guide");
@@ -621,12 +624,14 @@ describe("PanelModel browser additions", () => {
     expect(m.problems).toEqual([]);
   });
 
-  it("Escape's target: selecting Results keeps the shown preview", async () => {
+  it("Escape's target: leaving Page and selecting it again keeps the shown preview", async () => {
     const m = new PanelModel(tracker("t"));
     m.applyLink("connected");
+    m.select("sites");
     m.showPreview(key);
-    expect(m.section).toBe("site");
-    m.select("results");
+    expect(m.section).toBe("page");
+    m.select("activity");
+    m.select("page");
     expect(m.shownPreview).toEqual(key);
   });
 

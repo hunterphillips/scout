@@ -1,9 +1,10 @@
+import { readFileSync } from "node:fs";
 import { JSDOM } from "jsdom";
 import { describe, expect, it, vi } from "vitest";
 import type { StatusSnapshot } from "../messages.js";
 import { PanelModel } from "./model.js";
 import { capabilities, entry, F, offer, originSetting, results, state, tracker } from "./test-frames.js";
-import { type PanelHandlers, renderPanel, statusRows, type ViewState } from "./view.js";
+import { type PanelHandlers, renderPanel, sentText, statusRows, type ViewState } from "./view.js";
 
 const STATUS: StatusSnapshot = {
   link: "connected",
@@ -23,7 +24,7 @@ function handlers(): PanelHandlers {
 }
 
 function view(model: PanelModel) {
-  const dom = new JSDOM(`<!doctype html><body><p id="header-line"></p><div id="root"></div></body>`);
+  const dom = new JSDOM(`<!doctype html><body><div id="root"></div></body>`);
   const doc = dom.window.document;
   const root = doc.getElementById("root")!;
   const on = handlers();
@@ -42,12 +43,12 @@ function running(): PanelModel {
 }
 
 describe("panel view", () => {
-  it("sections in order, Results first and current; the nav comes before the section in Tab order", () => {
+  it("sections in order, Page first and current; the nav comes after the view in Tab order", () => {
     const { root } = view(running());
-    const nav = [...root.querySelectorAll("nav button")].map((b) => b.textContent);
-    expect(nav).toEqual(["Results", "Sites", "This site", "Settings", "Activity", "Problems"]);
-    expect(root.querySelector('[aria-current="page"]')!.textContent).toBe("Results");
-    expect(root.firstElementChild!.tagName).toBe("NAV");
+    const nav = [...root.querySelectorAll("nav button")].map((b) => b.getAttribute("aria-label"));
+    expect(nav).toEqual(["Page", "Sites", "Activity", "Settings"]);
+    expect(root.querySelector('[aria-current="page"]')!.getAttribute("aria-label")).toBe("Page");
+    expect(root.lastElementChild!.tagName).toBe("NAV");
     expect(root.querySelector("[tabindex]:not([tabindex='0'])")).toBeNull(); // no positive tabindex anywhere
   });
 
@@ -78,15 +79,30 @@ describe("panel view", () => {
     expect(root.querySelector<HTMLElement>("pre.preview-text")!.scrollTop).toBe(120);
   });
 
-  it("the header line is updated in place, so its live region is not re-created", () => {
+  it("the results heading is updated in place, so its live region is not re-created", () => {
     const m = running();
-    const { doc, render } = view(m);
-    const header = doc.getElementById("header-line")!;
-    expect(header.textContent).toBe("Idle · docs.example.com · 1 offer");
+    const { root, render } = view(m);
+    const heading = root.querySelector("#results-heading")!;
+    expect(heading.getAttribute("aria-live")).toBe("polite");
+    expect(heading.textContent).toBe("Nothing yet");
     m.apply(state("working", { epoch: 1, jobId: "job-1" }));
     render();
-    expect(doc.getElementById("header-line")).toBe(header);
-    expect(header.textContent).toBe("Working · Looking for links…");
+    expect(root.querySelector("#results-heading")).toBe(heading);
+    expect(heading.textContent).toBe("Looking for links…");
+  });
+
+  it("Settings' Diagnostics opens on a 'Now' row with the status, host and offer count", () => {
+    const m = running();
+    m.select("settings");
+    const { root, render } = view(m);
+    const now = () => {
+      const dt = [...root.querySelectorAll("details.diagnostics dt")].find((e) => e.textContent === "Now")!;
+      return dt.nextElementSibling!.textContent;
+    };
+    expect(now()).toBe("Idle · docs.example.com · 1 offer");
+    m.apply(state("working", { epoch: 1, jobId: "job-1" }));
+    render();
+    expect(now()).toBe("Working · Looking for links…");
   });
 
   it("Approve is disabled with its reason until the shown preview is complete", () => {
@@ -98,20 +114,185 @@ describe("panel view", () => {
     expect(root.querySelector(`#${approve.getAttribute("aria-describedby")}`)!.textContent).toBe("Preview is still loading.");
   });
 
-  it("status rows: metadata only", () => {
+  it("status rows and the Sent line: metadata only", () => {
     expect(statusRows(STATUS)).toEqual([
       ["Status", "connected"],
       ["Allowed sites", "docs.example.com"],
       ["Issue text", "off"],
-      ["Sent", "focus 1 · issues 0 · acked 0 · dropped 0 · denied 0"],
     ]);
+    expect(sentText(STATUS)).toBe("Sent: focus 1 · issues 0 · acked 0 · dropped 0 · denied 0");
   });
 
-  it("every results state renders its own sentence", () => {
+  it("Activity ends with the Sent line, and only Activity shows it", () => {
+    const m = running();
+    const { root, render } = view(m);
+    expect(root.querySelector("#sent-line")).toBeNull();
+    m.select("activity");
+    render();
+    expect(root.querySelector("#sent-line")!.textContent).toBe(sentText(STATUS));
+  });
+
+  // P4.7: the Quiet layout.
+  it("the nav has four items; the current one carries aria-current and its label, and Activity shows a dot while there are problems", () => {
+    const m = running();
+    const { root, render } = view(m);
+    const items = () => [...root.querySelectorAll<HTMLButtonElement>("nav.nav button")];
+    expect(items().map((b) => b.getAttribute("data-key"))).toEqual(["nav-page", "nav-sites", "nav-activity", "nav-settings"]);
+    expect(items().filter((b) => b.hasAttribute("aria-current")).map((b) => b.getAttribute("data-key"))).toEqual(["nav-page"]);
+    expect(items().map((b) => b.textContent)).toEqual(["Page", "", "", ""]);
+    const activity = () => root.querySelector<HTMLButtonElement>('[data-key="nav-activity"]')!;
+    expect(activity().querySelector(".nav-dot")).toBeNull();
+    expect(activity().getAttribute("aria-label")).toBe("Activity");
+
+    m.applyLink("core_unavailable");
+    m.select("sites");
+    render();
+    expect(items().filter((b) => b.hasAttribute("aria-current")).map((b) => b.getAttribute("data-key"))).toEqual(["nav-sites"]);
+    expect(root.querySelector('[data-key="nav-sites"]')!.textContent).toBe("Sites");
+    expect(activity().querySelector(".nav-dot")!.getAttribute("aria-hidden")).toBe("true");
+    expect(activity().getAttribute("aria-label")).toBe("Activity, 1 problem");
+
+    m.applyLink("connected");
+    render();
+    expect(activity().querySelector(".nav-dot")).toBeNull();
+    expect(activity().getAttribute("aria-label")).toBe("Activity");
+  });
+
+  it("the review card counts the site's files ('1 of N') and Next shows the following one", () => {
+    const m = running();
+    m.apply(capabilities({ revision: 2, offers: [offer(), offer({ rid: F.rid2, version: F.v2 })], origins: [originSetting()] }));
+    const { root, on, render } = view(m);
+    const pill = root.querySelector<HTMLButtonElement>('[data-key="review-open"]')!;
+    expect(pill.textContent).toContain("Example has 2 files for your agent · Review");
+    expect(pill.getAttribute("aria-expanded")).toBe("false");
+    pill.click();
+    expect(on.showPreview).toHaveBeenCalledWith({ resourceId: F.rid, version: F.v1 });
+
+    m.showPreview({ resourceId: F.rid, version: F.v1 });
+    render();
+    expect(root.querySelector('[data-key="review-open"]')).toBeNull();
+    expect(root.querySelector("#preview-pane .review-foot")!.textContent).toContain("1 of 2");
+    const next = root.querySelector<HTMLButtonElement>('[data-key="review-next"]')!;
+    expect(next.getAttribute("aria-label")).toBe("Next file, 2 of 2");
+    next.click();
+    expect(on.showPreview).toHaveBeenLastCalledWith({ resourceId: F.rid2, version: F.v2 });
+
+    m.showPreview({ resourceId: F.rid2, version: F.v2 });
+    render();
+    expect(root.querySelector("#preview-pane .review-foot")!.textContent).toContain("2 of 2");
+    expect(root.querySelector('[data-key="review-next"]')!.getAttribute("aria-label")).toBe("Next file, 1 of 2");
+    root.querySelector<HTMLButtonElement>('[data-key="review-next"]')!.click();
+    expect(on.showPreview).toHaveBeenLastCalledWith({ resourceId: F.rid, version: F.v1 });
+  });
+
+  it("a single file's review card has no count and no Next", () => {
+    const m = running();
+    m.showPreview({ resourceId: F.rid, version: F.v1 });
+    const { root } = view(m);
+    expect(root.querySelector("#preview-pane")).not.toBeNull();
+    expect(root.querySelector(".review-foot")).toBeNull();
+    expect(root.querySelector('[data-key="review-next"]')).toBeNull();
+  });
+
+  it("the review card's buttons read 'Not now', then 'Approve'; a file that can't be declined shows only Approve", () => {
+    const m = running();
+    m.showPreview({ resourceId: F.rid, version: F.v1 });
+    const { root, on } = view(m);
+    const actions = () => [...root.querySelectorAll("#preview-pane .review-actions button")].map((b) => b.textContent);
+    expect(actions()).toEqual(["Not now", "Approve"]);
+    root.querySelector<HTMLButtonElement>(`[data-key="decline-${F.rid}-${F.v1}"]`)!.click();
+    expect(on.decline).toHaveBeenCalledWith({ resourceId: F.rid, version: F.v1 });
+
+    // A revoked library version the site no longer offers can be approved again, never declined.
+    const m2 = new PanelModel(tracker("t"));
+    m2.applyLink("connected");
+    m2.apply(capabilities({ library: [entry({ state: "blocked", defaultVersion: null, versions: [[F.v1, "revoked"]] })], origins: [originSetting()] }));
+    m2.apply(state("idle", { epoch: 1, detail: "docs.example.com", permitted: true }));
+    m2.showPreview({ resourceId: F.rid, version: F.v1 });
+    expect(m2.canDecline({ resourceId: F.rid, version: F.v1 })).toBe(false);
+    const second = view(m2);
+    expect([...second.root.querySelectorAll("#preview-pane .review-actions button")].map((b) => b.textContent)).toEqual(["Approve"]);
+  });
+
+  it("the context chip shows only while the agent grant is on, GitHub issue text is on, and an issue has been sent", () => {
+    const m = running();
+    m.apply({ type: "grant", agentBrowserContext: true, destinations: [] });
+    const { root, v, render } = view(m);
+    const chip = () => root.querySelector(".tray .chip");
+    const on = { ...STATUS, githubCapture: true, counters: { ...STATUS.counters, forwarded: 1 } };
+    v.status = on;
+    render();
+    expect(chip()!.textContent).toBe("Using your recent GitHub activity");
+
+    v.status = { ...on, githubCapture: false };
+    render();
+    expect(chip()).toBeNull();
+    v.status = { ...on, counters: { ...on.counters, forwarded: 0 } };
+    render();
+    expect(chip()).toBeNull();
+    v.status = on;
+    m.apply({ type: "grant", agentBrowserContext: false, destinations: [] });
+    render();
+    expect(chip()).toBeNull();
+    m.apply({ type: "grant", agentBrowserContext: true, destinations: [] });
+    render();
+    expect(chip()).not.toBeNull();
+    // The review card takes the tray's attention: the chip steps aside while it is open.
+    m.showPreview({ resourceId: F.rid, version: F.v1 });
+    render();
+    expect(chip()).toBeNull();
+  });
+
+  it("the Diagnostics disclosure the user opened stays open (and is the same node) across renders", () => {
+    const m = running();
+    m.select("settings");
+    const { root, render } = view(m);
+    const details = root.querySelector<HTMLDetailsElement>("details.diagnostics")!;
+    expect(details.open).toBe(false);
+    details.open = true;
+    m.apply(state("working", { epoch: 1, jobId: "job-1" }));
+    render();
+    expect(root.querySelector("details.diagnostics")).toBe(details);
+    expect(details.open).toBe(true);
+    details.open = false;
+    render();
+    expect(details.open).toBe(false);
+  });
+
+  it("the mark's dot pulses while Scout is looking for links, in every view", () => {
+    const m = running();
+    const { root, render } = view(m);
+    const mark = () => root.querySelector("header .mark")!;
+    expect(mark().classList.contains("working")).toBe(false);
+    m.apply(state("working", { epoch: 1, jobId: "job-1" }));
+    render();
+    expect(mark().classList.contains("working")).toBe(true);
+    for (const section of ["sites", "activity", "settings"] as const) {
+      m.select(section);
+      render();
+      expect(mark().classList.contains("working")).toBe(true);
+    }
+    m.apply(results(1, { status: "empty" }));
+    render();
+    expect(mark().classList.contains("working")).toBe(false);
+  });
+
+  it("panel.html animates only the working mark's dot, and prefers-reduced-motion turns every animation off", () => {
+    const css = readFileSync(new URL("../panel.html", import.meta.url), "utf8");
+    expect(css).toMatch(/\.mark\.working \.mark-dot \{[^}]*animation: pulse/);
+    const reduced = css.slice(css.indexOf("@media (prefers-reduced-motion: reduce)"));
+    expect(reduced).toMatch(/^@media \(prefers-reduced-motion: reduce\) \{\s*\*, \*::before, \*::after \{ animation: none !important;/);
+  });
+
+  it("every results state renders its own sentence and its own heading", () => {
     const m = running();
     const seen = new Set<string>();
+    const headings = new Set<string>();
     const { root, render } = view(m);
-    const grab = () => seen.add(root.querySelector("#results-explanation")!.textContent!);
+    const grab = () => {
+      seen.add(root.querySelector("#results-explanation")!.textContent!);
+      headings.add(root.querySelector("#results-heading")!.textContent!);
+    };
     grab();
     m.apply(state("working", { epoch: 1, jobId: "job-1" }));
     render();
@@ -137,6 +318,7 @@ describe("panel view", () => {
       grab();
     }
     expect(seen.size).toBe(14);
+    expect(headings.size).toBe(14);
   });
 
   it("Results says Scout can't be reached (or is connecting) while the link isn't up, and goes back to the results state on reconnect", () => {
@@ -173,26 +355,27 @@ describe("panel view", () => {
     m.select("sites");
     const { root } = view(m);
     const row = (host: string) => [...root.querySelectorAll("ul.sites li")].find((li) => li.querySelector(".site-host")!.textContent === host)!;
-    expect(row("docs.example.com").querySelector(".site-state")!.textContent).toBe("Allowed · Recommendations on");
-    expect(row("docs.stripe.com").querySelector(".site-state")!.textContent).toBe("Not allowed · Recommendations on");
+    expect(row("docs.example.com").querySelector(".site-state")!.textContent).toBe("Allowed · Suggestions on");
+    expect(row("docs.stripe.com").querySelector(".site-state")!.textContent).toBe("Not allowed · Suggestions on");
     expect(row("docs.stripe.com").querySelector('[data-key="allow-docs.stripe.com"]')).not.toBeNull();
-    expect(root.textContent).toContain("Turn on suggestions in the This site section.");
+    expect(row("docs.example.com").querySelector('[data-key="remove-docs.example.com"]')).not.toBeNull();
+    expect(root.textContent).toContain("Turn on suggestions for a site from the Page view while you're on it.");
     expect(root.textContent).not.toContain("config.json");
     expect(root.textContent).not.toContain("Recommendations run only");
   });
 
   // P4.6: the per-site recommendations switch.
-  it("This site has a 'Suggest links from this site' switch, off by default, keyed by the full origin; a click sends set_destination", () => {
+  it("the Page tray has a 'Suggest on <host>' switch, off by default, keyed by the full origin; a click sends set_destination", () => {
     const m = running();
     m.apply({ type: "grant", agentBrowserContext: false, destinations: [] });
-    m.select("site");
     const { root, on, render } = view(m);
     const box = () => root.querySelector<HTMLInputElement>('[data-key="destination-https://docs.example.com"]')!;
     expect(box()).not.toBeNull();
     expect(box().type).toBe("checkbox");
     expect(box().checked).toBe(false);
     expect(box().disabled).toBe(false);
-    expect(root.querySelector('label[for="destination-https://docs.example.com"]')!.textContent).toContain("Suggest links from this site");
+    expect(root.querySelector('label[for="destination-https://docs.example.com"]')!.textContent).toContain("Suggest on docs.example.com");
+    expect(box().closest(".tray")).not.toBeNull();
     expect(root.textContent).toContain("Each visit runs a short job on your Claude subscription.");
     box().click();
     expect(on.destination).toHaveBeenCalledWith("https://docs.example.com", true);
@@ -202,27 +385,31 @@ describe("panel view", () => {
     expect(box().checked).toBe(true);
   });
 
-  it("the switch is disabled with 'Allow this site first.' when Chrome doesn't allow the site; one already on can still be turned off", () => {
+  it("when Chrome doesn't allow the site the tray offers Allow instead of the switch; one already on can still be turned off", () => {
     const m = running();
     m.apply({ type: "grant", agentBrowserContext: false, destinations: [] });
-    m.select("site");
-    const { root, v, render } = view(m);
+    const { root, on, v, render } = view(m);
     v.status = { ...STATUS, granted: [] };
     render();
-    const box = () => root.querySelector<HTMLInputElement>('[data-key="destination-https://docs.example.com"]')!;
-    expect(box().disabled).toBe(true);
-    expect(root.textContent).toContain("Allow this site first.");
+    const box = () => root.querySelector<HTMLInputElement>('[data-key="destination-https://docs.example.com"]');
+    expect(box()).toBeNull();
+    const allow = root.querySelector<HTMLButtonElement>('.tray [data-key="site-allow"]')!;
+    expect(allow.getAttribute("aria-label")).toBe("Allow Scout on docs.example.com");
+    expect(root.querySelector(".tray .allow-row")!.textContent).toContain("Allow Scout on docs.example.com");
+    allow.click();
+    expect(on.allow).toHaveBeenCalledWith("https://docs.example.com/*");
     m.apply({ type: "grant", agentBrowserContext: false, destinations: ["https://docs.example.com"] });
     render();
-    expect(box().checked).toBe(true);
-    expect(box().disabled).toBe(false);
-    expect(root.textContent).not.toContain("Allow this site first.");
+    expect(box()!.checked).toBe(true);
+    expect(box()!.disabled).toBe(false);
+    expect(root.querySelector('[data-key="site-allow"]')).not.toBeNull();
+    box()!.click();
+    expect(on.destination).toHaveBeenCalledWith("https://docs.example.com", false);
   });
 
   it("the switch waits for the core while its command is pending, and is disabled without a core", () => {
     const m = running();
     m.apply({ type: "grant", agentBrowserContext: false, destinations: [] });
-    m.select("site");
     expect(m.setDestination("https://docs.example.com", true)).not.toBeNull();
     const { root, render } = view(m);
     const box = () => root.querySelector<HTMLInputElement>('[data-key="destination-https://docs.example.com"]')!;
@@ -256,13 +443,13 @@ describe("panel view", () => {
     m.apply(results(1, { status: "ok", items: [{ candidateId: "c1", title: "A", reason: "first", hostname: "docs.example.com" }] }));
     const { root, render } = view(m);
     const nav = root.querySelector("nav")!;
-    const results0 = root.querySelector("#nav-results, [data-key='nav-results']")!;
-    const reason = root.querySelector("p.reason")!;
+    const page0 = root.querySelector("[data-key='nav-page']")!;
+    const reason = root.querySelector("span.reason")!;
     m.apply(results(1, { status: "ok", items: [{ candidateId: "c1", title: "A", reason: "second", hostname: "docs.example.com" }] }));
     render();
     expect(root.querySelector("nav")).toBe(nav);
-    expect(root.querySelector("[data-key='nav-results']")).toBe(results0);
-    expect(root.querySelector("p.reason")).toBe(reason);
+    expect(root.querySelector("[data-key='nav-page']")).toBe(page0);
+    expect(root.querySelector("span.reason")).toBe(reason);
     expect(reason.textContent).toBe("second");
   });
 
@@ -283,19 +470,18 @@ describe("panel view", () => {
 
   it("a checkbox the user flipped shows the model's value again after a render; the typed site and its caret are kept", () => {
     const m = running();
-    m.select("site");
+    m.select("sites");
     const { doc, root, on, render, v } = view(m);
-    const box = root.querySelector<HTMLInputElement>("#auto-acquire")!;
+    const autoKey = `[data-key="auto-acquire-${F.origin}"]`;
+    const box = root.querySelector<HTMLInputElement>(autoKey)!;
     expect(box.disabled).toBe(false);
     const before = box.checked;
     box.click();
     expect(on.autoAcquire).toHaveBeenCalledWith(F.origin, !before, false);
     render();
-    expect(root.querySelector("#auto-acquire")).toBe(box);
+    expect(root.querySelector(autoKey)).toBe(box);
     expect(box.checked).toBe(before);
 
-    m.select("sites");
-    render();
     const input = root.querySelector<HTMLInputElement>("#site-input")!;
     input.focus();
     input.value = "docs.stri";
@@ -323,15 +509,21 @@ describe("panel view", () => {
       }),
     );
     m.apply(state("idle", { epoch: 1, detail: "docs.example.com", permitted: true }));
-    m.select("site");
-    const { root, on } = view(m);
-    const keys = [...root.querySelectorAll("[data-key]")].map((e) => e.getAttribute("data-key")!);
-    expect(new Set(keys).size).toBe(keys.length);
-    expect(keys).toContain(`preview-${F.rid}-${F.v1}`);
-    expect(keys).toContain(`library-preview-${F.rid}-${F.v1}`);
+    const { root, on, render } = view(m);
+    const keys = () => [...root.querySelectorAll("[data-key]")].map((e) => e.getAttribute("data-key")!);
+    expect(new Set(keys()).size).toBe(keys().length);
+    expect(keys()).toContain("review-open");
+    expect(keys()).toContain(`library-preview-${F.rid}-${F.v1}`);
     root.querySelector<HTMLButtonElement>(`[data-key="library-preview-${F.rid}-${F.v1}"]`)!.click();
     expect(on.showPreview).toHaveBeenCalledWith({ resourceId: F.rid, version: F.v1 });
     expect(root.querySelector(`[data-key="revoke-${twin}"]`)).not.toBeNull();
+    // The offer's review card beside its own library line: still no collision.
+    m.showPreview({ resourceId: F.rid, version: F.v1 });
+    render();
+    expect(new Set(keys()).size).toBe(keys().length);
+    expect(keys()).toContain(`decline-${F.rid}-${F.v1}`);
+    expect(keys()).toContain(`approve-${F.rid}-${F.v1}`);
+    expect(keys()).toContain(`library-preview-${F.rid}-${F.v1}`);
   });
 
   it("a focused text box moved by the patch gets its focus and whole selection back (start, end, direction)", () => {

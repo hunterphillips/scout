@@ -169,7 +169,9 @@ the plan's phase log):
   `content/capture.ts` (route gate, settle, navCounter), `selectors.ts` and `route.ts`
   (verbatim from the live-verified Phase 0 spike). Side panel: `panel-bridge.ts` (worker
   side — port only from `panel.html`, in-memory cache of the last grant/capabilities/
-  audit/state/results for repaint, badge dot; `action.onClicked` toggles the click's
+  audit/state/results for repaint; the toolbar badge counts links on #1F5FCC or files to
+  review on #A35D00 while no panel is open, and a paused core swaps in the grey paused
+  icon; `action.onClicked` toggles the click's
   window's panel synchronously — `sidePanel.close` when a panel port reported that window
   and Chrome ≥141 has `close`, else `sidePanel.open`, so an open still grants `activeTab`;
   `openPanelOnActionClick` would not; decision in `panel/toggle.ts`),
@@ -182,13 +184,23 @@ the plan's phase log):
   `CapabilityModel`, `PanelModel`, `PauseState`; `view.ts` renders text only, with one
   delegated `click`/`submit`/`input` listener on the panel root dispatching on
   `data-action`/`data-submit`/`data-input`, and a keyed patch (tag + full-id `data-key`)
-  so unchanged controls keep their nodes, focus and selection. Results shows the link copy
+  so unchanged controls keep their nodes, focus and selection. Page's results heading shows the link copy
   (`link_down`, same text as Problems) while the link is disconnected, core_unavailable or
   upgrade_required, and "Connecting to Scout…" while connecting, never the idle text;
-  counter writes push the status to open panels once per tick. Sections: Results, Sites
-  (marks `grant.destinations` as "Recommendations on", listing a destination even before
-  Chrome grants it; destinations are set in `config.json`, read at core start), This
-  site, Settings, Activity, Problems. No popup. Since pivot P2.1:
+  counter writes push the status to open panels once per tick. Layout (P4.7, the Quiet
+  design in `docs/design/2026-10-03-panel/`): a header with the mark (its dot pulses while
+  Scout looks for links; `prefers-reduced-motion` stops it) and a Pause icon, then four
+  destinations in a bottom pill nav (`nav-page`, `nav-sites`, `nav-activity`,
+  `nav-settings`; Activity carries a problem dot). **Page**: the results heading, up to 3
+  link cards, a review pill that expands into an inline review card ("1 of N", Next, Not
+  now/Approve), and a tray with the context chip and the "Suggest on <host>" switch
+  (`destination-<origin>`) or an Allow row. **Sites**: rows reading "Allowed · Suggestions
+  on" for `grant.destinations` (a destination is listed even before Chrome grants it),
+  Remove, and the per-site auto-approve switch with its confirmation sheet. **Activity**:
+  Problems (they live here now), then agent reads, then the Sent line. **Settings**:
+  switches, Pause, Refresh files, Reconnect, and a Diagnostics disclosure. No popup.
+  Assets: `assets/mark.svg` (the mark), `scripts/render-icons.mjs` (renders `icons/*.png`,
+  committed, through headless Chrome), `assets/fonts` (Figtree, OFL). Since pivot P2.1:
   `https://*/*` is optional-only plus `activeTab`; nothing is posted until the core's
   `capture_policy`, then a revisioned permissions snapshot and a focus; url/title only for
   granted origins; a Chrome all-sites grant counts as not granted. `build.mjs` writes
@@ -272,8 +284,8 @@ the plan's phase log):
   from `~/.scout/config.json` (no PATH fallback; `SCOUT_HOME` stripped from the child
   env), restart cap 3 per 60 s, non-blocking stdin writes (`send` → written / retryLater /
   oversize; a command line incl. newline must be under 512 bytes, macOS `PIPE_BUF`);
-  `FrontmostMonitor`. Pivot P4.2: the app is a menu-bar accessory (`NSStatusItem`,
-  `binoculars`): status line, Pause/Resume, Show/Hide window, Quit Scout. The window is
+  `FrontmostMonitor`. Pivot P4.2: the app is a menu-bar accessory (`NSStatusItem`
+  with Scout's mark drawn as a template image): status line, Pause/Resume, Show/Hide window, Quit Scout. The window is
   created lazily on Show window or `SCOUT_WINDOW=1` (the one UI-only env flag) and closing
   it hides it; frames keep feeding the models while hidden. ScoutKit `PauseState` (pure;
   `pause`/`resume` have no `commandId` and are never acked, so it tracks one pending

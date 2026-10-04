@@ -47,7 +47,7 @@ export type ResultsPhase =
   | { kind: "error"; reason: ErrorReason }
   | { kind: "cancelled"; reason: CancelledReason };
 
-/** What the Results section shows. Each state is distinct; "nothing relevant" is never a failure. */
+/** What the Page view's results show. Each state is distinct; "nothing relevant" is never a failure. */
 export type ResultsDisplay =
   | { kind: "none" }
   /** The panel can't reach the core (the link, not the core's own status). */
@@ -113,7 +113,37 @@ export function displaySummary(d: ResultsDisplay): string | null {
   }
 }
 
-/** One sentence for the Results section, also its accessible description. */
+/** The Page view's heading over the results: "Worth a look" with links, a quiet word otherwise. */
+export function displayHeading(d: ResultsDisplay): string {
+  switch (d.kind) {
+    case "none":
+      return "Nothing yet";
+    case "link_down":
+      return d.link === "core_unavailable" ? "Scout isn't running" : d.link === "upgrade_required" ? "Update needed" : "Can't reach Scout";
+    case "connecting":
+      return "Connecting…";
+    case "paused":
+      return "Paused";
+    case "disconnected":
+      return "Chrome not connected";
+    case "working":
+      return "Looking for links…";
+    case "ready":
+      return "Worth a look";
+    case "empty":
+      return "Nothing relevant here";
+    case "unavailable":
+      return "Links unavailable";
+    case "timeout":
+      return "Out of time";
+    case "error":
+      return "Couldn't get links";
+    case "cancelled":
+      return "Stopped looking";
+  }
+}
+
+/** One sentence under the Page view's heading, also the link list's accessible description. */
 export function displayExplanation(d: ResultsDisplay): string {
   switch (d.kind) {
     case "none":

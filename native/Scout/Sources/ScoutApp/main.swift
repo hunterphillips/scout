@@ -126,10 +126,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private func buildStatusItem() {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         if let button = item.button {
-            let image = NSImage(systemSymbolName: "binoculars", accessibilityDescription: "Scout")
-            image?.isTemplate = true
-            button.image = image
-            if image == nil { button.title = "Scout" }
+            button.image = Self.markImage()
         }
         let menu = NSMenu()
         menu.autoenablesItems = false
@@ -145,6 +142,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         item.menu = menu
         statusItem = item
         updateMenu()
+    }
+
+    /// Scout's mark (a ring with a dot spotted up-right; `packages/browser-extension/assets/mark.svg`)
+    /// as a one-colour template image, so the menu bar tints it for light and dark mode.
+    static func markImage() -> NSImage {
+        let image = NSImage(size: NSSize(width: 18, height: 18), flipped: true) { _ in
+            // The 24-unit mark scaled to 18 pt: ring r 8 at (12, 12), dot r 3 at (15, 9).
+            let s: CGFloat = 18.0 / 24.0
+            let ring = NSBezierPath(ovalIn: NSRect(x: (12 - 8) * s, y: (12 - 8) * s, width: 16 * s, height: 16 * s))
+            ring.lineWidth = 2.4 * s
+            NSColor.black.setStroke()
+            ring.stroke()
+            NSColor.black.setFill()
+            NSBezierPath(ovalIn: NSRect(x: (15 - 3) * s, y: (9 - 3) * s, width: 6 * s, height: 6 * s)).fill()
+            return true
+        }
+        image.isTemplate = true
+        image.accessibilityDescription = "Scout"
+        return image
     }
 
     func menuNeedsUpdate(_ menu: NSMenu) {

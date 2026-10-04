@@ -44,17 +44,25 @@ it("the service worker turns zod jitless before any Scout module runs; other bun
   }
 }, 30_000);
 
-it("dist holds exactly the background, the side panel and the GitHub content script; no popup", () => {
+const m0 = (dist: string) => JSON.parse(readFileSync(join(dist, "manifest.json"), "utf8")) as Record<string, unknown>;
+
+it("dist holds exactly the background, the side panel, the GitHub content script, the icons and the font; no popup", () => {
   const dist = join(mkdtempSync(join(tmpdir(), "scout-ext-")), "dist");
   try {
     const root = fileURLToPath(new URL("..", import.meta.url));
     const r = spawnSync(process.execPath, ["build.mjs"], { cwd: root, env: { ...process.env, SCOUT_EXT_DIST: dist }, encoding: "utf8" });
     expect(r.status, r.stderr).toBe(0);
     const files = (readdirSync(dist, { recursive: true }) as string[]).filter((f) => !statSync(join(dist, f)).isDirectory()).sort();
-    expect(files).toEqual(["background.js", "content/github-issue.js", "manifest.json", "panel.html", "panel.js"].map((f) => f.split("/").join(sep)));
+    const icons = ["icon-16", "icon-32", "icon-48", "icon-128", "paused-16", "paused-32"].map((n) => `icons/${n}.png`);
+    const fonts = ["fonts/OFL.txt", "fonts/figtree-latin-wght.woff2"];
+    expect(files).toEqual(["background.js", "content/github-issue.js", ...fonts, ...icons, "manifest.json", "panel.html", "panel.js"].map((f) => f.split("/").join(sep)).sort());
+    // Every icon the manifest names ships, and the panel loads its font from the extension itself.
+    for (const p of [...Object.values(m0(dist)["icons"] as object), ...Object.values((m0(dist)["action"] as { default_icon: object }).default_icon)]) expect(files).toContain(String(p).split("/").join(sep));
     const html = readFileSync(join(dist, "panel.html"), "utf8");
     expect(html).toContain('<script type="module" src="panel.js"></script>');
     expect(html).not.toMatch(/<script(?![^>]*src="panel\.js")/); // MV3 CSP: no inline script
+    expect(html).toContain('url("fonts/figtree-latin-wght.woff2")');
+    expect(html).not.toMatch(/https?:\/\//); // nothing remote: no font, stylesheet or script from the network
     const m = JSON.parse(readFileSync(join(dist, "manifest.json"), "utf8")) as Record<string, unknown>;
     expect(m["side_panel"]).toEqual({ default_path: "panel.html" });
     expect(m["action"]).not.toHaveProperty("default_popup");
@@ -71,7 +79,8 @@ it("the manifest asks for exact sites one at a time: https://*/* is optional onl
   expect([...(m["permissions"] as string[])].sort()).toEqual(["activeTab", "nativeMessaging", "scripting", "sidePanel", "storage"]);
   expect(m["minimum_chrome_version"]).toBe("116");
   expect(m["side_panel"]).toEqual({ default_path: "panel.html" });
-  expect(m["action"]).toEqual({ default_title: "Scout" });
+  expect(m["action"]).toEqual({ default_title: "Scout", default_icon: { 16: "icons/icon-16.png", 32: "icons/icon-32.png" } });
+  expect(m["icons"]).toEqual({ 16: "icons/icon-16.png", 32: "icons/icon-32.png", 48: "icons/icon-48.png", 128: "icons/icon-128.png" });
   expect(m["optional_permissions"]).toBeUndefined();
   expect(m["content_scripts"]).toBeUndefined(); // registered at runtime, only with the GitHub grant and toggle
   expect(m["incognito"]).toBe("not_allowed");

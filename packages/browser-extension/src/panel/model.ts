@@ -22,14 +22,13 @@ import { PauseState } from "./pause.js";
 import { keyId, PreviewAssembler, type PreviewFailure, type PreviewKey, sameKey } from "./preview.js";
 import { type CoreStatus, displaySummary, isLinkDown, LINK_DOWN_TEXT, type LinkOpenRequest, type ResultsDisplay, ResultsModel } from "./results.js";
 
-export type PanelSection = "results" | "sites" | "site" | "settings" | "activity" | "problems";
+/** The bottom nav's destinations (P4.7): the Page view holds results, the site's files and its switch; Problems live in Activity. */
+export type PanelSection = "page" | "sites" | "activity" | "settings";
 export const SECTIONS: ReadonlyArray<{ id: PanelSection; title: string }> = [
-  { id: "results", title: "Results" },
+  { id: "page", title: "Page" },
   { id: "sites", title: "Sites" },
-  { id: "site", title: "This site" },
-  { id: "settings", title: "Settings" },
   { id: "activity", title: "Activity" },
-  { id: "problems", title: "Problems" },
+  { id: "settings", title: "Settings" },
 ];
 
 export type Problem =
@@ -40,7 +39,7 @@ export type Problem =
   /** The core answered a click with a target the panel would not open, or Chrome did not open it. */
   | { kind: "linkRefused"; commandId: string; refusal: LinkRefusal };
 
-export const MISSING_CAPABILITIES = "Scout core's list of site offers and approvals didn't arrive, so This site can't show them. Refresh in Settings to try again.";
+export const MISSING_CAPABILITIES = "Scout core's list of site files and approvals didn't arrive, so the Page view can't show them. Refresh in Settings to try again.";
 
 export class PanelModel {
   static readonly previewCapacity = 8;
@@ -51,8 +50,8 @@ export class PanelModel {
   readonly resultsModel = new ResultsModel();
   readonly capabilities = new CapabilityModel();
   readonly pauseState = new PauseState();
-  section: PanelSection = "results";
-  /** The preview in the This site pane; changes only by a user action. */
+  section: PanelSection = "page";
+  /** The file open in the Page view's review card; changes only by a user action. */
   shownPreview: PreviewKey | null = null;
   readonly previews = new Map<string, PreviewAssembler>();
   /** Oldest first, for eviction (key ids). */
@@ -241,17 +240,17 @@ export class PanelModel {
     this.section = section;
   }
 
-  /** Shows `key` in the This site pane, loading it unless it is loaded or loading. */
+  /** Opens `key` in the Page view's review card, loading it unless it is loaded or loading. */
   showPreview(key: PreviewKey): PanelCommand | null {
     this.shownPreview = { resourceId: key.resourceId, version: key.version };
-    this.select("site");
+    this.select("page");
     const a = this.previews.get(keyId(key));
     if (a?.phase === "complete" || a?.phase === "verifying") return null;
     if (a?.phase === "loading" && this.awaiting.has(keyId(key))) return null;
     return this.startPreview(key);
   }
 
-  /** Closes the preview pane (a user action). */
+  /** Collapses the review card (a user action). */
   closePreview(): void {
     this.shownPreview = null;
   }
@@ -489,7 +488,7 @@ export class PanelModel {
     return parts.join(" · ");
   }
 
-  /** The panel header: status, current host, offer count, results summary. */
+  /** One line for Settings' Diagnostics: status, current host, offer count, results summary. */
   get headerLine(): string {
     const parts = [this.statusLine];
     const n = this.currentOffers.length;

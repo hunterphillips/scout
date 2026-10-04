@@ -3,7 +3,7 @@
 import { describe, expect, it } from "vitest";
 import { createBackground } from "./background-core.js";
 import { PANEL_PORT_NAME, type StatusSnapshot, type WorkerToPanel } from "./messages.js";
-import { BADGE_TEXT } from "./panel-bridge.js";
+import { FILES_BADGE_COLOR, ICON_PATHS, LINKS_BADGE_COLOR, PAUSED_ICON_PATHS } from "./panel-bridge.js";
 import { F } from "./panel/test-frames.js";
 import { activate, asChrome, EXT_ID, type FakeChrome, fakeClock, flush, makeChrome } from "./test-fakes.js";
 import { approve, commandsPosted, corePolicy, dropPort, lastPort, pageText, setup } from "./test-harness.js";
@@ -13,6 +13,8 @@ const CAPS = F.frame("frame.capabilities.minimal.json");
 const AUDIT = F.frame("frame.audit.json");
 const STATE_IDLE = { type: "state", status: "idle", visitEpoch: 3, detail: "docs.example.com", permitted: true } as const;
 const RESULTS = F.frame("frame.results.ok.json");
+/** The fixture's two links, as the badge counts them. */
+const LINKS = "2";
 const ACK = F.frame("frame.ack.ok-target.json");
 const PREVIEW = F.frame("frame.preview.first.json");
 
@@ -226,12 +228,13 @@ describe("cache", () => {
 });
 
 describe("badge", () => {
-  it("results ok with no panel open sets a dot; a state frame clears it", async () => {
+  it("results ok with no panel open sets the link count in blue; a state frame clears it", async () => {
     const { f } = await setup();
     frame(f, STATE_IDLE);
     frame(f, RESULTS);
     await flush();
-    expect(f._.state.badge).toBe(BADGE_TEXT);
+    expect(f._.state.badge).toBe(LINKS);
+    expect(f._.state.badgeColor).toBe(LINKS_BADGE_COLOR);
     frame(f, { type: "state", status: "idle", visitEpoch: 4 });
     await flush();
     expect(f._.state.badge).toBe("");
@@ -270,7 +273,7 @@ describe("badge", () => {
     expect(f._.state.badge).toBe("");
     frame(f, RESULTS);
     await flush();
-    expect(f._.state.badge).toBe(BADGE_TEXT);
+    expect(f._.state.badge).toBe(LINKS);
     await openPanel(f);
     await flush();
     expect(f._.state.badge).toBe("");
@@ -283,10 +286,75 @@ describe("badge", () => {
     await clock.advance(0);
     frame(f, RESULTS);
     await flush();
-    expect(f._.state.badge).toBe(BADGE_TEXT);
+    expect(f._.state.badge).toBe(LINKS);
     dropPort(f);
     await flush();
     expect(f._.state.badge).toBe("");
+  });
+
+  it("files to review for the current visit set their count in amber; links win; a panel or the icon marks them seen", async () => {
+    const { f } = await setup();
+    frame(f, CAPS); // one offer on docs.example.com
+    await flush();
+    expect(f._.state.badge).toBe(""); // no visit yet
+    frame(f, STATE_IDLE);
+    await flush();
+    expect([f._.state.badge, f._.state.badgeColor]).toEqual(["1", FILES_BADGE_COLOR]);
+    frame(f, RESULTS);
+    await flush();
+    expect([f._.state.badge, f._.state.badgeColor]).toEqual([LINKS, LINKS_BADGE_COLOR]);
+    // The icon click shows the panel: the same offers set no badge again, on any later frame.
+    f.action.onClicked.emit({ id: 12, windowId: 1 } as chrome.tabs.Tab);
+    await flush();
+    expect(f._.state.badge).toBe("");
+    frame(f, { ...STATE_IDLE, visitEpoch: 4 });
+    frame(f, CAPS);
+    await flush();
+    expect(f._.state.badge).toBe("");
+    // A new version is a new file to review.
+    const caps = CAPS as Extract<typeof CAPS, { type: "capabilities" }>;
+    frame(f, { ...caps, revision: 2, offers: [{ ...caps.offers[0]!, version: F.v2 }] });
+    await flush();
+    expect([f._.state.badge, f._.state.badgeColor]).toEqual(["1", FILES_BADGE_COLOR]);
+    // Offers on another site, or a visit Chrome does not permit, set nothing.
+    frame(f, { type: "state", status: "idle", visitEpoch: 5, detail: "other.example", permitted: true });
+    await flush();
+    expect(f._.state.badge).toBe("");
+    frame(f, { ...STATE_IDLE, visitEpoch: 6, permitted: false });
+    await flush();
+    expect(f._.state.badge).toBe("");
+  });
+
+  it("offers that arrive while a panel is open set no badge after it closes", async () => {
+    const { f } = await setup();
+    const p = await openPanel(f);
+    frame(f, STATE_IDLE);
+    frame(f, CAPS);
+    await flush();
+    expect(f._.state.badge).toBe("");
+    p.port.disconnect();
+    await flush();
+    frame(f, CAPS);
+    await flush();
+    expect(f._.state.badge).toBe("");
+  });
+
+  it("a paused core swaps in the grey paused icon; any other state or the port's loss puts the mark back", async () => {
+    const { f } = await setup();
+    expect(f._.state.icon).toBeNull(); // the manifest's icon until something changes
+    frame(f, { type: "state", status: "paused" });
+    await flush();
+    expect(f._.state.icon).toEqual(PAUSED_ICON_PATHS);
+    expect(f._.state.badge).toBe("");
+    frame(f, STATE_IDLE);
+    await flush();
+    expect(f._.state.icon).toEqual(ICON_PATHS);
+    frame(f, { type: "state", status: "paused" });
+    await flush();
+    expect(f._.state.icon).toEqual(PAUSED_ICON_PATHS);
+    dropPort(f);
+    await flush();
+    expect(f._.state.icon).toEqual(ICON_PATHS);
   });
 
   it("Chrome's sidePanel.onOpened (where present) clears it", async () => {

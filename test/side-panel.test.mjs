@@ -210,9 +210,9 @@ describe.skipIf(SKIP !== null)(SKIP ? `Scout's side panel in Chrome for Testing 
       await panel.waitForSelector(selector, { timeout: 10_000 });
       await panel.click(selector);
     };
-    await until(async () => (await text()).includes("Idle"), "the panel to connect to the core", 20_000);
-    await click("nav-site");
-    await until(async () => (await text()).includes("Scout is not allowed on this site."), "This site to show the ungranted site");
+    // The site's controls are on Page, the panel's default view: the tray offers Allow once the
+    // panel is connected and knows the site.
+    await until(async () => (await text()).includes(`Allow Scout on ${HOSTNAME}`), "the Page tray to offer Allow for the ungranted site", 20_000);
     expect(await text()).toContain(HOSTNAME);
     expect(await text()).not.toContain("/docs/billing"); // an origin at most, never the page URL
 
@@ -231,13 +231,13 @@ describe.skipIf(SKIP !== null)(SKIP ? `Scout's side panel in Chrome for Testing 
     await site.bringToFront();
     expect(await sw.evaluate(() => chrome.permissions.getAll().then((p) => p.origins))).toEqual([]);
     await click("site-allow");
-    await until(async () => (await text()).includes("Scout is allowed on this site."), "This site to show the grant");
+    await until(async () => (await panel.$('[data-key="site-allow"]')) === null, "the Page tray to show the grant");
     expect(await sw.evaluate(() => chrome.permissions.getAll().then((p) => p.origins))).toEqual([`${SITE}/*`]);
     steps.allow = "headless: the panel's Allow → permissions.request (prompt pre-answered via developerPrivate; the prompt itself is a live check)";
-    // This site's switch turns recommendations on: the core writes config.json and its grant
+    // The tray's "Suggest on <host>" switch turns recommendations on: the core writes config.json and its grant
     // frame carries the site, with no restart; the visit already settled gets its job now.
     const switchKey = `destination-${SITE}`;
-    await until(async () => (await text()).includes("Suggest links from this site"), "the recommendations switch");
+    await until(async () => (await text()).includes(`Suggest on ${HOSTNAME}`), "the recommendations switch");
     expect(await panel.evaluate((k) => document.querySelector(`[data-key="${k}"]`).checked, switchKey)).toBe(false);
     await click(switchKey);
     await until(() => panel.evaluate((k) => document.querySelector(`[data-key="${k}"]`)?.checked === true, switchKey), "the switch to show on");
@@ -246,11 +246,11 @@ describe.skipIf(SKIP !== null)(SKIP ? `Scout's side panel in Chrome for Testing 
     steps.recommendationsSwitch = "headless";
     // Sites: the site is one of config.json's destinations, carried on the core's grant frame.
     await click("nav-sites");
-    await until(async () => (await text()).includes(`${HOSTNAME}`) && (await text()).includes("Recommendations on"), "Sites to show recommendations on");
+    await until(async () => (await text()).includes(`${HOSTNAME}`) && (await text()).includes("Suggestions on"), "Sites to show suggestions on");
     steps.sitesRow = await panel.evaluate((h) => [...document.querySelectorAll("ul.sites li")].find((li) => li.querySelector(".site-host").textContent === h)?.querySelector(".site-state").textContent ?? null, HOSTNAME);
-    expect(steps.sitesRow).toBe("Allowed · Recommendations on");
+    expect(steps.sitesRow).toBe("Allowed · Suggestions on");
     frontmost();
-    await click("nav-results");
+    await click("nav-page");
 
     // 3. The settled visit: the fake agent's results reach the panel.
     await until(() => app().some((f) => f.type === "results"), "results from the core", 40_000);
