@@ -114,13 +114,13 @@ describe("panel view", () => {
     expect(root.querySelector(`#${approve.getAttribute("aria-describedby")}`)!.textContent).toBe("Preview is still loading.");
   });
 
-  it("status rows and the Sent line: metadata only", () => {
+  it("status rows and the Sent to Scout row: metadata only", () => {
     expect(statusRows(STATUS)).toEqual([
       ["Status", "connected"],
       ["Allowed sites", "docs.example.com"],
       ["Issue text", "off"],
     ]);
-    expect(sentText(STATUS)).toBe("Sent to Scout: tab updates 1 · issues 0 · received 0 · dropped 0 · blocked 0");
+    expect(sentText(STATUS)).toBe("tab updates 1 · issues 0 · received 0 · dropped 0 · blocked 0");
   });
 
   it("names a site by its host, for any host", () => {
@@ -129,13 +129,19 @@ describe("panel view", () => {
     expect(reviewTitle("skill", "github.com")).toBe("github.com made a skill for your agent");
   });
 
-  it("Activity ends with the Sent line, and only Activity shows it", () => {
+  it("Settings' Diagnostics ends with the Sent to Scout row, and no other view shows it", () => {
     const m = running();
     const { root, render } = view(m);
     expect(root.querySelector("#sent-line")).toBeNull();
     m.select("activity");
     render();
-    expect(root.querySelector("#sent-line")!.textContent).toBe(sentText(STATUS));
+    expect(root.querySelector("#sent-line")).toBeNull();
+    m.select("settings");
+    render();
+    const sent = root.querySelector("details.diagnostics dl.status #sent-line")!;
+    expect(sent.textContent).toBe(sentText(STATUS));
+    expect(sent.previousElementSibling!.textContent).toBe("Sent to Scout");
+    expect(sent.nextElementSibling).toBeNull();
   });
 
   // P4.7: the Quiet layout.

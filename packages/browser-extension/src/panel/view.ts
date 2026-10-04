@@ -19,7 +19,7 @@
 // files for the user's agent (a pill that expands into the review card), what is approved, then
 // a tray with the agent-context chip and the site's "Suggest on <host>" switch or Allow row.
 // Activity holds Problems at the top; Settings holds the switches, Pause, Reconnect and a
-// Diagnostics disclosure. Escape collapses the review card, then returns to Page (panel-app.ts).
+// Diagnostics disclosure (which ends with the "Sent to Scout" counters). Escape collapses the review card, then returns to Page (panel-app.ts).
 
 import type { CapabilityOffer, LibraryEntry } from "@scout/contracts";
 import type { StatusSnapshot } from "../messages.js";
@@ -108,10 +108,10 @@ export function statusRows(s: StatusSnapshot): Array<[string, string]> {
   ];
 }
 
-/** Activity's footer: what the extension has sent Scout (metadata counts only). */
+/** Diagnostics' "Sent to Scout" row: what the extension has sent Scout (metadata counts only). */
 export function sentText(s: StatusSnapshot): string {
   const c = s.counters;
-  return `Sent to Scout: tab updates ${c.focus} · issues ${c.forwarded} · received ${c.acked} · dropped ${c.dropped} · blocked ${c.denied}`;
+  return `tab updates ${c.focus} · issues ${c.forwarded} · received ${c.acked} · dropped ${c.dropped} · blocked ${c.denied}`;
 }
 
 // ---------- names ----------
@@ -556,9 +556,7 @@ function activityView(doc: Document, v: ViewState, on: PanelHandlers): HTMLEleme
     list.append(el(doc, "li", { text: `${when} · ${who} · ${e.method.replace(/_/g, " ")} · ${e.outcome.replace(/_/g, " ")}${e.origin ? ` · ${hostOf(e.origin) ?? e.origin}` : ""}` }));
   }
   reads.append(list);
-  const out = [problemsGroup(doc, v, on), reads].filter((x): x is HTMLElement => x !== null);
-  if (v.status) out.push(el(doc, "p", { id: "sent-line", class: "footer-note", text: sentText(v.status) }));
-  return out;
+  return [problemsGroup(doc, v, on), reads].filter((x): x is HTMLElement => x !== null);
 }
 
 // ---------- Settings ----------
@@ -594,7 +592,10 @@ function settingsView(doc: Document, v: ViewState, on: PanelHandlers): HTMLEleme
     ),
   ];
   const dl = el(doc, "dl", { class: "status" }, el(doc, "dt", { text: "Now" }), el(doc, "dd", { text: m.headerLine }));
-  if (v.status) for (const [k, val] of statusRows(v.status)) dl.append(el(doc, "dt", { text: k }), el(doc, "dd", { text: val }));
+  if (v.status) {
+    for (const [k, val] of statusRows(v.status)) dl.append(el(doc, "dt", { text: k }), el(doc, "dd", { text: val }));
+    dl.append(el(doc, "dt", { text: "Sent to Scout" }), el(doc, "dd", { id: "sent-line", text: sentText(v.status) }));
+  }
   // A <details> keeps the user's open state across renders (patchNode leaves its `open` alone).
   out.push(el(doc, "details", { class: "diagnostics", "data-key": "diagnostics" }, el(doc, "summary", { text: "Diagnostics" }), dl));
   return out;

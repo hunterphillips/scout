@@ -166,9 +166,9 @@ describe("side panel page", () => {
     expect(h.byKey("open-c1")).not.toBeNull();
   });
 
-  it("Activity's Sent counters follow the worker as they change, with no panel action", async () => {
+  it("Diagnostics' Sent to Scout counters follow the worker as they change, with no panel action", async () => {
     const h = await harness();
-    await h.click("nav-activity");
+    await h.click("nav-settings");
     const sent = () => h.$("#sent-line")!.textContent;
     expect(sent()).toContain("received 0");
     lastPort(h.f).onMessage.emit({ type: "ack", seq: 1 }); // the core acknowledged an observation
