@@ -743,6 +743,10 @@ describe.skipIf(!BUILT)("P4.6 recommendations switch: set_destination and a hand
     const working = b.panel().slice(before).find((f) => f.type === "state" && f.status === "working");
     expect(working).toMatchObject({ visitEpoch: epoch });
     expect((await resultsOf(b, working.jobId)).visitEpoch).toBe(epoch);
+    // The watcher's reload of the core's own write (250 ms debounce) changes nothing: still one job.
+    await new Promise((r) => setTimeout(r, 1_000));
+    expect(b.diagEvents().filter((e) => e.event === "job_started" && e.epoch === epoch)).toHaveLength(1);
+    expect(b.diagEvents().some((e) => e.event === "job_cancelled" && e.epoch === epoch)).toBe(false);
     expect(b.core.exitCode).toBeNull();
   }, 60_000);
 
@@ -790,5 +794,26 @@ describe.skipIf(!BUILT)("P4.6 recommendations switch: set_destination and a hand
     expect(lstatSync(join(home, "config.json")).isSymbolicLink()).toBe(true);
     rmSync(join(home, "config.json"));
     writeFileSync(join(home, "config.json"), before, { mode: 0o600 });
+  }, 30_000);
+
+  it("another malformed key in config.json: the switch is refused with invalid, writes nothing, and starts no job", async () => {
+    writeFileSync(join(home, "fake-mode"), "ok");
+    const skipped = (e) => e.event === "job_skipped" && e.reason === "not_enabled";
+    const n = b.diagEvents().filter(skipped).length;
+    b.focus(8, nextPage());
+    await until(() => b.diagEvents().filter(skipped).length > n, "job_skipped not_enabled");
+    const epoch = b.diagEvents().filter(skipped).at(-1).epoch;
+    const good = readFileSync(join(home, "config.json"), "utf8");
+    const broken = JSON.stringify({ ...JSON.parse(good), agentBrowserContext: "yes" });
+    writeFileSync(join(home, "config.json"), broken, { mode: 0o600 });
+    try {
+      expect(await setDestination(true, false)).toMatchObject({ ok: false, code: "invalid" });
+      expect(readFileSync(join(home, "config.json"), "utf8")).toBe(broken);
+      await new Promise((r) => setTimeout(r, 1_000));
+      expect(b.diagEvents().some((e) => e.event === "job_started" && e.epoch === epoch)).toBe(false);
+      expect(b.diagEvents().filter((e) => e.event === "destination_set_failed").at(-1)).toMatchObject({ origin: SITE, code: "config-invalid-agent-browser-context" });
+    } finally {
+      writeFileSync(join(home, "config.json"), good, { mode: 0o600 });
+    }
   }, 30_000);
 });

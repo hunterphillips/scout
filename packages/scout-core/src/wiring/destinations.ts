@@ -2,7 +2,8 @@
 // reads it once at start, then keeps it current two ways, with no restart:
 //   - the side panel's per-site switch (`set_destination`): `set` writes config.json
 //     (config.ts writeDestinations: read-modify-write, other keys kept, atomic, 0600, refused
-//     unless config.json is a regular file this user owns) and applies the list it wrote;
+//     unless config.json is a regular file this user owns and the whole file passes readConfig)
+//     and applies the list it wrote;
 //   - a hand edit: config.json is watched like the agent profile (profileWatcher.ts: the
 //     directory, PROFILE_DEBOUNCE_MS debounce, PROFILE_POLL_MS poll fallback), and a changed file
 //     is read again.
@@ -98,8 +99,18 @@ export function createLiveDestinations(o: LiveDestinationsOptions): LiveDestinat
       }
       let result: { written: boolean; destinations: string[] };
       try {
-        result = writeDestinations(o.home, host, enabled, (current) => current.includes(host) === expectedEnabled);
+        // The whole file must read (readConfig throws ConfigError) before anything is written:
+        // the watcher's reload of this write runs readConfig, and a file it cannot read turns
+        // every destination off, cancelling the job this switch just started.
+        result = writeDestinations(o.home, host, enabled, (current) => {
+          readConfig(o.home);
+          return current.includes(host) === expectedEnabled;
+        });
       } catch (e) {
+        if (e instanceof ConfigError) {
+          diagnostics.event("destination_set_failed", { origin, code: e.code });
+          return { ok: false, code: "invalid" };
+        }
         const code = e instanceof DestinationsWriteError && (e.code === "invalid" || e.code === "full") ? "invalid" : "store_error";
         diagnostics.event("destination_set_failed", { origin, code: e instanceof DestinationsWriteError ? e.code : "io" });
         return { ok: false, code };
