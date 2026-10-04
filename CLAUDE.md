@@ -197,8 +197,9 @@ the plan's phase log):
   (`destination-<origin>`) or an Allow row. **Sites**: rows reading "Allowed · Suggestions
   on" for `grant.destinations` (a destination is listed even before Chrome grants it),
   Remove, and the per-site auto-approve switch with its confirmation sheet. **Activity**:
-  Problems (they live here now), then agent reads, then the Sent line. **Settings**:
-  switches, Pause, Refresh files, Reconnect, and a Diagnostics disclosure. No popup.
+  Problems (they live here now), then agent reads. **Settings**: switches, Pause, Refresh
+  files, Reconnect, and a Diagnostics disclosure ending with the "Sent to Scout" counters row
+  (`#sent-line`). No popup.
   Assets: `assets/mark.svg` (the mark), `scripts/render-icons.mjs` (renders `icons/*.png`,
   committed, through headless Chrome), `assets/fonts` (Figtree, OFL). Since pivot P2.1:
   `https://*/*` is optional-only plus `activeTab`; nothing is posted until the core's
@@ -323,7 +324,7 @@ the plan's phase log):
   removals, `launchctl bootout` on the real home only; doctor reports eight sections
   (install record, Mac app, core, Chrome relay + `BRIDGE_PROTOCOL`, agent integration,
   CLI advisory, billing from the diagnostics log — never a fresh preflight,
-  recommendations) and exits 1 only on a fail. `installed.json` gains kinds
+  suggestions) and exits 1 only on a fail. `installed.json` gains kinds
   `agent-profile`, `launch-agent`, `app-bundle` and a `kinds` list. Pivot P2.6: `setup --agent-integration`
   registers the stdio MCP adapter at user scope through `claude mcp add` (never by
   editing JSON) and installs the static `scout-integration` skill into the skills root,

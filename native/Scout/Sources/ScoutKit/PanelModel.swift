@@ -4,7 +4,13 @@ import Foundation
 public enum PanelSection: String, Sendable, Equatable, CaseIterable {
     case results, offers, library, preview, settings, activity, problems
 
-    public var title: String { rawValue.capitalized }
+    public var title: String {
+        switch self {
+        case .offers: return "Files"
+        case .library: return "Approved"
+        default: return rawValue.capitalized
+        }
+    }
 }
 
 /// What the compact panel signals.
@@ -257,7 +263,7 @@ public struct PanelModel: Sendable, Equatable {
 
     /// Why Approve is off for `key`, or nil when it is on.
     public func approveBlocker(_ key: PreviewKey) -> String? {
-        if sidecar != .running { return "Scout core is not running." }
+        if sidecar != .running { return "Scout isn't running." }
         if let blocker = decisionBlocker(key) { return blocker }
         if let blocker = capabilities.approvalBlocker(key) { return blocker.reason }
         switch previews[key]?.phase {
@@ -423,7 +429,7 @@ public struct PanelModel: Sendable, Equatable {
 
     private func decisionBlocker(_ key: PreviewKey) -> String? {
         if decidedSinceFrame.contains(key) { return "Decision recorded." }
-        if decisionRecord(key)?.state == .pending { return "Waiting for Scout core." }
+        if decisionRecord(key)?.state == .pending { return "Waiting for Scout…" }
         return nil
     }
 
@@ -512,8 +518,8 @@ public struct PanelModel: Sendable, Equatable {
     }
 
     static var stoppedText: String {
-        "Scout core kept exiting after \(RestartPolicy.defaultMaxRestarts) restarts in "
-            + "\(describe(RestartPolicy.defaultWindow)). Quit and reopen Scout."
+        "Scout kept stopping (\(RestartPolicy.defaultMaxRestarts) times in "
+            + "\(describe(RestartPolicy.defaultWindow))). Quit and reopen Scout."
     }
 
     static func describe(_ window: Double) -> String {

@@ -11,7 +11,7 @@ const FAKE_CLAUDE = join(REPO_ROOT, "packages", "scout-core", "src", "agents", "
 
 export const FAKE_MANIFEST = {
   manifest_version: 3,
-  name: "Scout Sensor",
+  name: "Scout",
   version: "0.1.0",
   permissions: ["nativeMessaging"],
 };

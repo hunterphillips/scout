@@ -32,11 +32,11 @@ enum PanelAction {
 @MainActor
 final class ScoutPanel: NSObject {
     static let libraryPageSize = 25
-    static let autoAcquireRisk = "Auto-acquire approves every new guide or skill this site publishes without asking you, "
-        + "and your agent can use it right away. Turn it on only for sites you trust."
+    static let autoAcquireRisk = "Scout will approve every new llms.txt, AGENTS.md, skill and update this site publishes without asking you, "
+        + "and your agent can use it right away. A site can change these files at any time. Turn it on only for sites you trust."
     static let truncatedNote = "Some items are not shown."
-    static let browserContextExplainer = "Lets your interactive Claude agent ask Scout which permitted site you are on, "
-        + "that site's links, and your recent activity there. Background jobs never get it. Each read is listed under Activity."
+    static let browserContextExplainer = "Lets your agent ask Scout which allowed site you are on, "
+        + "that site's links, and the GitHub issues you read recently. Each read is listed under Activity."
 
     let window: ScoutWindow
     private let onAction: (PanelAction) -> Void
@@ -258,7 +258,7 @@ final class ScoutPanel: NSObject {
         let count = model.currentOffers.count
         badge.isHidden = count == 0
         badge.stringValue = " \(count) "
-        badge.setAccessibilityLabel(count == 1 ? "1 offer for this site" : "\(count) offers for this site")
+        badge.setAccessibilityLabel(count == 1 ? "1 file for your agent on this site" : "\(count) files for your agent on this site")
         statusLabel.textColor = { if case .error = model.indicator { return .systemRed } else { return .labelColor } }()
         statusLabel.setAccessibilityLabel("Scout status: \(model.compactLine)")
     }
@@ -374,7 +374,7 @@ final class ScoutPanel: NSObject {
     private func offerRows(_ model: PanelModel) -> [NSView] {
         let caps = model.capabilities
         guard !caps.offers.isEmpty else {
-            return [note(model.sidecar == .running ? "No offers. Scout lists guides and skills from sites Chrome lets it read." : "Scout core is not running.")]
+            return [note(model.sidecar == .running ? "No files for your agent yet. Scout finds them on sites you allow." : "Scout isn't running.")]
         }
         let host = model.currentHost
         let offers = caps.offers.sorted { a, b in
@@ -404,7 +404,7 @@ final class ScoutPanel: NSObject {
 
     private func libraryRows(_ model: PanelModel) -> [NSView] {
         let library = model.capabilities.library
-        guard !library.isEmpty else { return [note("The library is empty.")] }
+        guard !library.isEmpty else { return [note("Nothing approved yet.")] }
         let pages = max(1, (library.count + Self.libraryPageSize - 1) / Self.libraryPageSize)
         libraryPage = min(libraryPage, pages - 1)
         var rows: [NSView] = []
@@ -440,13 +440,13 @@ final class ScoutPanel: NSObject {
             rows.append(row(lines + [hstack(controls)], summary: "\(name) from \(site), \(state)"))
         }
         if pages > 1 {
-            let previous = button("Previous", id: "library.page.previous", label: "Previous library page") { [weak self] in
+            let previous = button("Previous", id: "library.page.previous", label: "Previous page") { [weak self] in
                 self?.libraryPage -= 1
                 self?.listSignature = ""
                 self?.onAction(.select(.library))
             }
             previous.isEnabled = libraryPage > 0
-            let next = button("Next", id: "library.page.next", label: "Next library page") { [weak self] in
+            let next = button("Next", id: "library.page.next", label: "Next page") { [weak self] in
                 self?.libraryPage += 1
                 self?.listSignature = ""
                 self?.onAction(.select(.library))
@@ -465,39 +465,39 @@ final class ScoutPanel: NSObject {
             onAction(.pauseOrResume)
         }
         pause.isEnabled = control.enabled
-        let refresh = button("Refresh", id: "settings.refresh", label: "Refresh offers and library") { [onAction] in onAction(.refresh) }
+        let refresh = button("Refresh files", id: "settings.refresh", label: "Refresh files") { [onAction] in onAction(.refresh) }
         refresh.isEnabled = model.sidecar == .running
         rows.append(hstack([pause, refresh]))
 
         let granted = model.capabilities.agentBrowserContext ?? false
-        let grant = checkbox("Let my Claude agent read browser context", id: "settings.browserContext",
+        let grant = checkbox("Let your agent read the current site and recent GitHub issues", id: "settings.browserContext",
                              on: granted) { [onAction] in onAction(.setBrowserContext(!granted)) }
         grant.isEnabled = model.canToggleGrant
-        rows.append(row([hstack([grant] + commandStatus(model.grantRecord, what: "browser-context setting", model)),
-                         Self.secondary(Self.browserContextExplainer)], summary: "Browser context for your agent"))
+        rows.append(row([hstack([grant] + commandStatus(model.grantRecord, what: "agent access", model)),
+                         Self.secondary(Self.browserContextExplainer)], summary: "Agent access"))
 
         let origins = model.capabilities.origins
-        rows.append(Self.title("Auto-acquire"))
+        rows.append(Self.title("Approve new files automatically"))
         rows.append(Self.secondary(Self.autoAcquireRisk))
         if model.capabilities.capabilities?.truncated == true { rows.append(note(Self.truncatedNote)) }
         if origins.isEmpty { rows.append(note("No sites yet.")) }
         for setting in origins {
             let site = CapabilityModel.host(of: setting.origin) ?? setting.origin
             let record = model.autoAcquireRecord(setting.origin)
-            let box = checkbox("Auto-acquire for \(site)", id: "settings.auto.\(setting.origin)", on: setting.autoAcquire) { [weak self] in
+            let box = checkbox("Approve new files from \(site) automatically", id: "settings.auto.\(setting.origin)", on: setting.autoAcquire) { [weak self] in
                 self?.confirmAutoAcquire(origin: setting.origin, site: site, enable: !setting.autoAcquire)
             }
             box.isEnabled = model.canToggleAutoAcquire(setting.origin)
-            var views: [NSView] = [hstack([box] + commandStatus(record, what: "auto-acquire for \(site)", model))]
+            var views: [NSView] = [hstack([box] + commandStatus(record, what: "automatic approval for \(site)", model))]
             if !setting.permitted { views.append(Self.secondary("Chrome does not give Scout access to \(site) right now.")) }
-            rows.append(row(views, summary: "Auto-acquire for \(site)"))
+            rows.append(row(views, summary: "Automatic approval for \(site)"))
         }
         return rows
     }
 
     private func activityRows(_ model: PanelModel) -> [NSView] {
         let audit = model.capabilities.audit
-        guard !audit.isEmpty else { return [note("Your agent has not read browser context yet.")] }
+        guard !audit.isEmpty else { return [note("No reads yet.")] }
         let formatter = DateFormatter()
         formatter.dateStyle = .none
         formatter.timeStyle = .medium
@@ -517,14 +517,14 @@ final class ScoutPanel: NSObject {
         return problems.map { problem in
             switch problem {
             case let .sidecar(text):
-                return row([Self.title("Scout core"), Self.secondary(text)], summary: text)
+                return row([Self.title("Scout"), Self.secondary(text)], summary: text)
             case let .conflict(conflict):
-                let text = "Skill \(conflict.name) was not exported: \(conflict.code.rawValue.replacingOccurrences(of: "_", with: " "))."
+                let text = "Skill \(conflict.name) was left alone (\(conflict.code.rawValue.replacingOccurrences(of: "_", with: " ")))."
                 return row([Self.secondary(text)], summary: text)
             case let .command(record):
                 let what = describe(record.request, model)
                 guard case let .failed(code) = record.state else { return row([], summary: what) }
-                let text = "\(what) failed: \(code.rawValue)"
+                let text = "\(what) failed: \(Self.describe(code))."
                 var controls: [NSView] = []
                 if model.canRetry(record.id) {
                     controls.append(button("Retry", id: "problem.\(record.id).retry", label: "Retry \(what)") { [onAction] in
@@ -554,7 +554,7 @@ final class ScoutPanel: NSObject {
 
     private func renderPreview(_ model: PanelModel) {
         guard let key = model.shownPreview else {
-            previewHeader.stringValue = "Pick Preview on an offer or library item."
+            previewHeader.stringValue = "Pick Preview on a file to read it here."
             previewProgress.isHidden = true
             previewError.isHidden = true
             setPreviewText("", key: nil)
@@ -663,7 +663,7 @@ final class ScoutPanel: NSObject {
             return
         }
         let alert = NSAlert()
-        alert.messageText = "Turn on auto-acquire for \(site)?"
+        alert.messageText = "Approve new files from \(site) automatically?"
         alert.informativeText = Self.autoAcquireRisk
         let turnOn = alert.addButton(withTitle: "Turn On")
         let cancel = alert.addButton(withTitle: "Cancel")
@@ -736,12 +736,12 @@ final class ScoutPanel: NSObject {
             spinner.style = .spinning
             spinner.controlSize = .small
             spinner.startAnimation(nil)
-            spinner.setAccessibilityLabel("Waiting for Scout core: \(what)")
+            spinner.setAccessibilityLabel("Waiting for Scout: \(what)")
             return record.sent ? [spinner] : [spinner, Self.secondary("Sending…")]
         case let .failed(code):
-            let label = Self.secondary("Failed: \(code.rawValue)")
+            let label = Self.secondary("Failed: \(Self.describe(code))")
             label.textColor = .systemRed
-            label.setAccessibilityLabel("\(what) failed: \(code.rawValue)")
+            label.setAccessibilityLabel("\(what) failed: \(Self.describe(code))")
             guard model.canRetry(record.id) else { return [label] }
             let onAction = self.onAction
             let retry = button("Retry", id: "retry.\(record.id)", label: "Retry \(what)", into: &store) { onAction(.retry(record.id)) }
@@ -801,7 +801,7 @@ final class ScoutPanel: NSObject {
             if let entry = caps.libraryEntry(rid) {
                 return "\(Self.resourceName(entry.kind, skill: nil)) from \(CapabilityModel.host(of: entry.siteOrigin) ?? entry.siteOrigin)"
             }
-            return "resource \(rid.dropFirst(4).prefix(8))"
+            return "file \(rid.dropFirst(4).prefix(8))"
         }
         switch request {
         case let .preview(rid, _, _): return "Preview of \(name(rid))"
@@ -809,9 +809,9 @@ final class ScoutPanel: NSObject {
         case let .decline(rid, _, _): return "Decline \(name(rid))"
         case let .revoke(rid, _): return "Revoke \(name(rid))"
         case let .setAutoAcquire(origin, enabled, _, _):
-            return "\(enabled ? "Turning on" : "Turning off") auto-acquire for \(CapabilityModel.host(of: origin) ?? origin)"
-        case let .setAgentBrowserContext(enabled, _): return "\(enabled ? "Allowing" : "Stopping") browser-context reads"
-        case .refreshCapabilities: return "Refresh"
+            return "\(enabled ? "Turning on" : "Turning off") automatic approval for \(CapabilityModel.host(of: origin) ?? origin)"
+        case let .setAgentBrowserContext(enabled, _): return "\(enabled ? "Turning on" : "Turning off") agent access"
+        case .refreshCapabilities: return "Refresh files"
         case .openLink: return "Opening a link"
         }
     }
@@ -830,12 +830,24 @@ final class ScoutPanel: NSObject {
 
     static func describe(_ failure: PreviewAssembler.Failure) -> String {
         switch failure {
-        case .outOfOrder: return "chunks arrived out of order"
-        case .overlap: return "chunks overlapped"
-        case .oversized: return "the text is larger than Scout allows"
-        case .inconsistent: return "the chunks did not agree"
-        case .hashMismatch: return "the text did not match its hash"
-        case let .refused(code): return "Scout core refused it (\(code.rawValue))"
+        case .outOfOrder: return "parts of it arrived out of order"
+        case .overlap: return "parts of it overlapped"
+        case .oversized: return "it was larger than Scout allows"
+        case .inconsistent: return "its parts did not agree"
+        case .hashMismatch: return "its content did not match its fingerprint"
+        case .refused: return "Scout refused to show it"
+        }
+    }
+
+    /// Short text for a failed command, in the side panel's words (model.ts ACK_CODE_TEXT).
+    static func describe(_ code: AckFailureCode) -> String {
+        switch code {
+        case .staleRevision: return "something changed meanwhile"
+        case .notFound: return "Scout no longer has it"
+        case .invalid: return "the request was not valid"
+        case .storeError: return "Scout couldn't save it"
+        case .notPermitted: return "Chrome doesn't allow Scout on that site"
+        case .unavailable: return "Scout couldn't do it right now"
         }
     }
 }

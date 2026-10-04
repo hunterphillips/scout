@@ -24,7 +24,7 @@ describe("PanelModel (PanelModelTests)", () => {
     expect(m.headerLine).toBe("Scout isn't running");
     expect(m.problems[0]).toMatchObject({ kind: "link", text: expect.stringContaining("isn't running") });
     m.applyLink("disconnected");
-    expect(m.problems[0]).toMatchObject({ kind: "link", text: expect.stringContaining("native host") });
+    expect(m.problems[0]).toMatchObject({ kind: "link", text: expect.stringContaining("Chrome can't reach Scout") });
   });
 
   it("Results says the link is down (never idle) while the core can't be reached, and shows results again on reconnect", () => {

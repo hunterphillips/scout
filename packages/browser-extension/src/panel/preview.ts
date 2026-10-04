@@ -39,7 +39,7 @@ const FAILURE_TEXT: Record<PreviewFailure["kind"], string> = {
   oversized: "it was larger than Scout allows",
   inconsistent: "its parts did not agree",
   hashMismatch: "its content did not match its fingerprint",
-  refused: "Scout core refused to show it",
+  refused: "Scout refused to show it",
 };
 export const failureText = (f: PreviewFailure): string => FAILURE_TEXT[f.kind];
 

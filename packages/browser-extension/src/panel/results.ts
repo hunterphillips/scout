@@ -24,9 +24,9 @@ export type LinkDown = Extract<LinkState, "disconnected" | "core_unavailable" | 
 
 /** Why the core can't be reached, for Results and Problems. */
 export const LINK_DOWN_TEXT: Record<LinkDown, string> = {
-  disconnected: "Scout's native host isn't reachable. Check that Scout is installed, then Reconnect in Settings.",
-  core_unavailable: "Scout isn't running. Start the Scout app; the panel reconnects on its own.",
-  upgrade_required: "Scout's parts are different versions. Run Scout's setup again, then reload the extension.",
+  disconnected: "Chrome can't reach Scout. Check that Scout is installed, then choose Reconnect in Settings.",
+  core_unavailable: "Scout isn't running. Open the Scout app and this panel reconnects on its own.",
+  upgrade_required: "This extension and the Scout app are different versions. Run Scout's setup again, then reload the extension.",
 };
 
 export const isLinkDown = (link: LinkState): link is LinkDown => link in LINK_DOWN_TEXT;
@@ -147,15 +147,15 @@ export function displayHeading(d: ResultsDisplay): string {
 export function displayExplanation(d: ResultsDisplay): string {
   switch (d.kind) {
     case "none":
-      return "No links for this page yet. Scout looks once you stay on a site Chrome lets it read.";
+      return "No links for this page yet. Scout suggests links once you stay on a site with suggestions on.";
     case "link_down":
       return LINK_DOWN_TEXT[d.link];
     case "connecting":
       return "Connecting to Scout…";
     case "paused":
-      return "Scout is paused. Resume it to get links.";
+      return "Scout is paused. It reads nothing from your browser until you resume.";
     case "disconnected":
-      return "Scout can't see Chrome right now, so it has no links to show.";
+      return "Scout can't see Chrome right now.";
     case "working":
       return "Looking for links on this site…";
     case "ready":

@@ -152,11 +152,11 @@ describe("side panel page", () => {
     expect(h.$("#results-heading")!.textContent).toBe("Scout isn't running");
     expect(h.byKey("open-c1")).toBeNull();
     // Results says so too, never the idle "No links for this page yet".
-    expect(h.$("#results-explanation")!.textContent).toBe("Scout isn't running. Start the Scout app; the panel reconnects on its own.");
+    expect(h.$("#results-explanation")!.textContent).toBe("Scout isn't running. Open the Scout app and this panel reconnects on its own.");
     await h.click("nav-settings");
     expect(h.now()).toContain("Scout isn't running");
     await h.click("nav-activity");
-    expect(h.$(".problems")!.textContent).toContain("Scout isn't running. Start the Scout app; the panel reconnects on its own.");
+    expect(h.$(".problems")!.textContent).toContain("Scout isn't running. Open the Scout app and this panel reconnects on its own.");
     // The core comes back: Results leaves the down state and shows the repainted results.
     await h.click("nav-page");
     lastPort(h.f).onMessage.emit({ type: "ready" });
@@ -166,14 +166,14 @@ describe("side panel page", () => {
     expect(h.byKey("open-c1")).not.toBeNull();
   });
 
-  it("Activity's Sent counters follow the worker as they change, with no panel action", async () => {
+  it("Diagnostics' Sent to Scout counters follow the worker as they change, with no panel action", async () => {
     const h = await harness();
-    await h.click("nav-activity");
+    await h.click("nav-settings");
     const sent = () => h.$("#sent-line")!.textContent;
-    expect(sent()).toContain("acked 0");
+    expect(sent()).toContain("received 0");
     lastPort(h.f).onMessage.emit({ type: "ack", seq: 1 }); // the core acknowledged an observation
     await h.settle();
-    expect(sent()).toContain("acked 1");
+    expect(sent()).toContain("received 1");
   });
 
   it("repaints at once from the worker's cache when the panel opens after the frames", async () => {
@@ -234,7 +234,7 @@ describe("side panel page", () => {
     expect((h.byKey(KEY) as unknown as HTMLInputElement).checked).toBe(false);
     expect(h.byKey(KEY)!.closest(".tray")).not.toBeNull();
     expect(h.text()).toContain("Suggest on docs.example.com");
-    expect(h.text()).toContain("Each visit runs a short job on your Claude subscription.");
+    expect(h.text()).toContain("When you stay on a page here, Scout runs a short job on your Claude subscription.");
     await h.click(KEY);
     const cmd = lastCommand(h.f);
     expect(cmd).toEqual({ type: "set_destination", commandId: expect.stringMatching(/^sp-/), origin: "https://docs.example.com", enabled: true, expectedEnabled: false });
@@ -420,7 +420,7 @@ describe("side panel page", () => {
     corePolicy(h.f, true);
     await h.core({ type: "state", status: "paused" });
     expect(commandsPosted(h.f)).toEqual([]);
-    expect(h.text()).toContain("Scout is paused. Resume it to get links.");
+    expect(h.text()).toContain("Scout is paused. It reads nothing from your browser until you resume.");
     expect(h.byKey("open-c1")).toBeNull();
     await h.click("nav-settings");
     expect(h.byKey("pause")!.textContent).toBe("Resume");
@@ -445,7 +445,7 @@ describe("side panel page", () => {
     await flush(6);
     await app.idle();
     app.render();
-    expect(doc.body.textContent).toContain("Scout is paused. Resume it to get links.");
+    expect(doc.body.textContent).toContain("Scout is paused. It reads nothing from your browser until you resume.");
     expect(app.model.pauseState.control).toMatchObject({ title: "Resume", enabled: true });
   });
 

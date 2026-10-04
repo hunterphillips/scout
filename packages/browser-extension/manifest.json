@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "Scout Sensor",
+  "name": "Scout",
   "version": "0.1.0",
-  "description": "Scout's browser sensor and side panel: reports the focused tab on sites you allow and, when you turn it on, GitHub issue text, to the local Scout app, and shows Scout's links for the page.",
+  "description": "A browser companion for Claude Code. On sites you allow, review files they publish for your agent and get suggested links.",
   "icons": {
     "16": "icons/icon-16.png",
     "32": "icons/icon-32.png",

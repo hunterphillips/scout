@@ -39,7 +39,7 @@ export type Problem =
   /** The core answered a click with a target the panel would not open, or Chrome did not open it. */
   | { kind: "linkRefused"; commandId: string; refusal: LinkRefusal };
 
-export const MISSING_CAPABILITIES = "Scout core's list of site files and approvals didn't arrive, so the Page view can't show them. Refresh in Settings to try again.";
+export const MISSING_CAPABILITIES = "Scout couldn't load the files for your agent. Choose Refresh files in Settings to try again.";
 
 export class PanelModel {
   static readonly previewCapacity = 8;
@@ -429,7 +429,7 @@ export class PanelModel {
 
   private decisionBlocker(key: PreviewKey): string | null {
     if (this.decidedSinceFrame.has(keyId(key))) return "Decision recorded.";
-    if (this.decisionRecord(key)?.state === "pending") return "Waiting for Scout core.";
+    if (this.decisionRecord(key)?.state === "pending") return "Waiting for Scout…";
     return null;
   }
 
@@ -536,11 +536,11 @@ export class PanelModel {
 /** Short text for an ack failure code, for Problems. */
 export const ACK_CODE_TEXT: Record<AckFailureCode, string> = {
   stale_revision: "something changed meanwhile",
-  not_found: "Scout core doesn't know it",
+  not_found: "Scout no longer has it",
   invalid: "the request was not valid",
   store_error: "Scout couldn't save it",
   not_permitted: "Chrome doesn't allow Scout on that site",
-  unavailable: "Scout core couldn't do it right now",
+  unavailable: "Scout couldn't do it right now",
 };
 
 export { hostOf };

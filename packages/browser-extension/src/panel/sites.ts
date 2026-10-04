@@ -66,7 +66,7 @@ export const refusalText = (r: SiteRefusal): string => REFUSAL_TEXT[r];
 /** A site the user typed into Sites ("docs.stripe.com" or a full https URL), or why not. */
 export function parseSiteInput(text: string): { ok: true; origin: string; pattern: string } | { ok: false; reason: string } {
   const t = text.trim().toLowerCase();
-  if (t === "") return { ok: false, reason: "Type a site, like docs.stripe.com." };
+  if (t === "") return { ok: false, reason: "Type a site, like docs.example.com." };
   const url = /^[a-z][a-z0-9+.-]*:/.test(t) ? t : `https://${t}`;
   const v = checkSite(url.includes("/", "https://".length) ? url : `${url}/`, false);
   return v.ok ? { ok: true, origin: v.origin, pattern: v.pattern } : { ok: false, reason: REFUSAL_TEXT[v.reason] };

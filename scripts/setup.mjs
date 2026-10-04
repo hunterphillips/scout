@@ -41,8 +41,8 @@ export const AGENT_PROFILE_DEFAULTS = Object.freeze({ schemaVersion: 1, adapter:
 export const NEXT_STEPS = [
   "One-time steps setup cannot do:",
   "  1. Load the unpacked extension: chrome://extensions, Developer mode on, Load unpacked, pick the folder below. Reload it there after every `npm run build`.",
-  "  2. Click the Scout toolbar button: it opens Scout's side panel for the current tab. Grant a site from the panel to let Scout see it.",
-  "  3. Start Scout: open the bundled app (`npm run bundle-app` builds it), or `swift run ScoutApp` in native/Scout. With Scout quit, the panel says Scout is not running; nothing is recorded or recommended.",
+  "  2. Click the Scout toolbar button: it opens Scout's side panel for the current tab. Allow a site from the panel to use Scout there.",
+  "  3. Start Scout: open the bundled app (`npm run bundle-app` builds it), or `swift run ScoutApp` in native/Scout. With Scout quit, the panel says Scout isn't running; nothing is captured or suggested.",
 ];
 
 export function parseArgs(argv) {
@@ -107,7 +107,7 @@ export function planSetup({ env = process.env, scoutRoot = REPO_ROOT, dryRun = f
   // one found on PATH), PATH and the usual places on the real home.
   const claude = integrationClaude(env, claudeFallbacks, realHome);
   const claudePath = claude.path ?? null;
-  if (!claudePath) warnings.push(`no agent profile is written (${claude.error}), so background recommendations stay unavailable until you re-run setup`);
+  if (!claudePath) warnings.push(`no agent profile is written (${claude.error}), so suggestions stay unavailable until you re-run setup`);
 
   // Refuse to overwrite any Scout-owned file that exists without this install's marker.
   const foreign = [
