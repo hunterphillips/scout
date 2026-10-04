@@ -12,7 +12,7 @@ import Testing
         _ = model.apply(.stopped)
         #expect(model.compactLine == "Stopped")
         guard case let .sidecar(text)? = model.problems.first else { Issue.record("no sidecar problem"); return }
-        #expect(text.contains("after \(RestartPolicy.defaultMaxRestarts) restarts in a minute"))
+        #expect(text.contains("(\(RestartPolicy.defaultMaxRestarts) times in a minute)"))
     }
 
     @Test func describesRestartWindows() {
@@ -307,7 +307,7 @@ import Testing
         #expect(c.code == .foreignCollision)
         _ = model.apply(.stopped)
         guard case let .sidecar(text)? = model.problems.first else { Issue.record("no sidecar problem"); return }
-        #expect(text.hasPrefix("Scout core kept exiting"))
+        #expect(text.hasPrefix("Scout kept stopping"))
     }
 
     @Test func aNewCoreInstanceRestartsRevisionsAndResendsPendingCommands() throws {
