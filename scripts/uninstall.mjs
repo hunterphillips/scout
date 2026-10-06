@@ -13,17 +13,19 @@
 // hashing to their recorded ownership, and keeps changed ones, which are listed). While Scout
 // runs it holds that lock (and the agent profile's), so a real uninstall stops before changing
 // anything while Scout runs, wrappers or not: quit Scout first. The prompt lists the wrappers.
-// Then the agent integration (the `scout` MCP registration and the scout-integration skill,
-// each only while still exactly what setup installed; lib/agent-integration.mjs), then the
-// files. --agent-integration does the first two only. With the real ~/.scout and
-// SCOUT_SKILLS_ROOT or SCOUT_CLAUDE_BIN set, it refuses before changing anything.
+// Then the agent integration, for every agent it is recorded for (the `scout` MCP registration
+// through that agent's CLI and the scout-integration skill, each only while still exactly what
+// setup installed; lib/agent-integration.mjs), then the files. --agent-integration does the
+// first two only. With the real ~/.scout and SCOUT_SKILLS_ROOT, SCOUT_CLAUDE_BIN,
+// SCOUT_CODEX_BIN or SCOUT_CODEX_HOME set, it refuses before changing anything.
 // On the real home a matching login LaunchAgent is booted out of launchd before its plist is
 // removed (a failure is reported, not fatal); on a test home that step is skipped and said so.
 // The installed app (bundle-app --install, kind app-bundle) is removed only while its
 // whole-bundle hash (every file, _CodeSignature/ aside) matches the record. A failure part way records what is left.
 //
 // Usage: node scripts/uninstall.mjs [--dry-run] [--yes] [--include-key] [--agent-integration]
-// Env overrides: SCOUT_HOME, SCOUT_CLAUDE_BIN, LAUNCH_AGENTS_DIR (see lib/paths.mjs); the other
+// Env overrides: SCOUT_HOME, SCOUT_CLAUDE_BIN, SCOUT_CODEX_BIN, SCOUT_CODEX_HOME,
+// LAUNCH_AGENTS_DIR (see lib/paths.mjs); the other
 // paths, and the skills root, come from installed.json, checked against allowedPath.
 // Never touches ~/.rook, ~/.scout/logs, or anything not listed. Never removes a directory
 // because its name starts with `scout-`.
@@ -34,10 +36,10 @@ import { createInterface } from "node:readline/promises";
 import { join } from "node:path";
 import { APP_BUNDLE_ID, REPO_ROOT, isRealScoutHome, layout } from "./lib/paths.mjs";
 import { extensionIdFromPem } from "./lib/extension-key.mjs";
-import { allowedPath, readInstalled, saveInstalled } from "./lib/installed.mjs";
+import { agentOf, allowedPath, readInstalled, saveInstalled } from "./lib/installed.mjs";
 import { exists, fileMarker, readJsonObject, writeJson } from "./lib/files.mjs";
 import { isMain } from "./lib/is-main.mjs";
-import { isIntegrationEntry, overrideRefusal, removeIntegration } from "./lib/agent-integration.mjs";
+import { AGENTS, isIntegrationEntry, overrideRefusal, removeIntegration } from "./lib/agent-integration.mjs";
 import { readExportsManifest } from "./lib/integration-skill.mjs";
 import { bundleHash, applicationsRefusal, launchAgentRefusal, sha256 } from "./lib/app-bundle.mjs";
 import { coreLockHolder } from "./lib/core-state.mjs";
@@ -159,6 +161,27 @@ function removeDirIfEmpty(dir, out, dryRun) {
   }
 }
 
+/**
+ * Scout's private Codex home (`run/codex-home`, made by the core for Codex jobs): Codex's caches
+ * and `auth.json`, a symlink to the user's own Codex login. Removed as a whole when it is a real
+ * directory owned by you; rmSync unlinks the symlink and never follows it, so the user's login
+ * file is never touched.
+ */
+function removeCodexPrivateHome(L, out, dryRun) {
+  let st;
+  try {
+    st = lstatSync(L.codexPrivateHome);
+  } catch {
+    return;
+  }
+  if (st.isSymbolicLink() || !st.isDirectory() || st.uid !== process.getuid()) {
+    out(`SKIP ${L.codexPrivateHome} (not a directory Scout made; not touching)`);
+    return;
+  }
+  if (!dryRun) rmSync(L.codexPrivateHome, { recursive: true });
+  out(`${dryRun ? "would remove" : "removed"} ${L.codexPrivateHome} (Scout's private Codex home; your Codex login is not touched)`);
+}
+
 /** Boot the login LaunchAgent out of launchd on the real home only; failures are reported, not fatal. */
 function bootoutLine(env, realHome, dryRun, bootout, out) {
   const target = `gui/${process.getuid()}/${APP_BUNDLE_ID}`;
@@ -180,7 +203,7 @@ function launchctlBootout() {
   return { ok: r.status === 0, detail: r.error ? r.error.message : `exit ${r.status}${r.stderr ? `: ${r.stderr.trim().split("\n").at(-1)}` : ""}` };
 }
 
-export async function runUninstall(argv, { env = process.env, out = console.log, err = console.error, confirm = ttyConfirm, claudeFallbacks, mcpTimeoutMs, realHome, bootout = launchctlBootout } = {}) {
+export async function runUninstall(argv, { env = process.env, out = console.log, err = console.error, confirm = ttyConfirm, claudeFallbacks, codexFallbacks, mcpTimeoutMs, realHome, bootout = launchctlBootout } = {}) {
   let opts, record;
   const L = layout({ env });
   try {
@@ -222,7 +245,10 @@ export async function runUninstall(argv, { env = process.env, out = console.log,
   }
   const listed = opts.agentIntegration ? record.files.filter(isIntegrationEntry) : record.files;
   out(`${opts.agentIntegration ? "Agent integration" : "Files"} listed in ${L.installed}:`);
-  for (const f of listed) out(`  ${String(f.kind).padEnd(22)} ${f.path}`);
+  for (const f of listed) {
+    const agent = agentOf(f);
+    out(`  ${String(f.kind).padEnd(22)} ${f.path}${agent !== undefined && agent !== "claude-code" ? ` (${AGENTS[agent]?.label ?? String(agent)})` : ""}`);
+  }
   const wrappers = exportedWrapperNames(record, L);
   for (const f of listed.filter((x) => x.kind === "launch-agent")) {
     if (isRealScoutHome(env, realHome)) out(`  (the LaunchAgent is also booted out of launchd: launchctl bootout gui/${process.getuid()}/${APP_BUNDLE_ID})`);
@@ -260,7 +286,7 @@ export async function runUninstall(argv, { env = process.env, out = console.log,
 
   let working = record;
   if (hasIntegration) {
-    const r = removeIntegration(record, { env, L, dryRun: opts.dryRun, claudeFallbacks, mcpTimeoutMs, realHome });
+    const r = removeIntegration(record, { env, L, dryRun: opts.dryRun, claudeFallbacks, codexFallbacks, mcpTimeoutMs, realHome });
     for (const line of r.lines) out(line);
     skipped += r.left;
     working = r.record;
@@ -321,6 +347,7 @@ export async function runUninstall(argv, { env = process.env, out = console.log,
     out(`${opts.dryRun ? "would keep" : "kept"} ${L.installed} listing the ${remaining.length} entr${remaining.length === 1 ? "y" : "ies"} not removed`);
   }
   if (opts.agentIntegration) return skipped > 0 ? 2 : 0;
+  removeCodexPrivateHome(L, out, opts.dryRun);
   removeDirIfEmpty(L.binDir, out, opts.dryRun);
   removeDirIfEmpty(L.runDir, out, opts.dryRun);
   out(`Left in place: ${L.logsDir} (including diagnostics.jsonl) and any file not listed above.`);

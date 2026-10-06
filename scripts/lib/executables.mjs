@@ -1,4 +1,5 @@
-// Scout setup: resolve `node` and `claude` to absolute paths once, at setup time.
+// Scout setup: resolve `node` and the agent CLIs (`claude`, `codex`) to absolute paths once, at
+// setup time.
 
 import { accessSync, constants, statSync } from "node:fs";
 import { homedir } from "node:os";
@@ -26,13 +27,23 @@ export function findOnPath(name, pathVar = process.env.PATH ?? "") {
   return null;
 }
 
+/** The usual install places for an agent CLI `name`, searched after PATH. */
+export function defaultAgentFallbacks(name, env = process.env) {
+  return [join(env.HOME || homedir(), ".local", "bin", name), `/opt/homebrew/bin/${name}`];
+}
+
 export function defaultClaudeFallbacks(env = process.env) {
-  return [join(env.HOME || homedir(), ".local", "bin", "claude"), "/opt/homebrew/bin/claude"];
+  return defaultAgentFallbacks("claude", env);
+}
+
+/** `name` via PATH, then the fallbacks; null when none is executable. */
+export function resolveAgentBinary(name, { pathVar = process.env.PATH ?? "", fallbacks = defaultAgentFallbacks(name) } = {}) {
+  return findOnPath(name, pathVar) ?? fallbacks.find(isExecutableFile) ?? null;
 }
 
 /** `claude` via PATH, then the fallbacks; null when none is executable. */
 export function resolveClaude({ pathVar = process.env.PATH ?? "", fallbacks = defaultClaudeFallbacks() } = {}) {
-  return findOnPath("claude", pathVar) ?? fallbacks.find(isExecutableFile) ?? null;
+  return resolveAgentBinary("claude", { pathVar, fallbacks });
 }
 
 /** The node running this script. */

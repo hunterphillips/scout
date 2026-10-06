@@ -1,6 +1,6 @@
 // Test fixture for setup/uninstall/doctor: a temp home and fake scoutRoot, both under a path
-// with spaces (or without, for the agent integration, which refuses spaces), and a fake
-// `claude` for the integration's `claude mcp add/get/remove`.
+// with spaces (or without, for the agent integration, which refuses spaces), a fake `claude`
+// for the integration's `claude mcp add/get/remove`, and a fake `codex` for `codex mcp ...`.
 import { chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -8,6 +8,8 @@ import { REPO_ROOT } from "./paths.mjs";
 
 /** The scripted CLI the agent checks use; its `mcp` subcommands copy CLI 2.1.286's messages and `get` layout. */
 const FAKE_CLAUDE = join(REPO_ROOT, "packages", "scout-core", "src", "agents", "claudeCode", "testing", "fake-claude.mjs");
+/** The scripted Codex CLI; its `mcp` subcommands copy CLI 0.155.1's messages and JSON. */
+const FAKE_CODEX = join(REPO_ROOT, "packages", "scout-core", "src", "agents", "codex", "testing", "fake-codex.mjs");
 
 export const FAKE_MANIFEST = {
   manifest_version: 3,
@@ -27,9 +29,15 @@ export function makeFixture({ withClaude = true, rootPrefix = "scout setup test 
   const binDir = join(root, "bin");
   for (const d of ["browser-extension", "native-host", "scout-core", "scout-mcp", "contracts"]) mkdirSync(join(scoutRoot, "packages", d, "dist"), { recursive: true });
   mkdirSync(join(scoutRoot, "packages", "scout-core", "dist", "agents", "claudeCode"), { recursive: true });
+  mkdirSync(join(scoutRoot, "packages", "scout-core", "dist", "agents", "codex"), { recursive: true });
   writeFileSync(join(scoutRoot, "packages/contracts/dist/bridge.js"), "export const BRIDGE_PROTOCOL = 3;\n");
   writeFileSync(join(scoutRoot, "packages/scout-core/dist/agents/claudeCode/claudeJob.js"), 'export const VERIFIED_CLI_VERSION = "2.1.286";\n');
   writeFileSync(join(scoutRoot, "packages/scout-core/dist/agents/claudeCode/profile.js"), 'export const CLAUDE_CODE_ADAPTER_ID = "claude-code";\nexport const DEFAULT_CLAUDE_CODE_MODEL = "claude-sonnet-5-5";\n');
+  writeFileSync(join(scoutRoot, "packages/scout-core/dist/agents/codex/codexJob.js"), 'export const VERIFIED_CODEX_VERSION = "0.155.1";\n');
+  writeFileSync(
+    join(scoutRoot, "packages/scout-core/dist/agents/codex/profile.js"),
+    'export const CODEX_ADAPTER_ID = "codex";\nexport const DEFAULT_CODEX_MODEL = "gpt-6-sol";\nexport const DEFAULT_CODEX_REASONING_EFFORT = "low";\n',
+  );
   writeFileSync(join(scoutRoot, "packages/browser-extension/dist/manifest.json"), JSON.stringify(FAKE_MANIFEST, null, 2) + "\n");
   writeFileSync(join(scoutRoot, "packages/native-host/dist/host.js"), "// fake host\n");
   writeFileSync(join(scoutRoot, "packages/scout-core/dist/main.js"), "// fake core\n");
@@ -70,6 +78,33 @@ export function makeFakeClaude(dir) {
     calls: () => {
       try {
         return readFileSync(log, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l).subcommand).filter(Boolean);
+      } catch {
+        return [];
+      }
+    },
+  };
+}
+
+/**
+ * A fake `codex` at `<dir>/codex` running the shared fake CLI. Its MCP registry is
+ * `$CODEX_HOME/config.toml` of the env it runs with (the integration sets CODEX_HOME).
+ * `setMode(m)` picks a mode (mcp-get-killed, mcp-get-hang, mcp-add-fail, mcp-remove-fail);
+ * `calls()` lists every argv it ran with.
+ */
+export function makeFakeCodex(dir) {
+  mkdirSync(dir, { recursive: true });
+  const path = join(dir, "codex");
+  const modeFile = join(dir, "mode");
+  const log = join(dir, "calls.jsonl");
+  writeFileSync(modeFile, "");
+  writeFileSync(path, `#!/bin/sh\nFAKE_MODE="$(/bin/cat '${modeFile}')" FAKE_LOG='${log}' exec '${process.execPath}' '${FAKE_CODEX}' "$@"\n`);
+  chmodSync(path, 0o755);
+  return {
+    path,
+    setMode: (m) => writeFileSync(modeFile, m),
+    calls: () => {
+      try {
+        return readFileSync(log, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l).argv).filter(Boolean);
       } catch {
         return [];
       }

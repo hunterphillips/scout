@@ -18,9 +18,14 @@
 //                     to export runtime skill wrappers there
 //   skillsRootCreated true only when setup created the skills root itself; uninstall leaves
 //                     the root in place either way (Claude Code shares it) and says so
-//   mcp-registration  { path: "<nodePath> <scout-mcp main.js>", name: "scout", scope: "user" }:
-//                     the command `claude mcp add` registered; `path` is that command, not a file
-//   skill             { path: "<skillsRoot>/scout-integration/SKILL.md", sha256 }: the static skill
+//   mcp-registration  { path: "<nodePath> <scout-mcp main.js>", agent, name: "scout", ... }:
+//                     the command the agent's CLI registered; `path` is that command, not a file.
+//                     Claude Code (`claude mcp add`): scope "user". Codex (`codex mcp add`):
+//                     codexHome, the Codex home it went into
+//   skill             { path: "<root>/scout-integration/SKILL.md", agent, sha256 }: the static
+//                     skill; root is skillsRoot for Claude Code, `<Codex home>/skills` for Codex
+// `agent` is "claude-code" or "codex"; an entry without it is Claude Code's (records written
+// before the Codex integration). These two kinds are singletons per agent.
 // Records without these fields are still valid version-1 records.
 
 import { randomBytes } from "node:crypto";
@@ -30,8 +35,21 @@ import { basename, isAbsolute, join, resolve } from "node:path";
 
 export const KINDS = ["config", "wrapper", "nmh-manifest", "key", "extension-manifest-key", "mcp-registration", "skill", "agent-profile", "launch-agent", "app-bundle"];
 
-/** Kinds that may appear at most once; a new entry replaces the old one whatever its path. */
+/** Kinds that may appear at most once (per agent, for AGENT_KINDS); a new entry replaces the old one whatever its path. */
 const SINGLETON_KINDS = ["mcp-registration", "skill", "agent-profile", "launch-agent", "app-bundle"];
+
+/** The agents an integration can be installed for. */
+export const AGENT_IDS = ["claude-code", "codex"];
+/** Kinds recorded once per agent. */
+export const AGENT_KINDS = ["mcp-registration", "skill"];
+
+/** The agent an integration entry belongs to (absent means Claude Code); undefined for other kinds. */
+export function agentOf(entry) {
+  if (!AGENT_KINDS.includes(entry?.kind)) return undefined;
+  return entry.agent === undefined ? "claude-code" : entry.agent;
+}
+
+export const CODEX_SKILL_SUFFIX = "/skills/scout-integration/SKILL.md";
 
 export const INTEGRATION_SERVER_NAME = "scout";
 export const INTEGRATION_SKILL_DIR = "scout-integration";
@@ -68,11 +86,12 @@ export function saveInstalled(path, record) {
   writeJson(path, { ...record, kinds }, 0o600);
 }
 
-/** Adds or replaces the entry for `entry.path`; never duplicates. */
+/** Adds or replaces the entry for `entry.path` (per agent, for AGENT_KINDS); never duplicates. */
 export function upsertEntry(record, entry) {
   if (!KINDS.includes(entry.kind)) throw new Error(`unknown kind ${entry.kind}`);
   const single = SINGLETON_KINDS.includes(entry.kind);
-  const files = record.files.filter((f) => f.path !== entry.path && !(single && f.kind === entry.kind));
+  const agent = agentOf(entry);
+  const files = record.files.filter((f) => !((f.path === entry.path || (single && f.kind === entry.kind)) && agentOf(f) === agent));
   files.push(entry);
   return { ...record, files };
 }
@@ -95,15 +114,18 @@ export function parseRegistrationCommand(text) {
 
 /**
  * True when `path` is a place setup could have written an entry of `kind`, given
- * `L` (a layout from paths.mjs) and the record it came from (for `skillsRoot`).
- * Uninstall and doctor ignore any other entry, so a tampered installed.json cannot
- * point them at arbitrary files or registrations.
+ * `L` (a layout from paths.mjs), the record it came from (for `skillsRoot`) and, for the
+ * integration kinds, the entry itself (for its `agent`). Uninstall and doctor ignore any other
+ * entry, so a tampered installed.json cannot point them at arbitrary files or registrations.
  */
-export function allowedPath(kind, path, L, record) {
+export function allowedPath(kind, path, L, record, entry = { kind }) {
+  const agent = agentOf({ ...entry, kind });
+  if (agent !== undefined && !AGENT_IDS.includes(agent)) return false;
   if (kind === "mcp-registration") return parseRegistrationCommand(path) !== null;
   if (typeof path !== "string" || !isAbsolute(path) || resolve(path) !== path) return false;
   switch (kind) {
     case "skill":
+      if (agent === "codex") return path.endsWith(CODEX_SKILL_SUFFIX) && path.length > CODEX_SKILL_SUFFIX.length;
       return isCleanAbsolute(record?.skillsRoot) && path === integrationSkillPath(record.skillsRoot);
     case "key":
       return path === L.keyPem;

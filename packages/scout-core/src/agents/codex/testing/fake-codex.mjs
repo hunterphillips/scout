@@ -10,6 +10,8 @@
 //   login status    stderr per FAKE_LOGIN: chatgpt "Logged in using ChatGPT" (exit 0), api-key
 //                   "Logged in using an API key - sk-***" (exit 0), none "Not logged in"
 //                   (exit 1); "Not logged in" too when $CODEX_HOME/auth.json does not resolve
+//   mcp add|get|remove  the user MCP registry in $CODEX_HOME/config.toml (fake-codex-mcp.mjs,
+//                   for the install scripts' tests); logged as {sub, argv, envKeys}
 //   exec            the job (below); anything else exits 2
 //
 // `exec` emulates the CLI from its argv: flags no job may pass are recorded as `violations`
@@ -65,6 +67,12 @@ if (argv[0] === "login" && argv[1] === "status" && argv.length === 2) {
   }
   process.stderr.write(login === "api-key" ? "Logged in using an API key - sk-***\n" : "Logged in using ChatGPT\n");
   process.exit(0);
+}
+if (argv[0] === "mcp") {
+  logLine({ sub: true, argv, envKeys });
+  const { runMcp } = await import("./fake-codex-mcp.mjs");
+  await runMcp({ args: argv.slice(1), mode });
+  process.exit(process.exitCode ?? 0);
 }
 if (argv[0] !== "exec") {
   logLine({ sub: true, argv, envKeys, unexpected: true });
