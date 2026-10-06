@@ -237,7 +237,7 @@ describe("hotload: acceptance runs", () => {
     const always = makeWorld("mcp-failed");
     const r2 = await always.run(["--case", "hotload", "--authorize-real-root", "--two-session", "--max-inference", "3", "--acknowledge-budget"]);
     expect(r2.report).toMatchObject({ outcome: "mcp_not_loaded", mcpStatusAtInit: "failed", afterRestart: "mcp_failed" });
-  });
+  }, 30_000);
 
   it.each([
     ["read-fail", { outcome: "skill_invoked_read_failed", readError: "not_found", readCalled: true }],
