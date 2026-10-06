@@ -1,8 +1,8 @@
 // The JSONL link between the native app and the core (stdio): what the core shows the user
 // and the commands the app sends back. Browser-safe like the rest of the root export.
 //
-// Core -> app frames are discriminated by `type`; two types carry a second discriminator the
-// Swift decoder reads: `results` by `status`, `ack` by `ok`.
+// Core -> app frames are discriminated by `type`; two types carry a second discriminator:
+// `results` by `status`, `ack` by `ok`.
 //
 // Results: a `results` frame names the core instance, visit, origin, and job it answers and
 // never carries a URL. A `state` frame resets the window's results for the visit it names (a
@@ -93,7 +93,7 @@ export const PanelCandidateIdSchema = z.string().max(CANDIDATE_ID_MAX_CHARS).reg
 /**
  * One recommended link as the window shows it. Never the URL: a click sends the candidate ID
  * back (`open_link`) and the core answers with the target it re-checked. `hostname` is the
- * verified target's host, for display. `reason` is shown only in Scout's window, never logged.
+ * verified target's host, for display. `reason` is shown only in the side panel, never logged.
  */
 export const PanelResultItemSchema = z.strictObject({
   candidateId: PanelCandidateIdSchema,
@@ -282,9 +282,9 @@ export const PanelAuditSchema = z.object({
 export const GRANT_DESTINATIONS_MAX = 64;
 
 /**
- * Whether the user's interactive agent may read browser context, and (optional, P4.3) the
+ * Whether the user's interactive agent may read browser context, and (optional) the
  * sites with background recommendations on: `config.json` `destinations` as `https://<host>`
- * origins, for the side panel's Sites section. Absent from older cores; the Swift app ignores it.
+ * origins, for the side panel's Sites section. Absent from older cores.
  */
 export const PanelGrantSchema = z.object({
   type: z.literal("grant"),

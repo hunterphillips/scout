@@ -483,7 +483,7 @@ describe("PanelModel capabilities (PanelModelCapabilityTests)", () => {
     expect(m.canToggleGrant).toBe(false);
   });
 
-  // P4.6: the per-site recommendations switch, a toggle like the grant.
+  // The per-site recommendations switch, a toggle like the grant.
   it("set_destination is a compare-and-set toggle on the grant frame's destinations", () => {
     const m = onSite();
     const STRIPE = "https://docs.stripe.com";
