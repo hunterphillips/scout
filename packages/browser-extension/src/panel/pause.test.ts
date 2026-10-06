@@ -1,4 +1,4 @@
-// Ported from ScoutKit's PauseStateTests.swift (P4.2, on main). The core is the one source of
+// Ported from ScoutKit's PauseStateTests.swift. The core is the one source of
 // truth, as in the app; browser differences: no quitting state, and a pending request expires
 // after PAUSE_PENDING_MS.
 import { describe, expect, it } from "vitest";

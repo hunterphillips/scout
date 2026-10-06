@@ -2,7 +2,7 @@ import Testing
 @testable import ScoutKit
 
 /// The menu bar's Pause/Resume and the Chrome side panel's agree because both follow the core's
-/// `state` frame: the side panel changes pause only through the core (P4.2).
+/// `state` frame: the side panel changes pause only through the core.
 @Suite struct PauseAgreementTests {
     private func running() -> MenuModel {
         var model = MenuModel()

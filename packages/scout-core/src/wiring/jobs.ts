@@ -5,12 +5,12 @@
 // process tree the core started (agents/processTree.ts ProcessTracker).
 //
 // The readiness check starts at once only when some host is recommendation-enabled
-// (`config.destinations`), or (P4.6) as soon as the first host is enabled while the core runs;
+// (`config.destinations`), or as soon as the first host is enabled while the core runs;
 // otherwise no agent runs, and the first job (after the first enabled settle) starts it and
 // waits for it.
 //
 // The browser-context grant reaches the scheduler through the `grant` frames the panel channel
-// emits (the same signal the window gets): `observePanel` sees every frame, and each change
+// emits (the same signal the side panel gets): `observePanel` sees every frame, and each change
 // after the first bumps the revision job requests carry, then calls `scheduler.onGrantChanged`.
 //
 // Discovery passes: each pass's fetch session gets its own parse scope (catalog/parseWorker.ts):
@@ -18,7 +18,7 @@
 // cancel fails only that pass's parses, so a cancelled pass never occupies the single worker.
 // `parsersFor(session)` is what the pass's catalog resolve parses with.
 //
-// The agent profile (P3.4): the core holds `agent-profile.lock` (capabilities/storeLock.ts,
+// The agent profile: the core holds `agent-profile.lock` (capabilities/storeLock.ts,
 // named-lock option) for its lifetime, so the profile CLI's writes exit 2 meanwhile; a lock held
 // elsewhere at start (a CLI write in progress) is retried every PROFILE_LOCK_RETRY_MS. The file
 // stays user-editable, so wiring/profileWatcher.ts watches it; a change whose fingerprint differs
@@ -176,7 +176,7 @@ export function createJobWiring(o: JobWiringOptions): JobWiring {
   let destinations = o.destinations;
   if (destinations.length > 0) void adapter?.refreshReadiness();
 
-  // The grant as the window was last told it.
+  // The grant as the side panel was last told it.
   let shownGrant: boolean | null = null;
   let grantRevision = 0;
 

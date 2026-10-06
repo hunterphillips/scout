@@ -22,7 +22,7 @@ export interface CatalogParsers {
 }
 
 /**
- * The dedupe/robots pass runs on the core's main thread (P4.4 decision): it gives the event
+ * The dedupe/robots pass runs on the core's main thread: it gives the event
  * loop back (setImmediate) whenever it has run this long, checked every `SLICE_CHECK_EVERY`
  * entries. Unsliced, the worst bounded shape (50,000 sitemap entries that are all spellings
  * of one URL: a URL parse and a normalization each) held the loop ~60-70 ms, and a robots.txt

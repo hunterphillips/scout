@@ -1,4 +1,4 @@
-// doctor's eight sections against a temp home (P4.3). Nothing here starts Scout, Chrome, or a
+// doctor's eight sections against a temp home. Nothing here starts Scout, Chrome, or a
 // real claude; the fake claude logs its argv so the tests can see doctor only asks --version.
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";

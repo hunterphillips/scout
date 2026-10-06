@@ -9,7 +9,7 @@
 // pass's fetch session is cancelled (pause, permission loss, disconnect, stop). `close()` is for
 // shutdown: it terminates the worker and refuses every later parse.
 //
-// `scope(isCancelled)` gives one discovery pass its own parsers (P3.4): a parse submitted once
+// `scope(isCancelled)` gives one discovery pass its own parsers: a parse submitted once
 // `isCancelled()` is true (the pass's fetch session was cancelled) or after the scope's own
 // `cancel()` is refused with ParseCancelledError before it reaches the queue, so a cancelled
 // pass can never occupy the single worker; `cancel()` fails only that pass's queued parses

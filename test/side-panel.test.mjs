@@ -114,7 +114,7 @@ describe.skipIf(SKIP !== null)(SKIP ? `Scout's side panel in Chrome for Testing 
     expect(built.status, built.stderr).toBe(0);
 
     // Scout's home: config, the fake agent, a fresh cached catalog for the site.
-    // Recommendations start off: the panel's switch turns them on (P4.6).
+    // Recommendations start off: the panel's switch turns them on.
     writeFileSync(join(home, "config.json"), JSON.stringify({ extensionId: extId, destinations: [] }));
     const claudePath = join(home, "bin", "claude");
     writeFileSync(claudePath, `#!/bin/sh\nFAKE_MODE=ok FAKE_VERSION=2.1.286 FAKE_LOG='${home}/fake.log' exec '${process.execPath}' '${FAKE_CLAUDE}' "$@"\n`);
@@ -203,7 +203,7 @@ describe.skipIf(SKIP !== null)(SKIP ? `Scout's side panel in Chrome for Testing 
     const text = () => panel.evaluate(() => document.body.innerText);
     /**
      * A trusted click (CDP input), as a user's: permissions.request needs the gesture. No retry:
-     * the panel's keyed patch keeps an unchanged button the same node across renders (P4.4).
+     * the panel's keyed patch keeps an unchanged button the same node across renders.
      */
     const click = async (key) => {
       const selector = `[data-key="${key}"]`;

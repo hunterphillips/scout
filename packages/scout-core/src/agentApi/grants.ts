@@ -1,9 +1,9 @@
 // What an authenticated agent connection may read beyond approved resources. Only the
-// browser-context grant exists: `agentBrowserContext` in config.json, set by the user (P2.5
-// adds the toggle). It is read on every call and never cached per connection, so turning it
-// off reaches connections that are already open, and reconnecting cannot bring it back.
-// A job connection never carries it in Phase 2. Scout's window turns it on or off through
-// `writeBrowserContextGrant`, which rewrites config.json atomically and keeps every other key.
+// browser-context grant exists: `agentBrowserContext` in config.json, set by the user. It is
+// read on every call and never cached per connection, so turning it off reaches connections
+// that are already open, and reconnecting cannot bring it back. A job connection never
+// carries it. The side panel turns it on or off through `writeBrowserContextGrant`, which
+// rewrites config.json atomically and keeps every other key.
 
 import { readFileSync, unlinkSync } from "node:fs";
 import { join } from "node:path";

@@ -57,5 +57,5 @@ jobs:
     with:
       job: implement
       model: claude-opus-5-5
-      issue_number: ${{ github.event.issue.number || inputs.issue_number }}
+      issue_number: ${{ github.event.issue.number || fromJSON(inputs.issue_number || '0') }}   # dispatch inputs arrive as strings
     secrets: inherit

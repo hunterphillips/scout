@@ -24,7 +24,7 @@
 // resource releases the snapshots that pinned it; expired snapshots are released before
 // each collection.
 //
-// Scout's window gets its capability view, previews, command acks, the context-read audit,
+// The side panel gets its capability view, previews, command acks, the context-read audit,
 // and the browser-context grant from the panel channel (panelChannel.ts), which starts right
 // after the coordinator and stops right after it, before the sockets and the store close.
 // Panel frames go to every attached sink (panelSinks.ts): the app's stdout (the `stdio` sink,
@@ -40,11 +40,11 @@
 // usable profile every job is `unavailable`), its readiness check (started at once only when
 // some host is recommendation-enabled), the catalog parse worker a
 // cancelled discovery pass cancels too, and the scheduler. Every panel frame passes through it,
-// so the scheduler hears the browser-context grant as the window does; revoked resources reach
-// it through the store's revocation hook, after agent.sock released the snapshots that pinned
-// them.
+// so the scheduler hears the browser-context grant as the side panel does; revoked resources
+// reach it through the store's revocation hook, after agent.sock released the snapshots that
+// pinned them.
 //
-// Shutdown (P3.4), one function, one order, every trigger: stdin EOF (the app quit), stdin
+// Shutdown is one function with one order for every trigger: stdin EOF (the app quit), stdin
 // closed abruptly (the app crashed), a read error on stdin, a stdout error, the `shutdown`
 // command, SIGTERM, SIGINT, SIGHUP.
 //   1. stop accepting (synchronous, nothing awaited before it): the coordinator stops (no new
@@ -232,7 +232,7 @@ export async function runStdio(deps: StdioDeps): Promise<StdioCore> {
     sinks.emit(state);
   };
 
-  // Context reads over agent.sock; each one re-sends Scout's window its (debounced) audit view.
+  // Context reads over agent.sock; each one re-sends the side panel its (debounced) audit view.
   const readAudit = createReadAudit();
   const audit: ReadAudit = {
     record(entry) {
@@ -242,7 +242,7 @@ export async function runStdio(deps: StdioDeps): Promise<StdioCore> {
     entries: () => readAudit.entries(),
   };
 
-  // One id per start, shared by agent.sock replies and Scout's window's capabilities frames.
+  // One id per start, shared by agent.sock replies and the side panel's capabilities frames.
   const coreInstanceId = randomBytes(16).toString("hex");
 
   // The registry and the channel read the coordinator's grants and visit lazily: they are
@@ -256,9 +256,11 @@ export async function runStdio(deps: StdioDeps): Promise<StdioCore> {
       return { visitEpoch: view.currentSite.visitEpoch, origin: view.currentSite.origin };
     },
     isPermitted: (origin) => coordinator.permissions.isPermitted(origin),
+    // A page Scout opens from its links gets no job of its own.
+    onLinkOpened: (href) => jobs?.scheduler.onLinkOpened(href),
     diagnostics,
   });
-  // Recommendation destinations, live (P4.6): the side panel's switch writes them, a hand edit of
+  // Recommendation destinations, live: the side panel's switch writes them, a hand edit of
   // config.json is picked up; each change reaches the scheduler first (a running job for a host
   // turned off is cancelled), then every sink as a `grant` frame.
   const destinations = createLiveDestinations({

@@ -1,6 +1,6 @@
 // The production answers to agent-protocol requests: a pure backend over the capability
 // store, the coordinator's read-only view, and the catalog cache, testable without a socket.
-// The reference behaviour is the Phase 1 fixture (`@scout/scout-mcp/fixture`); differences
+// The reference behaviour is the in-memory fixture (`@scout/scout-mcp/fixture`); differences
 // are deliberate and listed here:
 // - `list_resources` lists every readable version: each resource's approved default and its
 //   superseded versions, one entry per version. Pending, declined and revoked never appear.

@@ -1,4 +1,4 @@
-// The side panel's one Pause/Resume control. A port of ScoutKit's PauseState (P4.2): the core is
+// The side panel's one Pause/Resume control. A port of ScoutKit's PauseState: the core is
 // the one source of truth for pause. A click sends the core's `pause` or `resume`; what shows
 // follows the core's `state` frame, so a pause or resume from the Mac menu or window shows here
 // too, and the extension's posting follows the core's capture_policy in the worker.

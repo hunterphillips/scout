@@ -145,7 +145,7 @@ export async function createFixtureBackend(seed: FixtureSeed = {}): Promise<Fixt
   for (const r of seed.resources ?? []) {
     const id = await deriveResourceId(r.kind, r.sourceUrl);
     const versions = r.versions.map((v, i): FixtureVersion => {
-      // Fixture-only hash; the store defines the real content-hash input in P2.3.
+      // Fixture-only hash; the store defines the real content-hash input.
       const hash = createHash("sha256").update(`${r.kind}\n${r.sourceUrl}\n${v.text}`).digest("hex");
       return { hash, bytes: Buffer.from(v.text, "utf8"), state: v.state, fetchedAt: v.fetchedAt ?? i, decidedAt: v.decidedAt ?? i };
     });

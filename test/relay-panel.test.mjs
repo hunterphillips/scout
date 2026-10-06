@@ -1,4 +1,4 @@
-// End-to-end, bridge protocol 3: Scout's window over the relay. The built native host and
+// End-to-end, bridge protocol 3: the side panel over the relay. The built native host and
 // the built core in a temp SCOUT_HOME; a scripted stand-in for the extension speaks Chrome's
 // native-messaging framing on the host's stdio, and the core's stdout stands in for the
 // native app, which gets `state` frames only. The user's agent is the scripted fake CLI (never a model); DNS is stubbed.
@@ -81,7 +81,7 @@ function dnsStub(dir) {
   return pathToFileURL(path).href;
 }
 
-describe.skipIf(!BUILT)("bridge protocol 3: Scout's window over the relay", () => {
+describe.skipIf(!BUILT)("bridge protocol 3: the side panel over the relay", () => {
   let home;
   const children = [];
   const sockets = [];

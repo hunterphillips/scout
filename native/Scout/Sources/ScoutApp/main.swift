@@ -1,8 +1,8 @@
-// Scout's Mac app: the engine's windowless home (P4.2). A menu-bar accessory that supervises the
+// Scout's Mac app: the engine's windowless home. A menu-bar accessory that supervises the
 // scout-core sidecar, reports the frontmost app to it, and quits through TerminationPolicy. Its
 // menu holds a status line, Pause/Resume, and Quit. Model logic lives in ScoutKit.
 //
-// Never activating (P2.5): nothing here calls `activate` on the app, so a frame can never bring
+// Never activating: nothing here calls `activate` on the app, so a frame can never bring
 // Scout forward. ScoutKitTests' AppSourceGuardTests scans these sources and fails if an
 // activation call appears.
 import AppKit

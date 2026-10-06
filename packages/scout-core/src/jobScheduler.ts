@@ -1,10 +1,10 @@
 // When recommendation jobs run. One job at a time per core, for the current visit only, and
-// only for a recommendation-enabled host (`config.destinations`; since P4.6 the list is live:
-// `onDestinationsChanged` replaces it, and the next settle reads the new one). The coordinator tells the
-// scheduler about settles, visit changes, pause, sensor loss, permissions, accepted activity,
-// the browser-context grant, revoked resources, profile changes and stop; the scheduler talks
-// only to the result registry, the snapshot registry, the job pipeline (pipeline.ts), and the
-// coordinator's window hooks (`working`, `idle`).
+// only for a recommendation-enabled host (`config.destinations`; the list is live:
+// `onDestinationsChanged` replaces it, and the next settle reads the new one). The coordinator
+// tells the scheduler about settles, visit changes, pause, sensor loss, permissions, accepted
+// activity, the browser-context grant, revoked resources, profile changes and stop; the
+// scheduler talks only to the result registry, the snapshot registry, the job pipeline
+// (pipeline.ts), and the coordinator's panel hooks (`working`, `idle`).
 //
 // Budget: one JOB_MAX_DEADLINE_MS (30 s) budget per settled visit, from the dwell settle,
 // covering discovery, inference and verification. A job gets what remains when it starts;
@@ -12,9 +12,9 @@
 // (pipeline.ts) is the adapter's launch floor plus the verification reserve, so the scheduler
 // never starts a job the adapter would refuse for time; the same threshold gates a replacement.
 //
-// Per job, in order: `results.beginJob(jobId)` → the window's `working{jobId}` → the resume
+// Per job, in order: `results.beginJob(jobId)` → the panel's `working{jobId}` → the resume
 // cache, else `snapshots.take(...)` → the pipeline → the visit's `idle` → `results.publish`.
-// Never an `idle` for the visit after its publish (the window would drop the answer). A job
+// Never an `idle` for the visit after its publish (the side panel would drop the answer). A job
 // that ends without an answer (discarded) still gets its `idle`, so no spinner is left behind.
 //
 // The snapshot carries activity only when the browser-context grant is on and GitHub capture
@@ -62,6 +62,15 @@
 // publishes `working{replacement}` → `idle` → its results, and the cancelled run publishes
 // nothing.
 //
+// Suggestions stick to their page (resumeCache.ts holds them while shown and 15 min after the
+// page's visit ends): a new visit whose key matches a stored answer, whatever activity the
+// user has read since, gets it republished through the same order, before the time and agent
+// checks, with no snapshot and so no job token. A page Scout opened from its own links
+// (`onLinkOpened`, from the result registry's resolved `open_link`) gets no job of its own for
+// OPENED_BY_SCOUT_TTL_MS: its settle is `job_skipped {reason: "opened_by_scout"}` and publishes
+// nothing, even when the page has a stored answer. Pause clears the stored answers; losing an
+// origin's permission drops that origin's; issue capture withdrawn drops those that saw activity.
+//
 // Diagnostics (scalars only, never reasons, titles, URLs or prompts): job_started, job_finished,
 // job_cancelled, job_discarded, job_skipped, job_replaced, verify.
 
@@ -78,6 +87,16 @@ import type { ResultRegistry } from "./results.js";
 import { activityHash, type JobResumeCache, type JobResumeKey } from "./resumeCache.js";
 
 export { MIN_JOB_MS } from "./pipeline.js";
+
+/** How long a page Scout opened from its links gets no job of its own. */
+export const OPENED_BY_SCOUT_TTL_MS = 15 * 60 * 1000;
+/** Upper bound on remembered opened pages; past it the oldest is forgotten. */
+export const OPENED_BY_SCOUT_MAX = 32;
+
+function stripFragment(url: string): string {
+  const hash = url.indexOf("#");
+  return hash === -1 ? url : url.slice(0, hash);
+}
 
 /** What the scheduler reads from the coordinator, live, on every check. */
 export interface SchedulerView {
@@ -166,6 +185,8 @@ export interface JobScheduler {
    * keys use the new profile. A bare fingerprint keeps the tools fields as they were.
    */
   onProfileChanged(next: string | SchedulerProfile): void;
+  /** Scout is opening `href` from its links: a visit there starts no job for OPENED_BY_SCOUT_TTL_MS. */
+  onLinkOpened(href: string): void;
   /** Cancel the running job (`shutdown`) and start none from now on. Idempotent. */
   stop(): void;
   /** Whether a host is recommendation-enabled. */
@@ -218,6 +239,8 @@ export function createJobScheduler(options: JobSchedulerOptions): JobScheduler {
   let skipped: { visit: ActiveVisit; catalog: CatalogResolution } | null = null;
   let running: Running | null = null;
   let stopped = false;
+  /** Pages Scout opened from its links (fragment-free URL → when). */
+  const opened = new Map<string, number>();
 
   const event = (name: string, fields: DiagnosticFields): void => diagnostics.event(name, fields);
   const isEnabled = (origin: string): boolean => {
@@ -234,8 +257,19 @@ export function createJobScheduler(options: JobSchedulerOptions): JobScheduler {
     if (shownEpoch() !== visit.epoch) return false;
     options.window.idle(visit.epoch);
     const out = options.results.publish({ ...answer, coreInstanceId: options.coreInstanceId, visitEpoch: visit.epoch, origin: visit.origin, jobId } as Parameters<ResultRegistry["publish"]>[0]);
+    if (out.ok && (answer.status === "ok" || answer.status === "empty")) options.resumeCache?.show(visit.url);
     return out.ok;
   };
+
+  const openedByScout = (url: string): boolean => {
+    const at = opened.get(stripFragment(url));
+    if (at === undefined) return false;
+    const age = clock.now() - at;
+    return age >= 0 && age < OPENED_BY_SCOUT_TTL_MS;
+  };
+
+  /** The shown visit ended: its page's stored answer keeps a full window from now. */
+  const leavePage = (): void => options.resumeCache?.show(null);
 
   const releaseSnapshot = (job: Running, reason: "released" | "cancelled"): void => {
     if (job.snapshot !== null) options.snapshots()?.release(job.snapshot.id, reason);
@@ -289,16 +323,15 @@ export function createJobScheduler(options: JobSchedulerOptions): JobScheduler {
     const jobId = (options.newJobId ?? newJobId)();
     if (!options.results.beginJob(jobId).ok) return;
     options.window.working(visit.epoch, jobId);
+    const activity = options.browserContextGranted() && view.captureAllowed() ? toEntries(options.activity()) : [];
+    const key = resumeKey(b, activity);
+    const cached = options.resumeCache?.restore(key, { hasUserTools: profile.hasUserTools });
+    if (cached) return answerNow(visit, jobId, cached, { epoch: visit.epoch, cached: true });
     const remaining = b.deadline - clock.now();
     if (remaining < MIN_JOB_MS) return answerNow(visit, jobId, { status: "unavailable", reason: "no_time_left" }, { epoch: visit.epoch });
     const agent = typeof options.agent === "function" ? options.agent() : options.agent;
     const snapshots = options.snapshots();
     if (agent === null || snapshots === null) return answerNow(visit, jobId, { status: "unavailable", reason: "agent_unavailable" }, { epoch: visit.epoch });
-
-    const activity = options.browserContextGranted() && view.captureAllowed() ? toEntries(options.activity()) : [];
-    const key = resumeKey(b, activity);
-    const cached = options.resumeCache?.restore(key, { hasUserTools: profile.hasUserTools });
-    if (cached) return answerNow(visit, jobId, cached, { epoch: visit.epoch, cached: true });
 
     let taken: { snapshot: JobSnapshot; token: string };
     try {
@@ -392,7 +425,7 @@ export function createJobScheduler(options: JobSchedulerOptions): JobScheduler {
       if (shownEpoch() === job.visit.epoch) options.window.idle(job.visit.epoch);
       return;
     }
-    // The last check before the window sees it.
+    // The last check before the side panel sees it.
     const stale = staleReason(job);
     if (stale !== null) {
       event("job_discarded", { stage: "publish", why: stale, epoch: job.visit.epoch });
@@ -454,6 +487,10 @@ export function createJobScheduler(options: JobSchedulerOptions): JobScheduler {
         event("job_skipped", { epoch: visit.epoch, reason: "not_enabled" });
         return;
       }
+      if (openedByScout(visit.url)) {
+        event("job_skipped", { epoch: visit.epoch, reason: "opened_by_scout" });
+        return;
+      }
       const result = catalog.result;
       if (!result.ok || result.catalog.candidates.length === 0) {
         event("job_skipped", { epoch: visit.epoch, reason: "no_candidates" });
@@ -479,19 +516,24 @@ export function createJobScheduler(options: JobSchedulerOptions): JobScheduler {
     onVisitChanged() {
       budget = null;
       skipped = null;
+      leavePage();
       cancel("visit_changed", "drop");
     },
     onPause() {
       budget = null;
       skipped = null;
+      options.resumeCache?.clear();
       cancel("paused", "drop");
     },
     onSensorLost() {
       budget = null;
       skipped = null;
+      leavePage();
       cancel("visit_changed", "drop");
     },
     onPermissionsChanged() {
+      const captureAllowed = view.captureAllowed();
+      options.resumeCache?.dropWhere((e) => !view.isPermitted(e.origin) || (e.hadActivity && !captureAllowed));
       const job = running;
       if (job === null || job.cancelled !== null) return;
       if (!view.isPermitted(job.visit.origin)) return cancel("revoked", "drop");
@@ -542,6 +584,12 @@ export function createJobScheduler(options: JobSchedulerOptions): JobScheduler {
       if (job === null || job.cancelled !== null) return;
       // Unlike new activity, a new profile always ends the job: its adapter is retired.
       if (!replace(job, "superseded")) cancel("superseded", "publish");
+    },
+    onLinkOpened(href) {
+      const page = stripFragment(href);
+      opened.delete(page);
+      opened.set(page, clock.now());
+      while (opened.size > OPENED_BY_SCOUT_MAX) opened.delete(opened.keys().next().value as string);
     },
     stop() {
       if (stopped) return;

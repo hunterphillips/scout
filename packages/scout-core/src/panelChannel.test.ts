@@ -118,7 +118,7 @@ describe("panel channel", () => {
     expect(got[0]).toMatchObject({ type: "grant", destinations: expect.arrayContaining(["https://www.peakdesign.com"]) });
   });
 
-  it("set_destination (P4.6): writes config.json, sends the new list as a grant frame before the ack, idempotent per sender; stale is stale_revision", async () => {
+  it("set_destination: writes config.json, sends the new list as a grant frame before the ack, idempotent per sender; stale is stale_revision", async () => {
     const home = mkdtempSync(join(tmpdir(), "spc-dst-"));
     try {
       writeFileSync(join(home, "config.json"), JSON.stringify({ agentBrowserContext: true, destinations: [] }));

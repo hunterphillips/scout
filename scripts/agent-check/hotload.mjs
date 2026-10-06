@@ -1,4 +1,4 @@
-// The native skill hot-load check (P1.4). One headless multi-turn `claude -p` stream-json
+// The native skill hot-load check. One headless multi-turn `claude -p` stream-json
 // process stands in for an already-open interactive session (it is not an interactive
 // session; the report says so); a proof skill is added to the skills root after its first
 // turn, and the second turn must list it, use it natively (the Skill tool) and read the
