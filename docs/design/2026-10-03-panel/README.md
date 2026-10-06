@@ -1,6 +1,6 @@
 # Side panel redesign (2026-10-03)
 
-Hunter picked the **Quiet** direction, with Companion's bottom nav and its inline review card. The mark is **A · Sightline**: a ring with a blue dot up and to the right.
+The chosen direction is **Quiet**, with Companion's bottom nav and its inline review card. The mark is **A · Sightline**: a ring with a blue dot up and to the right.
 
 The files here are static mockups in the Design canvas format (`.dc.html`: HTML with inline styles, plus a small template wrapper). Read them for the look, the tokens and the layout. Don't copy them into the extension.
 

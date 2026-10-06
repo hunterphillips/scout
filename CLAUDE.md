@@ -136,16 +136,17 @@ and limits; `CONTRIBUTING.md` has the platform matrix.
     `adapter.ts` (`AgentJobAdapter`: `id`, `profileFingerprint`, `readiness`,
     `refreshReadiness`, `run`, `abortAll`), `registry.ts` (`createJobAdapter`, exhaustive
     switch on `profile.adapter`), `profile.ts` (`AgentProfileSchema`, a discriminated union
-    on `adapter`; the core holds `agent-profile.lock` for its lifetime), `toolProfile.ts`
-    / `toolPolicy.ts` / `contextToolBridge.ts` + `bridgeMain.ts` (user-selected stdio tools
-    behind a per-job forwarding bridge; secrets resolved in memory from `{file, pointer}`
-    bindings, never written to disk; managed-policy check), `backendDefinition.ts`,
+    on `adapter`; the core holds `agent-profile.lock` for its lifetime) with
+    `profileBase.ts` (what every adapter's profile shares) and `executables.ts` (PATH
+    lookup without a shell), `toolProfile.ts` / `contextToolBridge.ts` + `bridgeMain.ts`
+    (user-selected stdio tools behind a per-job forwarding bridge; secrets resolved in
+    memory from `{file, pointer}` bindings, never written to disk), `backendDefinition.ts`,
     `environmentBindings.ts`, `profileCli.ts` (`cli.js agent …`; `--allow-start` gates
     every backend launch, exit 3 without it, exit 2 while `agent-profile.lock` is held; an
     inspected backend runs detached in its own process group and is killed on
-    SIGINT/SIGTERM/SIGHUP), plus the shared process helpers (`childSupervisor.ts`,
-    `processTree.ts`, `jobStop.ts`, `streamMonitor.ts`, `jsonLineStream.ts`,
-    `outputValidation.ts`, `mapOutcome.ts`, `privateFile.ts`).
+    SIGINT/SIGTERM/SIGHUP), `prompt.ts`, the shared process helpers (`childSupervisor.ts`,
+    `processTree.ts`, `outputValidation.ts`, `privateFile.ts`, `exactEnvTransport.ts`),
+    and `agents/testing/` (the fake retrieval backend).
   - `agents/claudeCode/`: the Claude Code adapter. One fresh `claude -p` per job; private
     files in a 0700 `SCOUT_HOME/run/jobs/<id>/` named by argv only; the CLI's cwd is the
     single `SCOUT_HOME/run/agent-cwd`; strict MCP config, exact `--allowedTools`, hooks
@@ -154,19 +155,24 @@ and limits; `CONTRIBUTING.md` has the platform matrix.
     child (SIGKILL on cancel/timeout/shutdown; verdicts cached per env fingerprint + CLI
     version); a job proceeds only on `subscription`. CLI version drift triggers one async
     re-preflight. A required non-Scout tool stops a job only when every call to it errored.
-    `agents/claudeCode/testing/` holds the fake `claude` (`fake-claude.mjs`,
-    `fake-claude-session.mjs`) and the fake backend.
-  - `integrations/claudeCode/`: `skillExporter.ts`, `skillWrapper.ts`, `index.ts`. Exports
-    approved resources as managed skill wrappers (`scout-<kind>-<16 hex>/SKILL.md`,
-    frontmatter exactly `name` + `description`, fixed Scout body, tagged ownership hash)
-    only into the validated skills root recorded in `installed.json`.
+    Files: `claudeJob.ts`, `profile.ts` (the union member, `DEFAULT_CLAUDE_CODE_MODEL`),
+    `authPreflight.ts`, `preflightWorker.ts`, `preflightChildMain.ts`, `launchProfile.ts`,
+    `initCheck.ts`, `streamMonitor.ts`, `jsonLineStream.ts`, `mapOutcome.ts`, `jobStop.ts`,
+    `jobSurface.ts`, `toolPolicy.ts` (managed-policy check), `README.md` (what an adapter
+    provides). `agents/claudeCode/testing/` holds the fake `claude` (`fake-claude.mjs`,
+    `fake-claude-session.mjs`, `fakeCli.ts`, `preflightSandbox.ts`).
+  - `integrations/claudeCode/`: `skillExporter.ts`, `skillWrapper.ts`, `skillIdentity.ts`
+    (managed wrapper names `scout-<kind>-<16 hex>`, tagged ownership hash), `index.ts`
+    (`openExporter`). Exports approved resources as managed skill wrappers (`SKILL.md`,
+    frontmatter exactly `name` + `description`, fixed Scout body) only into the validated
+    skills root recorded in `installed.json`.
   - `capabilities/`: `discovery.ts`, `skillsIndex.ts`, `textValidation.ts`,
     `discoveryCache.ts` (fixed root probes for `llms.txt`, `AGENTS.md`,
     `/.well-known/agent-skills/index.json`; preview cache under `cache/discovery/`),
-    `store.ts`, `decisions.ts`, `garbageCollection.ts`, `exports.ts`, `storeLock.ts`,
-    `atomicWrite.ts`, `identity.ts`, `capabilityCli.ts` (`capabilities/store.json` +
-    `blobs/` + `exports.json` under `SCOUT_HOME`; approvals keyed by content hash;
-    `store.lock` keeps the dev CLI from writing while the core runs).
+    `store.ts`, `decisions.ts`, `garbageCollection.ts`, `storeLock.ts`, `atomicWrite.ts`,
+    `capabilityCli.ts` (`capabilities/store.json` + `blobs/` + `exports.json` under
+    `SCOUT_HOME`; approvals keyed by content hash; `store.lock` keeps the dev CLI from
+    writing while the core runs).
   - `agentApi/`: `auth.ts` (`run/agent-token`, rotated 0600 per start), `grants.ts`
     (browser-context grant `agentBrowserContext` in `config.json`, default false, re-read
     on every call), `readAudit.ts` (200 entries), `handlers.ts` (pure `call(frame,

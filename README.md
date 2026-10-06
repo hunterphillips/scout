@@ -36,9 +36,9 @@ Run from this directory (Node 22.12+, npm):
     npm run test:swift   # the Mac app's tests
     npm run test:all     # build, then npm test and test:e2e
 
-CI runs `test:node` on Ubuntu, and the full suite plus the Chrome side-panel e2e test on
-macOS. Locally the side-panel e2e test drives the real panel in Chrome for Testing and is
-opt-in: `SCOUT_E2E_CHROME=1 SCOUT_E2E_BROWSERS=<dir with a Chrome for Testing install>`.
+CI runs the full suite on macOS. The side-panel e2e test drives the real panel in Chrome
+for Testing and is opt-in: `SCOUT_E2E_CHROME=1 SCOUT_E2E_BROWSERS=<dir with a Chrome for
+Testing install>`.
 
 Core dev CLI (after `npm run build`; `catalog`, `discover`, `verify`, and `capability
 ingest` make network requests; nothing runs a model):

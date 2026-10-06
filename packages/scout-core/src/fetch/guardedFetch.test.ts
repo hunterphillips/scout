@@ -312,7 +312,7 @@ describe("guardedFetch", () => {
 
     expect(calls[0]!.init.redirect).toBe("manual");
     const { "user-agent": userAgent, ...rest } = headersOf(calls[0]!.init);
-    expect(userAgent).toMatch(/^Scout\/\S+ \(\+local POC\)$/);
+    expect(userAgent).toMatch(/^Scout\/\S+$/);
     expect(rest).toEqual({
       accept: "text/plain",
       "accept-encoding": "gzip, br",

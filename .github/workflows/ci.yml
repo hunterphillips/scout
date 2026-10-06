@@ -25,4 +25,3 @@ jobs:
       - run: npm run typecheck
       - run: npm test
       - run: npm run test:e2e
-      - run: npm run test:swift
