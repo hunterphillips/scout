@@ -32,7 +32,7 @@ import { type Diagnostics, scoutHome } from "../diagnostics.js";
 import { InstalledRecordError, readInstalledRecord } from "../installedRecord.js";
 import { emptyState } from "./decisions.js";
 import type { DiscoveryResult } from "./discovery.js";
-import { createSkillExporter, ExportError, MANAGED_NAME_RE } from "./exports.js";
+import { createSkillExporter, ExportError, MANAGED_NAME_RE } from "../integrations/claudeCode/skillExporter.js";
 import { type CapabilityStore, createCapabilityStore } from "./store.js";
 import { acquireStoreLock, StoreLockedError } from "./storeLock.js";
 

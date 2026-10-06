@@ -95,7 +95,7 @@ import { readBrowserContextGrant, writeBrowserContextGrant } from "./agentApi/gr
 import { createAgentHandlers } from "./agentApi/handlers.js";
 import { createReadAudit, type ReadAudit } from "./agentApi/readAudit.js";
 import { type AgentSocketServer, createAgentSocketServer } from "./agentSocketServer.js";
-import { createSkillExporter, ExportError, type SkillExporter } from "./capabilities/exports.js";
+import { openExporter } from "./integrations/claudeCode/index.js";
 import { type CapabilityStore, createCapabilityStore, StoreCorruptError } from "./capabilities/store.js";
 import { releaseHeldLocks, StoreLockedError } from "./capabilities/storeLock.js";
 import { createSiteResourceDiscoverer } from "./capabilities/discovery.js";
@@ -106,7 +106,6 @@ import { ConfigError, type CoreConfig, readConfig } from "./config.js";
 import { type Coordinator, createCoordinator } from "./coordinator.js";
 import { createDiagnostics, defaultDiagnosticsPath, type Diagnostics, scoutHome } from "./diagnostics.js";
 import { DWELL_MS } from "./dwell.js";
-import { InstalledRecordError, readInstalledRecord } from "./installedRecord.js";
 import { createPanelChannel, type PanelChannel } from "./panelChannel.js";
 import { createPanelSinks, type PanelSink } from "./panelSinks.js";
 import { createResultRegistry } from "./results.js";
@@ -173,6 +172,7 @@ export async function runStdio(deps: StdioDeps): Promise<StdioCore> {
   }
 
   const runDir = join(home, "run");
+  // The skill exporter is the Claude Code integration's; a second integration registers its own here.
   const exporter = openExporter(home, diagnostics);
 
   // The agent socket is built once the token exists; the store's revocation hook reaches it then.
@@ -643,27 +643,6 @@ class StartError extends Error {
   constructor(readonly code: string) {
     super(code);
     this.name = "StartError";
-  }
-}
-
-/**
- * The skill exporter for the skills root the installer recorded, or undefined when none is
- * recorded or the record or root is unusable (reported to diagnostics, never fatal).
- */
-function openExporter(home: string, diagnostics: Diagnostics): SkillExporter | undefined {
-  let skillsRoot: string | undefined;
-  try {
-    skillsRoot = readInstalledRecord(home).skillsRoot;
-  } catch (e) {
-    diagnostics.event("installed_record_invalid", { code: e instanceof InstalledRecordError ? e.code : "installed-unreadable" });
-    return undefined;
-  }
-  if (skillsRoot === undefined) return undefined;
-  try {
-    return createSkillExporter({ scoutHome: home, skillsRoot, diagnostics });
-  } catch (e) {
-    diagnostics.event("skills_root_invalid", { code: e instanceof ExportError ? e.code : "unknown" });
-    return undefined;
   }
 }
 

@@ -106,8 +106,8 @@ export function listTree(dir) {
 export async function exportRealWrappers(scoutHome, skillsRoot, skills = ["pay"]) {
   const { createHash } = await import("node:crypto");
   const { createCapabilityStore } = await import("../../packages/scout-core/dist/capabilities/store.js");
-  const { createSkillExporter } = await import("../../packages/scout-core/dist/capabilities/exports.js");
-  const { wrapperName } = await import("../../packages/scout-core/dist/capabilities/identity.js");
+  const { createSkillExporter } = await import("../../packages/scout-core/dist/integrations/claudeCode/skillExporter.js");
+  const { wrapperName } = await import("../../packages/scout-core/dist/integrations/claudeCode/skillIdentity.js");
   const sha = (s) => createHash("sha256").update(s, "utf8").digest("hex");
   const origin = "https://s.example";
   mkdirSync(skillsRoot, { recursive: true });
