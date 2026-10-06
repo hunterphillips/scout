@@ -26,8 +26,8 @@ function stripFragment(url: string): string {
 // the origin and page, the catalog, the approvals, the browser-context grant, the agent profile,
 // and its tools. The activity the job saw (a hash) is kept but not matched: the user has been
 // reading since, and the page's answer still stands; one entry per page and inputs, the latest
-// answer wins. The window counts from the store, and `touch` restarts it when the page's visit
-// ends. An answer made without the user's optional tools (they were selected but failed, so it
+// answer wins. The window counts from the store; the page shown now (`show`) does not age, and
+// its window restarts when it stops being shown, so a page's answer lasts 15 min after its visit. An answer made without the user's optional tools (they were selected but failed, so it
 // rests on Scout's browser context alone) is never reused by a job that has them. Only `ok` and
 // `empty` answers are stored. At most RESUME_MAX_ENTRIES entries.
 
@@ -56,10 +56,14 @@ export interface JobResumeCache<T> {
   store(key: JobResumeKey, entry: JobResumeEntry<T>): void;
   /** The stored answer if one is under the TTL for this key (any activity) and usable by a job with (or without) user tools. */
   restore(key: JobResumeKey, opts: { hasUserTools: boolean }): T | null;
-  /** Restart the window of the entries for `url` (the fragment ignored): its visit just ended. */
-  touch(url: string): void;
-  /** Drop the entries of every origin `drop` names (an origin no longer permitted). */
-  dropOrigins(drop: (origin: string) => boolean): void;
+  /**
+   * The page whose answer is shown now (the fragment ignored), or null: its entries do not age
+   * while shown, and the window of the page shown before restarts now.
+   */
+  show(url: string | null): void;
+  /** Drop the entries `drop` names: an origin no longer permitted, or a job that saw activity now withdrawn. */
+  dropWhere(drop: (entry: { origin: string; hadActivity: boolean }) => boolean): void;
+  /** Drop every entry and forget the shown page. */
   clear(): void;
   readonly size: number;
 }
@@ -73,9 +77,12 @@ export function activityHash(entries: readonly { url: string; title: string; tex
 
 export function createJobResumeCache<T>(options: ResumeCacheOptions): JobResumeCache<T> {
   const ttlMs = options.ttlMs ?? RESUME_TTL_MS;
+  const noActivity = activityHash([]);
   const entries = new Map<string, JobResumeEntry<T> & { origin: string; url: string; activityHash: string; storedAt: number }>();
-  const expired = (storedAt: number): boolean => {
-    const age = options.clock.now() - storedAt;
+  let shown: string | null = null;
+  const expired = (e: { url: string; storedAt: number }): boolean => {
+    if (e.url === shown) return false;
+    const age = options.clock.now() - e.storedAt;
     return age < 0 || age >= ttlMs;
   };
   const id = (k: JobResumeKey): string =>
@@ -85,7 +92,7 @@ export function createJobResumeCache<T>(options: ResumeCacheOptions): JobResumeC
       return entries.size;
     },
     store(key, entry) {
-      for (const [k, e] of entries) if (expired(e.storedAt)) entries.delete(k);
+      for (const [k, e] of entries) if (expired(e)) entries.delete(k);
       const k = id(key);
       entries.delete(k);
       entries.set(k, { ...entry, origin: key.origin, url: stripFragment(key.url), activityHash: key.activityHash, storedAt: options.clock.now() });
@@ -98,7 +105,7 @@ export function createJobResumeCache<T>(options: ResumeCacheOptions): JobResumeC
         options.diagnostics?.event("resume_miss", { reason: entries.size === 0 ? "empty" : "key" });
         return null;
       }
-      if (expired(e.storedAt)) {
+      if (expired(e)) {
         entries.delete(k);
         options.diagnostics?.event("resume_miss", { reason: "expired" });
         return null;
@@ -110,16 +117,19 @@ export function createJobResumeCache<T>(options: ResumeCacheOptions): JobResumeC
       options.diagnostics?.event("resume_hit", { ageMs: options.clock.now() - e.storedAt, activityChanged: e.activityHash !== key.activityHash });
       return e.result;
     },
-    touch(url) {
-      const page = stripFragment(url);
+    show(url) {
+      const page = url === null ? null : stripFragment(url);
+      if (page === shown) return;
       const now = options.clock.now();
-      for (const e of entries.values()) if (e.url === page && !expired(e.storedAt)) e.storedAt = now;
+      for (const e of entries.values()) if (e.url === shown) e.storedAt = now;
+      shown = page;
     },
-    dropOrigins(drop) {
-      for (const [k, e] of entries) if (drop(e.origin)) entries.delete(k);
+    dropWhere(drop) {
+      for (const [k, e] of entries) if (drop({ origin: e.origin, hadActivity: e.activityHash !== noActivity })) entries.delete(k);
     },
     clear() {
       entries.clear();
+      shown = null;
     },
   };
 }

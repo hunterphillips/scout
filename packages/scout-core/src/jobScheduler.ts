@@ -62,13 +62,14 @@
 // publishes `working{replacement}` → `idle` → its results, and the cancelled run publishes
 // nothing.
 //
-// Suggestions stick to their page (resumeCache.ts holds them 15 min, the window restarting when
-// the page's visit ends): a new visit whose key matches a stored answer, whatever activity the
+// Suggestions stick to their page (resumeCache.ts holds them while shown and 15 min after the
+// page's visit ends): a new visit whose key matches a stored answer, whatever activity the
 // user has read since, gets it republished through the same order, before the time and agent
 // checks, with no snapshot and so no job token. A page Scout opened from its own links
 // (`onLinkOpened`, from the result registry's resolved `open_link`) gets no job of its own for
 // OPENED_BY_SCOUT_TTL_MS: its settle is `job_skipped {reason: "opened_by_scout"}` and publishes
-// nothing. Pause clears the stored answers; losing an origin's permission drops that origin's.
+// nothing, even when the page has a stored answer. Pause clears the stored answers; losing an
+// origin's permission drops that origin's; issue capture withdrawn drops those that saw activity.
 //
 // Diagnostics (scalars only, never reasons, titles, URLs or prompts): job_started, job_finished,
 // job_cancelled, job_discarded, job_skipped, job_replaced, verify.
@@ -240,8 +241,6 @@ export function createJobScheduler(options: JobSchedulerOptions): JobScheduler {
   let stopped = false;
   /** Pages Scout opened from its links (fragment-free URL → when). */
   const opened = new Map<string, number>();
-  /** The page whose answer the current visit shows; its stored answer's window restarts when the visit ends. */
-  let shownUrl: string | null = null;
 
   const event = (name: string, fields: DiagnosticFields): void => diagnostics.event(name, fields);
   const isEnabled = (origin: string): boolean => {
@@ -258,7 +257,7 @@ export function createJobScheduler(options: JobSchedulerOptions): JobScheduler {
     if (shownEpoch() !== visit.epoch) return false;
     options.window.idle(visit.epoch);
     const out = options.results.publish({ ...answer, coreInstanceId: options.coreInstanceId, visitEpoch: visit.epoch, origin: visit.origin, jobId } as Parameters<ResultRegistry["publish"]>[0]);
-    if (out.ok && (answer.status === "ok" || answer.status === "empty")) shownUrl = visit.url;
+    if (out.ok && (answer.status === "ok" || answer.status === "empty")) options.resumeCache?.show(visit.url);
     return out.ok;
   };
 
@@ -270,10 +269,7 @@ export function createJobScheduler(options: JobSchedulerOptions): JobScheduler {
   };
 
   /** The shown visit ended: its page's stored answer keeps a full window from now. */
-  const leavePage = (): void => {
-    if (shownUrl !== null) options.resumeCache?.touch(shownUrl);
-    shownUrl = null;
-  };
+  const leavePage = (): void => options.resumeCache?.show(null);
 
   const releaseSnapshot = (job: Running, reason: "released" | "cancelled"): void => {
     if (job.snapshot !== null) options.snapshots()?.release(job.snapshot.id, reason);
@@ -526,7 +522,6 @@ export function createJobScheduler(options: JobSchedulerOptions): JobScheduler {
     onPause() {
       budget = null;
       skipped = null;
-      shownUrl = null;
       options.resumeCache?.clear();
       cancel("paused", "drop");
     },
@@ -537,7 +532,8 @@ export function createJobScheduler(options: JobSchedulerOptions): JobScheduler {
       cancel("visit_changed", "drop");
     },
     onPermissionsChanged() {
-      options.resumeCache?.dropOrigins((origin) => !view.isPermitted(origin));
+      const captureAllowed = view.captureAllowed();
+      options.resumeCache?.dropWhere((e) => !view.isPermitted(e.origin) || (e.hadActivity && !captureAllowed));
       const job = running;
       if (job === null || job.cancelled !== null) return;
       if (!view.isPermitted(job.visit.origin)) return cancel("revoked", "drop");

@@ -59,25 +59,33 @@ describe("job resume cache", () => {
     expect(cache.restore(key(), { hasUserTools: false })).toBe("b");
   });
 
-  it("touch() restarts the window of a page's entries (fragment ignored); other pages keep theirs", () => {
+  it("show() holds the shown page's entries (fragment ignored) and restarts their window when it stops being shown; other pages age", () => {
     const clock = { t: 0, now: () => clock.t };
     const cache = createJobResumeCache<string>({ clock });
     cache.store(key(), { result: "a", browserOnly: false });
     cache.store(key({ url: "https://docs.example.com/other" }), { result: "b", browserOnly: false });
-    clock.t = RESUME_TTL_MS - 1;
-    cache.touch("https://docs.example.com/billing#elsewhere");
-    clock.t = RESUME_TTL_MS + 1;
-    expect(cache.restore(key(), { hasUserTools: false })).toBe("a");
+    cache.show("https://docs.example.com/billing#elsewhere");
+    // A long read: the shown page's answer outlives the window, and a store's sweep keeps it.
+    clock.t = RESUME_TTL_MS + 5;
+    cache.store(key({ url: "https://docs.example.com/third" }), { result: "c", browserOnly: false });
     expect(cache.restore(key({ url: "https://docs.example.com/other" }), { hasUserTools: false })).toBeNull();
+    cache.show(null);
+    clock.t += RESUME_TTL_MS - 1;
+    expect(cache.restore(key(), { hasUserTools: false })).toBe("a");
+    clock.t += 1;
+    expect(cache.restore(key(), { hasUserTools: false })).toBeNull();
   });
 
-  it("dropOrigins() removes the entries of every origin the predicate names", () => {
+  it("dropWhere() removes the entries the predicate names, by origin or by whether the job saw activity", () => {
     const cache = createJobResumeCache<string>({ clock: { now: () => 0 } });
     cache.store(key(), { result: "a", browserOnly: false });
-    cache.store(key({ origin: "https://other.example.com", url: "https://other.example.com/" }), { result: "b", browserOnly: false });
-    cache.dropOrigins((origin) => origin === "https://other.example.com");
+    cache.store(key({ url: "https://docs.example.com/plain", activityHash: activityHash([]) }), { result: "p", browserOnly: false });
+    cache.store(key({ origin: "https://other.example.com", url: "https://other.example.com/", activityHash: activityHash([]) }), { result: "b", browserOnly: false });
+    cache.dropWhere((e) => e.origin === "https://other.example.com");
+    expect(cache.size).toBe(2);
+    cache.dropWhere((e) => e.hadActivity);
     expect(cache.size).toBe(1);
-    expect(cache.restore(key(), { hasUserTools: false })).toBe("a");
+    expect(cache.restore(key({ url: "https://docs.example.com/plain" }), { hasUserTools: false })).toBe("p");
   });
 
   it("holds at most RESUME_MAX_ENTRIES entries, evicting the oldest-stored; re-storing a key refreshes its order", () => {

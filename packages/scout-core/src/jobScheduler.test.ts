@@ -25,8 +25,8 @@ const CANDIDATES: Candidate[] = ["a", "b", "c", "d"].map((p, i) => ({
   provenance: "llms.txt" as const,
 }));
 
-const catalog = (candidates: Candidate[] = CANDIDATES): CatalogResolution => ({
-  result: { ok: true, source: "fresh", stale: false, catalog: { origin: ORIGIN, version: "cat-v1", fetchedAt: 0, candidates, truncated: false, errors: [] } },
+const catalog = (candidates: Candidate[] = CANDIDATES, version = "cat-v1"): CatalogResolution => ({
+  result: { ok: true, source: "fresh", stale: false, catalog: { origin: ORIGIN, version, fetchedAt: 0, candidates, truncated: false, errors: [] } },
   stats: { requests: 0, refused: 0, bytesReceived: 0, ms: 0 },
 });
 
@@ -855,7 +855,7 @@ describe("job scheduler: resume cache", () => {
     // Another catalog is another key.
     h.world.visit = { ...h.world.visit!, epoch: 5 } as ActiveVisit;
     h.scheduler.onVisitChanged();
-    h.settle(h.clock.t, { ...catalog(), result: { ...(catalog().result as { ok: true; catalog: object }), catalog: { ...(catalog().result as { ok: true; catalog: object }).catalog, version: "cat-v2" } } } as CatalogResolution);
+    h.settle(h.clock.t, catalog(CANDIDATES, "cat-v2"));
     expect(h.agent.calls).toHaveLength(2);
 
     const toolsCache = createJobResumeCache<JobAnswer>({ clock: { now: () => 0 } });
@@ -933,6 +933,51 @@ describe("job scheduler: suggestions stick to their page (issue 18)", () => {
     expect(h.agent.calls).toHaveLength(2);
   });
 
+  it("a page read for longer than the window keeps its answer: A for 20 min → B → A republishes", async () => {
+    const h = harness({ withResumeCache: true });
+    h.settle();
+    h.agent.calls[0]!.answer(ok(["c2"]));
+    await flush();
+    h.clock.t += 20 * MIN;
+    go(h, "/b", 4);
+    h.settle();
+    h.agent.calls[1]!.answer(ok(["c1"]));
+    await flush();
+    h.clock.t += MIN;
+    go(h, "/billing", 5);
+    h.settle();
+    await flush();
+    expect(h.agent.calls).toHaveLength(2);
+    expect(h.frames.at(-1)).toMatchObject({ type: "results", status: "ok", items: [{ candidateId: "c2" }] });
+  });
+
+  it("issue capture withdrawn drops answers built from issue text, and keeps those built without it", async () => {
+    const h = harness({ withResumeCache: true });
+    h.settle();
+    h.agent.calls[0]!.answer(ok(["c0"]));
+    await flush();
+    // B's job saw no activity.
+    h.world.grant = false;
+    go(h, "/b", 4);
+    h.settle();
+    h.agent.calls[1]!.answer(ok(["c1"]));
+    await flush();
+    h.world.grant = true;
+    go(h, "/c", 5);
+    h.world.capture = false;
+    h.scheduler.onPermissionsChanged();
+    go(h, "/billing", 6);
+    h.settle();
+    expect(h.agent.calls).toHaveLength(3);
+    h.agent.calls[2]!.answer(ok(["c0"]));
+    await flush();
+    go(h, "/b", 7);
+    h.settle();
+    await flush();
+    expect(h.agent.calls).toHaveLength(3);
+    expect(h.frames.at(-1)).toMatchObject({ type: "results", status: "ok", items: [{ candidateId: "c1" }] });
+  });
+
   it.each<[string, (h: ReturnType<typeof harness>, rev: { n: number }) => void]>([
     [
       "pause",
@@ -955,6 +1000,7 @@ describe("job scheduler: suggestions stick to their page (issue 18)", () => {
     ],
     [
       "a revoked resource",
+      // The store bumps its approval revision on a revoke; with no job running, the scheduler's hook has nothing to cancel.
       (h, rev) => {
         rev.n += 1;
         h.scheduler.onResourceRevoked("r1");
