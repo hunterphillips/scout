@@ -194,8 +194,11 @@ async function boot(home, env, children) {
   core.stderr.on("data", (c) => (err += c));
   core.stdin.on("error", () => {});
   const exited = new Promise((resolve) => core.once("exit", (code, signal) => resolve({ code, signal })));
-  const panel = () => out.split("\n").filter(Boolean).map((l) => JSON.parse(l));
+  // The window's frames and commands go over the relay (the side panel); stdout and stdin are the
+  // app's: state frames out, frontmost/pause/resume/shutdown in.
+  const panel = () => toChrome.filter((f) => f.type === "panel").map((f) => f.state);
   const command = (obj) => core.stdin.write(`${JSON.stringify(obj)}\n`);
+  const panelCommand = (obj) => host.stdin.write(frame({ type: "command", command: obj }));
   command({ type: "frontmost", bundleId: "com.google.Chrome", at: Date.now() });
   await until(() => toChrome.some((f) => f.type === "ready"), "ready from the host");
   let seq = 0;
@@ -208,7 +211,7 @@ async function boot(home, env, children) {
   const focus = (tabId, path, documentId) =>
     sense({ kind: "focus", browserFocused: true, windowId: 1, tabId, url: path.startsWith("https://") ? path : `${SITE}${path}`, title: "Docs", incognito: false, permissionsRevision: permRev, ...(documentId ? { documentId } : {}) });
   const diagEvents = () => readLines(join(home, "logs", "diagnostics.jsonl"));
-  return { host, core, toChrome, panel, command, sense, grant, focus, dns, exited, diagEvents, stderr: () => err, fake: () => readLines(join(home, "fake.log")) };
+  return { host, core, toChrome, panel, command, panelCommand, sense, grant, focus, dns, exited, diagEvents, stderr: () => err, fake: () => readLines(join(home, "fake.log")) };
 }
 
 /** Capture one GitHub issue (title and body are fixture secrets) through the real gate. */
@@ -241,7 +244,7 @@ async function resultsOf(b, jobId, ms = 40_000) {
 async function openLink(b, identity) {
   const commandId = `open-${Math.random().toString(36).slice(2, 10)}`;
   const caps = b.panel().find((f) => f.type === "capabilities");
-  b.command({ type: "open_link", commandId, coreInstanceId: caps.coreInstanceId, ...identity });
+  b.panelCommand({ type: "open_link", commandId, coreInstanceId: caps.coreInstanceId, ...identity });
   await until(() => b.panel().some((f) => f.type === "ack" && f.commandId === commandId), "the open_link ack");
   return b.panel().find((f) => f.type === "ack" && f.commandId === commandId);
 }
@@ -639,7 +642,7 @@ describe.skipIf(!BUILT)("Phase 3 verification e2e: B7/B12/B13 closing paths end 
     expect(entry).toBeDefined();
     const started = () => b.diagEvents().filter((e) => e.event === "job_started").length;
     const n = started();
-    b.command({ type: "revoke", commandId: "rv1", resourceId, expectedRevision: entry.resourceRevision });
+    b.panelCommand({ type: "revoke", commandId: "rv1", resourceId, expectedRevision: entry.resourceRevision });
     await until(() => b.panel().some((f) => f.type === "ack" && f.commandId === "rv1"), "the revoke ack");
     expect(b.panel().find((f) => f.type === "ack" && f.commandId === "rv1")).toMatchObject({ ok: true });
     await until(() => b.diagEvents().some((e) => e.event === "job_cancelled" && e.reason === "revoked"), "job_cancelled revoked");
@@ -699,7 +702,7 @@ describe.skipIf(!BUILT)("P4.6 recommendations switch: set_destination and a hand
   /** Send set_destination and wait for its ack. */
   async function setDestination(enabled, expectedEnabled) {
     const commandId = `dst-${++ids}`;
-    b.command({ type: "set_destination", commandId, origin: SITE, enabled, expectedEnabled });
+    b.panelCommand({ type: "set_destination", commandId, origin: SITE, enabled, expectedEnabled });
     await until(() => b.panel().some((f) => f.type === "ack" && f.commandId === commandId), `the ${commandId} ack`);
     return b.panel().find((f) => f.type === "ack" && f.commandId === commandId);
   }
