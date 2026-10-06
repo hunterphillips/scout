@@ -320,13 +320,13 @@ switch (mode) {
     break;
   }
   case "ignore-term":
-    await startAndHang();
     process.on("SIGTERM", () => {});
+    await startAndHang();
     hang();
     break;
   case "sleep-ignore-term": {
-    await startAndHang();
     process.on("SIGTERM", () => {});
+    await startAndHang();
     const sleeper = (detached) => spawn("/bin/sh", ["-c", "trap '' TERM; exec /bin/sleep 300"], { stdio: "ignore", detached }).pid;
     logLine({ descendantPids: [sleeper(false), sleeper(true)] });
     hang();
