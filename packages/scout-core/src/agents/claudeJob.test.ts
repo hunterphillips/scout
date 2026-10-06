@@ -24,7 +24,8 @@ import {
 import { FORWARD_KEYS, runDirectPreflight } from "./launchProfile.js";
 import { createPreflightFacade, type PreflightReportLike } from "./preflightWorker.js";
 import { ProcessTracker } from "./processTree.js";
-import { DEFAULT_AGENT_MODEL, type AgentProfile } from "./profile.js";
+import { DEFAULT_CLAUDE_CODE_MODEL } from "./claudeCode/profile.js";
+import type { AgentProfile } from "./profile.js";
 import { markerInstructionText, newInstructionMarker } from "./prompt.js";
 import { fakeBackend, selection, type FakeBackendDef } from "./testing/fakeBackend.js";
 import { FIXTURE_ORIGIN, installFakeCli, startFixtureCore, type FakeCli, type FixtureCore } from "./testing/fakeCli.js";
@@ -74,7 +75,7 @@ async function setup(opts: { mode?: string; version?: string; preflightVersion?:
   mkdirSync(join(userHome, ".claude"), { recursive: true });
   const fake = installFakeCli(base, opts.mode ?? "ok", opts.version);
   const core = await startFixtureCore(base);
-  const profile: AgentProfile = { schemaVersion: 1, adapter: "claude-code", claudePath: fake.path, model: DEFAULT_AGENT_MODEL };
+  const profile: AgentProfile = { schemaVersion: 1, adapter: "claude-code", claudePath: fake.path, model: DEFAULT_CLAUDE_CODE_MODEL };
   if (opts.tools) profile.tools = opts.tools(base);
   const diagPath = join(base, "diag.jsonl");
   const diagWarnings: string[] = [];
@@ -201,7 +202,7 @@ describe("claude job: happy path", () => {
     expect(out.details).toMatchObject({
       adapter: "claude-code",
       termination: "completed",
-      model: DEFAULT_AGENT_MODEL,
+      model: DEFAULT_CLAUDE_CODE_MODEL,
       cliVersion: VERIFIED_CLI_VERSION,
       toolUses: ["mcp__scout__current_site", "mcp__scout__recent_activity"],
       optionalTools: [],
@@ -215,7 +216,7 @@ describe("claude job: happy path", () => {
     const allowed = ["current_site", "recent_activity", "site_links", "list_resources", "read_resource"].map((t) => `mcp__scout__${t}`).join(",");
     // The argv names the private job dir SCOUT_HOME/run/jobs/<request id>, which is gone.
     const jobDir = join(e.scoutHome, "run", "jobs", "job-1");
-    expect(call!.argv).toEqual(buildJobArgv(DEFAULT_AGENT_MODEL, jobDir, allowed));
+    expect(call!.argv).toEqual(buildJobArgv(DEFAULT_CLAUDE_CODE_MODEL, jobDir, allowed));
     expect(existsSync(jobDir)).toBe(false);
     // The CLI ran from the one stable cwd, SCOUT_HOME/run/agent-cwd (0700), which stays.
     expect(call!.cwd).toBe(join(e.scoutHome, "run", AGENT_CWD_DIR));
@@ -241,7 +242,7 @@ describe("claude job: happy path", () => {
     // Diagnostics: one scalar line, nothing the filter had to drop, no content.
     const lines = diagLines(e).filter((l) => l.event === "agent_job");
     expect(lines).toHaveLength(1);
-    expect(lines[0]).toMatchObject({ status: "ok", termination: "completed", origin: FIXTURE_ORIGIN, picks: 2, cliVersion: VERIFIED_CLI_VERSION, model: DEFAULT_AGENT_MODEL, turns: 3, usageIn: 100 });
+    expect(lines[0]).toMatchObject({ status: "ok", termination: "completed", origin: FIXTURE_ORIGIN, picks: 2, cliVersion: VERIFIED_CLI_VERSION, model: DEFAULT_CLAUDE_CODE_MODEL, turns: 3, usageIn: 100 });
     expect(lines[0]!.req).toMatch(/^[0-9a-f]{16}$/);
     expect(e.diagWarnings).toEqual([]);
     const text = readFileSync(e.diagPath, "utf8");
@@ -675,7 +676,7 @@ describe("claude job: gates before launch", () => {
     let runs = 0;
     const fresh = createClaudeJobAdapter({
       home: e.scoutHome,
-      profile: { schemaVersion: 1, adapter: "claude-code", claudePath: e.fake.path, model: DEFAULT_AGENT_MODEL },
+      profile: { schemaVersion: 1, adapter: "claude-code", claudePath: e.fake.path, model: DEFAULT_CLAUDE_CODE_MODEL },
       parentEnv: gatewayParentEnv(e.userHome),
       preflightAsync: async () => {
         runs += 1;
@@ -736,7 +737,7 @@ describe("claude job: gates before launch", () => {
     let spawned = 0;
     const adapter = createClaudeJobAdapter({
       home: sb.scoutHome,
-      profile: { schemaVersion: 1, adapter: "claude-code", claudePath: sb.claudePath, model: DEFAULT_AGENT_MODEL },
+      profile: { schemaVersion: 1, adapter: "claude-code", claudePath: sb.claudePath, model: DEFAULT_CLAUDE_CODE_MODEL },
       parentEnv: gatewayParentEnv(sb.home),
       preflight: (o) => runDirectPreflight({ ...o, managedPaths: sb.managedPaths, projectStopAt: sb.root, username: "someone", spawnSync: fake.spawnSync }),
       spawn: () => {
@@ -800,7 +801,7 @@ describe("claude job: gates before launch", () => {
 
 describe("claude job: launch-profile failures by cause", () => {
   it("the CLI binary is gone: unavailable agent_unavailable, never spawns", async () => {
-    const e = await setup({ deps: { profile: { schemaVersion: 1, adapter: "claude-code", claudePath: "/nonexistent-scout-test/claude", model: DEFAULT_AGENT_MODEL } } });
+    const e = await setup({ deps: { profile: { schemaVersion: 1, adapter: "claude-code", claudePath: "/nonexistent-scout-test/claude", model: DEFAULT_CLAUDE_CODE_MODEL } } });
     const out = await e.adapter.run(request(e), { toolSurface: surface(e) });
     expect(out.result).toMatchObject({ status: "unavailable", reason: "agent_unavailable" });
     expect(out.details).toMatchObject({ termination: "agent_unavailable", detail: "launch_profile" });

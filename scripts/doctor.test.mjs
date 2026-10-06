@@ -131,6 +131,13 @@ describe("doctor report", () => {
     expect(new Set(lines)).toEqual(new Set(["--version"]));
   });
 
+  it("CLI: a profile for another adapter gets no claude checks", () => {
+    writeFileSync(L.agentProfile, JSON.stringify({ schemaVersion: 1, adapter: "other-agent" }), { mode: 0o600 });
+    const cli = report().CLI;
+    expect(cli).toMatchObject({ status: "warn", summary: "adapter other-agent" });
+    expect(cli.checks.some((c) => /claude/.test(c.label))).toBe(false);
+  });
+
   it("billing: reports the core's last logged verdict, else not yet checked, and never runs a preflight", () => {
     expect(report().billing).toMatchObject({ status: "warn", summary: "not yet checked" });
     mkdirSync(L.logsDir, { recursive: true });

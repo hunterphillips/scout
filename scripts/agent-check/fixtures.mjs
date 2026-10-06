@@ -9,13 +9,13 @@ import { isAbsolute, join, relative, resolve } from "node:path";
 import { REPO_ROOT } from "../lib/paths.mjs";
 import { createFixtureBackend } from "../../packages/scout-mcp/dist/fixture.js";
 import { serveFixture } from "../../packages/scout-mcp/dist/test-support/fixtureSocket.js";
-import { DEFAULT_AGENT_MODEL } from "../../packages/scout-core/dist/agents/profile.js";
+import { DEFAULT_CLAUDE_CODE_MODEL } from "../../packages/scout-core/dist/agents/claudeCode/profile.js";
 import { schemaHash } from "../../packages/scout-core/dist/agents/toolProfile.js";
 
 export const SCOUT_MCP_MAIN = join(REPO_ROOT, "packages", "scout-mcp", "dist", "main.js");
 /** The synthetic stdio backend (honest mode) used as the user's selected tool. */
 export const FAKE_BACKEND = join(REPO_ROOT, "packages", "scout-core", "src", "agents", "testing", "fake-backend.mjs");
-export const CHECK_MODEL = DEFAULT_AGENT_MODEL;
+export const CHECK_MODEL = DEFAULT_CLAUDE_CODE_MODEL;
 /** Reserved for documentation (RFC 6761), so nothing real is ever named. */
 export const SKILL_SITE = "https://scout-proof.example";
 export const JOB_SITE = "https://docs.example.com";

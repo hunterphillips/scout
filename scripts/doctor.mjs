@@ -33,7 +33,7 @@ import { HOST_NAME, REPO_ROOT, layout, locationOverrideRefusal } from "./lib/pat
 import { EXTENSION_ID_RE, extensionIdFromManifestKey, extensionIdFromPem } from "./lib/extension-key.mjs";
 import { isExecutableFile } from "./lib/executables.mjs";
 import { allowedPath, readInstalled } from "./lib/installed.mjs";
-import { exists, readJsonObject, wrapperScript } from "./lib/files.mjs";
+import { builtConstant, exists, readJsonObject, wrapperScript } from "./lib/files.mjs";
 import { isMain } from "./lib/is-main.mjs";
 import { checkIntegration, integrationClaude } from "./lib/agent-integration.mjs";
 import { bundleHash, applicationsRefusal, isScoutBundle, launchAgentRefusal, sha256 } from "./lib/app-bundle.mjs";
@@ -51,13 +51,6 @@ const tryRead = (fn) => {
     return { error: e.message };
   }
 };
-
-/** `export const NAME = <number or "string">` from a built file, or null. */
-function builtConstant(path, name) {
-  const text = tryRead(() => readFileSync(path, "utf8")).value;
-  const m = text && new RegExp(`export const ${name} = ("[^"]*"|\\d+);`).exec(text);
-  return m ? JSON.parse(m[1]) : null;
-}
 
 /**
  * Every section: [{ title, status: "ok"|"warn"|"fail", summary, checks: [{ status: "OK"|"WARN"|"FAIL", label, detail }] }].
@@ -221,9 +214,14 @@ export function runReport(env = process.env, { claudeFallbacks, mcpTimeoutMs, re
   const profile = tryRead(() => readJsonObject(L.agentProfile));
   const recordedProfile = record?.files.find((f) => f.kind === "agent-profile");
   let claudePath = null;
+  // The checks below are Claude Code's; another adapter gets none here.
+  const otherAdapter = profile.value && profile.value.adapter !== "claude-code" ? String(profile.value.adapter) : null;
   if (profile.value) {
-    claudePath = typeof profile.value.claudePath === "string" && isAbsolute(profile.value.claudePath) ? profile.value.claudePath : null;
-    check(isExecutableFile(claudePath), "agent profile names an executable claude", `${L.agentProfile}: ${String(profile.value.claudePath)}`);
+    if (otherAdapter !== null) add("WARN", "agent profile", `adapter ${otherAdapter}: no checks in doctor`);
+    else {
+      claudePath = typeof profile.value.claudePath === "string" && isAbsolute(profile.value.claudePath) ? profile.value.claudePath : null;
+      check(isExecutableFile(claudePath), "agent profile names an executable claude", `${L.agentProfile}: ${String(profile.value.claudePath)}`);
+    }
     const text = tryRead(() => readFileSync(L.agentProfile, "utf8")).value;
     if (recordedProfile && text != null && sha256(text) !== recordedProfile.sha256) add("OK", "agent profile", "edited since setup wrote it (yours now; uninstall leaves it)");
   } else {
@@ -239,7 +237,7 @@ export function runReport(env = process.env, { claudeFallbacks, mcpTimeoutMs, re
     else if (verified && version !== verified) add("WARN", "claude version matches the verified one (advisory)", `${version}; Scout's flag set was verified with ${verified}. Jobs still run; a new version triggers one re-check of billing`);
     else add("OK", "claude version matches the verified one (advisory)", `${version}${verified ? "" : " (verified version unknown: scout-core not built)"}`);
   } else if (!profile.value) add("WARN", "claude", "not found on PATH, ~/.local/bin, or /opt/homebrew/bin");
-  current.summary = claudePath ? `${claudePath}${version ? ` ${version}` : ""}${verified ? ` (verified ${verified})` : ""}` : "no claude";
+  current.summary = claudePath ? `${claudePath}${version ? ` ${version}` : ""}${verified ? ` (verified ${verified})` : ""}` : otherAdapter !== null ? `adapter ${otherAdapter}` : "no claude";
 
   // ---- billing
   const pre = lastPreflight(L.diagnosticsLog);

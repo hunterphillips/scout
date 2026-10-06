@@ -244,7 +244,7 @@ async function reviewAndInspect(ctx: Ctx, file: string, allowStart: boolean, ref
       try {
         profile = createDefaultAgentProfile(ctx.io.env ?? process.env);
       } catch (e) {
-        return ctx.fail(e instanceof AgentProfileError ? `${e.code}: the agent profile needs the claude CLI; install it or put it on PATH` : "profile: could not be created");
+        return ctx.fail(e instanceof AgentProfileError ? `${e.code}: the agent profile needs it; install it or put it on PATH` : "profile: could not be created");
       }
     }
     const tools: ToolsProfile = profile.tools ?? { connections: [], selections: [] };

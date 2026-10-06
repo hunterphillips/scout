@@ -7,12 +7,12 @@ import {
   agentProfilePath,
   AgentProfileSchema,
   createDefaultAgentProfile,
-  DEFAULT_AGENT_MODEL,
   loadAgentProfile,
   profileFingerprint,
   writeAgentProfile,
   type AgentProfile,
 } from "./profile.js";
+import { DEFAULT_CLAUDE_CODE_MODEL } from "./claudeCode/profile.js";
 
 const dirs: string[] = [];
 afterEach(() => {
@@ -24,7 +24,7 @@ function home(): string {
   return d;
 }
 
-const profile: AgentProfile = { schemaVersion: 1, adapter: "claude-code", claudePath: "/opt/bin/claude", model: DEFAULT_AGENT_MODEL };
+const profile: AgentProfile = { schemaVersion: 1, adapter: "claude-code", claudePath: "/opt/bin/claude", model: DEFAULT_CLAUDE_CODE_MODEL };
 
 function codeOf(fn: () => unknown): string | undefined {
   try {
@@ -44,7 +44,7 @@ describe("agent profile", () => {
     writeFileSync(claude, "#!/bin/sh\n");
     chmodSync(claude, 0o755);
     expect(createDefaultAgentProfile({ PATH: bin })).toEqual({ ...profile, claudePath: claude });
-    expect(DEFAULT_AGENT_MODEL).toBe("claude-sonnet-5-5");
+    expect(DEFAULT_CLAUDE_CODE_MODEL).toBe("claude-sonnet-5-5");
     expect(codeOf(() => createDefaultAgentProfile({ PATH: h }))).toBe("profile: claude not found on PATH");
   });
 
@@ -71,6 +71,8 @@ describe("agent profile", () => {
     ["a model without a minor version", { ...profile, model: "claude-opus-5" }],
     ["tool references before P1.3 supports them", { ...profile, tools: [{ server: "notes" }] }],
     ["another schema version", { ...profile, schemaVersion: 2 }],
+    ["an unknown adapter", { ...profile, adapter: "other-agent" }],
+    ["no adapter", { schemaVersion: 1, claudePath: "/opt/bin/claude", model: DEFAULT_CLAUDE_CODE_MODEL }],
   ])("refuses %s", (_l, content) => {
     const h = home();
     writeFileSync(agentProfilePath(h), JSON.stringify(content), { mode: 0o600 });

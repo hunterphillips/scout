@@ -26,9 +26,10 @@ export function makeFixture({ withClaude = true, rootPrefix = "scout setup test 
   const scoutRoot = join(root, spaces ? "scout root" : "scout-root");
   const binDir = join(root, "bin");
   for (const d of ["browser-extension", "native-host", "scout-core", "scout-mcp", "contracts"]) mkdirSync(join(scoutRoot, "packages", d, "dist"), { recursive: true });
-  mkdirSync(join(scoutRoot, "packages", "scout-core", "dist", "agents"), { recursive: true });
+  mkdirSync(join(scoutRoot, "packages", "scout-core", "dist", "agents", "claudeCode"), { recursive: true });
   writeFileSync(join(scoutRoot, "packages/contracts/dist/bridge.js"), "export const BRIDGE_PROTOCOL = 3;\n");
   writeFileSync(join(scoutRoot, "packages/scout-core/dist/agents/claudeJob.js"), 'export const VERIFIED_CLI_VERSION = "2.1.286";\n');
+  writeFileSync(join(scoutRoot, "packages/scout-core/dist/agents/claudeCode/profile.js"), 'export const CLAUDE_CODE_ADAPTER_ID = "claude-code";\nexport const DEFAULT_CLAUDE_CODE_MODEL = "claude-sonnet-5-5";\n');
   writeFileSync(join(scoutRoot, "packages/browser-extension/dist/manifest.json"), JSON.stringify(FAKE_MANIFEST, null, 2) + "\n");
   writeFileSync(join(scoutRoot, "packages/native-host/dist/host.js"), "// fake host\n");
   writeFileSync(join(scoutRoot, "packages/scout-core/dist/main.js"), "// fake core\n");

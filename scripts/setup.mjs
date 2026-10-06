@@ -22,18 +22,15 @@
 // Never touches ~/.rook or any process.
 
 import { chmodSync, lstatSync, mkdirSync, readFileSync, statSync } from "node:fs";
-import { resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { APP_BUNDLE_ID, DEFAULT_DESTINATIONS, HOST_NAME, REPO_ROOT, appBinary, isRealScoutHome, layout, locationOverrideRefusal, scoutHome } from "./lib/paths.mjs";
 import { extensionIdFromPem, generateKeyPem, manifestKey } from "./lib/extension-key.mjs";
 import { isExecutableFile, resolveNode } from "./lib/executables.mjs";
 import { newMarker, readInstalled, saveInstalled, upsertEntry } from "./lib/installed.mjs";
-import { checkPrivateDir, ensurePrivateDir, exists, fileMarker, readJsonObject, shDoubleQuote, wrapperScript, writeFileMode, writeJson } from "./lib/files.mjs";
+import { builtConstant, checkPrivateDir, ensurePrivateDir, exists, fileMarker, readJsonObject, shDoubleQuote, wrapperScript, writeFileMode, writeJson } from "./lib/files.mjs";
 import { isMain } from "./lib/is-main.mjs";
 import { INTEGRATION_EXPLANATION, applyIntegration, describeIntegration, integrationClaude, planIntegration, recordedIntegration } from "./lib/agent-integration.mjs";
 import { applicationsRefusal, bundleIdOf, launchAgentPlist, launchAgentRefusal, sha256 } from "./lib/app-bundle.mjs";
-
-/** The core's agent profile defaults (packages/scout-core/src/agents/profile.ts). */
-export const AGENT_PROFILE_DEFAULTS = Object.freeze({ schemaVersion: 1, adapter: "claude-code", model: "claude-sonnet-5-5" });
 
 /** Lines setup prints after an install: the one-time steps it cannot do itself. */
 export const NEXT_STEPS = [
@@ -219,13 +216,18 @@ function agentProfileStep({ L, record, claudePath }) {
     return { note: `kept ${L.agentProfile} as it is (${recorded ? "changed since setup wrote it" : "not written by setup"}); Scout's jobs use the claude path and model it names` };
   }
   if (!claudePath) return {};
-  const text = JSON.stringify({ ...AGENT_PROFILE_DEFAULTS, claudePath }, null, 2) + "\n";
+  // The Claude Code profile's adapter id and initial model, from the built scout-core.
+  const built = join(L.scoutRoot, "packages", "scout-core", "dist", "agents", "claudeCode", "profile.js");
+  const adapter = builtConstant(built, "CLAUDE_CODE_ADAPTER_ID");
+  const model = builtConstant(built, "DEFAULT_CLAUDE_CODE_MODEL");
+  if (adapter === null || model === null) throw new Error(`scout-core not built: ${built} is missing\nRun \`npm run build\` in ${L.scoutRoot} first.`);
+  const text = JSON.stringify({ schemaVersion: 1, adapter, model, claudePath }, null, 2) + "\n";
   return {
     step: {
       path: L.agentProfile,
       kind: "agent-profile",
       mode: 0o600,
-      summary: `claudePath=${claudePath} model=${AGENT_PROFILE_DEFAULTS.model} (written only because none exists)`,
+      summary: `claudePath=${claudePath} model=${model} (written only because none exists)`,
       entry: { path: L.agentProfile, kind: "agent-profile", sha256: sha256(text) },
       write: () => writeFileMode(L.agentProfile, text, 0o600),
     },
