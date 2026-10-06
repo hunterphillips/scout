@@ -1,6 +1,6 @@
 // Everything the side panel shows: the link to the core, the core's status, results, the
 // capability view, previews, command states, and the user's section and preview selection.
-// A port of ScoutKit's PanelModel (native/Scout/Sources/ScoutKit/PanelModel.swift).
+// A port of ScoutKit's PanelModel.
 //
 // Every event goes through `applyLink` / `apply`, every user action through a method that
 // returns the commands to send. Nothing here changes the section or the shown preview except a

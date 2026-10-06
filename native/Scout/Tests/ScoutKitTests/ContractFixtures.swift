@@ -32,11 +32,4 @@ enum ContractFixtures {
             .filter { $0.hasPrefix(prefix) && $0.hasSuffix(".json") }
             .sorted()
     }
-
-    static let rid = "res_" + String(repeating: "a", count: 64)
-    static let rid2 = "res_" + String(repeating: "b", count: 64)
-    static let v1 = String(repeating: "1", count: 64)
-    static let v2 = String(repeating: "2", count: 64)
-    static let v3 = String(repeating: "3", count: 64)
-    static let origin = "https://docs.example.com"
 }

@@ -1,5 +1,5 @@
 // The core's latest capability view, browser-context grant and context-read audit. A port of
-// ScoutKit's CapabilityModel (native/Scout/Sources/ScoutKit/CapabilityModel.swift).
+// ScoutKit's CapabilityModel.
 // `capabilities` frames replace each other whole; a frame from the same core instance with a
 // lower `revision` than the one held is stale and dropped; another `coreInstanceId` starts a
 // new revision sequence. A `grant` frame also carries the sites with recommendations on

@@ -1,4 +1,4 @@
-// Ported from native/Scout/Tests/ScoutKitTests/ResultsModelTests.swift. The app's sidecar
+// Ported from ScoutKit's ResultsModelTests.swift. The app's sidecar
 // `.running` is the worker's link `connected`; `.starting`/`.stopped` are a link that is down.
 // The opener the Swift tests inject is chrome.tabs.create here (panel-app.test.ts); these cases
 // check what the model queues and refuses.
@@ -224,7 +224,7 @@ describe("ResultsModel (ResultsModelTests.swift)", () => {
     const click = m.openResult("c1")!;
     const id = click.commandId;
     expect(m.canRetry(id)).toBe(false);
-    // Swift leaves an unsent click to the pipe's own re-send; the panel never re-sends a click.
+    // The panel never re-sends a click.
     m.markSent(click, "retryLater");
     expect(m.commands.unsent).toEqual([]);
     expect(m.commands.record(id)).toMatchObject({ state: "failed", code: "unavailable" });

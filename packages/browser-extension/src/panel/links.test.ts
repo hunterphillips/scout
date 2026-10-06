@@ -1,4 +1,4 @@
-// Ported from native/Scout/Tests/ScoutKitTests/LinkOpenerTests.swift: the same table of hrefs.
+// Ported from ScoutKit's LinkOpenerTests.swift: the same table of hrefs.
 import { SOURCE_URL_MAX_CHARS } from "@scout/contracts";
 import { describe, expect, it } from "vitest";
 import { checkLink, LINK_REFUSALS, type LinkRefusal, refusalText, URL_MAX_BYTES } from "./links.js";
