@@ -1,8 +1,8 @@
-// One recommendation job, from its immutable snapshot to the answer Scout's window may show:
+// One recommendation job, from its immutable snapshot to the answer the side panel may show:
 // build the job request from a fixed template, run the user's agent through the adapter,
 // validate its picks, verify at most three targets with the bounded checker, and map them to
 // display items. The scheduler (jobScheduler.ts) owns when a job runs, its cancellation, the
-// window's state frames, and the publish; this file owns what the answer is.
+// panel's state frames, and the publish; this file owns what the answer is.
 //
 // The request carries only what the snapshot fixed: model-facing candidate fields (id, title,
 // description, label quality; never the link `site_links` serves), the snapshot's id and
@@ -21,7 +21,7 @@
 // Answers: `empty` only when the model said so. Picks are validated against the snapshot's
 // candidates (an unknown or repeated id is `error/invalid_output`); picks that all fail
 // verification are `error/agent_failed` with `verifyAllFailed` in the details, never "nothing
-// relevant". Reasons go only into the answer for Scout's window; never into diagnostics.
+// relevant". Reasons go only into the answer for the side panel; never into diagnostics.
 
 import { JOB_MAX_PICKS, type Candidate, type HostJobResult, type JobRequest } from "@scout/contracts";
 import type { JobSnapshot } from "./activity/snapshots.js";
@@ -107,7 +107,7 @@ export function buildJobRequest(input: Pick<RunJobInput, "coreInstanceId" | "sna
   };
 }
 
-/** A host result (anything but `ok`) as the window's answer. */
+/** A host result (anything but `ok`) as the panel's answer. */
 function nonOkAnswer(result: Exclude<HostJobResult, { status: "ok" }>): JobAnswer {
   switch (result.status) {
     case "empty":

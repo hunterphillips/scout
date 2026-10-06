@@ -41,7 +41,7 @@ describe("job resume cache", () => {
     expect(cache.size).toBe(0);
   });
 
-  // Ported from the legacy rank cache's tests when P4.4 removed it.
+  // Ported from the removed rank cache's tests.
   it("sweeps expired entries on store", () => {
     const clock = { t: 0, now: () => clock.t };
     const cache = createJobResumeCache<string>({ clock });

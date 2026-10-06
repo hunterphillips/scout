@@ -1,5 +1,5 @@
-// Phase 3 verification, B11: switching tab, document, or app during discovery, model execution,
-// target checks, and click authorization. Old results and links are refused at every stage.
+// Switching tab, document, or app during discovery, model execution, target checks, and click
+// authorization. Old results and links are refused at every stage.
 //
 // Wired as main.ts wires the core: the real coordinator (dwell, visit tracker, permissions,
 // discovery runner), the real job scheduler and pipeline, the real result registry, the real
@@ -9,7 +9,8 @@
 // answers `ok` after a cancel, as the adapter can during its drain window), and target
 // verification (resolves when told, ignoring the job's signal: the strictest case).
 //
-// The frames list is what the window receives (state frames, results frames and acks on one stream).
+// The frames list is what the side panel receives (state frames, results frames and acks on
+// one stream).
 
 import type { ActiveVisit, BrowserObservation, Candidate, HostJobResult, JobRequest, ObservationFrame, PanelState, ToChromeFrame } from "@scout/contracts";
 import { describe, expect, it } from "vitest";
@@ -358,7 +359,7 @@ describe("B11: a tab, document or app switch at every stage refuses the old visi
         const before = c.frames.length;
         doSwitch(c);
         expect(c.results.current()).toBeNull();
-        // The window is told: the state for the new visit (or none) replaces the old one.
+        // The side panel is told: the state for the new visit (or none) replaces the old one.
         const state = c.frames.slice(before).filter((f) => f.type === "state");
         expect(state.length).toBeGreaterThan(0);
         expect(state.every((f) => f.type === "state" && f.visitEpoch !== epoch)).toBe(true);

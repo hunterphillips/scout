@@ -1,5 +1,5 @@
 // `cli.js capabilities unexport-all`: the one-shot uninstall runs before it drops the recorded
-// skills root (P4.3).
+// skills root.
 import { createHash } from "node:crypto";
 import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";

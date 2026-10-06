@@ -1,4 +1,4 @@
-// The in-memory record of browser-context reads over agent.sock, for Scout's window (P2.5)
+// The in-memory record of browser-context reads over agent.sock, for the side panel
 // to show what the user's agent looked at. Bounded to the last READ_AUDIT_MAX_ENTRIES and
 // never persisted. An entry holds the method, the caller's role, the outcome and at most
 // the site origin: never a full URL, title, page text, or token.

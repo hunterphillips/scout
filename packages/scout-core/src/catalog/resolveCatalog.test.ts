@@ -62,7 +62,8 @@ describe("createCatalogResolver on a shared session", () => {
     const cancelled = await pass(cancelling.guardedFetch, (s) => (session = s));
 
     expect(cancelling.paths).not.toContain("/sitemap.xml");
-    // Since P4.4 the resolver's pass also stops at its first yield once cancelled, so nothing usable comes back.
+    // The resolver's pass also stops at its first yield once cancelled, so nothing usable
+    // comes back.
     expect(cancelled.result).toMatchObject({ ok: false, code: "discover_failed" });
     expect(!cancelled.result.ok && cancelled.result.errors).toEqual(expect.arrayContaining(["pass:cancelled", "fetch:refused"]));
     expect(existsSync(cacheFile())).toBe(false);

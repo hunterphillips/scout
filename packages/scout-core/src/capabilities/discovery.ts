@@ -60,7 +60,7 @@ const INDEX_ACCEPT = "application/json";
 /** Where an item's answer came from this pass. */
 export type ProbeSource = "network" | "not_modified" | "cache" | "none";
 
-/** Public website text Scout accepted, with what P2.3 needs to build a version. */
+/** Public website text Scout accepted, with what the capability store needs to build a version. */
 export interface AcquiredResource {
   kind: ResourceKind;
   siteOrigin: string;

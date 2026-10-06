@@ -57,7 +57,7 @@ const until = async (cond: () => boolean, ms = 4000): Promise<void> => {
   }
 };
 
-describe("job wiring: process ownership and the agent profile (P3.4)", () => {
+describe("job wiring: process ownership and the agent profile", () => {
   let home: string;
   let wiring: JobWiring | null = null;
   const events: Array<{ name: string; fields: Record<string, unknown> }> = [];

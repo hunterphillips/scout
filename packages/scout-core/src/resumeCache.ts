@@ -19,17 +19,18 @@ function stripFragment(url: string): string {
   return hash === -1 ? url : url.slice(0, hash);
 }
 
-// The recommendation jobs' resume cache (pivot Phase 3; the legacy rank client's cache went
-// in P4.4), which is also where a page's suggestions stay once its visit ends: a finished job's
-// answer, reused for 15 min when what it was built from is unchanged, so going back to a page
-// (A, B, back to A) shows its answer again without a model call. The key names the core start,
-// the origin and page, the catalog, the approvals, the browser-context grant, the agent profile,
-// and its tools. The activity the job saw (a hash) is kept but not matched: the user has been
-// reading since, and the page's answer still stands; one entry per page and inputs, the latest
-// answer wins. The window counts from the store; the page shown now (`show`) does not age, and
-// its window restarts when it stops being shown, so a page's answer lasts 15 min after its visit. An answer made without the user's optional tools (they were selected but failed, so it
-// rests on Scout's browser context alone) is never reused by a job that has them. Only `ok` and
-// `empty` answers are stored. At most RESUME_MAX_ENTRIES entries.
+// The recommendation jobs' resume cache, which is also where a page's suggestions stay once
+// its visit ends: a finished job's answer, reused for 15 min when what it was built from is
+// unchanged, so going back to a page (A, B, back to A) shows its answer again without a model
+// call. The key names the core start, the origin and page, the catalog, the approvals, the
+// browser-context grant, the agent profile, and its tools. The activity the job saw (a hash)
+// is kept but not matched: the user has been reading since, and the page's answer still
+// stands; one entry per page and inputs, the latest answer wins. The window counts from the
+// store; the page shown now (`show`) does not age, and its window restarts when it stops being
+// shown, so a page's answer lasts 15 min after its visit. An answer made without the user's
+// optional tools (they were selected but failed, so it rests on Scout's browser context alone)
+// is never reused by a job that has them. Only `ok` and `empty` answers are stored. At most
+// RESUME_MAX_ENTRIES entries.
 
 export interface JobResumeKey {
   coreInstanceId: string;

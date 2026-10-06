@@ -50,7 +50,7 @@ export interface CatalogResolver {
 /**
  * The catalog pipeline for one caller: the on-disk cache plus, per resolve, a fresh paced
  * fetch bound to that origin (so pacing, budget, and deadline are per origin and per run).
- * The CLI uses it now; the coordinator will in Phase 4.
+ * The CLI and the core (main.ts) use it.
  */
 export function createCatalogResolver(options: CatalogResolverOptions): CatalogResolver {
   const { clock, diagnostics } = options;

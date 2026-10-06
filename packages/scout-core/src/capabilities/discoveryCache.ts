@@ -11,7 +11,7 @@ import { sha256Hex, TEXT_MAX_BYTES, type TextRejectReason } from "./textValidati
 /**
  * The discovery cache is a preview store. It holds what resource discovery last learned
  * about one origin so Scout can show it and revalidate it cheaply. Approved text never
- * lives here: the capability store (P2.3) copies an approved version into its own
+ * lives here: the capability store copies an approved version into its own
  * content-addressed blobs and never reads it back from this cache.
  *
  * Layout: `<scoutHome>/cache/discovery/<host>-<hash>.json` (dir 0700, file 0600, written

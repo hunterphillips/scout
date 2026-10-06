@@ -325,7 +325,7 @@ describe("discoverCatalog", () => {
   });
 });
 
-// P4.4: the dedupe/robots pass stays on the main thread, time-sliced (PASS_SLICE_MS). Each shape
+// The dedupe/robots pass stays on the main thread, time-sliced (PASS_SLICE_MS). Each shape
 // is the entry cap from one already-parsed sitemap (the parse itself runs in the worker in the
 // core), with robots.txt at the rule cap: all distinct and allowed (500 kept, then capped), all
 // spellings of one URL (a URL parse and a normalization each; ~60-70 ms unsliced), and all
