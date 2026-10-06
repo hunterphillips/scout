@@ -1,4 +1,4 @@
-// Phase 3 verification, B8/B9 "no chat-push path", the core's side. Scout reaches the user's
+// The "no chat-push path" check, the core's side. Scout reaches the user's
 // agent in exactly one way: it starts a fresh, non-persistent `claude -p` per job whose prompt
 // is a fixed template on stdin. It never joins, resumes or streams into an existing session,
 // never opens an IDE/WebSocket channel to a running Claude, and nothing outside the test fakes

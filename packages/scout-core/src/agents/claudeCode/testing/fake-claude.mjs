@@ -27,7 +27,7 @@
 // reply in the first pick's reason, so a test sees the tool was called, not just listed.
 // `tool-errors` is `bridge-call` with Scout's `current_site` and the bridged `lookup` results
 // reported as `is_error` (a tool that failed at runtime), then the same answer.
-// `sleep-ignore-term` (P3.4 lifecycle) starts like `ignore-term` (every server connected, no
+// `sleep-ignore-term` (job shutdown) starts like `ignore-term` (every server connected, no
 // final response, SIGTERM ignored) and also starts two `sleep` descendants that ignore SIGTERM:
 // one in its process group, one that leaves it (its own group); their pids go to the log as
 // {descendantPids}.

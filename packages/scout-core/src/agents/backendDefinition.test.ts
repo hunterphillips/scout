@@ -179,7 +179,7 @@ describe("inspectBackend", () => {
     return left.length === 0;
   };
 
-  // P4.4: the inspected backend runs detached in its own process group under the job supervisor.
+  // The inspected backend runs detached in its own process group under the job supervisor.
   it("a backend ignoring SIGTERM and EOF, with a helper in its group and one that escaped it: none outlives the inspection", async () => {
     const t0 = Date.now();
     const { outcome, lines } = await run("honest", ["--ignore-term", "--helpers"], { ...limits, stopGraceMs: 300 });

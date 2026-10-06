@@ -13,10 +13,10 @@
 // count. Items, none survive -> `invalid_output`, never `empty`: an invalid answer is not
 // an honest "nothing fits".
 //
-// Provenance: cleanReason and its URL_LIKE pattern are copied verbatim from
-// the removed personal-context package (see git history before 2026-10-02;
-// outputValidation.test.ts pins the legacy results). The rest is new: no evidence IDs, labels or
-// audit map, which belonged to the legacy service's personal sources.
+// Provenance: cleanReason and its URL_LIKE pattern are copied verbatim from the removed
+// personal-context package (see git history before 2026-10-02; outputValidation.test.ts pins
+// the removed package's results). The rest is new: no evidence IDs, labels or audit map,
+// which belonged to the removed package's personal sources.
 
 import { JOB_MAX_PICKS, JOB_REASON_MAX_CHARS, type AgentPick, type JobRequest } from "@scout/contracts";
 
