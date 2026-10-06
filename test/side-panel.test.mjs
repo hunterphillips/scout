@@ -242,7 +242,7 @@ describe.skipIf(SKIP !== null)(SKIP ? `Scout's side panel in Chrome for Testing 
     await click(switchKey);
     await until(() => panel.evaluate((k) => document.querySelector(`[data-key="${k}"]`)?.checked === true, switchKey), "the switch to show on");
     expect(JSON.parse(readFileSync(join(home, "config.json"), "utf8"))).toEqual({ extensionId: extId, destinations: [HOSTNAME] });
-    expect(app().filter((f) => f.type === "grant").at(-1)).toMatchObject({ destinations: [SITE] });
+    // The grant frame goes to the panel over the relay (the app's stdout carries state only); Sites shows it below.
     steps.recommendationsSwitch = "headless";
     // Sites: the site is one of config.json's destinations, carried on the core's grant frame.
     await click("nav-sites");
@@ -252,13 +252,13 @@ describe.skipIf(SKIP !== null)(SKIP ? `Scout's side panel in Chrome for Testing 
     frontmost();
     await click("nav-page");
 
-    // 3. The settled visit: the fake agent's results reach the panel.
-    await until(() => app().some((f) => f.type === "results"), "results from the core", 40_000);
-    const results = app().find((f) => f.type === "results");
-    expect(results).toMatchObject({ status: "ok", origin: SITE });
-    const first = results.items[0];
-    await until(() => panel.evaluate((k) => document.querySelector(`[data-key="${k}"]`) !== null, `open-${first.candidateId}`), "the panel to render the results");
-    expect(await panel.evaluate((k) => document.querySelector(`[data-key="${k}"]`).getAttribute("aria-label"), `open-${first.candidateId}`)).toBe(`Open ${first.title} on ${first.hostname}`);
+    // 3. The settled visit: the fake agent's results reach the panel over the relay and render as link cards.
+    await until(() => panel.evaluate(() => document.querySelector('[data-key^="open-"]') !== null), "the panel to render the results", 40_000);
+    const firstKey = await panel.evaluate(() => document.querySelector('[data-key^="open-"]').getAttribute("data-key"));
+    const first = { candidateId: firstKey.slice("open-".length) };
+    const firstCandidate = candidates.find((c) => c.id === first.candidateId);
+    expect(firstCandidate).toBeDefined();
+    expect(await panel.evaluate((k) => document.querySelector(`[data-key="${k}"]`).getAttribute("aria-label"), firstKey)).toBe(`Open ${firstCandidate.title} on ${HOSTNAME}`);
     expect(await panel.evaluate(() => document.body.innerHTML)).not.toContain(`${SITE}/docs/`); // no href before the ack
     const width = await panel.evaluate(() => [window.innerWidth, document.documentElement.scrollWidth]);
     steps.panelWidth = width;
