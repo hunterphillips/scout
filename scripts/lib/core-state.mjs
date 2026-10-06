@@ -48,8 +48,8 @@ export function inspectPrivate(path, kind, mode) {
 }
 
 /**
- * The last `agent_preflight` diagnostics event the core logged ({ verdict, cliVersion?, t }),
- * or null. Reads at most the log's last 1 MiB; never runs a preflight.
+ * The last `agent_preflight` diagnostics event the core logged, from any adapter
+ * ({ verdict, adapter?, cliVersion?, t }), or null. Reads at most the log's last 1 MiB; never runs a preflight.
  */
 export function lastPreflight(logPath, { maxBytes = 1024 * 1024 } = {}) {
   let text;
@@ -77,7 +77,7 @@ export function lastPreflight(logPath, { maxBytes = 1024 * 1024 } = {}) {
     if (!lines[i].includes('"agent_preflight"')) continue;
     try {
       const e = JSON.parse(lines[i]);
-      if (e?.event === "agent_preflight" && typeof e.verdict === "string" && Number.isFinite(e.t)) return { verdict: e.verdict, t: e.t, ...(typeof e.cliVersion === "string" ? { cliVersion: e.cliVersion } : {}) };
+      if (e?.event === "agent_preflight" && typeof e.verdict === "string" && Number.isFinite(e.t)) return { verdict: e.verdict, t: e.t, ...(typeof e.adapter === "string" ? { adapter: e.adapter } : {}), ...(typeof e.cliVersion === "string" ? { cliVersion: e.cliVersion } : {}) };
     } catch {
       // a torn line
     }

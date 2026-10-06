@@ -86,7 +86,7 @@ import { createJsonLineStream } from "../jsonLineStream.js";
 import { createLaunchProfile, LaunchProfileError, runDirectPreflight, type DirectPreflightOptions, type LaunchProfile } from "./launchProfile.js";
 import { mapOutcome, recordUsage } from "./mapOutcome.js";
 import { MODEL_RE, profileFingerprint } from "../profile.js";
-import type { ClaudeCodeProfile } from "./profile.js";
+import { CLAUDE_CODE_ADAPTER_ID, type ClaudeCodeProfile } from "./profile.js";
 import { buildJobInstructions, buildJobPrompt } from "../prompt.js";
 import { writeTreeRecord, type ProcessTracker } from "../processTree.js";
 import { createStreamMonitor } from "./streamMonitor.js";
@@ -342,7 +342,7 @@ export function createClaudeJobAdapter(deps: ClaudeJobDeps): ClaudeJobAdapter {
       at: (deps.clock ?? systemClock).now(),
     });
     retryPreflight = !preflight.ok && preflight.version === undefined;
-    deps.diagnostics?.event("agent_preflight", { verdict: preflight.verdict, reasons: preflight.reasons.length, ...(preflight.version ? { cliVersion: preflight.version } : {}) });
+    deps.diagnostics?.event("agent_preflight", { adapter: CLAUDE_CODE_ADAPTER_ID, verdict: preflight.verdict, reasons: preflight.reasons.length, ...(preflight.version ? { cliVersion: preflight.version } : {}) });
     return preflight;
   }
 
