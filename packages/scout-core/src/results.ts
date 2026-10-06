@@ -20,7 +20,8 @@
 // (toFrame). A click sends back the displayed identity (instance, visit, job, candidate) and
 // `resolveLink` answers with the stored target only after re-checking it: https, no
 // credentials, the default port, the result's origin, and Chrome's grant for that origin now.
-// The registry never fetches.
+// The registry never fetches. Each resolved target goes to `onLinkOpened` (the scheduler starts
+// no job for the page Scout opens).
 //
 // The coordinator clears the result when its visit ends, on pause, on loss of the origin's
 // grant, on disconnect, and on stop, silently: the state frame that follows each of those
@@ -95,6 +96,8 @@ export interface ResultRegistryOptions {
   /** The visit a result may be published for now, or null while none may (no visit, paused, disconnected, stopped). */
   activeVisit: () => { visitEpoch: number; origin: string } | null;
   isPermitted: (origin: string) => boolean;
+  /** Hears the target of every resolved link (the page Scout is about to open). */
+  onLinkOpened?: (href: string) => void;
   diagnostics?: Diagnostics;
 }
 
@@ -260,6 +263,7 @@ export function createResultRegistry(options: ResultRegistryOptions): ResultRegi
     resolveLink(request) {
       const answer = resolve(request);
       diagnostics?.event("link_resolved", answer.ok ? { ok: true } : { ok: false, code: answer.code });
+      if (answer.ok) options.onLinkOpened?.(answer.href);
       return answer;
     },
     subscribe(listener) {
