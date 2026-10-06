@@ -200,10 +200,7 @@ export function createJobWiring(o: JobWiringOptions): JobWiring {
     results: o.results,
     snapshots: o.snapshots,
     view: {
-      visit: () => {
-        const c = o.coordinator();
-        return c.stopped || c.agentView().paused ? null : c.tracker.current();
-      },
+      visit: () => o.coordinator().shownVisit(),
       permissionsRevision: () => o.coordinator().permissions.revision,
       isPermitted: (origin) => o.coordinator().permissions.isPermitted(origin),
       captureAllowed: () => o.coordinator().captureAllowed(),

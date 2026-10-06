@@ -67,7 +67,7 @@ and reads a frozen snapshot of its visit instead.
 ## Job lifecycle
 
 1. A visit forms when the focused tab is on an allowed https origin. It settles after a
-   3 s dwell.
+   3 s dwell. Switching to another app keeps the visit; coming back to another page ends it.
 2. A settled visit starts a discovery pass. One pass runs at a time, the latest visit
    wins, and a visit change cancels the pass. The pass builds the site's catalog of
    candidate links and checks for agent files.

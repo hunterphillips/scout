@@ -21,10 +21,11 @@
 // is allowed right now; otherwise `activity: []`.
 //
 // Changes while a job runs:
-//   - fatal, nothing is published: visit change (navigation, Chrome leaving the foreground)
-//     → `visit_changed`; the origin's grant lost → `revoked` (the permissions change arrives
-//     before the visit change it causes, and the first cancel reason stands); sensor loss →
-//     `visit_changed`; pause → `paused`; stop → `shutdown`.
+//   - fatal, nothing is published: visit change (navigation, a tab or window switch; another
+//     app coming to the front is not one, the visit is kept) → `visit_changed`; the origin's
+//     grant lost → `revoked` (the permissions change arrives before the visit change it
+//     causes, and the first cancel reason stands); sensor loss → `visit_changed`; pause →
+//     `paused`; stop → `shutdown`.
 //   - relevant: an accepted activity entry the job may see (→ `superseded`); capture
 //     disallowed or the grant turned off while the snapshot carried activity (→ `revoked`); a
 //     revoked resource the snapshot pinned (→ `revoked`). The job is cancelled and ONE

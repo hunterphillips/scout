@@ -89,19 +89,6 @@ describe("visitTracker", () => {
 
   const clearing: Array<[string, (s: ReturnType<typeof setup>) => void]> = [
     ["tab switch to an unpermitted tab", (s) => s.tracker.observeFocus(s.focus({ tabId: 11, url: "https://example.com/" }))],
-    ["window blur", (s) => s.tracker.observeFocus(s.focus({ browserFocused: false }))],
-    [
-      "WINDOW_ID_NONE",
-      (s) => {
-        const { tabId: _t, url: _u, documentId: _d, ...rest } = s.focus({ windowId: WINDOW_ID_NONE });
-        s.tracker.observeFocus(rest);
-      },
-    ],
-    ["WINDOW_ID_NONE even if browserFocused is true", (s) => s.tracker.observeFocus(s.focus({ windowId: WINDOW_ID_NONE }))],
-    [
-      "non-Chrome frontmost",
-      (s) => s.tracker.observeFrontmost({ type: "frontmost", bundleId: "com.apple.Terminal", at: s.clock.t }),
-    ],
     ["unpermitted origin", (s) => s.tracker.observeFocus(s.focus({ url: "https://stripe.com/pricing" }))],
     ["non-default port", (s) => s.tracker.observeFocus(s.focus({ url: "https://docs.stripe.com:8443/payments" }))],
     ["http instead of https", (s) => s.tracker.observeFocus(s.focus({ url: "http://docs.stripe.com/payments" }))],
@@ -162,16 +149,164 @@ describe("visitTracker", () => {
     expect(s.changes[1]!.previous).toBe(s.changes[0]!.visit);
   });
 
-  it("leaving and coming back is two changes, so the return is a new epoch", () => {
+  const terminal = (s: ReturnType<typeof setup>) => s.tracker.observeFrontmost({ type: "frontmost", bundleId: "com.apple.Terminal", at: s.clock.t });
+  /** Chrome's report once none of its windows has focus: no tab, no URL. */
+  const unfocused = (s: ReturnType<typeof setup>) => {
+    const { tabId: _t, url: _u, documentId: _d, title: _ti, ...rest } = s.focus({ browserFocused: false, windowId: WINDOW_ID_NONE });
+    s.tracker.observeFocus(rest);
+  };
+
+  const keeping: Array<[string, (s: ReturnType<typeof setup>) => void]> = [
+    ["another app frontmost", terminal],
+    ["window blur on the same page", (s) => s.tracker.observeFocus(s.focus({ browserFocused: false }))],
+    ["WINDOW_ID_NONE", unfocused],
+    ["WINDOW_ID_NONE even if browserFocused is true", (s) => s.tracker.observeFocus(s.focus({ windowId: WINDOW_ID_NONE }))],
+    [
+      "another app, then Chrome's unfocused report",
+      (s) => {
+        terminal(s);
+        unfocused(s);
+      },
+    ],
+  ];
+
+  it.each(keeping)("%s keeps the visit and its epoch, marked away, with no change", (_name, act) => {
     const s = setup();
     s.activate();
-    const first = s.tracker.epoch;
-    s.tracker.observeFrontmost({ type: "frontmost", bundleId: "com.apple.Terminal", at: s.clock.t });
-    s.setRevision(8);
-    s.clock.t += 1_000;
+    const visit = s.tracker.current();
+    const epoch = s.tracker.epoch;
+    s.events.length = 0;
+    act(s);
+    expect(s.tracker.current()).toBe(visit);
+    expect(s.tracker.epoch).toBe(epoch);
+    expect(s.tracker.away).toBe(true);
+    expect(s.changes).toHaveLength(0);
+    expect(s.events.filter((e) => e.name.startsWith("visit_"))).toEqual([{ name: "visit_suspended", fields: { epoch } }]);
+  });
+
+  it("coming back to the same page resumes the visit: same epoch, same visit, no change", () => {
+    const presence: Array<{ epoch: number; away: boolean }> = [];
+    const s = setup();
+    const tracker = createVisitTracker({
+      isPermitted: () => true,
+      clock: s.clock,
+      onChange: (c) => void s.changes.push({ ...c, at: s.clock.t }),
+      onPresence: (p) => void presence.push(p),
+    });
+    tracker.observeFrontmost({ type: "frontmost", bundleId: "com.google.Chrome", at: 0 });
+    tracker.observeFocus(s.focus());
+    const visit = tracker.current();
+    s.changes.length = 0;
+    tracker.observeFrontmost({ type: "frontmost", bundleId: "com.apple.Terminal", at: 1 });
+    const { tabId: _t, url: _u, documentId: _d, title: _ti, ...none } = s.focus({ browserFocused: false, windowId: WINDOW_ID_NONE });
+    tracker.observeFocus(none);
+    // Chrome in front again, but its window not yet focused: still away.
+    tracker.observeFrontmost({ type: "frontmost", bundleId: "com.google.Chrome", at: 2 });
+    expect(tracker.away).toBe(true);
+    s.clock.t += 60_000;
+    tracker.observeFocus(s.focus());
+    expect(tracker.away).toBe(false);
+    expect(tracker.current()).toBe(visit);
+    expect(s.changes).toHaveLength(0);
+    expect(presence).toEqual([
+      { epoch: visit!.epoch, away: true },
+      { epoch: visit!.epoch, away: false },
+    ]);
+  });
+
+  it("logs visit_resumed on the return, and nothing for a repeat while away", () => {
+    const s = setup();
+    s.activate();
+    const epoch = s.tracker.epoch;
+    s.events.length = 0;
+    terminal(s);
+    terminal(s);
+    unfocused(s);
     s.chrome();
-    expect(s.changes.map((c) => c.epoch)).toEqual([first + 1, first + 2]);
-    expect(s.tracker.current()).toMatchObject({ epoch: first + 2, startedAt: s.clock.t, contextRevision: 8 });
+    s.tracker.observeFocus(s.focus());
+    expect(s.events.map((e) => e.name)).toEqual(["visit_suspended", "visit_resumed"]);
+    expect(s.events.map((e) => e.fields)).toEqual([{ epoch }, { epoch }]);
+  });
+
+  const returning: Array<[string, Partial<FocusObservation>]> = [
+    ["another document", { documentId: "doc-b" }],
+    ["another URL", { url: "https://docs.stripe.com/billing" }],
+    ["another tab", { tabId: 11, documentId: "doc-c" }],
+    ["an unpermitted page", { url: "https://example.com/" }],
+    ["incognito", { tabId: 12, incognito: true }],
+  ];
+
+  it.each(returning)("coming back to %s ends the kept visit as a real change", (_name, overrides) => {
+    const s = setup();
+    s.activate();
+    const held = s.tracker.current();
+    const before = s.tracker.epoch;
+    terminal(s);
+    unfocused(s);
+    s.chrome();
+    s.tracker.observeFocus(s.focus(overrides));
+    expect(s.tracker.away).toBe(false);
+    expect(s.changes).toHaveLength(1);
+    expect(s.changes[0]).toMatchObject({ epoch: before + 1, previous: held });
+    expect(s.tracker.current()?.epoch ?? before + 1).toBe(before + 1);
+  });
+
+  it("a focus showing another page while Chrome is not frontmost ends the kept visit", () => {
+    const s = setup();
+    s.activate();
+    const before = s.tracker.epoch;
+    terminal(s);
+    s.tracker.observeFocus(s.focus({ url: "https://docs.stripe.com/billing" }));
+    expect(s.tracker.current()).toBeNull();
+    expect(s.tracker.away).toBe(false);
+    expect(s.changes).toEqual([expect.objectContaining({ epoch: before + 1, visit: null, previous: expect.objectContaining({ epoch: before }) })]);
+    // Back in Chrome on that page: a new visit.
+    s.chrome();
+    expect(s.tracker.current()).toMatchObject({ epoch: before + 2, url: "https://docs.stripe.com/billing" });
+  });
+
+  it("losing the origin's grant while away ends the kept visit", () => {
+    const s = setup();
+    s.activate();
+    const before = s.tracker.epoch;
+    terminal(s);
+    unfocused(s);
+    s.granted.delete("https://docs.stripe.com");
+    s.tracker.recompute();
+    expect(s.tracker.current()).toBeNull();
+    expect(s.tracker.away).toBe(false);
+    expect(s.changes).toEqual([expect.objectContaining({ epoch: before + 1, visit: null })]);
+  });
+
+  it("reset ends the visit, kept or not", () => {
+    for (const leave of [false, true]) {
+      const s = setup();
+      s.activate();
+      const before = s.tracker.epoch;
+      if (leave) {
+        terminal(s);
+        unfocused(s);
+      }
+      s.tracker.reset();
+      expect(s.tracker.current()).toBeNull();
+      expect(s.tracker.epoch).toBe(before + 1);
+      expect(s.changes).toEqual([expect.objectContaining({ visit: null, previous: expect.objectContaining({ epoch: before }) })]);
+      // Chrome's same page after a reset is a new visit.
+      s.chrome();
+      s.tracker.observeFocus(s.focus());
+      expect(s.tracker.current()?.epoch).toBeGreaterThan(before + 1);
+    }
+  });
+
+  it("another app in front with no visit logs nothing and stays idle", () => {
+    const s = setup();
+    s.chrome();
+    s.tracker.observeFocus(s.focus({ url: "https://example.com/" }));
+    s.events.length = 0;
+    terminal(s);
+    unfocused(s);
+    expect(s.tracker.away).toBe(false);
+    expect(s.events).toEqual([]);
   });
 
   it("stays idle until a frontmost command says Chrome is in front", () => {
@@ -207,7 +342,7 @@ describe("visitTracker", () => {
     s.activate();
     s.events.length = 0;
     s.tracker.observeFocus(s.focus({ documentId: "doc-a2" }));
-    s.tracker.observeFocus(s.focus({ browserFocused: false }));
+    s.tracker.observeFocus(s.focus({ tabId: 11, url: "https://example.com/" }));
     expect(s.events.filter((e) => e.name === "visit_change").map((e) => e.fields.active)).toEqual([true, false]);
   });
 

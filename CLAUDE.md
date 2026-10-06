@@ -107,8 +107,9 @@ and limits; `CONTRIBUTING.md` has the platform matrix.
     state, live sensor, capture policy, page_text gate + ack, dwell → discovery → store
     ingest), `permissionState.ts` (revisioned grants; nothing permitted before the first
     snapshot), `dwell.ts` (3 s on injected `Timers`), `visitTracker.ts` (visits only for
-    permitted https origins), `config.ts`, `version.ts` (`SCOUT_VERSION`, must track
-    package.json), `diagnostics.ts` (JSONL, scalar fields, forbidden-name filter).
+    permitted https origins; another app in front keeps the visit, marked `away`),
+    `config.ts`, `version.ts` (`SCOUT_VERSION`, must track package.json), `diagnostics.ts`
+    (JSONL, scalar fields, forbidden-name filter).
   - Panel channel: `panelCapabilities.ts`, `nativeCommands.ts` (acknowledged idempotent
     mutation commands), `previewStream.ts` (16 KiB preview chunks), `panelChannel.ts` (one
     `coreInstanceId` per start, shared with the agent API), `panelSinks.ts` +

@@ -1,8 +1,8 @@
 // The dwell scheduler: automatic discovery starts only after a permitted foreground
 // visit has stayed the same for DWELL_MS. One timer at a time. The coordinator arms it
 // on every visit change that has a visit and cancels it (with a reason) on pause,
-// navigation, Chrome losing the foreground (the visit ends), permission loss, sensor
-// disconnect, and shutdown. Timers are injected so tests run it on a fake clock.
+// navigation, the visit ending, another app coming to the front (`visit_suspended`; armed
+// again in full on the return), permission loss, sensor disconnect, and shutdown. Timers are injected so tests run it on a fake clock.
 
 import type { ActiveVisit } from "@scout/contracts";
 import { systemTimers, type Timers } from "./clock.js";
@@ -14,6 +14,7 @@ export const DWELL_MS = 3000;
 export type DwellCancelReason =
   | "visit_changed"
   | "visit_ended"
+  | "visit_suspended"
   | "paused"
   | "permission_lost"
   | "disconnected"

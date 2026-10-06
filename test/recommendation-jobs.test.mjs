@@ -9,7 +9,8 @@
 //        targets, quota and auth denial (at run time and at the billing preflight), required-tool
 //        failure and timeout, each with the exact `results` frame the window gets.
 //   B11: click authorization (`open_link`) after a tab, document and app switch, and a tab
-//        switch during model execution, through the real processes.
+//        switch during model execution, through the real processes. An app switch keeps the
+//        page's links and its running job.
 //   B7/B12/B13: permission loss, pause, resource revoke, deadline and shutdown each end the
 //        running job (its token refused on agent.sock, its process gone, the window out of
 //        `working`), GitHub grant loss clears captured activity, and no fixture text reaches
@@ -214,7 +215,12 @@ async function boot(home, env, children) {
   const focus = (tabId, path, documentId) =>
     sense({ kind: "focus", browserFocused: true, windowId: 1, tabId, url: path.startsWith("https://") ? path : `${SITE}${path}`, title: "Docs", incognito: false, permissionsRevision: permRev, ...(documentId ? { documentId } : {}) });
   const diagEvents = () => readLines(join(home, "logs", "diagnostics.jsonl"));
-  return { host, core, toChrome, panel, command, panelCommand, sense, grant, focus, dns, exited, diagEvents, stderr: () => err, fake: () => readLines(join(home, "fake.log")) };
+  /** Another app comes to the front: the Mac app's report, then Chrome's unfocused focus. */
+  const away = () => {
+    command({ type: "frontmost", bundleId: "com.apple.Terminal", at: Date.now() });
+    sense({ kind: "focus", browserFocused: false, windowId: -1, permissionsRevision: permRev });
+  };
+  return { host, core, toChrome, panel, command, panelCommand, sense, grant, focus, away, dns, exited, diagEvents, stderr: () => err, fake: () => readLines(join(home, "fake.log")) };
 }
 
 /** Capture one GitHub issue (title and body are fixture secrets) through the real gate. */
@@ -328,15 +334,21 @@ describe.skipIf(!BUILT)("recommendation jobs e2e: B10 outcomes and B11 click aut
     expect((await resultsOf(b, d.jobId)).status).toBe("ok");
     expect(await openLink(b, { visitEpoch: t.epoch, jobId: t.jobId, candidateId: "c0" })).toMatchObject({ ok: false, code: "stale_revision" });
     expect(await openLink(b, { visitEpoch: d.epoch, jobId: d.jobId, candidateId: "c1" })).toMatchObject({ ok: true, target: { href: `${SITE}/docs/bravo` } });
-    // An app switch: refused while away, and still refused back in Chrome (a new visit).
-    b.command({ type: "frontmost", bundleId: "com.apple.Terminal", at: Date.now() });
-    await until(() => b.panel().at(-1)?.type === "state" && b.panel().at(-1).visitEpoch !== d.epoch, "the state after leaving Chrome");
-    expect(await openLink(b, { visitEpoch: d.epoch, jobId: d.jobId, candidateId: "c1" })).toMatchObject({ ok: false, code: "stale_revision" });
+    // An app switch keeps the link: it resolves while away and back in Chrome on the same page.
     const before = b.panel().length;
+    const eventsBefore = b.diagEvents().length;
+    b.away();
+    await until(() => b.diagEvents().slice(eventsBefore).some((e) => e.event === "visit_suspended"), "visit_suspended");
+    expect(await openLink(b, { visitEpoch: d.epoch, jobId: d.jobId, candidateId: "c1" })).toMatchObject({ ok: true, target: { href: `${SITE}/docs/bravo` } });
     b.command({ type: "frontmost", bundleId: "com.google.Chrome", at: Date.now() });
-    await until(() => b.panel().slice(before).some((f) => f.type === "results"), "the cached answer back in Chrome");
-    expect(await openLink(b, { visitEpoch: d.epoch, jobId: d.jobId, candidateId: "c1" })).toMatchObject({ ok: false, code: "stale_revision" });
-    // Only the two ok acks ever carried an href; no results or state frame did.
+    b.focus(9, pageNow, "D-other");
+    await until(() => b.diagEvents().slice(eventsBefore).some((e) => e.event === "visit_resumed"), "visit_resumed");
+    // Past the dwell: nothing settles, starts, clears or repaints.
+    await new Promise((r) => setTimeout(r, 800));
+    expect(b.panel().slice(before).filter((f) => f.type !== "ack")).toEqual([]);
+    expect(b.diagEvents().slice(eventsBefore).map((e) => e.event).filter((e) => ["results_cleared", "job_started", "visit_change", "dwell_settled"].includes(e))).toEqual([]);
+    expect(await openLink(b, { visitEpoch: d.epoch, jobId: d.jobId, candidateId: "c1" })).toMatchObject({ ok: true, target: { href: `${SITE}/docs/bravo` } });
+    // Only the ok acks ever carried an href; no results or state frame did.
     expect(b.panel().filter((f) => JSON.stringify(f).includes(`${SITE}/`)).every((f) => f.type === "ack" && f.ok)).toBe(true);
   }, 90_000);
 
@@ -450,11 +462,35 @@ describe.skipIf(!BUILT)("recommendation jobs e2e: B10 outcomes and B11 click aut
     b.focus(12, `/docs/page-${page}`);
     await until(() => b.diagEvents().some((e) => e.event === "job_cancelled" && e.reason === "visit_changed"), "job_cancelled visit_changed");
     await until(() => !alive(pid), "the cancelled CLI to end", 5_000);
-    // The new tab's own job starts (the same mode, hanging): leave it before it can matter.
-    b.command({ type: "frontmost", bundleId: "com.apple.Terminal", at: Date.now() });
+    // The new tab's own job starts (the same mode, hanging): leave for an unpermitted page before it can matter.
+    b.focus(13, "https://example.com/");
     await until(() => b.diagEvents().filter((e) => e.event === "job_finished" && e.status === "cancelled").length >= 1, "the cancellations to finish");
     expect(b.panel().slice(before).some((f) => f.type === "results" && f.jobId === jobId)).toBe(false);
+  }, 60_000);
+
+  it("B11 an app switch during the job: it is not cancelled, publishes while away, and the return to the page repaints nothing", async () => {
+    // Verification never gets an answer: the job runs about 4 s past the model, time to leave.
+    b.dns.set("hang");
+    setMode("ok");
+    const path = nextPage();
+    const { jobId, epoch } = await startJob(b, 8, path);
+    const eventsBefore = b.diagEvents().length;
+    b.away();
+    await until(() => b.diagEvents().slice(eventsBefore).some((e) => e.event === "visit_suspended" && e.epoch === epoch), "visit_suspended");
+    const result = await resultsOf(b, jobId);
+    expect(result).toMatchObject({ status: "ok", jobId, visitEpoch: epoch });
+    const published = b.panel().length;
+    const events = () => b.diagEvents().slice(eventsBefore).map((e) => e.event);
+    expect(events()).not.toContain("job_cancelled");
+    expect(events()).not.toContain("results_cleared");
+    expect(await openLink(b, { visitEpoch: epoch, jobId, candidateId: "c0" })).toMatchObject({ ok: true, target: { href: `${SITE}/docs/alpha` } });
     b.command({ type: "frontmost", bundleId: "com.google.Chrome", at: Date.now() });
+    b.focus(8, path);
+    await until(() => b.diagEvents().slice(eventsBefore).some((e) => e.event === "visit_resumed" && e.epoch === epoch), "visit_resumed");
+    await new Promise((r) => setTimeout(r, 800));
+    expect(b.panel().slice(published).filter((f) => f.type !== "ack")).toEqual([]);
+    expect(events().filter((e) => ["results_cleared", "job_started", "job_cancelled", "visit_change"].includes(e))).toEqual([]);
+    b.dns.set("loopback");
   }, 60_000);
 
   it("B10 timeout: an agent that never answers ends at the deadline with error timeout", async () => {
