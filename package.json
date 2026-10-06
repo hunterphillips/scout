@@ -2,7 +2,7 @@
   "name": "scout-workspace",
   "private": true,
   "version": "0.1.0",
-  "description": "Scout proof of concept workspace: the website agent (core, MCP adapter, browser extension, native host).",
+  "description": "Scout: a browser companion that hands website agent resources to your agent and suggests links.",
   "type": "module",
   "engines": {
     "node": ">=22.12.0"
@@ -20,8 +20,9 @@
     "test": "npm run test:node && npm run test:mac",
     "test:node": "npm run test:node --workspaces && vitest run --root scripts --exclude '**/*.mac.test.*'",
     "test:mac": "npm run test:mac --workspaces && vitest run --root scripts .mac.test. && npm run test:swift",
+    "test:scripts": "vitest run --root scripts",
     "test:e2e": "vitest run --root test",
-    "test:agent-contract": "vitest run --root packages/scout-core src/agents src/capabilities && vitest run --root packages/scout-mcp && vitest run --root scripts agent-check",
+    "test:agent-contract": "vitest run --root packages/scout-core src/agents src/capabilities src/integrations && vitest run --root packages/scout-mcp && vitest run --root scripts agent-check",
     "test:swift": "cd native/Scout && swift build && swift test",
     "verify:agent": "node scripts/agent-check/run.mjs",
     "test:all": "npm run build && npm test && npm run test:e2e",

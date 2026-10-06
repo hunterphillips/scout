@@ -28,9 +28,12 @@
 
 import { spawnSync as nodeSpawnSync } from "node:child_process";
 import * as realFs from "node:fs";
-import { accessSync, constants as fsc, realpathSync, statSync } from "node:fs";
+import { realpathSync, statSync } from "node:fs";
 import { userInfo } from "node:os";
-import { delimiter, dirname, isAbsolute, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
+import { isExecutableFile, resolveOnPath, type Env } from "../executables.js";
+
+export { isExecutableFile, resolveOnPath, type Env };
 
 /** The only claude invocations the preflight may make. Enforced in runClaude. */
 export const ALLOWED_CLAUDE_ARGS: readonly (readonly string[])[] = Object.freeze([
@@ -50,7 +53,6 @@ const KNOWN = {
 };
 const SUBSCRIPTION_TYPES = KNOWN.subscriptionType;
 
-export type Env = Readonly<Record<string, string | undefined>>;
 export type Verdict = "subscription" | "ambiguous";
 
 // ---------- environment ----------
@@ -338,34 +340,6 @@ function samePath(a: string, b: string): boolean {
 }
 
 // ---------- claude CLI ----------
-
-/** Resolve a command to an absolute executable path from a PATH value. No config writes. */
-export function resolveOnPath(cmd: string, pathValue: string | undefined): string | undefined {
-  for (const dir of (pathValue ?? "").split(delimiter)) {
-    if (!dir || !isAbsolute(dir)) continue;
-    const p = join(dir, cmd);
-    try {
-      if (statSync(p).isFile()) {
-        accessSync(p, fsc.X_OK);
-        return p;
-      }
-    } catch {
-      // not here
-    }
-  }
-  return undefined;
-}
-
-/** Whether `p` is an existing file the current user may execute. */
-export function isExecutableFile(p: string): boolean {
-  try {
-    if (!statSync(p).isFile()) return false;
-    accessSync(p, fsc.X_OK);
-    return true;
-  } catch {
-    return false;
-  }
-}
 
 /** The subset of `child_process.spawnSync` the preflight uses; tests inject a fake. */
 export type SpawnSyncFn = (

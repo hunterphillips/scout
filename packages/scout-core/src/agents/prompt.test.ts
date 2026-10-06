@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { JOB_AGENT_OUTPUT_JSON_SCHEMA } from "@scout/contracts";
-import { buildJobArgv } from "./claudeJob.js";
+import { buildJobArgv } from "./claudeCode/claudeJob.js";
 import {
   buildJobInstructions,
   buildJobPrompt,

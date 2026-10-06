@@ -66,7 +66,7 @@ export type ResultsDisplay =
 
 const UNAVAILABLE_TEXT: Record<UnavailableReason, string> = {
   no_time_left: "not enough time was left on this visit",
-  agent_unavailable: "Claude is not available",
+  agent_unavailable: "Your agent is not available",
   busy: "Scout is busy with another request",
 };
 const ERROR_TEXT: Record<ErrorReason, string> = {

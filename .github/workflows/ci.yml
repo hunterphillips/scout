@@ -9,9 +9,24 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 jobs:
-  test:
-    # macOS: the core's process-tree code reads BSD `ps`, setup/bundle tests use
-    # codesign and plutil, and the Mac app is Swift.
+  node:
+    # Everything except the *.mac.test.* files, which need macOS tools (codesign, plutil,
+    # launchctl) or the Swift toolchain.
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - run: npm run typecheck
+      - run: npm run test:node
+  mac:
+    # The full suite on the platform Scout ships on (test:node and test:mac, which includes
+    # the Swift tests), the e2e tests, and the side panel driven in Chrome for Testing.
     runs-on: macos-15
     timeout-minutes: 40
     steps:
@@ -22,7 +37,15 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run build
-      - run: npm run typecheck
       - run: npm test
       - run: npm run test:e2e
-      - run: npm run test:swift
+      - run: npx @puppeteer/browsers install chrome@stable --path "$RUNNER_TEMP/browsers"
+      # The side-panel test skips itself, and exits 0, when it finds no Chrome: fail on that.
+      - name: side-panel e2e
+        shell: bash
+        run: |
+          npx vitest run --root test side-panel 2>&1 | tee "$RUNNER_TEMP/side-panel.log"
+          if grep -q 'side-panel e2e: skipped' "$RUNNER_TEMP/side-panel.log"; then exit 1; fi
+        env:
+          SCOUT_E2E_CHROME: "1"
+          SCOUT_E2E_BROWSERS: ${{ runner.temp }}/browsers

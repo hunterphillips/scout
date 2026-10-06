@@ -8,7 +8,7 @@
 // the last buffered line.
 
 import type { AgentPick, JOB_ERROR_REASONS } from "@scout/contracts";
-import type { JobCancelReason, JobTermination } from "./adapter.js";
+import type { JobCancelReason, JobTermination } from "../adapter.js";
 
 export type Ending =
   | { status: "ok"; items: AgentPick[] }

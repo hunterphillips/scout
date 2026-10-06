@@ -2,7 +2,7 @@
 // never the website's text.
 //
 // Frontmatter is exactly two keys, `name` and `description`, one line each. `name` is a
-// validated skill name (identity.ts). `description` is one double-quoted line that states the
+// validated skill name (skillIdentity.ts). `description` is one double-quoted line that states the
 // publisher origin first and may end with a bounded, website-provided description labeled as
 // website-authored. Website text is reduced to plain characters before it is placed there:
 // control, format and separator characters, quotes, backslashes and backticks are removed or
@@ -20,7 +20,7 @@
 // backticks, no `${` or `$ARGUMENTS`, no `!` command syntax, and no file paths.
 
 import { isHttpsOrigin, RESOURCE_ID_PATTERN, SHA256_HEX_PATTERN, type ResourceKind } from "@scout/contracts";
-import { isValidSkillName, wrapperName } from "./identity.js";
+import { isValidSkillName, wrapperName } from "./skillIdentity.js";
 
 export const WRAPPER_FILE = "SKILL.md";
 /** The CLI's (and the Agent Skills spec's) description limit. */

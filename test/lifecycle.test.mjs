@@ -18,7 +18,7 @@ import { afterAll, afterEach, describe, expect, it } from "vitest";
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const CORE = join(ROOT, "packages/scout-core/dist/main.js");
 const HOST = join(ROOT, "packages/native-host/dist/host.js");
-const FAKE_CLAUDE = join(ROOT, "packages/scout-core/src/agents/testing/fake-claude.mjs");
+const FAKE_CLAUDE = join(ROOT, "packages/scout-core/src/agents/claudeCode/testing/fake-claude.mjs");
 const FAKE_BACKEND = join(ROOT, "packages/scout-core/src/agents/testing/fake-backend.mjs");
 const BUILT = existsSync(CORE) && existsSync(HOST);
 if (!BUILT) console.warn("lifecycle: skipped: run `npm run build` first");

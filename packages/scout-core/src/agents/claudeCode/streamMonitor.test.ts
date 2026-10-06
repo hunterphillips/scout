@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { JobDetails } from "./adapter.js";
+import type { JobDetails } from "../adapter.js";
 import { JobStop } from "./jobStop.js";
 import { createStreamMonitor } from "./streamMonitor.js";
 

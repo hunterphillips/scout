@@ -20,7 +20,7 @@ import { afterEach, describe, expect, it } from "vitest";
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const CORE = join(ROOT, "packages/scout-core/dist/main.js");
 const HOST = join(ROOT, "packages/native-host/dist/host.js");
-const FAKE_CLAUDE = join(ROOT, "packages/scout-core/src/agents/testing/fake-claude.mjs");
+const FAKE_CLAUDE = join(ROOT, "packages/scout-core/src/agents/claudeCode/testing/fake-claude.mjs");
 const HOSTNAME = "docs.scout-panel.invalid";
 const SITE = `https://${HOSTNAME}`;
 

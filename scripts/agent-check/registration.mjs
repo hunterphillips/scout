@@ -19,8 +19,8 @@
 import { closeSync, constants, fstatSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, rmdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { errorCode } from "./classify.mjs";
-import { ownershipHash } from "../../packages/scout-core/dist/capabilities/identity.js";
-import { WRAPPER_FILE } from "../../packages/scout-core/dist/capabilities/wrapper.js";
+import { ownershipHash } from "../../packages/scout-core/dist/integrations/claudeCode/skillIdentity.js";
+import { WRAPPER_FILE } from "../../packages/scout-core/dist/integrations/claudeCode/skillWrapper.js";
 
 export { MCP_TIMEOUT_MS, claudeRun, exitOf, mcpAddUser, mcpGet, ownsRegistration, removeOwnedRegistration } from "../lib/claude-mcp.mjs";
 

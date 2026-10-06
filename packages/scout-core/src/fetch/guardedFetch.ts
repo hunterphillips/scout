@@ -35,7 +35,7 @@ export const DEFAULT_MAX_REDIRECTS = 3;
 export const DEFAULT_ACCEPT = "text/plain, text/markdown, application/xml;q=0.9, text/xml;q=0.9, */*;q=0.1";
 
 /** Fixed identifier sent on every guarded request. */
-export const SCOUT_USER_AGENT = `Scout/${SCOUT_VERSION} (+local POC)`;
+export const SCOUT_USER_AGENT = `Scout/${SCOUT_VERSION}`;
 
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 

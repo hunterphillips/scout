@@ -30,7 +30,7 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const CORE = join(ROOT, "packages/scout-core/dist/main.js");
 const HOST = join(ROOT, "packages/native-host/dist/host.js");
 const MCP_CLIENT = join(ROOT, "packages/scout-mcp/dist/client.js");
-const FAKE_CLAUDE = join(ROOT, "packages/scout-core/src/agents/testing/fake-claude.mjs");
+const FAKE_CLAUDE = join(ROOT, "packages/scout-core/src/agents/claudeCode/testing/fake-claude.mjs");
 const FAKE_BACKEND = join(ROOT, "packages/scout-core/src/agents/testing/fake-backend.mjs");
 const BUILT = existsSync(CORE) && existsSync(HOST) && existsSync(MCP_CLIENT);
 if (!BUILT) console.warn("phase3: skipped: run `npm run build` first");

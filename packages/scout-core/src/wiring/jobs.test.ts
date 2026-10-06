@@ -1,6 +1,7 @@
 import { chmodSync, mkdtempSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { ActiveVisit } from "@scout/contracts";
 import { afterEach, describe, expect, it } from "vitest";
 import { AGENT_PROFILE_LOCK_FILE, profileFingerprint, type AgentProfile } from "../agents/profile.js";
 import { acquireStoreLock, StoreLockedError } from "../capabilities/storeLock.js";
@@ -153,6 +154,47 @@ describe("job wiring: process ownership and the agent profile (P3.4)", () => {
     writeProfile(home, profile(home, 3));
     await until(() => seen.length === 3);
     expect(w.adapter?.profileFingerprint).toBe(profileFingerprint(profile(home, 3)));
+  });
+
+  it("a profile naming an unknown adapter is invalid: no adapter, and a settled visit's suggestions are agent_unavailable", () => {
+    fresh();
+    writeProfile(home, JSON.stringify({ ...profile(home), adapter: "other-agent" }));
+    const visit = { origin: ORIGIN, url: `${ORIGIN}/a`, epoch: 1, at: 0, tabId: 1, contextRevision: 0 } as unknown as ActiveVisit;
+    const published: unknown[] = [];
+    wiring = createJobWiring({
+      home,
+      env: {},
+      destinations: [new URL(ORIGIN).host],
+      coreInstanceId: "core-test",
+      clock: systemClock,
+      diagnostics,
+      results: { beginJob: () => ({ ok: true }), publish: (r: unknown) => (published.push(r), { ok: true }) } as never,
+      snapshots: () => null,
+      coordinator: () =>
+        ({
+          stopped: false,
+          agentView: () => ({ paused: false }),
+          tracker: { current: () => visit },
+          permissions: { revision: 0, isPermitted: () => true },
+          captureAllowed: () => true,
+          showWorking: () => {},
+          showIdle: () => {},
+        }) as never,
+      activity: { entries: () => [] },
+      store: { approvalRevision: 0 },
+    });
+    expect(events.find((e) => e.name === "agent_profile_unavailable")?.fields).toEqual({ code: "profile: invalid" });
+    expect(wiring.adapter).toBeNull();
+    const candidates = [{ id: "c1", title: "A", labelQuality: "published", sourceUrl: `${ORIGIN}/a` }];
+    wiring.scheduler.onSettled(
+      visit,
+      {
+        result: { ok: true, source: "fresh", stale: false, catalog: { origin: ORIGIN, version: "v1", fetchedAt: 0, candidates, truncated: false, errors: [] } },
+        stats: { requests: 0, refused: 0, bytesReceived: 0, ms: 0 },
+      } as never,
+      Date.now(),
+    );
+    expect(published).toEqual([expect.objectContaining({ status: "unavailable", reason: "agent_unavailable" })]);
   });
 
   it("no change is acted on after close", async () => {

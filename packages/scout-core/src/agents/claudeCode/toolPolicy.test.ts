@@ -4,11 +4,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { buildJobSurface, SCOUT_TOOL_NAMES } from "./jobSurface.js";
-import { fakeBackend, selection } from "./testing/fakeBackend.js";
+import { fakeBackend, selection } from "../testing/fakeBackend.js";
 import { defaultManagedPaths } from "./claudeJob.js";
-import { BRIDGE_JOB_MAX_BYTES, BridgeJobSchema } from "./contextToolBridge.js";
+import { BRIDGE_JOB_MAX_BYTES, BridgeJobSchema } from "../contextToolBridge.js";
 import { BRIDGE_SERVER_NAME, checkManagedPolicy, managedSettingsConflict, planJobTools, type JobManagedPaths, type ToolPlanOptions } from "./toolPolicy.js";
-import { MAX_ARG_CHARS, MAX_ARGS, MAX_CONNECTIONS, MAX_DESCRIPTION_CHARS, MAX_SELECTIONS, ToolsProfileSchema, type ToolsProfile } from "./toolProfile.js";
+import { MAX_ARG_CHARS, MAX_ARGS, MAX_CONNECTIONS, MAX_DESCRIPTION_CHARS, MAX_SELECTIONS, ToolsProfileSchema, type ToolsProfile } from "../toolProfile.js";
 
 const SECRET = "SENTINEL-PLAN-SECRET-9a0b";
 const dirs: string[] = [];

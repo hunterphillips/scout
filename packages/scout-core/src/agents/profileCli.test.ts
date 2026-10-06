@@ -9,7 +9,8 @@ import { afterEach, describe, expect, it } from "vitest";
 import { runCli } from "../cli.js";
 import { AGENT_PROFILE_LOCK_FILE } from "./profile.js";
 import { type AgentStatus } from "./profileCli.js";
-import { agentProfilePath, DEFAULT_AGENT_MODEL, loadAgentProfile, writeAgentProfile } from "./profile.js";
+import { DEFAULT_CLAUDE_CODE_MODEL } from "./claudeCode/profile.js";
+import { agentProfilePath, loadAgentProfile, writeAgentProfile } from "./profile.js";
 import { FAKE_BACKEND, LOOKUP_SCHEMA, type BackendLogLine } from "./testing/fakeBackend.js";
 import { schemaHash } from "./toolProfile.js";
 
@@ -47,7 +48,7 @@ function fixture(): Fixture {
   dirs.push(dir);
   const home = join(dir, "home");
   mkdirSync(home, { mode: 0o700 });
-  writeAgentProfile(home, { schemaVersion: 1, adapter: "claude-code", claudePath: "/opt/bin/claude", model: DEFAULT_AGENT_MODEL });
+  writeAgentProfile(home, { schemaVersion: 1, adapter: "claude-code", claudePath: "/opt/bin/claude", model: DEFAULT_CLAUDE_CODE_MODEL });
   const modeFile = join(dir, "mode");
   writeFileSync(modeFile, "honest");
   const log = join(dir, "backend.log");

@@ -37,8 +37,8 @@
 // published only for the coordinator's current, unpaused, permitted visit.
 //
 // Recommendation jobs: wiring/jobs.ts builds the adapter for `agent-profile.json` (without a
-// usable profile every job is `unavailable`), its billing preflight in a killable child process
-// (started at once only when some host is recommendation-enabled), the catalog parse worker a
+// usable profile every job is `unavailable`), its readiness check (started at once only when
+// some host is recommendation-enabled), the catalog parse worker a
 // cancelled discovery pass cancels too, and the scheduler. Every panel frame passes through it,
 // so the scheduler hears the browser-context grant as the window does; revoked resources reach
 // it through the store's revocation hook, after agent.sock released the snapshots that pinned
@@ -49,8 +49,8 @@
 // command, SIGTERM, SIGINT, SIGHUP.
 //   1. stop accepting (synchronous, nothing awaited before it): the coordinator stops (no new
 //      frames act, the dwell and the discovery pass are cancelled, the scheduler cancels its job
-//      with `shutdown`), the panel channel stops, stdin stops being read; then the preflight
-//      child is killed (`killPreflight()` is synchronous and runs before the first await).
+//      with `shutdown`), the panel channel stops, stdin stops being read; then every readiness
+//      check is stopped (`cancelReadinessChecks()` is synchronous and runs before the first await).
 //   2. `jobs`: the scheduler is stopped; every snapshot is released and every job token revoked
 //      (a job's next read on agent.sock is refused); every adapter's job is aborted and its
 //      process tree waited for (SIGTERM to the group → 2 s grace → SIGKILL → tracked descendants).
@@ -95,7 +95,7 @@ import { readBrowserContextGrant, writeBrowserContextGrant } from "./agentApi/gr
 import { createAgentHandlers } from "./agentApi/handlers.js";
 import { createReadAudit, type ReadAudit } from "./agentApi/readAudit.js";
 import { type AgentSocketServer, createAgentSocketServer } from "./agentSocketServer.js";
-import { createSkillExporter, ExportError, type SkillExporter } from "./capabilities/exports.js";
+import { openExporter } from "./integrations/claudeCode/index.js";
 import { type CapabilityStore, createCapabilityStore, StoreCorruptError } from "./capabilities/store.js";
 import { releaseHeldLocks, StoreLockedError } from "./capabilities/storeLock.js";
 import { createSiteResourceDiscoverer } from "./capabilities/discovery.js";
@@ -106,7 +106,6 @@ import { ConfigError, type CoreConfig, readConfig } from "./config.js";
 import { type Coordinator, createCoordinator } from "./coordinator.js";
 import { createDiagnostics, defaultDiagnosticsPath, type Diagnostics, scoutHome } from "./diagnostics.js";
 import { DWELL_MS } from "./dwell.js";
-import { InstalledRecordError, readInstalledRecord } from "./installedRecord.js";
 import { createPanelChannel, type PanelChannel } from "./panelChannel.js";
 import { createPanelSinks, type PanelSink } from "./panelSinks.js";
 import { createResultRegistry } from "./results.js";
@@ -173,6 +172,7 @@ export async function runStdio(deps: StdioDeps): Promise<StdioCore> {
   }
 
   const runDir = join(home, "run");
+  // The skill exporter belongs to the first agent integration; a second integration registers its own here.
   const exporter = openExporter(home, diagnostics);
 
   // The agent socket is built once the token exists; the store's revocation hook reaches it then.
@@ -294,7 +294,7 @@ export async function runStdio(deps: StdioDeps): Promise<StdioCore> {
   sweepJobDirs(join(runDir, "jobs"), diagnostics);
 
   const activity = createActivityStore({ clock });
-  // The adapter, preflight, parse pool and scheduler; it reads the coordinator only once a job runs.
+  // The adapter, readiness checks, parse pool and scheduler; it reads the coordinator only once a job runs.
   const jobWiring = createJobWiring({
     home,
     env: deps.env,
@@ -458,14 +458,14 @@ export async function runStdio(deps: StdioDeps): Promise<StdioCore> {
   // Settles (never rejects) once start has finished either way, so a shutdown that
   // arrives mid-bind closes the listeners that bind is about to produce.
   let startSettled: Promise<void> = Promise.resolve();
-  /** Step 1: stop accepting work, then kill the preflight. Synchronous. */
+  /** Step 1: stop accepting work, then stop the readiness checks. Synchronous. */
   const stopAccepting = (): void => {
     coordinator.stop();
     panelChannel.stop();
     destinations.close();
     rl.close();
-    // Before anything is awaited: a preflight child blocked on `claude` must never hold the exit.
-    jobWiring.killPreflight();
+    // Before anything is awaited: a readiness check blocked on its agent must never hold the exit.
+    jobWiring.cancelReadinessChecks();
   };
   const shutdown = (reason: string): Promise<void> => {
     if (shuttingDown !== null) return shuttingDown;
@@ -643,27 +643,6 @@ class StartError extends Error {
   constructor(readonly code: string) {
     super(code);
     this.name = "StartError";
-  }
-}
-
-/**
- * The skill exporter for the skills root the installer recorded, or undefined when none is
- * recorded or the record or root is unusable (reported to diagnostics, never fatal).
- */
-function openExporter(home: string, diagnostics: Diagnostics): SkillExporter | undefined {
-  let skillsRoot: string | undefined;
-  try {
-    skillsRoot = readInstalledRecord(home).skillsRoot;
-  } catch (e) {
-    diagnostics.event("installed_record_invalid", { code: e instanceof InstalledRecordError ? e.code : "installed-unreadable" });
-    return undefined;
-  }
-  if (skillsRoot === undefined) return undefined;
-  try {
-    return createSkillExporter({ scoutHome: home, skillsRoot, diagnostics });
-  } catch (e) {
-    diagnostics.event("skills_root_invalid", { code: e instanceof ExportError ? e.code : "unknown" });
-    return undefined;
   }
 }
 

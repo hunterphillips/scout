@@ -49,7 +49,7 @@ import { isAbsolute } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { ErrorCode, McpError, type Tool } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
-import { isExecutableFile } from "./authPreflight.js";
+import { isExecutableFile } from "./executables.js";
 import { BRIDGE_DEFAULT_LIMITS } from "./contextToolBridge.js";
 import { startChild, type SupervisedChild } from "./childSupervisor.js";
 import { ExactEnvStdioTransport } from "./exactEnvTransport.js";

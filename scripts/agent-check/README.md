@@ -4,7 +4,7 @@ Two commands for Phase 1 of the website-agent plan.
 
 - `npm run test:agent-contract` runs the hermetic tests: the job runtime and skill
   wrappers in scout-core, the scout-mcp adapter, and these scripts. The tests use a
-  scripted fake `claude` (`packages/scout-core/src/agents/testing/fake-claude.mjs`) and
+  scripted fake `claude` (`packages/scout-core/src/agents/claudeCode/testing/fake-claude.mjs`) and
   temp dirs only.
 - `npm run verify:agent -- --case <case> --home <dir> [options]` runs one live check
   against the installed Claude CLI. Every real run makes model calls on the user's

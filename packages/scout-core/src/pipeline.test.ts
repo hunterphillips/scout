@@ -3,7 +3,6 @@ import { describe, expect, it } from "vitest";
 import type { JobSnapshot } from "./activity/snapshots.js";
 import { snapshotCandidates } from "./activity/snapshots.js";
 import type { JobDetails, JobRunOptions } from "./agents/adapter.js";
-import type { PromptActivity } from "./agents/prompt.js";
 import { verifyTargets, type VerifyFetch } from "./catalog/verifyTargets.js";
 import { buildJobRequest, runJob, type RunJobInput, VERIFY_RESERVE_MS } from "./pipeline.js";
 
@@ -37,7 +36,7 @@ const snapshot: JobSnapshot = {
 const details: JobDetails = { adapter: "fake", termination: "completed", toolUses: [], optionalTools: [], droppedPicks: 0, cutPicks: 0, toolErrors: {}, optionalToolFailed: false, timings: { totalMs: 1 }, usage: {} };
 
 function input(result: HostJobResult | ((req: JobRequest) => HostJobResult), extra: Partial<RunJobInput> = {}) {
-  const seen: { request?: JobRequest; options?: JobRunOptions & { activity?: readonly PromptActivity[] } } = {};
+  const seen: { request?: JobRequest; options?: JobRunOptions } = {};
   const verifyCalls: { ids: string[]; budgetMs: number }[] = [];
   const clock = { now: () => 1_000 };
   const base: RunJobInput = {

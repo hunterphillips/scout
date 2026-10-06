@@ -24,7 +24,7 @@ import { existsSync, lstatSync, mkdirSync, realpathSync, rmSync, statSync } from
 import { isAbsolute, join, sep } from "node:path";
 import { AgentRequestIdSchema } from "@scout/contracts";
 import { isExecutableFile, runPreflight, type Env, type PreflightDeps, type PreflightReport, type Verdict } from "./authPreflight.js";
-import { MODEL_RE } from "./profile.js";
+import { MODEL_RE } from "../profile.js";
 
 export const PROFILE_ID = "scout-job-claude-subscription/v1";
 

@@ -149,7 +149,7 @@ export function removeSkill(skillsRoot, expected) {
 
 /**
  * The skills root, wrapper count and wrapper names scout-core's exports manifest records (shape in
- * packages/scout-core/src/capabilities/exports.ts). Read-only; returns null when the manifest
+ * packages/scout-core/src/integrations/claudeCode/skillExporter.ts). Read-only; returns null when the manifest
  * does not exist and throws when it exists but cannot be read or has no skillsRoot / entries.
  */
 export function readExportsManifest(exportsManifest) {
