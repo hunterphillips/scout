@@ -720,6 +720,7 @@ describe.skipIf(!BUILT)("recommendations switch: set_destination and a hand edit
     b = await boot(home, env, children);
     b.dns.set("loopback");
     b.grant([`${SITE}/*`], false);
+    await until(() => grants().length > 0, "the initial grant frame");
   }, 60_000);
 
   afterAll(async () => {
