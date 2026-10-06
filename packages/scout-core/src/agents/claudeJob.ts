@@ -18,8 +18,8 @@
 // profile's selected tools. Before anything is written, managed policy is checked; a policy
 // that would defeat the job's restrictions is `unsupported_configuration`.
 //
-// Lifecycle (adapted from packages/personal-context-mcp/src/agentRunner.ts, removed in P4.4;
-// git history has it), one unit each: jsonLineStream.ts parses stdout; streamMonitor.ts
+// Lifecycle (adapted from the removed personal-context package; see git history before
+// 2026-10-02), one unit each: jsonLineStream.ts parses stdout; streamMonitor.ts
 // checks each event as it arrives (init, tools, hooks, auth); childSupervisor.ts spawns,
 // terminates and reaps the process tree; mapOutcome.ts turns the finished run into an
 // outcome; jobStop.ts holds the one stop decision. This file wires them per job and owns the
@@ -257,7 +257,7 @@ export class JobRequestError extends Error {
   }
 }
 
-/** A preflight reason without local paths (verbatim from the legacy agentRunner). */
+/** A preflight reason without local paths (verbatim from the removed personal-context package). */
 export function redactReason(reason: string): string {
   return reason.replace(/^(\w+ settings) .*?(: [^:]*)$/u, "$1$2").replace(/(?:^|(?<=\s))\/\S+/gu, "<path>");
 }

@@ -1,7 +1,6 @@
 // The direct Claude launch profile for Scout jobs. Runs NO model calls.
 //
-// Provenance: adapted from packages/personal-context-mcp/src/launchProfile.ts (itself from
-// the Phase 0 spikes); that package was removed in P4.4 (git history has it).
+// Provenance: adapted from the removed personal-context package (see git history before 2026-10-02).
 // Unchanged: the env allowlist (FORWARD_KEYS) and CLAUDE_CONFIG_DIR/HOME rules, so routing,
 // provider, model and nested-session variables never reach the child; the preflight runs
 // against exactly the profile's env, cwd and binary; serializing a profile yields key names

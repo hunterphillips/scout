@@ -1,5 +1,5 @@
-// Provenance: copied from packages/personal-context-mcp/src/processTree.ts (itself lifted
-// from scripts/spikes/process-tree.mjs); both were removed in P4.4 (git history has them).
+// Provenance: copied from the removed personal-context package (see git history before
+// 2026-10-02).
 // OwnedTree's tracking and signalling rules are unchanged, and processTree.test.ts pins
 // them against the legacy copy's results. Differences, all additive:
 //   - psSnapshotAsync(): the same ps query through execFile, so the job runtime never
@@ -16,7 +16,7 @@
 //
 // Track and clean up the process tree one spawned `claude` owns.
 //
-// Lifted from the Phase 0 spike `scripts/spikes/process-tree.mjs` without changing its
+// Lifted from the Phase 0 spike without changing its
 // invariants; only types were added. Only the caller's own tree is ever signalled: the
 // detached process group it created, plus descendants seen leaving that group.
 // Identities are pid + start time, so a reused pid is never signalled. ps is asked for

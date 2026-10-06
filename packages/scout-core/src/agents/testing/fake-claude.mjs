@@ -1,5 +1,5 @@
 // Test double for `claude -p` in the agent-job tests, modelled on
-// packages/personal-context-mcp/test/fake-claude.mjs (removed in P4.4). Never calls a model
+// the removed personal-context package's (see git history before 2026-10-02). Never calls a model
 // or the network.
 //
 // Behaviour comes from FAKE_MODE (and FAKE_VERSION, the version its init reports), set by

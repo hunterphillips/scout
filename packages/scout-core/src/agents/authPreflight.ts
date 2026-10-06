@@ -1,12 +1,11 @@
-// Provenance: copied verbatim from packages/personal-context-mcp/src/authPreflight.ts
-// (itself lifted from scripts/spikes/auth-preflight.mjs). That package and the spike were
-// removed in P4.4 (git history has both); this is now the only copy. Differences: none in
+// Provenance: copied verbatim from the removed personal-context package (see git history
+// before 2026-10-02); this is now the only copy. Differences: none in
 // behaviour; only this header. authPreflight.parity.test.ts pins the legacy copy's verdicts,
 // reasons and CLI calls over the same synthetic settings matrix.
 //
 // Billing preflight. Runs NO model calls.
 //
-// Lifted from the Phase 0 spike `scripts/spikes/auth-preflight.mjs` without changing
+// Lifted from the Phase 0 spike without changing
 // behaviour; the only additions are typed injection seams (`spawnSync`) so tests never
 // start a real `claude`.
 //

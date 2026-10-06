@@ -3,8 +3,8 @@
 //
 // Stop = SIGTERM to the CLI's process group (directly, while it is unreaped), SIGKILL after
 // the grace period, then any straggler from the ps-recorded tree; the exit wait is capped at
-// grace + 2 s (`reap_timeout`). Adapted from the legacy agentRunner (removed with the
-// personal-context package in P4.4). Since P4.4 `agent inspect|refresh` stops an inspected
+// grace + 2 s (`reap_timeout`). Adapted from the removed personal-context package
+// (see git history before 2026-10-02). Since P4.4 `agent inspect|refresh` stops an inspected
 // backend through this too (backendDefinition.ts inspectBackend). Differences: ps runs
 // asynchronously (psSnapshotAsync), at most one query at a time, every TREE_POLL_MS while
 // the CLI runs and fresh on terminate and reap, instead of a blocking spawnSync every 150 ms; this runtime lives in the coordinator process, so it must
@@ -185,7 +185,7 @@ export function startChild(o: ChildSupervisorOptions): SupervisedChild {
       child.stdout?.destroy();
       child.stderr?.destroy();
     },
-    // Verbatim from the legacy agentRunner, with async snapshots.
+    // Verbatim from the removed personal-context package, with async snapshots.
     async reap() {
       if (!tree) return;
       const waitGone = async (ms: number): Promise<boolean> => {

@@ -24,7 +24,7 @@
 //   - the first `result` event is kept;
 //   - a non-result event that reports an auth or quota problem: unavailable, auth_or_quota.
 //
-// Adapted from the legacy agentRunner's event handler; isAuthOrQuota is verbatim.
+// Adapted from the removed personal-context package's event handler; isAuthOrQuota is verbatim.
 
 import type { Clock } from "../clock.js";
 import type { JobDetails, JobTermination } from "./adapter.js";
@@ -35,7 +35,7 @@ import { isRecord, type StreamRecord } from "./jsonLineStream.js";
 
 const MAX_TOOL_USES_RECORDED = 64;
 
-// Verbatim from the legacy agentRunner.
+// Verbatim from the removed personal-context package.
 const AUTH_QUOTA_STATUS = [401, 403, 429];
 const AUTH_QUOTA_TEXT = /(\/login|log ?in|auth|api key|rate.?limit|usage limit|quota|credit|billing|overloaded)/i;
 export function isAuthOrQuota(ev: StreamRecord): boolean {
