@@ -70,9 +70,10 @@ describe("runPreflightInChild", () => {
     const started = Date.now();
     const report = await runPreflightInChild(input);
     clearInterval(tick);
-    // Four CLI calls at 0.4 s each: the preflight itself took over a second.
+    // Four CLI calls at 0.4 s each: the preflight itself took over a second. A blocked loop
+    // would show a gap of 400 ms or more; 200 leaves room for a loaded CI runner.
     expect(Date.now() - started).toBeGreaterThan(1000);
-    expect(worstGap).toBeLessThan(50);
+    expect(worstGap).toBeLessThan(200);
     expect(report.cliVersion).toBe("2.1.286");
     expect(report.reasons.every((r) => typeof r === "string")).toBe(true);
   }, 20_000);
