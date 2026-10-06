@@ -353,13 +353,15 @@ switch (effectiveMode) {
     break;
   }
   case "ignore-term":
-    await start();
+    // The handler goes in before start(): the test cancels as soon as the scout server's pid
+    // is logged, which happens inside start().
     process.on("SIGTERM", () => {});
+    await start();
     hang();
     break;
   case "late-output":
-    // Answers only once told to stop, after a delay: the host must never count it.
-    await start();
+    // Answers only once told to stop, after a delay: the host must never count it. The
+    // handler goes in before start(), as in ignore-term.
     process.on("SIGTERM", () => {
       setTimeout(() => {
         message({ status: "ok", items: [pick(ids[0])] });
@@ -367,6 +369,7 @@ switch (effectiveMode) {
         setTimeout(() => process.exit(0), 50);
       }, 100);
     });
+    await start();
     hang();
     break;
   case "flood":

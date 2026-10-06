@@ -234,7 +234,7 @@ describe("side panel page", () => {
     expect((h.byKey(KEY) as unknown as HTMLInputElement).checked).toBe(false);
     expect(h.byKey(KEY)!.closest(".tray")).not.toBeNull();
     expect(h.text()).toContain("Suggest on docs.example.com");
-    expect(h.text()).toContain("When you stay on a page here, Scout asks your agent for links.");
+    expect(h.text()).toContain("Allow Scout to suggest relevant links on the current site.");
     await h.click(KEY);
     const cmd = lastCommand(h.f);
     expect(cmd).toEqual({ type: "set_destination", commandId: expect.stringMatching(/^sp-/), origin: "https://docs.example.com", enabled: true, expectedEnabled: false });

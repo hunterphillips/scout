@@ -461,7 +461,7 @@ describe("panel view", () => {
     expect(box().disabled).toBe(false);
     expect(root.querySelector('label[for="destination-https://docs.example.com"]')!.textContent).toContain("Suggest on docs.example.com");
     expect(box().closest(".tray")).not.toBeNull();
-    expect(root.textContent).toContain("When you stay on a page here, Scout asks your agent for links.");
+    expect(root.textContent).toContain("Allow Scout to suggest relevant links on the current site.");
     box().click();
     expect(on.destination).toHaveBeenCalledWith("https://docs.example.com", true);
     // The core's grant frame turns it on.
