@@ -407,7 +407,7 @@ function destinationSwitch(doc: Document, v: ViewState, on: PanelHandlers, origi
         ? "Allow this site first."
         : m.capabilities.agentBrowserContext === null
           ? "Waiting for Scout…"
-          : "When you stay on a page here, Scout asks your agent for links.";
+          : "Allow Scout to suggest relevant links on the current site.";
   const label = el(doc, "span", { class: "site-label" }, siteTile(doc, host), el(doc, "span", { text: `Suggest on ${host}` }));
   return toggle(doc, `destination-${origin}`, label, enabled, m.canToggleDestination(origin) && (granted || enabled), (x) => on.destination(origin, x), note, "switch-label site-switch");
 }
