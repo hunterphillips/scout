@@ -11,8 +11,8 @@
 // app-bundle    { path: "<Applications>/Scout.app", sha256 }: the installed app (bundle-app
 //                     --install); sha256 is bundleHash (every file in the bundle); removed only
 //                     while it matches
-// `kinds` (P4.3): the sorted kind names present, rewritten on every save (saveInstalled), so a
-// later reader can tell a record written since P4.3 from an older one. `version` stays 1.
+// `kinds`: the sorted kind names present, rewritten on every save (saveInstalled), so a
+// later reader can tell a record that lists its kinds from an older one. `version` stays 1.
 // The agent integration (setup --agent-integration, lib/agent-integration.mjs) adds:
 //   skillsRoot        the Claude Code skills root; scout-core reads it (installedRecord.ts)
 //                     to export runtime skill wrappers there

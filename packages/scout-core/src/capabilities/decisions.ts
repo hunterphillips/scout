@@ -51,7 +51,7 @@ export interface VersionMeta {
 }
 
 export interface StoredResource {
-  /** The contract record P2.4 serves from. */
+  /** The contract record agent.sock serves from. */
   resource: Resource;
   /** Bumped on every change to this resource; approval commands must name it. */
   revision: number;

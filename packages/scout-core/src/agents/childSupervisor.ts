@@ -4,12 +4,13 @@
 // Stop = SIGTERM to the CLI's process group (directly, while it is unreaped), SIGKILL after
 // the grace period, then any straggler from the ps-recorded tree; the exit wait is capped at
 // grace + 2 s (`reap_timeout`). Adapted from the removed personal-context package
-// (see git history before 2026-10-02). Since P4.4 `agent inspect|refresh` stops an inspected
-// backend through this too (backendDefinition.ts inspectBackend). Differences: ps runs
+// (see git history before 2026-10-02). `agent inspect|refresh` stops an inspected backend
+// through this too (backendDefinition.ts inspectBackend). Differences: ps runs
 // asynchronously (psSnapshotAsync), at most one query at a time, every TREE_POLL_MS while
-// the CLI runs and fresh on terminate and reap, instead of a blocking spawnSync every 150 ms; this runtime lives in the coordinator process, so it must
-// never stall its event loop. The process-group signal covers the CLI and every in-group
-// descendant without ps; the polled tree only adds descendants that left the group.
+// the CLI runs and fresh on terminate and reap, instead of a blocking spawnSync every
+// 150 ms. This runtime lives in the coordinator process, so it must never stall its event
+// loop. The process-group signal covers the CLI and every in-group descendant without ps;
+// the polled tree only adds descendants that left the group.
 // dispose() always clears the timers and SIGKILLs the group if the CLI is still unreaped.
 // With a `tracker` (the core's ProcessTracker), the tree is registered at spawn and removed only
 // once reap() saw nothing owned alive: a straggler reap could not kill keeps it registered, so

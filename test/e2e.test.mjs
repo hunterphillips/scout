@@ -403,7 +403,7 @@ describe.skipIf(!BUILT)("host <-> core end to end", () => {
     expect(dns.hosts().length).toBeGreaterThan(0);
     expect(new Set(dns.hosts())).toEqual(new Set(["docs.scout-e2e.invalid"]));
     // Nothing a page, the issue or the model wrote, and no URL beyond the origin, in any log:
-    // run metadata is redacted status, timing and counts only (P3.4). The fixture's candidate
+    // run metadata is redacted status, timing and counts only. The fixture's candidate
     // titles, the issue's title and body, both picks' reasons, and every candidate href.
     expect(first[results].items[1].reason).toBe("Fits the open billing work");
     const fixtureText = [TITLE, BODY, ...candidates.map((c) => c.title), "Fits the open billing work", "lookup:metered", "Matches", ...candidates.map((c) => c.sourceUrl), "/docs/", "/issues/"];

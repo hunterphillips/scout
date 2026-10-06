@@ -1,4 +1,4 @@
-// B13: the per-job bridge, driven directly with the MCP SDK client (no model, no CLI): the
+// The per-job bridge, driven directly with the MCP SDK client (no model, no CLI): the
 // built entrypoint (dist/agents/bridgeMain.js) against fake-backend.mjs in each adversarial
 // mode. Unselected names and changed schemas must never reach a backend.
 
@@ -126,7 +126,7 @@ function mkfifo(path: string): boolean {
 const textOf = (r: unknown): string => ((r as CallToolResult).content[0] as { text: string }).text;
 const names = async (c: Client): Promise<string[]> => (await c.listTools()).tools.map((t) => t.name);
 
-describe("context tool bridge (B13)", () => {
+describe("context tool bridge", () => {
   it("advertises only the selected tool, with its frozen description and schema, and forwards its calls", async () => {
     const s = await setup("honest", (id) => [selection(id, "lookup", true)]);
     const { tools } = await s.client.listTools();

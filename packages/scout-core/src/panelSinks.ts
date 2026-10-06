@@ -1,7 +1,8 @@
-// Where the window's frames go. Since bridge protocol 3 Scout's window has two possible
-// surfaces: the native app (JSONL on the core's stdout, the `stdio` sink, registered once at
-// start) and the Chrome side panel (the live native-host connection, a `relay` sink, registered
-// when that connection completes its hello and removed when it closes or is replaced).
+// Where panel frames go. There are two possible sinks: the Mac app (JSONL on the core's stdout,
+// the `stdio` sink, registered once at start) and the Chrome side panel (the live native-host
+// connection, a `relay` sink, registered when that connection completes its hello and removed
+// when it closes or is replaced). The Mac app reads only `state` frames; the side panel reads
+// every frame.
 //
 // Every frame goes to every sink, except the answers to one command: an `ack`, and a `preview`
 // chunk, go only to the sink that sent the command with that `commandId` (the last one to send

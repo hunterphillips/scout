@@ -1,19 +1,19 @@
-// Scout's window side of the core: wires the capability view (panelCapabilities.ts), previews
+// The side panel's side of the core: wires the capability view (panelCapabilities.ts), previews
 // (previewStream.ts), mutation commands (nativeCommands.ts), the context-read audit, and the
-// browser-context grant to the JSONL frames the native app reads. Wiring only; each part's
-// rules are in its own file.
+// browser-context grant to the panel frames every sink receives (panelSinks.ts). Wiring only;
+// each part's rules are in its own file.
 //
 // On start it sends `grant`, `capabilities`, and `audit` once. Afterwards `capabilities` goes
 // out (debounced) whenever `capabilitiesChanged()` is called (the coordinator calls it on
 // permission, visit, and ingest changes; commands call it after their ack), `audit` (debounced
 // AUDIT_DEBOUNCE_MS, skipped when unchanged) on `auditChanged()`, and `grant` when the user
-// toggles it or the recommendation destinations change (`destinationsChanged()`, P4.6).
+// toggles it or the recommendation destinations change (`destinationsChanged()`).
 // A `preview` command answers with a chunk, or with a failure ack.
 //
 // Recommendation results (results.ts): a publish goes out as a `results` frame (hrefs
 // stripped); a non-silent clear that dropped a result asks the coordinator to send its current
-// state again (`resendState`), which the window reads as "this visit's results are gone". The
-// coordinator's own clears are silent: the state frame it sends next resets the window anyway.
+// state again (`resendState`), which the side panel reads as "this visit's results are gone".
+// The coordinator's own clears are silent: the state frame it sends next resets the panel anyway.
 // No stand-in `empty` frame is ever sent. `open_link` is answered from the same registry.
 //
 // A browser surface (panelSinks.ts: the relay sink of a native-host connection) is repainted by
@@ -24,10 +24,10 @@
 // results frame matters for the repaint after backpressure (socketServer.ts), when a published
 // result may have been dropped on the way to a connection that is still current.
 //
-// Ordering: the window drops a visit's results on any `state` frame for that visit other than
-// `working` for the same job. So the coordinator (or P3.2's job scheduler) emits a job's
+// Ordering: the side panel drops a visit's results on any `state` frame for that visit other
+// than `working` for the same job. So the coordinator (or the job scheduler) emits a job's
 // `working{jobId}` and then the visit's `idle` before the result is published; an `idle` or
-// `resendState` for the same visit after the publish wipes the window's results.
+// `resendState` for the same visit after the publish wipes the panel's results.
 
 import { GRANT_DESTINATIONS_MAX, isHttpsOrigin, type CapabilityConflict, type PanelAck, type PanelAudit, type PanelCommand, type PanelState } from "@scout/contracts";
 import type { GrantWrite } from "./agentApi/grants.js";

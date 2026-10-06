@@ -1,16 +1,15 @@
-// `cli.js capability ...`: a thin developer front end to the capability store, for Phase 2
-// checks before the native window exists. It is a dev tool writing to stdout, not to
-// diagnostics: `list` prints source URLs, and `list --json` prints the whole stored state,
-// including source URLs and website-provided skill names and descriptions. It never prints
-// resource text, and it never exports wrappers: the skills root comes from the installer's
-// record (P2.6), not from a command-line path.
+// `cli.js capability ...`: a thin developer front end to the capability store. It is a dev
+// tool writing to stdout, not to diagnostics: `list` prints source URLs, and `list --json`
+// prints the whole stored state, including source URLs and website-provided skill names and
+// descriptions. It never prints resource text, and it never exports wrappers: the skills root
+// comes from the installer's record, not from a command-line path.
 //
 // `list` opens the store read-only. Every other command takes the store's writer lock, so
 // while the Scout core runs (and holds the lock) they refuse with exit 2. The CLI has no
 // `onRevoked` consumer: a CLI revoke cannot invalidate job tokens or cancel jobs, which is
 // one more reason it only runs when the core does not.
 //
-// `unexport-all [--home <dir>] [--json]` (P4.3, run by `npm run uninstall` before it drops the
+// `unexport-all [--home <dir>] [--json]` (run by `npm run uninstall` before it drops the
 // recorded skills root): holding `capabilities/store.lock`, it removes every runtime skill
 // wrapper `exports.json` owns whose files still hash to the recorded ownership hash, and
 // rewrites `exports.json` without them; a changed wrapper, a symlink, or an I/O refusal is kept,

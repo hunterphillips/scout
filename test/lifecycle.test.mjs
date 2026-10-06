@@ -1,4 +1,4 @@
-// Runtime ownership and shutdown (P3.4), end to end: the built host and core in a temp
+// Runtime ownership and shutdown, end to end: the built host and core in a temp
 // SCOUT_HOME, a recommendation job running the scripted fake CLI (never a model) in its
 // `sleep-ignore-term` mode (no final response, SIGTERM ignored, one in-group and one escaped
 // `sleep` descendant that also ignore SIGTERM) with an optional retrieval tool whose backend

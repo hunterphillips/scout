@@ -299,7 +299,7 @@ describe("claude job: outcomes", () => {
   });
 });
 
-// ---------- startup checks (B9/B13) ----------
+// ---------- startup checks ----------
 
 describe("claude job: the init event and the stream stop a misconfigured job", () => {
   it.each<[string, string, string | undefined]>([
@@ -473,7 +473,7 @@ describe("claude job: the init event and the stream stop a misconfigured job", (
   });
 });
 
-// ---------- cancellation and timeouts (B11/B13) ----------
+// ---------- cancellation and timeouts ----------
 
 describe("claude job: cancellation", () => {
   it.each(["visit_changed", "superseded", "revoked"] as const)("signal (%s): cancelled, descendants killed, transports closed, files removed", async (reason) => {
@@ -893,7 +893,7 @@ describe("claude job: the synthetic instruction marker", () => {
   });
 });
 
-// ---------- selected user tools through the bridge (B9/B13) ----------
+// ---------- selected user tools through the bridge ----------
 
 // Each case here boots four to six Node processes (the fake CLI, scout-mcp, the bridge, one
 // or two backends) and waits for each by its log, not by a timer; under a loaded machine

@@ -15,18 +15,20 @@ describe("job resume cache", () => {
     ...extra,
   });
 
-  it("reuses an answer for exactly the same key under 30 s (the fragment ignored); every key field counts", () => {
+  it("reuses an answer for the same key under 15 min (the fragment and the activity ignored); every other key field counts", () => {
+    expect(RESUME_TTL_MS).toBe(15 * 60 * 1000);
     const clock = { t: 0, now: () => clock.t };
     const cache = createJobResumeCache<string>({ clock });
     cache.store(key(), { result: "answer", browserOnly: false });
     expect(cache.restore(key({ url: "https://docs.example.com/billing" }), { hasUserTools: false })).toBe("answer");
+    // The user has been reading since: other activity still gets the page's answer back.
+    expect(cache.restore(key({ activityHash: activityHash([]) }), { hasUserTools: false })).toBe("answer");
     for (const changed of [
       { coreInstanceId: "core-2" },
       { origin: "https://docs2.example.com" },
       { url: "https://docs.example.com/other" },
       { url: "https://docs.example.com/billing?tab=2" },
       { catalogHash: "cat-2" },
-      { activityHash: activityHash([]) },
       { approvalRevision: 2 },
       { grantRevision: 1 },
       { profileFingerprint: "fp-2" },
@@ -39,7 +41,7 @@ describe("job resume cache", () => {
     expect(cache.size).toBe(0);
   });
 
-  // Ported from the legacy rank cache's tests when P4.4 removed it.
+  // Ported from the removed rank cache's tests.
   it("sweeps expired entries on store", () => {
     const clock = { t: 0, now: () => clock.t };
     const cache = createJobResumeCache<string>({ clock });
@@ -49,7 +51,44 @@ describe("job resume cache", () => {
     expect(cache.size).toBe(1);
   });
 
-  it("holds at most eight entries, evicting the oldest-stored; re-storing a key refreshes its order", () => {
+  it("one entry per page and inputs: a later answer for the same page under other activity replaces it", () => {
+    const cache = createJobResumeCache<string>({ clock: { now: () => 0 } });
+    cache.store(key(), { result: "a", browserOnly: false });
+    cache.store(key({ activityHash: activityHash([]) }), { result: "b", browserOnly: false });
+    expect(cache.size).toBe(1);
+    expect(cache.restore(key(), { hasUserTools: false })).toBe("b");
+  });
+
+  it("show() holds the shown page's entries (fragment ignored) and restarts their window when it stops being shown; other pages age", () => {
+    const clock = { t: 0, now: () => clock.t };
+    const cache = createJobResumeCache<string>({ clock });
+    cache.store(key(), { result: "a", browserOnly: false });
+    cache.store(key({ url: "https://docs.example.com/other" }), { result: "b", browserOnly: false });
+    cache.show("https://docs.example.com/billing#elsewhere");
+    // A long read: the shown page's answer outlives the window, and a store's sweep keeps it.
+    clock.t = RESUME_TTL_MS + 5;
+    cache.store(key({ url: "https://docs.example.com/third" }), { result: "c", browserOnly: false });
+    expect(cache.restore(key({ url: "https://docs.example.com/other" }), { hasUserTools: false })).toBeNull();
+    cache.show(null);
+    clock.t += RESUME_TTL_MS - 1;
+    expect(cache.restore(key(), { hasUserTools: false })).toBe("a");
+    clock.t += 1;
+    expect(cache.restore(key(), { hasUserTools: false })).toBeNull();
+  });
+
+  it("dropWhere() removes the entries the predicate names, by origin or by whether the job saw activity", () => {
+    const cache = createJobResumeCache<string>({ clock: { now: () => 0 } });
+    cache.store(key(), { result: "a", browserOnly: false });
+    cache.store(key({ url: "https://docs.example.com/plain", activityHash: activityHash([]) }), { result: "p", browserOnly: false });
+    cache.store(key({ origin: "https://other.example.com", url: "https://other.example.com/", activityHash: activityHash([]) }), { result: "b", browserOnly: false });
+    cache.dropWhere((e) => e.origin === "https://other.example.com");
+    expect(cache.size).toBe(2);
+    cache.dropWhere((e) => e.hadActivity);
+    expect(cache.size).toBe(1);
+    expect(cache.restore(key({ url: "https://docs.example.com/plain" }), { hasUserTools: false })).toBe("p");
+  });
+
+  it("holds at most RESUME_MAX_ENTRIES entries, evicting the oldest-stored; re-storing a key refreshes its order", () => {
     const cache = createJobResumeCache<string>({ clock: { now: () => 0 } });
     for (let i = 0; i < RESUME_MAX_ENTRIES; i++) cache.store(key({ approvalRevision: i }), { result: `r${i}`, browserOnly: false });
     cache.store(key({ approvalRevision: 0 }), { result: "r0-again", browserOnly: false });

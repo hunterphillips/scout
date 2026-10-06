@@ -73,7 +73,9 @@ and reads a frozen snapshot of its visit instead.
    candidate links and checks for agent files.
 3. If suggestions are on for the site, the scheduler starts a recommendation job. The core
    runs one job at a time. A visit change cancels it, and the new visit gets one
-   replacement.
+   replacement. A page's answer is kept for 15 min after its visit ends: a later visit to
+   it with the same catalog, approvals, grant and profile gets the answer back with no job.
+   A page Scout opened from its own links gets no job for 15 min.
 4. The scheduler's states run `beginJob → working → take → run → idle → publish`. Every
    stage checks that the visit is still current.
 5. The job adapter launches a fresh agent process with Scout's MCP tools and any tools the
@@ -131,7 +133,7 @@ preflight in a separate child process must confirm the CLI bills to a subscripti
 | Fetch pacing | Serial per origin, honours crawl delay; 128 requests and 90 s per window |
 | Target verification | ≤3 targets in parallel, 4 s each |
 | Activity buffer | ≤10 issue entries, 15 min TTL |
-| Job tokens | ≤256 live; resume cache 30 s |
+| Job tokens | ≤256 live; page answers 15 min, ≤32 |
 | Read audit | 200 entries |
 | Panel commands | 10 s expiry; 256-entry ack route map |
 | Shutdown | 5 s deadline, then forced release |

@@ -1,4 +1,4 @@
-// B3/B4/B7: the exported SKILL.md is Scout-authored, carries only name + description, and
+// The exported SKILL.md is Scout-authored, carries only name + description, and
 // cannot be steered by hostile website metadata.
 
 import { describe, expect, it } from "vitest";

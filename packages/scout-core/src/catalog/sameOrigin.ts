@@ -54,7 +54,7 @@ export function sameOriginAbsoluteHttpsUrl(raw: string, origin: string): URL | n
  * No trimming, no base: whitespace, backslashes, upper-case hosts, and any other form the parser
  * rewrites (and another parser might read differently) return null. Any path, query, or
  * fragment on the origin passes. A `humanHref` from verifyTargets.ts passes, because it is a
- * parsed URL's `href`. Scout's window opens only targets that pass this (results.ts).
+ * parsed URL's `href`. Scout opens only targets that pass this (results.ts).
  */
 export function exactSameOriginHttpsUrl(href: string, origin: string): URL | null {
   if (typeof href !== "string" || href.length > MAX_URL_LENGTH) return null;

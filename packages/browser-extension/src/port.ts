@@ -10,9 +10,9 @@
 // core sends one. A core_unavailable with reason upgrade_required is sticky
 // until a later port is ready: mixed versions show as such, not as "down".
 //
-// Bridge protocol 3 carries Scout's window over the same port: each `panel` frame
+// Bridge protocol 3 carries the side panel over the same port: each `panel` frame
 // from the core (validated with ToChromeFrameSchema) goes to onPanel, and
-// sendCommand posts a window command ({type:"command", command}) once the port is
+// sendCommand posts a panel command ({type:"command", command}) once the port is
 // ready and the core is not reported unavailable. Commands are never queued: otherwise
 // sendCommand returns false.
 
@@ -55,7 +55,7 @@ export interface PortDeps {
   onPolicy(policy: CapturePolicy): void;
   /** The port is gone: stop in-flight reads (bumps the cancel epoch). */
   onLost(): void;
-  /** One of Scout's window frames from the core (protocol 3). Defaults to a no-op. */
+  /** One side panel frame from the core (protocol 3). Defaults to a no-op. */
   onPanel?(frame: PanelState): void;
   /**
    * linkState() changed (port opened or lost, ready, core_unavailable, a retry scheduled or the

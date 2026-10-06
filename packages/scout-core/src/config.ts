@@ -1,10 +1,9 @@
 // Core configuration read from <scoutHome>/config.json.
 //
-// `destinations` is the list of hosts where recommendations are enabled (consumed in
-// Phase 3). It no longer decides which sites are visits or can have capabilities: that is
-// Chrome's per-origin grant, reported by the extension's permissions snapshot. Since P4.6 the
-// core writes it too (`writeDestinations`, the side panel's per-site switch) and picks up a
-// hand edit while it runs (wiring/destinations.ts).
+// `destinations` is the list of hosts where recommendations are enabled. It does not decide
+// which sites are visits or can have capabilities: that is Chrome's per-origin grant, reported
+// by the extension's permissions snapshot. The core writes it too (`writeDestinations`, the
+// side panel's per-site switch) and picks up a hand edit while it runs (wiring/destinations.ts).
 
 import { lstatSync, readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -33,7 +32,7 @@ export class ConfigError extends Error {
 }
 
 export interface CoreConfig {
-  /** Hosts with recommendations enabled, e.g. "docs.stripe.com" (Phase 3). Not a visit or capability gate. */
+  /** Hosts with recommendations enabled, e.g. "docs.stripe.com". Not a visit or capability gate. */
   destinations: readonly string[];
   /** The bundle id treated as "Chrome frontmost", e.g. com.google.chrome.for.testing. */
   chromeBundleId: string;

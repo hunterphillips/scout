@@ -1,4 +1,4 @@
-// Notices edits to `agent-profile.json` while the core runs (P3.4). The profile CLI cannot write
+// Notices edits to `agent-profile.json` while the core runs. The profile CLI cannot write
 // it then (the core holds `agent-profile.lock`), but the file is user-editable, so a hand edit
 // must reach the next job.
 //
