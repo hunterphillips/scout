@@ -1,4 +1,4 @@
-// The generic agent-job adapter the core calls (from Phase 3) to get recommendations from
+// The generic agent-job adapter the core calls to get recommendations from
 // the user's own agent. One implementation per agent, each in its own folder; registry.ts
 // maps a profile to it.
 //

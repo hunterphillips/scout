@@ -1,6 +1,6 @@
 // The selected-tools part of `agent-profile.json` (field `tools`): which existing MCP tools
 // the user explicitly chose for Scout's unattended jobs, and the reviewed local stdio
-// definitions that serve them. P2.7's setup CLI writes it; this module is the schema plus
+// definitions that serve them. The `agent` CLI writes it; this module is the schema plus
 // pure helpers, and the in-memory resolution of environment bindings before a launch.
 //
 // - A connection is a reviewed local stdio server definition: an absolute executable, an

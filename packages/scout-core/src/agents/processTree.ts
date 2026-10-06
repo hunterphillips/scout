@@ -1,24 +1,24 @@
 // Provenance: copied from the removed personal-context package (see git history before
 // 2026-10-02).
 // OwnedTree's tracking and signalling rules are unchanged, and processTree.test.ts pins
-// them against the legacy copy's results. Differences, all additive:
+// them against the removed package's results. Differences, all additive:
 //   - psSnapshotAsync(): the same ps query through execFile, so the job runtime never
 //     blocks the coordinator's event loop on ps. psSnapshot() is kept for OwnedTree's
 //     default and the tests; both parse through parsePsOutput().
 //   - signalAll() takes an optional snapshot, as poll() and alive() already did, so a caller
 //     holding a fresh async snapshot never falls back to the blocking default.
-//   - ProcessTracker (P3.4): the core's registry of every job tree it started, so its shutdown
+//   - ProcessTracker: the core's registry of every job tree it started, so its shutdown
 //     waits for (and kills) any descendant a job's own reap left behind.
 //   - psSnapshot() takes an optional timeout (the shutdown's last sweep bounds it at 1 s).
-//   - The job tree record (P3.4): each job dir holds `tree.json` naming the CLI and every owned
+//   - The job tree record: each job dir holds `tree.json` naming the CLI and every owned
 //     process seen so far, so a core that was hard-killed mid-job can kill that tree on its next
 //     start (killRecordedTree) instead of leaving it spending quota.
 //
 // Track and clean up the process tree one spawned agent CLI owns.
 //
-// Lifted from the Phase 0 spike without changing its
-// invariants; only types were added. Only the caller's own tree is ever signalled: the
-// detached process group it created, plus descendants seen leaving that group.
+// The original invariants are unchanged; only types were added. Only the caller's own tree
+// is ever signalled: the detached process group it created, plus descendants seen leaving
+// that group.
 // Identities are pid + start time, so a reused pid is never signalled. ps is asked for
 // pid/ppid/pgid/state/start only, never command lines or environments.
 
@@ -162,7 +162,7 @@ export class OwnedTree {
   }
 }
 
-// ---------- the core's registry of every job tree it started (P3.4) ----------
+// ---------- the core's registry of every job tree it started ----------
 
 const delay = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
@@ -217,7 +217,7 @@ export class ProcessTracker {
   }
 }
 
-// ---------- the job tree record a hard-killed core leaves behind (P3.4) ----------
+// ---------- the job tree record a hard-killed core leaves behind ----------
 
 /** The record's file name in a job dir. */
 export const JOB_TREE_FILE = "tree.json";

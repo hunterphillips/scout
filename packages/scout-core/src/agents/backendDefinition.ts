@@ -21,7 +21,7 @@
 // inspectBackend starts the backend once, with exactly the environment it is given, the
 // definition's cwd (default `/`) and stderr discarded; runs MCP `initialize` (within
 // `startupMs`) and `tools/list` (within `overallMs` from the start); then stops it the way a
-// job's CLI is stopped (P4.4): the backend is spawned detached, so it leads its own process
+// job's CLI is stopped: the backend is spawned detached, so it leads its own process
 // group, under childSupervisor.ts; stop = stdin closed, SIGTERM to the group and to every
 // tracked descendant that left it (ps-polled OwnedTree), SIGKILL to both after
 // `stopGraceMs`, then a reap until nothing it owned is alive. So a backend that ignores
@@ -30,8 +30,8 @@
 // misses the terminal's Ctrl-C: while it runs, SIGINT/SIGTERM/SIGHUP to this process SIGKILL
 // the group and the escaped helpers a blocking ps pass finds, then the signal is re-raised.
 //
-// Decision (P2.7, plan: "an auth prompt produces an unavailable connection; do not open a
-// hidden login flow"): any request the backend makes of Scout during inspection (sampling,
+// Decision (an auth prompt makes the connection unavailable; Scout never opens a hidden
+// login flow): any request the backend makes of Scout during inspection (sampling,
 // elicitation, roots, or any other server-to-client request) fails the whole inspection
 // with the fixed code `auth_prompt`. The request is answered with an MCP error, never
 // with data, the backend is stopped at once, and no tool it listed is returned: a backend

@@ -1,13 +1,12 @@
 // Provenance: copied verbatim from the removed personal-context package (see git history
-// before 2026-10-02); this is now the only copy. Differences: none in
-// behaviour; only this header. authPreflight.parity.test.ts pins the legacy copy's verdicts,
-// reasons and CLI calls over the same synthetic settings matrix.
+// before 2026-10-02); this is now the only copy. Differences: none in behaviour; only this
+// header. authPreflight.parity.test.ts pins the removed package's verdicts, reasons and CLI
+// calls over the same synthetic settings matrix.
 //
 // Billing preflight. Runs NO model calls.
 //
-// Lifted from the Phase 0 spike without changing
-// behaviour; the only additions are typed injection seams (`spawnSync`) so tests never
-// start a real `claude`.
+// The only additions to the original check are typed injection seams (`spawnSync`), so tests
+// never start a real `claude`.
 //
 // Question answered: would a `claude` child process, started with the proposed child
 // environment, bill a claude.ai subscription?
@@ -172,7 +171,10 @@ export function managedPathsFor(platform: string, configDir: string, user: strin
   return { files: [remote], dropInDirs: [], opaque: [], unsupported: true };
 }
 
-/** Project settings candidates: child cwd and every ancestor (fail closed). `stopAt` (tests) ends the walk. */
+/**
+ * Project settings candidates: child cwd and every ancestor (fail closed). `stopAt` (tests)
+ * ends the walk.
+ */
 function projectSettingsPaths(cwd: string, userConfigDir: string, stopAt: string | undefined): string[] {
   const out: string[] = [];
   let dir = resolve(cwd);
@@ -508,7 +510,10 @@ function inspectCli(opts: {
 
 // ---------- orchestration ----------
 
-/** An explicit child launch: its env replaces the inherited one, its claude path is audited as given. */
+/**
+ * An explicit child launch: its env replaces the inherited one, and its claude path is audited
+ * as given.
+ */
 export interface PreflightChild {
   env: Env;
   claudePath: string;

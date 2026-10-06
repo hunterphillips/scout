@@ -1,7 +1,7 @@
 // The billing preflight's full suite: every fail-closed path of runPreflight and of the
-// direct profile around it. Ported in P4.4 from the removed personal-context package's
-// authPreflight.test.ts and the Phase 0 spikes' auth-preflight / direct-profile-preflight
-// tests (git history has all three). Hermetic: a fake `claude` (spawnSync stand-in), temp
+// direct profile around it. Ported from the removed personal-context package's
+// authPreflight.test.ts and the earlier auth-preflight / direct-profile-preflight tests (git
+// history has all three). Hermetic: a fake `claude` (spawnSync stand-in), temp
 // homes, managed paths inside the sandbox, the project walk stopped at the sandbox root.
 
 import { chmodSync, readdirSync, readFileSync } from "node:fs";
