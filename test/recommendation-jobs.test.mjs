@@ -673,6 +673,8 @@ describe.skipIf(!BUILT)("recommendation jobs e2e: B7/B12/B13 closing paths end t
       ["cancelled", "revoked"],
       ["error", "timeout"],
     ]);
+    // The `results` frame can land after its job_finished event (a different channel) on a slow runner.
+    await until(() => b.panel().some((f) => f.type === "results" && f.jobId === replacement.jobId), "the replacement's results frame");
     expect(b.panel().filter((f) => f.type === "results" && f.jobId === replacement.jobId)).toMatchObject([{ status: "error", reason: "timeout" }]);
     await until(() => !alive(replacement.pid), "the timed-out CLI to end", 5_000);
     expect((await agentCall(replacement.tokenCopy, "recent_activity")).status).toBe("error");
