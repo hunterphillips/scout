@@ -82,6 +82,21 @@ describe("panel frames (core -> app)", () => {
     expect(PanelStateSchema.safeParse({ ...capabilities, library: [{ ...entry, state: "pending_only" }] }).success).toBe(false);
   });
 
+  it("carries the agent choice as an optional field: options by id and label, the current one by id", () => {
+    const agents = { available: [{ id: "agent-a", label: "Agent A" }, { id: "agent-b", label: "Agent B" }], current: "agent-a" };
+    expect(PanelStateSchema.safeParse({ ...capabilities, agents }).success).toBe(true);
+    expect(PanelStateSchema.safeParse({ ...capabilities, agents: { available: [] } }).success).toBe(true);
+    const bad = [
+      { available: [{ id: "agent-a", label: "Agent A" }, { id: "agent-a", label: "Again" }] },
+      { available: [{ id: "agent-a", label: "" }] },
+      { available: [{ id: "Agent A", label: "Agent A" }] },
+      { available: [{ id: "agent-a", label: "Agent A", path: "/bin/agent-a" }] },
+      { available: Array.from({ length: 9 }, (_, i) => ({ id: `agent-${i}`, label: `Agent ${i}` })) },
+      { available: [], current: "" },
+    ];
+    for (const a of bad) expect(PanelStateSchema.safeParse({ ...capabilities, agents: a }).success, JSON.stringify(a)).toBe(false);
+  });
+
   it("still parses the old state frames", () => {
     expect(PanelStateSchema.safeParse({ type: "state", status: "disconnected" }).success).toBe(true);
     expect(PanelStateSchema.safeParse({ type: "state", status: "working", visitEpoch: 3 }).success).toBe(true);
@@ -185,6 +200,7 @@ describe("native commands (app -> core)", () => {
     { type: "set_destination", commandId: "c9", origin: "https://docs.stripe.com", enabled: true, expectedEnabled: false },
     { type: "refresh_capabilities", commandId: "c7" },
     { type: "open_link", commandId: "c8", coreInstanceId: "core-1", visitEpoch: 4, jobId: "job_1", candidateId: "c1a" },
+    { type: "set_agent", commandId: "c10", agent: "agent-b" },
   ];
 
   it("parses every new command", () => {
@@ -219,6 +235,12 @@ describe("native commands (app -> core)", () => {
       { type: "open_link", commandId: "c", coreInstanceId: "core-1", visitEpoch: 4, jobId: "job_1", candidateId: "https://x.example/" },
       { type: "open_link", commandId: "c", coreInstanceId: "core-1", visitEpoch: -1, jobId: "job_1", candidateId: "c1" },
       { type: "open_link", commandId: "c", visitEpoch: 4, jobId: "job_1", candidateId: "c1" },
+      { type: "set_agent", commandId: "c" },
+      { type: "set_agent", commandId: "c", agent: "" },
+      { type: "set_agent", commandId: "c", agent: "Agent B" },
+      { type: "set_agent", commandId: "c", agent: "-flag" },
+      { type: "set_agent", commandId: "c", agent: "a".repeat(33) },
+      { type: "set_agent", commandId: "c", agent: "agent-b", path: "/usr/local/bin/agent-b" },
     ];
     for (const c of bad) expect(NativeCommandSchema.safeParse(c).success).toBe(false);
   });
@@ -240,6 +262,7 @@ describe("native commands (app -> core)", () => {
       { type: "set_destination", commandId: longest, origin, enabled: false, expectedEnabled: false },
       { type: "refresh_capabilities", commandId: longest },
       { type: "open_link", commandId: longest, coreInstanceId: longest, visitEpoch: maxInt, jobId: longest, candidateId: `c${"z".repeat(31)}` },
+      { type: "set_agent", commandId: longest, agent: `a${"z".repeat(31)}` },
     ];
     expect(origin.length).toBe(HOST_ORIGIN_MAX_CHARS);
     for (const c of largest) {

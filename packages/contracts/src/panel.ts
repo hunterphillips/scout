@@ -188,6 +188,25 @@ export const OriginSettingSchema = z.object({
   permitted: z.boolean(),
 });
 
+/** Most agents one `capabilities` frame offers. */
+export const AGENT_OPTIONS_MAX = 8;
+export const AGENT_LABEL_MAX_CHARS = 40;
+/** An agent adapter's id as the core names it (`agent-profile.json` `adapter`). */
+export const AgentIdSchema = z.string().regex(/^[a-z][a-z0-9-]{0,31}$/);
+
+/**
+ * The agents the user can choose for background jobs: one option per adapter whose executable
+ * the core found, and the adapter `agent-profile.json` names now (absent when there is no
+ * usable profile). `set_agent` names one of the options.
+ */
+export const PanelAgentsSchema = z.strictObject({
+  available: z
+    .array(z.strictObject({ id: AgentIdSchema, label: z.string().min(1).max(AGENT_LABEL_MAX_CHARS) }))
+    .max(AGENT_OPTIONS_MAX)
+    .refine((a) => new Set(a.map((o) => o.id)).size === a.length, { message: "duplicate agent id" }),
+  current: AgentIdSchema.optional(),
+});
+
 /** The whole capability view, re-sent on every change. */
 export const PanelCapabilitiesSchema = z.object({
   type: z.literal("capabilities"),
@@ -207,6 +226,8 @@ export const PanelCapabilitiesSchema = z.object({
   origins: z.array(OriginSettingSchema).max(CAPABILITY_ORIGINS_MAX),
   /** Some list was cut to its bound, or to CAPABILITIES_FRAME_MAX_BYTES. */
   truncated: z.boolean(),
+  /** The agent choice for Settings. Absent from older cores; the Swift app ignores it. */
+  agents: PanelAgentsSchema.optional(),
 });
 
 /** What the preview shows beside the text; part of the version's content hash. */
@@ -354,6 +375,15 @@ export const SetAgentBrowserContextCommandSchema = cmd("set_agent_browser_contex
 export const SetDestinationCommandSchema = cmd("set_destination", { origin: HostOriginSchema, enabled: z.boolean(), expectedEnabled: z.boolean() });
 export const RefreshCapabilitiesCommandSchema = cmd("refresh_capabilities", {});
 /**
+ * Run background jobs through another agent: the core writes that adapter's default
+ * `agent-profile.json` (the selected tools kept) and its profile watcher swaps the adapter. A
+ * set, not a toggle: naming the current agent acks `ok` and writes nothing, so a retry is
+ * harmless. Codes: `invalid` (no such adapter), `not_found` (its executable was not found),
+ * `store_error` (the write failed), `unavailable` (the core does not hold the profile lock, or
+ * has no profile writer). The Swift app never sends it.
+ */
+export const SetAgentCommandSchema = cmd("set_agent", { agent: AgentIdSchema });
+/**
  * The user clicked a recommended link: the identity the window displayed. The core checks it
  * against the result it holds (instance, visit, job, candidate), re-checks the stored target
  * and the origin's grant, and acks `ok` with `target`, or `stale_revision` (another instance,
@@ -391,6 +421,7 @@ export const NativeCommandSchema = z.discriminatedUnion("type", [
   SetDestinationCommandSchema,
   RefreshCapabilitiesCommandSchema,
   OpenLinkCommandSchema,
+  SetAgentCommandSchema,
 ]);
 
 export type PanelResultItem = z.infer<typeof PanelResultItemSchema>;
@@ -409,6 +440,7 @@ export type AckFailureCode = z.infer<typeof AckFailureCodeSchema>;
 export type PanelAck = z.infer<typeof PanelAckOkSchema> | z.infer<typeof PanelAckFailureSchema>;
 export type PanelAudit = z.infer<typeof PanelAuditSchema>;
 export type PanelGrant = z.infer<typeof PanelGrantSchema>;
+export type PanelAgents = z.infer<typeof PanelAgentsSchema>;
 export type NativeCommand = z.infer<typeof NativeCommandSchema>;
 /** Commands that carry a `commandId` and get an ack (or, for `preview`, a chunk). */
 export type PanelCommand = Extract<NativeCommand, { commandId: string }>;

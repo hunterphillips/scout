@@ -13,6 +13,7 @@ import {
   ResumeCommandSchema,
   RevokeCommandSchema,
   SetAgentBrowserContextCommandSchema,
+  SetAgentCommandSchema,
   SetAutoAcquireCommandSchema,
   SetDestinationCommandSchema,
 } from "./panel.js";
@@ -69,6 +70,7 @@ export const RelayCommandSchema = z.discriminatedUnion("type", [
   SetDestinationCommandSchema,
   RefreshCapabilitiesCommandSchema,
   OpenLinkCommandSchema,
+  SetAgentCommandSchema,
 ]);
 export type RelayCommand = z.infer<typeof RelayCommandSchema>;
 
