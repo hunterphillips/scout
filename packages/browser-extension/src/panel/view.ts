@@ -15,9 +15,10 @@
 //
 // Layout (the "Quiet" design): a header with the mark and Pause/Resume, the current view,
 // and a bottom pill nav with four destinations: Page (default), Sites, Activity, Settings.
-// Page is bottom-aligned: the results (heading, one line, up to three link cards), the site's
-// files for the user's agent (a pill that expands into the review card), what is approved, then
-// a tray with the agent-context chip and the site's "Suggest on <host>" switch or Allow row.
+// Page is bottom-aligned: the results slot (nothing, typing dots, one caption line, or a heading
+// and up to three link cards), the site's files for the user's agent (a pill that expands into
+// the review card), what is approved, then a tray with the agent-context chip and the site's
+// "Suggest on <host>" switch or Allow row.
 // Activity holds Problems at the top; Settings holds the switches, the agent choice, Pause, Reconnect and a
 // Diagnostics disclosure (which ends with the "Sent to Scout" counters). Escape collapses the review card, then returns to Page (panel-app.ts).
 
@@ -27,7 +28,7 @@ import { hostOf } from "./capabilities.js";
 import { ACK_CODE_TEXT, type PanelModel, type PanelSection, type Problem, SECTIONS } from "./model.js";
 import { refusalText as linkRefusalText } from "./links.js";
 import { failureText, type PreviewKey, sameKey } from "./preview.js";
-import { displayExplanation, displayHeading } from "./results.js";
+import { linksText, resultsSlot } from "./results.js";
 import { type CurrentSite, refusalText as siteRefusalText, siteRows, UNKNOWN_SITE_TEXT } from "./sites.js";
 
 export interface PanelUi {
@@ -252,15 +253,35 @@ function toggle(doc: Document, key: string, label: Child, checked: boolean, enab
 
 // ---------- Page ----------
 
-function resultsBlock(doc: Document, v: ViewState, on: PanelHandlers): HTMLElement {
+/**
+ * The results slot: nothing before a job, the typing dots while one runs, the links, or one
+ * caption line (no suggestions, a failure's reason, a connection state). A refused link click
+ * still shows here with Dismiss.
+ */
+function resultsBlock(doc: Document, v: ViewState, on: PanelHandlers): HTMLElement | null {
   const m = v.model;
-  const d = m.resultsDisplay;
-  const ready = d.kind === "ready";
-  const heading = el(doc, "h2", { id: "results-heading", class: ready ? "results-heading" : "results-heading quiet", "data-key": "results-heading", "aria-live": "polite" }, displayHeading(d), ready ? el(doc, "span", { class: "accent-dot", text: "." }) : null);
-  const box = el(doc, "section", { class: "results", "aria-labelledby": "results-heading" }, heading, el(doc, "p", { id: "results-explanation", class: `state state-${d.kind}`, text: displayExplanation(d) }));
-  if (d.kind === "ready") {
+  const slot = resultsSlot(m.resultsDisplay);
+  const labels = slot.kind === "links" ? { "aria-labelledby": "results-heading" } : { "aria-label": "Links for this page" };
+  const box = el(doc, "section", { class: "results", "data-key": "results", ...labels });
+  if (slot.kind === "working") {
+    // Keyed, so a repaint while the job runs keeps the node and its animation.
+    box.append(
+      el(
+        doc,
+        "div",
+        { class: "typing", "data-key": "results-typing", role: "img", "aria-label": "Looking for links", "aria-live": "off" },
+        ...[1, 2, 3].map(() => el(doc, "span", { class: "typing-dot", "aria-hidden": "true" })),
+      ),
+    );
+  } else if (slot.kind === "caption") {
+    box.append(el(doc, "p", { id: "results-caption", class: "results-caption", "data-key": "results-caption", role: "status", text: slot.text }));
+  } else if (slot.kind === "links") {
+    box.append(
+      el(doc, "h2", { id: "results-heading", class: "results-heading", "data-key": "results-heading", "aria-live": "polite" }, "Worth a look", el(doc, "span", { class: "accent-dot", text: "." })),
+      el(doc, "p", { id: "results-explanation", text: linksText(slot.items.length) }),
+    );
     const list = el(doc, "ul", { class: "links", "aria-describedby": "results-explanation" });
-    for (const item of d.items.slice(0, 3)) {
+    for (const item of slot.items.slice(0, 3)) {
       const rec = m.linkRecord(item.candidateId);
       const pending = rec?.state === "pending";
       const card = button(
@@ -279,7 +300,7 @@ function resultsBlock(doc: Document, v: ViewState, on: PanelHandlers): HTMLEleme
   for (const r of m.resultsModel.linkRefusals) {
     box.append(el(doc, "p", { class: "error" }, `A link was not opened: ${linkRefusalText(r.refusal)}. `, button(doc, `dismiss-${r.commandId}`, "Dismiss", () => on.dismiss(r.commandId), { class: "text-button" })));
   }
-  return box;
+  return box.childNodes.length > 0 ? box : null;
 }
 
 /** The review card for the shown file (QuietReview): what it is, its streamed text, the consent line, Not now / Approve. */
