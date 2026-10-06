@@ -36,10 +36,10 @@
 // An auth prompt makes the connection unavailable: Scout never opens a hidden login flow.
 // When the backend makes any request of Scout during inspection (inspectBackend's
 // `auth_prompt`), the command prints the reason and exits 1, and stores nothing from that
-// inspection. For a new connection
-// that is all. For a known one (`refresh`, or `inspect` of a known id) its last stored
-// inspection is left as it was, every selection on it is deselected, and the connection's
-// `unavailable` field records the code, all in one profile write (revisions bumped).
+// inspection. For a new connection that is all. For a known one (`refresh`, or `inspect` of
+// a known id) its last stored inspection is left as it was, every selection on it is
+// deselected, and the connection's `unavailable` field records the code, all in one profile
+// write (revisions bumped).
 // `status` reports it unavailable with that reason and `enable` refuses it until an
 // inspection succeeds, which replaces the connection without the field.
 //

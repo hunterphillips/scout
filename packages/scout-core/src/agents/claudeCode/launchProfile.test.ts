@@ -27,7 +27,7 @@ function codeOf(fn: () => unknown): string | undefined {
 // Pinned from the removed personal-context package's launch profile (git history has the
 // package): the same parent env must yield the same child env.
 describe("launch profile: parity with the removed package (pinned)", () => {
-  it("forwards exactly the env the legacy profile forwarded for the same parent env", () => {
+  it("forwards exactly the env the removed package's profile forwarded for the same parent env", () => {
     const sb = makeSandbox();
     const parentEnv = gatewayParentEnv(sb.home);
     const legacy = { HOME: sb.home, USER: "someone", LOGNAME: "someone", PATH: parentEnv.PATH, SHELL: "/bin/zsh", LANG: "en_US.UTF-8", TMPDIR: parentEnv.TMPDIR };

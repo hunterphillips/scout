@@ -1,5 +1,5 @@
-// The copied preflight must decide exactly as the legacy one did, over the same synthetic
-// settings, env and CLI answers. The legacy verdicts, reasons and CLI calls were pinned
+// The copied preflight must decide exactly as the removed package's one did, over the same
+// synthetic settings, env and CLI answers. Its verdicts, reasons and CLI calls were pinned
 // from the removed personal-context package's copy (git history has it).
 
 import { afterEach, describe, expect, it } from "vitest";

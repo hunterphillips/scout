@@ -15,7 +15,7 @@ const SRC = fileURLToPath(new URL("..", import.meta.url));
 /** Flags that would put Scout's text into an existing or continuing session. */
 const SESSION_FLAGS = ["--resume", "-r", "--continue", "-c", "--session-id", "--fork-session", "--input-format", "--replay-user-messages"];
 
-describe("no chat-push path (B8/B9): the core only starts fresh one-shot jobs", () => {
+describe("no chat-push path: the core only starts fresh one-shot jobs", () => {
   it("a job's argv is a fresh non-persistent -p run with no flag that joins, resumes or streams into a session", () => {
     const argv = buildJobArgv("claude-sonnet-5-5", "/run/jobs/j1", "mcp__scout__current_site");
     expect(argv).toContain("-p");

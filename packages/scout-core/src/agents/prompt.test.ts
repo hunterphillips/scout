@@ -130,7 +130,7 @@ describe("job prompt", () => {
     expect(text).toContain("16 turns");
     expect(text).toContain("140 characters");
     expect(text).toContain("current_site");
-    // They speak of "the user", never a name such as a fixture's placeholder user.
+    // The instructions refer to "the user" and never name a person.
     expect(text).not.toMatch(/\bAlex\b/);
   });
 });
