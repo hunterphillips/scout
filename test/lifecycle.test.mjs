@@ -246,7 +246,9 @@ describe.skipIf(!BUILT)("core shutdown with a job running (each trigger on its o
     const events = readLines(join(run.home, "logs", "diagnostics.jsonl"));
     const swept = events.find((e) => e.event === "jobs_swept");
     expect(swept).toMatchObject({ count: 1 });
-    expect(swept.killed).toBeGreaterThanOrEqual(run.pids.length);
+    // `killed` counts the members the sweep signalled; members that exited on their own once
+    // the CLI was killed are not in it, and on a slow runner that can be most of the tree.
+    expect(swept.killed).toBeGreaterThanOrEqual(1);
     core.stdin.end();
     expect(await new Promise((r) => core.once("exit", r))).toBe(0);
   }, 60_000);
