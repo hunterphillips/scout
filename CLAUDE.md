@@ -348,14 +348,18 @@ the plan's phase log):
 Run from `scout/`:
 
 - `npm ci`, `npm run build`, `npm run typecheck`
-- `npm test`: workspace tests, then setup-script tests
+- `npm test` = `test:node` then `test:mac`. `npm run test:node` (macOS or Linux): workspace
+  and script tests minus `*.mac.test.*`; `npm run test:mac` (macOS): only the
+  `*.mac.test.*` files (anything needing `codesign`/`plutil`/`launchctl`) plus `test:swift`.
+  CI (`.github/workflows/ci.yml`): job `node` on ubuntu runs `test:node`; job `mac` on
+  macos-15 runs `test:mac`, `test:e2e` and the side-panel e2e in Chrome for Testing
 - `npm run test:e2e` (after a build); `npm run test:all` builds then runs both
 - `npm run setup [--dry-run] [--scout-root <dir>] [--agent-integration] [--login-launch [--app <Scout.app>]]`,
   `npm run doctor [-- --verbose]`, `npm run uninstall [--yes] [--include-key] [--dry-run]`
 - `npm run bundle-app -- [--out <dir>] [--dry-run] [--binary <path>] [--install]` (a
   windowless `Scout.app`; `--install` → `~/Applications/Scout.app`); `npm run test:swift`;
-  `npm run test:pivot` (builds, then agent-contract + e2e; the side-panel e2e stays
-  opt-in: `SCOUT_E2E_CHROME=1 SCOUT_E2E_BROWSERS=<dir>`); `SCOUT_BUNDLE_SWIFT=1` opts the
+  the side-panel e2e is opt-in locally:
+  `SCOUT_E2E_CHROME=1 SCOUT_E2E_BROWSERS=<dir>`; `SCOUT_BUNDLE_SWIFT=1` opts the
   real bundle build into the scripts tests
 - `node packages/scout-core/dist/cli.js capability unexport-all [--home <abs>] [--json]`
   (exit 0 all gone / 3 kept / 2 Scout running / 1 untrusted record)

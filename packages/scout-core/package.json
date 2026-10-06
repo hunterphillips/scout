@@ -33,7 +33,9 @@
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "test:node": "vitest run --exclude '**/*.mac.test.*'",
+    "test:mac": "vitest run --passWithNoTests .mac.test."
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.1",

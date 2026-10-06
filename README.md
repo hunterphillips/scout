@@ -32,11 +32,16 @@ Run from this directory (Node 22.12+, npm):
     npm ci
     npm run build
     npm run typecheck
-    npm test             # workspace tests and setup-script tests
-    npm run test:e2e     # real native host against the real core (needs npm run build)
-    npm run test:pivot   # build, then the agent-contract checks and the e2e tests
+    npm test             # test:node, then test:mac (macOS)
+    npm run test:node    # macOS or Linux: workspace and script tests minus the *.mac.test.* files
+    npm run test:mac     # macOS: the *.mac.test.* files plus the Swift tests
+    npm run test:e2e     # macOS: real native host against the real core (needs npm run build)
     npm run test:swift   # the Mac app's tests
     npm run test:all     # build, then npm test and test:e2e
+
+A test that needs macOS tools (`codesign`, `plutil`, `launchctl`) goes in a
+`*.mac.test.*` file. CI runs `test:node` on Ubuntu, and `test:mac`, `test:e2e` and the
+side-panel e2e test on macOS.
 
 The side-panel e2e test drives the real panel in Chrome for Testing and is opt-in:
 `SCOUT_E2E_CHROME=1 SCOUT_E2E_BROWSERS=<dir with a Chrome for Testing install>`.
