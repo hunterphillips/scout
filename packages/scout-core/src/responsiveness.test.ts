@@ -1,16 +1,16 @@
-// Phase 3 verification: the coordinator stays responsive while a worst-case bounded catalog
-// parses. The real coordinator runs real discovery passes (real dwell timers, the real catalog
-// resolver on a real origin fetch session, sitemap and llms.txt parsed in the real parse worker
-// through per-pass scopes, as main.ts wires them) against a fake site that serves the largest
+// The coordinator stays responsive while a worst-case bounded catalog parses. The real
+// coordinator runs real discovery passes (real dwell timers, the real catalog resolver on a
+// real origin fetch session, sitemap and llms.txt parsed in the real parse worker through
+// per-pass scopes, as main.ts wires them) against a fake site that serves the largest
 // catalog the caps allow: a sitemap index with ten ~2 MiB children holding 50,000 entries with
 // image titles (the parser's heaviest path), and a robots.txt at the rule cap with wildcards.
 //
 // While a pass's sitemap is in the worker, a focus change (another tab) and then a pause arrive
-// through the coordinator's own input paths; each must reach the window (its panel state) within
+// through the coordinator's own input paths; each must reach the side panel (its state) within
 // 100 ms of arriving. A separate pass is left to run to the end while a 5 ms ticker measures the
 // longest the event loop is held at any point of the resolve (worker hand-off, the resolver's
 // dedupe/robots pass, the cache write): input would wait that long. The dedupe/robots pass stays
-// on the main thread, time-sliced since P4.4 (resolver.ts PASS_SLICE_MS; resolver.test.ts bounds
+// on the main thread, time-sliced (resolver.ts PASS_SLICE_MS; resolver.test.ts bounds
 // its adversarial shapes under 50 ms).
 
 import { mkdtempSync, rmSync } from "node:fs";
@@ -178,7 +178,7 @@ const until = async (cond: () => boolean, what: string, ms = 20_000): Promise<vo
 /**
  * Deliver `input` as a timer due `afterMs` from now (the way a socket frame or stdin line reaches
  * the coordinator: a callback on the event loop), and resolve with how long it took from when it
- * was due until the window got the state `isAnswer` recognizes.
+ * was due until the side panel got the state `isAnswer` recognizes.
  */
 function deliver(afterMs: number, input: () => void, panel: Array<{ state: PanelState; at: number }>, isAnswer: (s: PanelState) => boolean) {
   const dueAt = performance.now() + afterMs;
@@ -193,7 +193,7 @@ function deliver(afterMs: number, input: () => void, panel: Array<{ state: Panel
   });
 }
 
-describe("coordinator responsiveness under a worst-case bounded catalog (Phase 3 verification)", () => {
+describe("coordinator responsiveness under a worst-case bounded catalog", () => {
   it("the site is the bounded worst case: ten ~2 MiB index children, 50,000 image-titled entries, robots at the rule cap", () => {
     const { files } = worstCaseSite();
     const children = Object.keys(files).filter((p) => /^\/sitemap-\d+\.xml$/.test(p));
@@ -203,7 +203,7 @@ describe("coordinator responsiveness under a worst-case bounded catalog (Phase 3
     expect(files["/robots.txt"]!.split("\n").filter((l) => l.startsWith("Disallow") || l.startsWith("Allow"))).toHaveLength(MAX_RULES);
   });
 
-  it(`a focus change and then a pause, each arriving while a sitemap is in the parse worker, reach the window within ${BOUND_MS} ms`, async () => {
+  it(`a focus change and then a pause, each arriving while a sitemap is in the parse worker, reach the side panel within ${BOUND_MS} ms`, async () => {
     const c = coreUnderLoad();
     c.focus(10, "/billing");
     const firstEpoch = c.coordinator.tracker.epoch;

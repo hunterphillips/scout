@@ -1,10 +1,10 @@
 // When recommendation jobs run. One job at a time per core, for the current visit only, and
-// only for a recommendation-enabled host (`config.destinations`; since P4.6 the list is live:
-// `onDestinationsChanged` replaces it, and the next settle reads the new one). The coordinator tells the
-// scheduler about settles, visit changes, pause, sensor loss, permissions, accepted activity,
-// the browser-context grant, revoked resources, profile changes and stop; the scheduler talks
-// only to the result registry, the snapshot registry, the job pipeline (pipeline.ts), and the
-// coordinator's window hooks (`working`, `idle`).
+// only for a recommendation-enabled host (`config.destinations`; the list is live:
+// `onDestinationsChanged` replaces it, and the next settle reads the new one). The coordinator
+// tells the scheduler about settles, visit changes, pause, sensor loss, permissions, accepted
+// activity, the browser-context grant, revoked resources, profile changes and stop; the
+// scheduler talks only to the result registry, the snapshot registry, the job pipeline
+// (pipeline.ts), and the coordinator's panel hooks (`working`, `idle`).
 //
 // Budget: one JOB_MAX_DEADLINE_MS (30 s) budget per settled visit, from the dwell settle,
 // covering discovery, inference and verification. A job gets what remains when it starts;
@@ -12,9 +12,9 @@
 // (pipeline.ts) is the adapter's launch floor plus the verification reserve, so the scheduler
 // never starts a job the adapter would refuse for time; the same threshold gates a replacement.
 //
-// Per job, in order: `results.beginJob(jobId)` → the window's `working{jobId}` → the resume
+// Per job, in order: `results.beginJob(jobId)` → the panel's `working{jobId}` → the resume
 // cache, else `snapshots.take(...)` → the pipeline → the visit's `idle` → `results.publish`.
-// Never an `idle` for the visit after its publish (the window would drop the answer). A job
+// Never an `idle` for the visit after its publish (the side panel would drop the answer). A job
 // that ends without an answer (discarded) still gets its `idle`, so no spinner is left behind.
 //
 // The snapshot carries activity only when the browser-context grant is on and GitHub capture
@@ -425,7 +425,7 @@ export function createJobScheduler(options: JobSchedulerOptions): JobScheduler {
       if (shownEpoch() === job.visit.epoch) options.window.idle(job.visit.epoch);
       return;
     }
-    // The last check before the window sees it.
+    // The last check before the side panel sees it.
     const stale = staleReason(job);
     if (stale !== null) {
       event("job_discarded", { stage: "publish", why: stale, epoch: job.visit.epoch });

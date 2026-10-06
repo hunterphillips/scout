@@ -1,7 +1,7 @@
 // The installer's record, <scoutHome>/installed.json. The core reads one field from it:
 // `skillsRoot`, the directory Scout's skill wrappers are exported into. The root comes only
 // from this record, never from a command line or an environment guess (see
-// capabilities/capabilityCli.ts). The installer (P2.6) writes it; until then it is absent.
+// capabilities/capabilityCli.ts). The installer writes it; until then it is absent.
 
 import { readFileSync } from "node:fs";
 import { join } from "node:path";

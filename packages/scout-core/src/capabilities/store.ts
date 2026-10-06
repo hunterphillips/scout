@@ -15,11 +15,11 @@
 // the store never reads approved text from the discovery cache.
 //
 // Revocation, in order: (1) the blocked state is committed, then the resource's pins are
-// dropped; (2) `onRevoked` runs (P2.4 invalidates job tokens, P3 cancels jobs), bounded by
-// ON_REVOKED_TIMEOUT_MS; (3) `revoke()` resolves; (4) export cleanup runs (`cleanup` on the
-// result). A cleanup failure is recorded there and never restores access: reads check the
-// committed state. A committed approval, and an ingest that auto-approved anything, start
-// the same deferred export sync; its failure never undoes the approval.
+// dropped; (2) `onRevoked` runs (agent.sock invalidates job tokens, the scheduler cancels
+// jobs), bounded by ON_REVOKED_TIMEOUT_MS; (3) `revoke()` resolves; (4) export cleanup runs
+// (`cleanup` on the result). A cleanup failure is recorded there and never restores access:
+// reads check the committed state. A committed approval, and an ingest that auto-approved
+// anything, start the same deferred export sync; its failure never undoes the approval.
 //
 // One writer process at a time: opening takes `capabilities/store.lock` (storeLock.ts) and
 // `close()` releases it after the queued mutations and in-flight export syncs have settled; a
@@ -223,7 +223,7 @@ export interface CapabilityStore {
   pinVersion(requestId: string, resourceId: string, version: string): ReadResolution;
   /**
    * Keep any recorded version (pending, declined, or a blocked resource's revoked one) from
-   * collection while Scout's window previews it, read-only. False (nothing pinned) when the
+   * collection while the side panel previews it, read-only. False (nothing pinned) when the
    * version is not recorded. Released by `releasePins`, and by a revocation like every pin.
    */
   pinForPreview(requestId: string, resourceId: string, version: string): boolean;

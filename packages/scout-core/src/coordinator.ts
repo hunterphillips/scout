@@ -37,28 +37,28 @@
 // host is recommendation-enabled is in `agentView()`, asked of the scheduler (its
 // `config.destinations` are the one source); without a scheduler nothing is enabled.
 //
-// Scout's window commands (those with a `commandId`) go to the panel channel
+// Side panel commands (those with a `commandId`) go to the panel channel
 // (panelChannel.ts), which answers them; without one each gets an `unavailable` ack. The
 // coordinator tells the channel when the capability view may have changed: a permissions
 // snapshot applied or cleared (offers follow Chrome's grants), the visit changed, or an ingest
 // committed (and again when its export sync settles).
 //
-// Window surfaces (panelSinks.ts, `sinks`): every command arrives with the sink that sent it
+// Frame sinks (panelSinks.ts, `sinks`): every command arrives with the sink that sent it
 // (the app's stdio, or the live connection's relay sink); commandRouting.ts decides whether it
 // runs (frontmost/shutdown never from the relay; no commandId owned by another surface) and
-// routes its answer back to that sink only. `pause`/`resume` and the window commands are
+// routes its answer back to that sink only. `pause`/`resume` and the panel commands are
 // accepted from both. Each connection that completes its hello becomes the relay sink (the one
 // it replaces is removed; a closed one too) and is repainted at once (panelChannel.ts
 // `repaint`, with the last state sent), and again when its socket drains after backpressure
-// dropped window frames. A replaced connection's frames are ignored (`stale_sensor_frame`),
+// dropped panel frames. A replaced connection's frames are ignored (`stale_sensor_frame`),
 // except that a command naming a commandId is answered on that connection with an
 // `unavailable` ack, so its panel does not wait forever.
 //
 // Recommendation results (results.ts) live only as long as their visit: a visit change (which
 // includes losing the origin's grant, which clears them first), pause, disconnect (or a
 // replacing sensor), and stop clear them. These clears are silent: the state frame each sends
-// next (the new visit's idle, paused, disconnected) is what makes the window drop them, and
-// stop sends nothing. `resendState` is for P3.2's job clears within one visit.
+// next (the new visit's idle, paused, disconnected) is what makes the side panel drop them, and
+// stop sends nothing. `resendState` is for the job scheduler's clears within one visit.
 
 import {
   type ActiveVisit,
@@ -111,10 +111,10 @@ export interface CoordinatorOptions {
   onShutdownRequested?: () => void;
   /** Resource discovery on settled visits. Without it a settle is only logged. */
   capabilities?: CoordinatorCapabilities;
-  /** Scout's window commands and capability view. Without it those commands are refused. */
+  /** Side panel commands and capability view. Without it those commands are refused. */
   panel?: Pick<PanelChannel, "handle" | "capabilitiesChanged"> & Partial<Pick<PanelChannel, "repaint">>;
   /**
-   * Where the window's frames go (main.ts registers the app's stdio sink). The coordinator
+   * Where panel frames go (main.ts registers the app's stdio sink). The coordinator
    * registers each live connection as a relay sink, and records which sink sent each command
    * so its answer goes back there. Without it frames go only through `emitPanel`.
    */
@@ -129,8 +129,8 @@ export type CoordinatorCapabilities = DiscoveryCapabilities;
 
 export interface Coordinator {
   /**
-   * One command from Scout's window. `from` is the sink that sent it (its answer goes there);
-   * a `relay` sink may not send `frontmost` or `shutdown`.
+   * One command from the Mac app or the side panel. `from` is the sink that sent it (its
+   * answer goes there); a `relay` sink may not send `frontmost` or `shutdown`.
    */
   handleNativeCommand(cmd: NativeCommand, from: PanelSink): void;
   /** A native host completed a protocol-3 hello. The most recent one is the live sensor and the relay sink. */
@@ -169,8 +169,8 @@ export function createCoordinator(options: CoordinatorOptions): Coordinator {
   const panelChanged = (): void => options.panel?.capabilitiesChanged();
   // Silent: every caller sends a state frame next (a new visit's idle, paused, disconnected),
   // or none at all (stop), so a `resendState` here would only add a stray frame (an idle for the
-  // old epoch before `disconnected`). The non-silent clear is for P3.2's job clears within one
-  // visit, where no other state frame follows.
+  // old epoch before `disconnected`). The non-silent clear is for the job scheduler's clears
+  // within one visit, where no other state frame follows.
   const clearResults = (reason: string): void => void options.results?.clear(reason, { silent: true });
 
   let paused = false;

@@ -765,8 +765,8 @@ describe("job snapshots", () => {
     expect(mine.every((c) => valid(interactive, c))).toBe(true);
   });
 
-  // B7/B12/B13 (Phase 3 verification): every way a job's token is invalidated refuses the
-  // already-connected job's next chunk of a read it had started, and the read's pin goes with it.
+  // Every way a job's token is invalidated refuses the already-connected job's next chunk of a
+  // read it had started, and the read's pin goes with it.
   it.each<[string, (job: ReturnType<typeof takeJob>, resourceId: string) => unknown, string]>([
     ["the job is cancelled (its snapshot released)", (job) => snapshots.release(job.snapshot.id, "cancelled"), "not_granted"],
     ["Scout is paused (releaseAll)", () => snapshots.releaseAll("paused"), "not_granted"],

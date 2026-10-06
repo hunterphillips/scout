@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 
 /**
- * Acceptance rules for fetched website text (P2.2). Pure: bytes in, verdict out.
+ * Acceptance rules for fetched website text. Pure: bytes in, verdict out.
  *
  * The body decides, not the publisher's Content-Type: static hosts mislabel files, and a
  * single-page app answers every path with its `index.html`. A declared `text/markdown`

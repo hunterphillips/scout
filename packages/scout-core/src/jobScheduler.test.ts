@@ -131,7 +131,8 @@ function harness(overrides: Partial<JobSchedulerOptions> & { coreInstanceId?: st
     onLinkOpened: (href) => scheduler.onLinkOpened(href),
     diagnostics,
   });
-  // Frames as the window gets them: the coordinator's state frames and the channel's results frames on one stream.
+  // Frames as the side panel gets them: the coordinator's state frames and the channel's
+  // results frames on one stream.
   const channel = createPanelChannel({
     store: emptyStore,
     coreInstanceId: CORE,
@@ -218,7 +219,7 @@ function harness(overrides: Partial<JobSchedulerOptions> & { coreInstanceId?: st
 const ok = (ids: string[]): Ending => ({ status: "ok", items: ids.map((id) => ({ id, reason: `fits ${id}` })) });
 
 describe("job scheduler: one job, its order, and its answer", () => {
-  it("working{jobId} → idle → results, and never an idle after the results (frames as the window gets them)", async () => {
+  it("working{jobId} → idle → results, and never an idle after the results (frames as the side panel gets them)", async () => {
     const h = harness();
     h.settle();
     expect(h.states()).toEqual(["working:job1"]);
@@ -396,7 +397,7 @@ describe("job scheduler: cancellation", () => {
     expect(next.calls).toHaveLength(1);
     expect(next.calls[0]!.request.profileFingerprint).toBe("fp-2");
     expect(h.scheduler.running).toMatchObject({ jobId: "job2", replacementUsed: true });
-    // The cancelled run published nothing; the replacement's answer is what the window gets.
+    // The cancelled run published nothing; the replacement's answer is what the side panel gets.
     expect(h.frames.some((f) => f.type === "results")).toBe(false);
     next.calls[0]!.answer(ok(["c1"]));
     await flush();
@@ -472,7 +473,7 @@ describe("job scheduler: cancellation", () => {
   });
 });
 
-describe("job scheduler: live destinations (P4.6)", () => {
+describe("job scheduler: live destinations", () => {
   it("a host enabled while its visit is settled starts that visit's job at once, with a fresh budget", () => {
     const h = harness({ destinations: [] });
     h.settle(h.clock.t - 29_000); // settled long ago: the old budget would be spent
@@ -797,7 +798,7 @@ describe("job scheduler: resume cache", () => {
     expect(h.registry.size).toBe(0);
   });
 
-  // Phase 3 verification: the key alone keeps the answers apart. The profile watcher also clears
+  // The key alone keeps the answers apart. The profile watcher also clears
   // the cache on a change; this cache is never cleared, so only the tools dimension can cause the miss.
   it("a job with extra user tools never reuses a browser-only answer, even with the cache never cleared and the same fingerprint", async () => {
     const cache = createJobResumeCache<JobAnswer>({ clock: { now: () => 0 } });

@@ -1,8 +1,8 @@
-// Serves `preview` commands from Scout's window: one version's stored text in chunks of at most
+// Serves `preview` commands from the side panel: one version's stored text in chunks of at most
 // PREVIEW_CHUNK_MAX_BYTES, cut on UTF-8 boundaries, one chunk per command. Each chunk carries the
 // full blob's SHA-256, its byte offset and total, the version's descriptor, and (unless it is
-// the last) an opaque cursor for the next chunk. The app assembles and checks the chunks; it
-// never sends text back.
+// the last) an opaque cursor for the next chunk. The side panel assembles and checks the
+// chunks; it never sends text back.
 //
 // Any recorded version may be previewed, read-only: pending ones (that is how the user decides),
 // and a blocked resource's revoked versions too, so re-approving one from the library also
