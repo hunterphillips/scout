@@ -16,6 +16,8 @@ import { AGENT_PROFILE_SCHEMA_VERSION, AgentProfileError } from "../profileBase.
 import { ToolsProfileSchema } from "../toolProfile.js";
 
 export const CODEX_ADAPTER_ID = "codex";
+/** The adapter's name in the side panel's Settings. */
+export const CODEX_LABEL = "Codex";
 /** The initial model for the Codex profile; editable in the profile file. */
 export const DEFAULT_CODEX_MODEL = "gpt-6-sol";
 /** The reasoning effort a job runs at when the profile names none. */

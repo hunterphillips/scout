@@ -7,7 +7,10 @@
 // out (debounced) whenever `capabilitiesChanged()` is called (the coordinator calls it on
 // permission, visit, and ingest changes; commands call it after their ack), `audit` (debounced
 // AUDIT_DEBOUNCE_MS, skipped when unchanged) on `auditChanged()`, and `grant` when the user
-// toggles it or the recommendation destinations change (`destinationsChanged()`, P4.6).
+// toggles it or the recommendation destinations change (`destinationsChanged()`, P4.6). The
+// capabilities frame also carries the agent choice (`readAgents`); `set_agent`'s ack is followed
+// by a capabilities frame like any other stored change, and a profile edit by hand calls
+// `capabilitiesChanged()`.
 // A `preview` command answers with a chunk, or with a failure ack.
 //
 // Recommendation results (results.ts): a publish goes out as a `results` frame (hrefs
@@ -29,7 +32,7 @@
 // `working{jobId}` and then the visit's `idle` before the result is published; an `idle` or
 // `resendState` for the same visit after the publish wipes the window's results.
 
-import { GRANT_DESTINATIONS_MAX, isHttpsOrigin, type CapabilityConflict, type PanelAck, type PanelAudit, type PanelCommand, type PanelState } from "@scout/contracts";
+import { GRANT_DESTINATIONS_MAX, isHttpsOrigin, type CapabilityConflict, type PanelAck, type PanelAgents, type PanelAudit, type PanelCommand, type PanelState } from "@scout/contracts";
 import type { GrantWrite } from "./agentApi/grants.js";
 import type { ReadAuditEntry } from "./agentApi/readAudit.js";
 import type { StoreState } from "./capabilities/decisions.js";
@@ -41,6 +44,7 @@ import { createCapabilitiesEmitter } from "./panelCapabilities.js";
 import { createPreviewStream, type PreviewStore } from "./previewStream.js";
 import type { PanelSink } from "./panelSinks.js";
 import { type ResultRegistry, toFrame } from "./results.js";
+import type { SwitchAgentOutcome } from "./agents/profileSwitch.js";
 import type { SetDestinationOutcome } from "./wiring/destinations.js";
 
 export const AUDIT_DEBOUNCE_MS = 250;
@@ -61,6 +65,13 @@ export interface PanelChannelOptions {
    */
   readDestinations?: () => readonly string[];
   writeBrowserContextGrant: (enabled: boolean) => GrantWrite;
+  /**
+   * The agent choice for Settings (agents/profileSwitch.ts `agentChoices`), read on every
+   * `capabilities` frame. Without it the frame carries no `agents`.
+   */
+  readAgents?: () => PanelAgents;
+  /** `set_agent` (wiring/jobs.ts `switchAgent`); without it the command acks `unavailable`. */
+  setAgent?: (agent: string) => SwitchAgentOutcome;
   /** `set_destination` (wiring/destinations.ts `set`); without it the command acks `unavailable`. */
   setDestination?: (origin: string, enabled: boolean, expectedEnabled: boolean) => SetDestinationOutcome;
   getAudit: () => readonly ReadAuditEntry[];
@@ -118,7 +129,13 @@ export function createPanelChannel(options: PanelChannelOptions): PanelChannel {
       } catch {
         // An unreadable manifest shows no conflicts; the exporter reports it.
       }
-      return { state: store.snapshot(), conflicts, isPermitted: options.isPermitted, currentOrigin: options.currentOrigin() };
+      let agents: PanelAgents | undefined;
+      try {
+        agents = options.readAgents?.();
+      } catch {
+        // No agent choice on this frame; the rest of the view still goes out.
+      }
+      return { state: store.snapshot(), conflicts, isPermitted: options.isPermitted, currentOrigin: options.currentOrigin(), ...(agents ? { agents } : {}) };
     },
     coreInstanceId: options.coreInstanceId,
     emit,
@@ -164,6 +181,7 @@ export function createPanelChannel(options: PanelChannelOptions): PanelChannel {
     onGrantChanged: (enabled) => emit(grantFrame(enabled)),
     refreshCapabilities: () => capabilities.refresh(),
     ...(options.setDestination ? { setDestination: options.setDestination } : {}),
+    ...(options.setAgent ? { setAgent: options.setAgent } : {}),
     ...(options.results ? { results: options.results } : {}),
     diagnostics,
   });

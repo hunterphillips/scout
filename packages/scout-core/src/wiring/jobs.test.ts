@@ -1,4 +1,4 @@
-import { chmodSync, mkdirSync, mkdtempSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ActiveVisit } from "@scout/contracts";
@@ -234,6 +234,50 @@ describe("job wiring: process ownership and the agent profile (P3.4)", () => {
     } finally {
       await wiring?.close(Date.now() + 5000);
       await core.close();
+    }
+  });
+
+  it("switchAgent (set_agent) writes the chosen adapter's default profile with the tools kept; the watcher swaps the adapter and onProfileChanged fires", async () => {
+    fresh();
+    const bin = join(home, "bin");
+    mkdirSync(bin);
+    for (const name of ["claude", "codex"]) {
+      writeFileSync(join(bin, name), "#!/bin/sh\nexit 1\n");
+      chmodSync(join(bin, name), 0o755);
+    }
+    writeProfile(home, profile(home, 4));
+    let changed = 0;
+    const w = build({ env: { PATH: bin }, onProfileChanged: () => void changed++ });
+    expect(w.adapter!.id).toBe("claude-code");
+
+    expect(w.switchAgent("codex")).toEqual({ ok: true, written: true });
+    expect(events.find((e) => e.name === "agent_profile_switched")?.fields).toEqual({ adapter: "codex" });
+    await until(() => w.adapter?.id === "codex");
+    expect(changed).toBe(1);
+    const written = JSON.parse(readFileSync(join(home, "agent-profile.json"), "utf8")) as AgentProfile;
+    expect(written).toEqual({ schemaVersion: 1, adapter: "codex", codexPath: join(bin, "codex"), model: "gpt-6-sol", tools: { revision: 4, connections: [], selections: [] } });
+
+    // Choosing the current adapter again writes nothing.
+    expect(w.switchAgent("codex")).toEqual({ ok: true, written: false });
+    await new Promise((r) => setTimeout(r, 600));
+    expect(changed).toBe(1);
+    expect(w.switchAgent("other-agent")).toEqual({ ok: false, code: "invalid" });
+
+    // After shutdown began, nothing is written.
+    w.releaseProfile();
+    expect(w.switchAgent("claude-code")).toEqual({ ok: false, code: "unavailable" });
+    expect(JSON.parse(readFileSync(join(home, "agent-profile.json"), "utf8"))).toEqual(written);
+  });
+
+  it("switchAgent refuses while another process holds the profile lock", () => {
+    fresh();
+    const other = acquireStoreLock(home, { now: () => Date.now(), file: AGENT_PROFILE_LOCK_FILE });
+    try {
+      const w = build({ timers: manualTimers() });
+      expect(w.holdsProfileLock).toBe(false);
+      expect(w.switchAgent("claude-code")).toEqual({ ok: false, code: "unavailable" });
+    } finally {
+      other.release();
     }
   });
 

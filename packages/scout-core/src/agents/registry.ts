@@ -13,10 +13,10 @@ import type { Diagnostics } from "../diagnostics.js";
 import type { AgentJobAdapter } from "./adapter.js";
 import type { Env } from "./executables.js";
 import { createClaudeJobAdapter, type ClaudeJobDeps } from "./claudeCode/claudeJob.js";
-import { createDefaultClaudeCodeProfile } from "./claudeCode/profile.js";
+import { CLAUDE_CODE_LABEL, createDefaultClaudeCodeProfile } from "./claudeCode/profile.js";
 import { createPreflightFacade, type PreflightFacade } from "./claudeCode/preflightWorker.js";
 import { createCodexJobAdapter, type CodexJobDeps } from "./codex/codexJob.js";
-import { createDefaultCodexProfile } from "./codex/profile.js";
+import { CODEX_LABEL, createDefaultCodexProfile } from "./codex/profile.js";
 import { createCodexReadinessFacade, type CodexReadinessFacade } from "./codex/readinessWorker.js";
 import type { ProcessTracker } from "./processTree.js";
 import type { AgentProfile } from "./profile.js";
@@ -106,5 +106,25 @@ export function createDefaultProfileFor(id: AgentProfile["adapter"], parentEnv: 
       return createDefaultClaudeCodeProfile(parentEnv);
     case "codex":
       return createDefaultCodexProfile(parentEnv);
+  }
+}
+
+/** The adapter's name as the side panel shows it. */
+export function adapterLabel(id: AgentProfile["adapter"]): string {
+  switch (id) {
+    case "claude-code":
+      return CLAUDE_CODE_LABEL;
+    case "codex":
+      return CODEX_LABEL;
+  }
+}
+
+/** The absolute executable a profile's jobs run. */
+export function profileExecutable(profile: AgentProfile): string {
+  switch (profile.adapter) {
+    case "claude-code":
+      return profile.claudePath;
+    case "codex":
+      return profile.codexPath;
   }
 }

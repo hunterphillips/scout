@@ -16,6 +16,8 @@ import { AGENT_PROFILE_SCHEMA_VERSION, AgentProfileError } from "../profileBase.
 import { ToolsProfileSchema } from "../toolProfile.js";
 
 export const CLAUDE_CODE_ADAPTER_ID = "claude-code";
+/** The adapter's name in the side panel's Settings. */
+export const CLAUDE_CODE_LABEL = "Claude Code";
 /** The initial model for the Claude Code profile; editable in the profile file. */
 export const DEFAULT_CLAUDE_CODE_MODEL = "claude-sonnet-5-5";
 

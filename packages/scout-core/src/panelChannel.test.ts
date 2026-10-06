@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { GRANT_DESTINATIONS_MAX, PanelStateSchema, PREVIEW_CHUNK_MAX_BYTES, type PanelCapabilities, type PanelPreviewChunk, type PanelState } from "@scout/contracts";
@@ -11,6 +11,8 @@ import type { Timers } from "./clock.js";
 import type { DiagnosticFields, Diagnostics } from "./diagnostics.js";
 import { createPanelChannel, type PanelChannelOptions, type PanelStore } from "./panelChannel.js";
 import { createLiveDestinations } from "./wiring/destinations.js";
+import { writeAgentProfile } from "./agents/profile.js";
+import { agentChoices, switchAgent } from "./agents/profileSwitch.js";
 import { createResultRegistry, type ResultRegistry } from "./results.js";
 
 function fakeTimers() {
@@ -61,6 +63,8 @@ function setup(
     resendState?: () => void;
     readDestinations?: () => readonly string[];
     setDestination?: PanelChannelOptions["setDestination"];
+    readAgents?: PanelChannelOptions["readAgents"];
+    setAgent?: PanelChannelOptions["setAgent"];
   } = {},
 ) {
   const t = fakeTimers();
@@ -84,6 +88,8 @@ function setup(
     ...(overrides.resendState ? { resendState: overrides.resendState } : {}),
     ...(overrides.readDestinations ? { readDestinations: overrides.readDestinations } : {}),
     ...(overrides.setDestination ? { setDestination: overrides.setDestination } : {}),
+    ...(overrides.readAgents ? { readAgents: overrides.readAgents } : {}),
+    ...(overrides.setAgent ? { setAgent: overrides.setAgent } : {}),
     clock: { now: () => 0 },
     timers: t.timers,
     diagnostics,
@@ -147,6 +153,69 @@ describe("panel channel", () => {
     } finally {
       rmSync(home, { recursive: true, force: true });
     }
+  });
+
+  it("set_agent: the capabilities frame carries the agent choice; the ack is followed by a frame showing the new agent; a retried ID is answered from the cache", async () => {
+    const home = mkdtempSync(join(tmpdir(), "spc-agent-"));
+    try {
+      const bin = join(home, "bin");
+      mkdirSync(bin);
+      for (const name of ["claude", "codex"]) {
+        writeFileSync(join(bin, name), "#!/bin/sh\nexit 1\n");
+        chmodSync(join(bin, name), 0o755);
+      }
+      writeAgentProfile(home, { schemaVersion: 1, adapter: "claude-code", claudePath: join(bin, "claude"), model: "claude-sonnet-5-5", tools: { revision: 2, connections: [], selections: [] } });
+      const writes: string[] = [];
+      const s = setup({ readAgents: () => agentChoices(home, { PATH: bin }), setAgent: (a) => (writes.push(a), switchAgent(home, a, { PATH: bin })) });
+      s.channel.start();
+      const first = s.frames[1] as PanelCapabilities;
+      expect(first.agents).toEqual({ available: [{ id: "claude-code", label: "Claude Code" }, { id: "codex", label: "Codex" }], current: "claude-code" });
+      expect(PanelStateSchema.safeParse(first).success).toBe(true);
+
+      s.frames.length = 0;
+      const cmd = { type: "set_agent" as const, commandId: "a1", agent: "codex" };
+      await s.channel.handle(cmd, "relay-1");
+      expect(s.frames).toEqual([{ type: "ack", commandId: "a1", ok: true, revision: 0, approvalRevision: 0 }]);
+      s.fire();
+      expect(s.frames[1]).toMatchObject({ type: "capabilities", revision: 2, agents: { current: "codex" } });
+      expect(JSON.parse(readFileSync(join(home, "agent-profile.json"), "utf8"))).toMatchObject({ adapter: "codex", tools: { revision: 2 } });
+
+      // The same ID again: the first ack, the writer not called.
+      s.frames.length = 0;
+      await s.channel.handle(cmd, "relay-1");
+      expect(s.frames).toEqual([{ type: "ack", commandId: "a1", ok: true, revision: 0, approvalRevision: 0 }]);
+      expect(writes).toEqual(["codex"]);
+      // A new command naming the current agent is ok and changes nothing.
+      await s.channel.handle({ ...cmd, commandId: "a2" }, "relay-1");
+      expect(s.frames.at(-1)).toEqual({ type: "ack", commandId: "a2", ok: true, revision: 0, approvalRevision: 0 });
+      s.fire();
+      expect(s.frames.filter((f) => f.type === "capabilities")).toEqual([]);
+
+      // An agent whose executable is gone is refused, and so is an unknown one.
+      rmSync(join(bin, "claude"));
+      await s.channel.handle({ ...cmd, commandId: "a3", agent: "claude-code" }, "relay-1");
+      expect(s.frames.at(-1)).toEqual({ type: "ack", commandId: "a3", ok: false, code: "not_found" });
+      await s.channel.handle({ ...cmd, commandId: "a4", agent: "other-agent" }, "relay-1");
+      expect(s.frames.at(-1)).toEqual({ type: "ack", commandId: "a4", ok: false, code: "invalid" });
+      expect(JSON.parse(readFileSync(join(home, "agent-profile.json"), "utf8"))).toMatchObject({ adapter: "codex" });
+      expect(s.events.filter((e) => e.name === "native_command").map((e) => e.fields)).toEqual([
+        { type: "set_agent", ok: true },
+        { type: "set_agent", ok: true },
+        { type: "set_agent", ok: true },
+        { type: "set_agent", ok: false, code: "not_found" },
+        { type: "set_agent", ok: false, code: "invalid" },
+      ]);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("set_agent without a writer acks unavailable, and a frame without an agent reader carries no agents", async () => {
+    const s = setup();
+    s.channel.start();
+    expect(s.frames[1]).not.toHaveProperty("agents");
+    await s.channel.handle({ type: "set_agent", commandId: "a1", agent: "codex" });
+    expect(s.frames.at(-1)).toEqual({ type: "ack", commandId: "a1", ok: false, code: "unavailable" });
   });
 
   it("set_destination without a writer acks unavailable", async () => {

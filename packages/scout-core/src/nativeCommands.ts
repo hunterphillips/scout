@@ -1,5 +1,6 @@
 // Executes the mutation commands Scout's window sends (approve, decline, revoke, auto-acquire,
-// the browser-context grant, a site's recommendations switch, refresh) and answers each with exactly one ack.
+// the browser-context grant, a site's recommendations switch, the agent choice, refresh) and
+// answers each with exactly one ack.
 //
 // Order: a success ack goes out only after the change is persisted (the store's write, or the
 // config.json rename), and before the export sync it may start has finished (the store's
@@ -42,6 +43,13 @@
 //   Toggles carry no revision, so a boolean compare cannot tell a retried enable from a new one
 //   after an intervening disable (enable, disable, retried enable). Within one core the ID cache
 //   answers the retry; the app never retries a toggle across a core restart.
+// - set_agent (Settings' agent choice) is a set, not a toggle: it carries no compare, and naming
+//   the adapter the profile already names acks `ok` and writes nothing, so a retry or a delayed
+//   duplicate never changes more than the user asked. The writer (wiring/jobs.ts switchAgent)
+//   acks `invalid` for an unknown adapter, `not_found` when its executable is not found,
+//   `store_error` when the write fails, and `unavailable` without the profile lock; without a
+//   writer the command acks `unavailable`. The capabilities frame that follows the ack shows the
+//   new choice.
 // - open_link (a click on a recommended link): the result registry (results.ts) checks the
 //   displayed identity against the result it holds and re-checks the stored target and the
 //   origin's grant; `ok` carries `target: { href }` (only this command's ack does). Codes:
@@ -58,6 +66,7 @@ import { DecisionError, StaleApprovalError } from "./capabilities/decisions.js";
 import { type CapabilityStore, type ExportSync, StoreReadOnlyError } from "./capabilities/store.js";
 import type { Diagnostics } from "./diagnostics.js";
 import type { ResultRegistry } from "./results.js";
+import type { SwitchAgentOutcome } from "./agents/profileSwitch.js";
 import type { SetDestinationOutcome } from "./wiring/destinations.js";
 
 export const COMMAND_CACHE_SIZE = 256;
@@ -82,6 +91,8 @@ export interface NativeCommandsOptions {
    * `unavailable`.
    */
   setDestination?: (origin: string, enabled: boolean, expectedEnabled: boolean) => SetDestinationOutcome;
+  /** `set_agent`: write the profile for that adapter (wiring/jobs.ts `switchAgent`). Without it the command acks `unavailable`. */
+  setAgent?: (agent: string) => SwitchAgentOutcome;
   /** `refresh_capabilities`: send the capabilities view now. */
   refreshCapabilities: () => void;
   /** Resolves `open_link`; without it every `open_link` acks `unavailable`. */
@@ -198,6 +209,11 @@ export function createNativeCommands(options: NativeCommandsOptions): NativeComm
       case "set_destination": {
         if (!options.setDestination) return { ack: failed(id, "unavailable") };
         const r = options.setDestination(cmd.origin, cmd.enabled, cmd.expectedEnabled);
+        return { ack: r.ok ? ok(id, 0) : failed(id, r.code) };
+      }
+      case "set_agent": {
+        if (!options.setAgent) return { ack: failed(id, "unavailable") };
+        const r = options.setAgent(cmd.agent);
         return { ack: r.ok ? ok(id, 0) : failed(id, r.code) };
       }
       case "refresh_capabilities":
