@@ -5,7 +5,7 @@
 // homes, managed paths inside the sandbox, the project walk stopped at the sandbox root.
 
 import { chmodSync, readdirSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { ALLOWED_CLAUDE_ARGS, CHILD_ENV_STRATEGY, classifyBaseUrl, managedPathsFor, parseAuthStatus, runPreflight, type PreflightDeps } from "./authPreflight.js";
 import { FORWARD_KEYS, runDirectPreflight } from "./launchProfile.js";
@@ -230,6 +230,29 @@ describe("runPreflight: explicit child", () => {
     expect(claude.calls.every((c) => c.command === sb.claudePath)).toBe(true);
     expect(claude.calls.every((c) => c.envNames.join() === "HOME,PATH")).toBe(true);
     expect(sentinelsIn(JSON.stringify(report))).toEqual([]);
+  });
+
+  it("each claude call's PATH leads with the claude binary's directory; the inspected child env is unchanged", () => {
+    const sb = makeSandbox();
+    const claude = fakeSpawnSync();
+    const paths: (string | undefined)[] = [];
+    const childEnv = { HOME: sb.home, PATH: "/usr/bin:/bin" };
+    const report = runPreflight({
+      env: sb.baseEnv(),
+      cwd: sb.cwd,
+      managedPaths: sb.managedPaths,
+      projectStopAt: sb.root,
+      username: "someone",
+      spawnSync: (c, a, o) => {
+        paths.push(o.env.PATH);
+        return claude.spawnSync(c, a, o);
+      },
+      child: { env: childEnv, claudePath: sb.claudePath, strategy: "test-profile" },
+    });
+    expect(report.verdict).toBe("subscription");
+    expect(paths).toHaveLength(ALLOWED_CLAUDE_ARGS.length);
+    expect(paths.every((p) => p === `${dirname(sb.claudePath)}:/usr/bin:/bin`)).toBe(true);
+    expect(childEnv.PATH).toBe("/usr/bin:/bin");
   });
 
   it("refuses a pinned claude path that is relative or not executable", () => {

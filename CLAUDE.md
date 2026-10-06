@@ -187,7 +187,8 @@ and limits; `CONTRIBUTING.md` has the platform matrix.
     Codex's caches plus `auth.json`, a symlink to the user's `~/.codex/auth.json` or
     `$CODEX_HOME/auth.json`; anything else at that path is `auth_link_invalid` and never
     removed) and a per-job `CODEX_SQLITE_HOME=<jobDir>/state`; the child env is
-    `FORWARD_KEYS` plus those two, never `CODEX_API_KEY`, `CODEX_ACCESS_TOKEN` or
+    `FORWARD_KEYS` plus those two, with PATH led by the CLI's own directory (both adapters,
+    `executables.ts` `pathWithCliDir`, for npm/nvm `#!/usr/bin/env node` installs), never `CODEX_API_KEY`, `CODEX_ACCESS_TOKEN` or
     `OPENAI_API_KEY`. `readiness.ts` (in a forked child like Claude's preflight) runs only
     `codex --version` and `codex login status`: `subscription` needs "Logged in using
     ChatGPT", no API-key env, a valid auth link and an executable `codexPath`. Default

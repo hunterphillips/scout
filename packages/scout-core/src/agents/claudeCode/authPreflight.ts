@@ -1,6 +1,8 @@
 // Provenance: copied verbatim from the removed personal-context package (see git history
-// before 2026-10-02); this is now the only copy. Differences: none in behaviour; only this
-// header. authPreflight.parity.test.ts pins the removed package's verdicts, reasons and CLI
+// before 2026-10-02); this is now the only copy. Differences: this header, and each claude
+// call's PATH starts with the claude binary's own directory (executables.ts pathWithCliDir),
+// so an npm or nvm install finds its `node` under launchd's minimal PATH; the inspected child
+// env is unchanged. authPreflight.parity.test.ts pins the removed package's verdicts, reasons and CLI
 // calls over the same synthetic settings matrix.
 //
 // Billing preflight. Runs NO model calls.
@@ -30,7 +32,7 @@ import * as realFs from "node:fs";
 import { realpathSync, statSync } from "node:fs";
 import { userInfo } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
-import { isExecutableFile, resolveOnPath, type Env } from "../executables.js";
+import { isExecutableFile, pathWithCliDir, resolveOnPath, type Env } from "../executables.js";
 
 export { isExecutableFile, resolveOnPath, type Env };
 
@@ -378,7 +380,8 @@ function runClaude(
     throw new Error("refusing non-allowlisted claude invocation");
   }
   const r = spawn(claudePath, args, {
-    env,
+    // The CLI's own directory leads PATH, as at the job's spawn (executables.ts pathWithCliDir).
+    env: { ...env, PATH: pathWithCliDir(claudePath, env.PATH) },
     cwd,
     encoding: "utf8",
     timeout: timeoutMs,
