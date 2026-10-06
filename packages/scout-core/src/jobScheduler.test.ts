@@ -4,7 +4,7 @@ import { createSnapshotRegistry, type SnapshotReleaseReason } from "./activity/s
 import type { StoredActivity } from "./activity/store.js";
 import { createAgentAuth } from "./agentApi/auth.js";
 import { MIN_LAUNCH_MS, type JobDetails, type JobOutcome, type JobRunOptions } from "./agents/adapter.js";
-import type { Ending } from "./agents/claudeCode/jobStop.js";
+import type { Ending } from "./agents/jobStop.js";
 import { emptyState } from "./capabilities/decisions.js";
 import type { CatalogResolution } from "./catalog/resolveCatalog.js";
 import type { DiagnosticFields, Diagnostics } from "./diagnostics.js";

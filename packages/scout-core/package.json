@@ -22,6 +22,10 @@
       "types": "./dist/agents/claudeCode/preflightChildMain.d.ts",
       "default": "./dist/agents/claudeCode/preflightChildMain.js"
     },
+    "./agents/codex-readiness-child": {
+      "types": "./dist/agents/codex/readinessChildMain.d.ts",
+      "default": "./dist/agents/codex/readinessChildMain.js"
+    },
     "./catalog/parse-worker": {
       "types": "./dist/catalog/parseWorkerMain.d.ts",
       "default": "./dist/catalog/parseWorkerMain.js"

@@ -15,6 +15,7 @@ import { closeSync, constants as fsc, fstatSync, openSync, readFileSync, renameS
 import { join } from "node:path";
 import { z } from "zod";
 import { ClaudeCodeProfileSchema } from "./claudeCode/profile.js";
+import { CodexProfileSchema } from "./codex/profile.js";
 import { AgentProfileError } from "./profileBase.js";
 import { canonicalJson } from "./toolProfile.js";
 
@@ -32,12 +33,12 @@ export const PROFILE_MAX_BYTES = 512 * 1024;
  */
 export const MODEL_RE = /^[A-Za-z0-9][A-Za-z0-9._\-[\]]{0,63}$/;
 
-export const AgentProfileSchema = z.discriminatedUnion("adapter", [ClaudeCodeProfileSchema]);
+export const AgentProfileSchema = z.discriminatedUnion("adapter", [ClaudeCodeProfileSchema, CodexProfileSchema]);
 
 export type AgentProfile = z.infer<typeof AgentProfileSchema>;
 
 /** Every adapter id a profile may name. */
-export const AGENT_ADAPTER_IDS = ["claude-code"] as const satisfies readonly AgentProfile["adapter"][];
+export const AGENT_ADAPTER_IDS = ["claude-code", "codex"] as const satisfies readonly AgentProfile["adapter"][];
 
 /**
  * Stable hash of the profile content (keys sorted at every depth), hex. Any change to the

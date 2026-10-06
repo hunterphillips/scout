@@ -2,7 +2,9 @@
 // skills root, the scripted fake `claude`
 // (packages/scout-core/src/agents/claudeCode/testing/fake-claude.mjs) behind a wrapper,
 // hermetic managed-settings paths, and a gateway-shaped parent env carrying sentinel values
-// that must never reach a report.
+// that must never reach a report. With `adapter: "codex"`, the world runs the fake `codex`
+// (packages/scout-core/src/agents/codex/testing/fake-codex.mjs) instead, with a placeholder
+// `~/.codex/auth.json` for the private Codex home to link to.
 
 import { spawn } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
@@ -12,6 +14,7 @@ import { REPO_ROOT } from "../lib/paths.mjs";
 import { runAgentCheck } from "./run.mjs";
 
 const FAKE = join(REPO_ROOT, "packages", "scout-core", "src", "agents", "claudeCode", "testing", "fake-claude.mjs");
+const FAKE_CODEX = join(REPO_ROOT, "packages", "scout-core", "src", "agents", "codex", "testing", "fake-codex.mjs");
 const HARNESS = join(REPO_ROOT, "scripts", "agent-check", "abort-harness.mjs");
 const FAST = { settleMs: 50, turnTimeoutMs: 20_000, killGraceMs: 500, cancelAfterInitMs: 300, registryRecheckMs: 50 };
 export const SENTINELS = ["SENTINEL-API-KEY-7f3a", "sentinel-gateway.example.invalid"];
@@ -22,7 +25,7 @@ export function cleanupWorlds() {
   for (const w of worlds.splice(0)) rmSync(w.root, { recursive: true, force: true });
 }
 
-export function makeWorld(mode = "hotload-watch", { configDir = false } = {}) {
+export function makeWorld(mode = "hotload-watch", { configDir = false, adapter = "claude-code" } = {}) {
   const root = realpathSync(mkdtempSync(join(tmpdir(), "sac-")));
   chmodSync(root, 0o700);
   worlds.push({ root });
@@ -38,6 +41,14 @@ export function makeWorld(mode = "hotload-watch", { configDir = false } = {}) {
   const claude = join(bin, "claude");
   writeFileSync(claude, `#!/bin/sh\nFAKE_MODE="$(cat '${modeFile}')" FAKE_LOG='${log}' exec '${process.execPath}' '${FAKE}' "$@"\n`);
   chmodSync(claude, 0o755);
+  const loginFile = join(root, "fake-login");
+  writeFileSync(loginFile, "chatgpt");
+  const codex = join(bin, "codex");
+  writeFileSync(codex, `#!/bin/sh\nFAKE_MODE="$(cat '${modeFile}')" FAKE_LOGIN="$(cat '${loginFile}')" FAKE_LOG='${log}' exec '${process.execPath}' '${FAKE_CODEX}' "$@"\n`);
+  chmodSync(codex, 0o755);
+  mkdirSync(join(home, ".codex"), { mode: 0o700 });
+  writeFileSync(join(home, ".codex", "auth.json"), JSON.stringify({ auth_mode: "chatgpt", tokens: { access_token: "placeholder" } }), { mode: 0o600 });
+  const agentArgs = adapter === "codex" ? ["--adapter", "codex", "--codex", codex] : ["--claude", claude];
   const env = {
     HOME: home,
     PATH: `${bin}:/usr/bin:/bin`,
@@ -67,9 +78,11 @@ export function makeWorld(mode = "hotload-watch", { configDir = false } = {}) {
     skillsRoot: config ? join(config, "skills") : skillsRoot,
     scoutHome,
     claude,
+    codex,
     env,
     registryFile,
     setMode: (m) => writeFileSync(modeFile, m),
+    setLogin: (l) => writeFileSync(loginFile, l),
     lines: () => (existsSync(log) ? readFileSync(log, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l)) : []),
     registry: () => (existsSync(registryFile) ? JSON.parse(readFileSync(registryFile, "utf8")).mcpServers ?? {} : {}),
     reports: () => {
@@ -79,7 +92,7 @@ export function makeWorld(mode = "hotload-watch", { configDir = false } = {}) {
     /** Run verify:agent against this world; deps are merged over fast test seams. */
     async run(args, deps = {}, signals = undefined) {
       const lines = [];
-      const code = await runAgentCheck([...args, "--home", w.scoutHome, "--claude", claude], {
+      const code = await runAgentCheck([...args, "--home", w.scoutHome, ...agentArgs], {
         env,
         out: (s) => lines.push(String(s)),
         err: (s) => lines.push(String(s)),
@@ -95,7 +108,7 @@ export function makeWorld(mode = "hotload-watch", { configDir = false } = {}) {
     },
     /** Start verify:agent in a child process (abort-harness.mjs) that a test can signal. */
     spawnRun(args, deps = {}) {
-      const cfg = { args: [...args, "--home", w.scoutHome, "--claude", claude], env, deps: { preflightSeams: { managedPaths }, ...FAST, ...deps } };
+      const cfg = { args: [...args, "--home", w.scoutHome, ...agentArgs], env, deps: { preflightSeams: { managedPaths }, ...FAST, ...deps } };
       const child = spawn(process.execPath, [HARNESS, JSON.stringify(cfg)], { stdio: ["ignore", "pipe", "pipe"] });
       let output = "";
       child.stdout.on("data", (c) => (output += c));

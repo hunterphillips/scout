@@ -69,7 +69,7 @@
 // tokens or URLs beyond the origin.
 
 import { spawn as nodeSpawn } from "node:child_process";
-import { renameSync, writeFileSync } from "node:fs";
+import { writeFileSync } from "node:fs";
 import { userInfo } from "node:os";
 import { isAbsolute, join } from "node:path";
 import { AgentTokenSchema, JOB_AGENT_OUTPUT_JSON_SCHEMA, JobRequestSchema, type HostJobResult, type JobRequest } from "@scout/contracts";
@@ -81,13 +81,14 @@ import type { BridgeJob } from "../contextToolBridge.js";
 import { startChild, type SnapshotFn, type SpawnFn, type SupervisedChild } from "../childSupervisor.js";
 import type { ExpectedInit } from "./initCheck.js";
 import { buildJobSurface, defaultScoutMcpEntrypoint, type JobSurface } from "./jobSurface.js";
-import { JobStop, type Ending, type Out } from "./jobStop.js";
-import { createJsonLineStream } from "./jsonLineStream.js";
+import { JobStop, type Ending, type Out } from "../jobStop.js";
+import { createJsonLineStream } from "../jsonLineStream.js";
 import { createLaunchProfile, LaunchProfileError, runDirectPreflight, type DirectPreflightOptions, type LaunchProfile } from "./launchProfile.js";
 import { mapOutcome, recordUsage } from "./mapOutcome.js";
-import { MODEL_RE, profileFingerprint, type AgentProfile } from "../profile.js";
+import { MODEL_RE, profileFingerprint } from "../profile.js";
+import type { ClaudeCodeProfile } from "./profile.js";
 import { buildJobInstructions, buildJobPrompt } from "../prompt.js";
-import { JOB_TREE_FILE, type JobTreeRecord, type ProcessTracker } from "../processTree.js";
+import { writeTreeRecord, type ProcessTracker } from "../processTree.js";
 import { createStreamMonitor } from "./streamMonitor.js";
 import { ensureAgentCwd } from "../../localSocketFiles.js";
 import { checkManagedPolicy, defaultBridgeEntrypoint, managedMcpFilesFor, planJobTools, type JobManagedPaths, type ManagedPolicyResult, type ToolPlanOptions } from "./toolPolicy.js";
@@ -194,7 +195,7 @@ export interface PreflightReadiness extends AgentReadiness {
 export interface ClaudeJobDeps {
   /** SCOUT_HOME; job dirs go under `run/jobs/`. */
   home: string;
-  profile: AgentProfile;
+  profile: ClaudeCodeProfile;
   /** The core's environment; the launch profile picks the allowlisted keys from it. */
   parentEnv: Env;
   workspaceRoots?: readonly string[];
@@ -295,16 +296,7 @@ export function defaultManagedPaths(env: Readonly<Record<string, string>>, usern
   return { ...managedPathsFor(process.platform, configDir, user), mcpFiles: managedMcpFilesFor(process.platform) };
 }
 
-/** `tree.json` in the job dir, replaced atomically (0600). Best effort: a failure is ignored. */
-export function writeTreeRecord(jobDir: string, record: JobTreeRecord): void {
-  const tmp = join(jobDir, `.${JOB_TREE_FILE}.tmp`);
-  try {
-    writeFileSync(tmp, JSON.stringify(record), { mode: 0o600 });
-    renameSync(tmp, join(jobDir, JOB_TREE_FILE));
-  } catch {
-    // the job dir is gone or unwritable: nothing to record into
-  }
-}
+export { writeTreeRecord } from "../processTree.js";
 
 // ---------- the adapter ----------
 

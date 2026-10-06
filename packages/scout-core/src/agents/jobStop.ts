@@ -1,4 +1,4 @@
-// How a Claude job ends, and the one place a job's stop decision is kept.
+// How an agent job ends, and the one place a job's stop decision is kept.
 //
 // A stop comes from outside the CLI (cancel signal, deadline, adapter shutdown) or from the
 // job's own checks (a failed init check, an unexpected tool, too much output). The first
@@ -8,7 +8,7 @@
 // the last buffered line.
 
 import type { AgentPick, JOB_ERROR_REASONS } from "@scout/contracts";
-import type { JobCancelReason, JobTermination } from "../adapter.js";
+import type { JobCancelReason, JobTermination } from "./adapter.js";
 
 export type Ending =
   | { status: "ok"; items: AgentPick[] }

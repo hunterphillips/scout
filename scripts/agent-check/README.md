@@ -4,7 +4,7 @@ Two commands for Phase 1 of the website-agent plan.
 
 - `npm run test:agent-contract` runs the hermetic tests: the job runtime and skill
   wrappers in scout-core, the scout-mcp adapter, and these scripts. The tests use a
-  scripted fake `claude` (`packages/scout-core/src/agents/claudeCode/testing/fake-claude.mjs`) and
+  scripted fake `claude` (`packages/scout-core/src/agents/claudeCode/testing/fake-claude.mjs`), a scripted fake `codex` (`packages/scout-core/src/agents/codex/testing/fake-codex.mjs`) and
   temp dirs only.
 - `npm run verify:agent -- --case <case> --home <dir> [options]` runs one live check
   against the installed Claude CLI. Every real run makes model calls on the user's
@@ -30,7 +30,9 @@ arguments, the final output, usage, and whether Codex touched the user's `auth.j
 | `--dry-run` | Print the names, paths and argv of the run. Writes, registers and launches nothing, including the preflight. |
 | `--max-inference <n>` | Most inference requests the run may make: default 2, maximum 4. Above 2 needs `--acknowledge-budget`. A hotload run whose options need more is refused. |
 | `--acknowledge-budget` | Allow `--max-inference` above 2. Without it such a run exits 2, because the plan allows "at most two inference requests in one authorized check". |
+| `--adapter <id>` | `claude-code` (default) or `codex`. `codex` runs `baseline`, `selected-tool` and `cancel` through the Codex adapter; `hotload` is Claude Code only. |
 | `--claude <path>` | Use this `claude` binary instead of the one on `PATH`. |
+| `--codex <path>` | With `--adapter codex`: use this `codex` binary instead of the one on `PATH`. |
 | `--authorize-real-root` | hotload: the acceptance run. Adds one `scout-proof-<nonce>` MCP registration at user scope and one `scout-proof-<nonce>` skill directory in the real user skills root (`$CLAUDE_CONFIG_DIR/skills`, else `~/.claude/skills`), and removes both afterwards. |
 | `--preliminary` | hotload: put the skill in the throwaway cwd's `.claude/skills` and load the server with `--mcp-config`. Nothing installed changes; the result does not count for the gate. |
 | `--with-revocation` | hotload: after the skill works, revoke the resource, remove the skill, and ask for one more read. Needs one more request. |
@@ -67,6 +69,7 @@ same user config file. The report records whether the registry changed underneat
 | `... --case baseline --home <dir>` | 1 |
 | `... --case selected-tool --home <dir>` | 1 |
 | `... --case cancel --home <dir>` | 1 |
+| `... --case baseline --home <dir> --adapter codex` (also `selected-tool`, `cancel`) | 1 |
 
 ## What each case does
 
@@ -137,6 +140,11 @@ values. After cleanup it reads them again and runs `mcp get` once more about 3 s
 later. `registry` reports the counts before and after, `foreignChanged` (another writer
 changed other entries), and `reappeared` (our entry came back after removal, which fails the
 check).
+
+With `--adapter codex`, the check runs Codex's login check instead (`codex --version`,
+`codex login status`) and launches nothing unless it reports a ChatGPT login. The report's
+`init` records only that `thread.started` arrived; the cancel case counts its 3 seconds from
+that event.
 
 **baseline.** One background job through the real job adapter, with Scout context only.
 Passes on `ok` with at least one pick and at least one Scout tool call.

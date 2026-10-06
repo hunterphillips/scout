@@ -1,4 +1,4 @@
-import { chmodSync, mkdtempSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ActiveVisit } from "@scout/contracts";
@@ -9,7 +9,8 @@ import { ParseCancelledError } from "../catalog/parseWorker.js";
 import { systemClock, type Timers } from "../clock.js";
 import type { Diagnostics } from "../diagnostics.js";
 import type { SchedulerProfile } from "../jobScheduler.js";
-import { createJobWiring, PROFILE_LOCK_RETRY_MS, type JobWiring } from "./jobs.js";
+import { createJobWiring, PROFILE_LOCK_RETRY_MS, type JobWiring, type JobWiringOptions } from "./jobs.js";
+import { fakeUserCodexHome, installFakeCodex, startFixtureCore } from "../agents/codex/testing/fakeCodex.js";
 
 const ORIGIN = "https://docs.example.com";
 const SITEMAP = `<?xml version="1.0"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"><url><loc>${ORIGIN}/a</loc></url></urlset>`;
@@ -63,7 +64,7 @@ describe("job wiring: process ownership and the agent profile", () => {
   const events: Array<{ name: string; fields: Record<string, unknown> }> = [];
   const diagnostics: Diagnostics = { failures: 0, event: (name, fields = {}) => void events.push({ name, fields }) };
 
-  const build = (extra: { timers?: Timers } = {}): JobWiring => {
+  const build = (extra: Partial<JobWiringOptions> = {}): JobWiring => {
     wiring = createJobWiring({
       home,
       env: {},
@@ -195,6 +196,45 @@ describe("job wiring: process ownership and the agent profile", () => {
       Date.now(),
     );
     expect(published).toEqual([expect.objectContaining({ status: "unavailable", reason: "agent_unavailable" })]);
+  });
+
+  it("a Codex profile builds the Codex adapter; an edit from Claude Code to Codex swaps it, and the next job runs on Codex", async () => {
+    fresh();
+    const userHome = join(home, "u");
+    mkdirSync(userHome, { mode: 0o700 });
+    fakeUserCodexHome(userHome);
+    const fake = installFakeCodex(home);
+    const core = await startFixtureCore(home);
+    try {
+      writeProfile(home, profile(home, 1));
+      const w = build({ env: { HOME: userHome, PATH: "/usr/bin:/bin" } });
+      const claude = w.adapter!;
+      expect(claude.id).toBe("claude-code");
+      const seen: Array<string | SchedulerProfile> = [];
+      w.scheduler.onProfileChanged = (next) => void seen.push(next);
+
+      const codex: AgentProfile = { schemaVersion: 1, adapter: "codex", codexPath: fake.path, model: "gpt-6-sol" };
+      writeProfile(home, codex);
+      await until(() => seen.length === 1);
+      expect(w.adapter!.id).toBe("codex");
+      expect(seen[0]).toEqual({ fingerprint: profileFingerprint(codex), toolsRevision: 0, hasUserTools: false });
+      expect(events.find((e) => e.name === "agent_profile_changed")?.fields).toEqual({ usable: true, toolsRevision: 0 });
+
+      // The adapter the scheduler reads (its agent() getter) now runs the job through Codex,
+      // with readiness checked in the core's forked readiness child.
+      const out = await w.adapter!.run(
+        { requestId: "r1", coreInstanceId: "core-test", visitEpoch: 1, origin: ORIGIN, catalogHash: "c", browserSnapshot: { id: "s", revision: 1 }, approvalRevision: 0, grantRevision: 0, profileFingerprint: w.adapter!.profileFingerprint, deadlineMs: 20_000, candidates: [{ id: "c1", title: "A", labelQuality: "published" }, { id: "c2", title: "B", labelQuality: "published" }], maxPicks: 3 },
+        { toolSurface: { scout: { socketPath: core.socketPath, token: core.token } } },
+      );
+      expect(out.result).toMatchObject({ status: "ok", items: [{ id: "c1" }, { id: "c2" }] });
+      expect(out.details.adapter).toBe("codex");
+      expect(fake.lines().filter((l) => l.violations !== undefined)).toHaveLength(1);
+      // The replaced Claude adapter is closed.
+      expect((await claude.run({ requestId: "r2", coreInstanceId: "core-test", visitEpoch: 1, origin: ORIGIN, catalogHash: "c", browserSnapshot: { id: "s", revision: 1 }, approvalRevision: 0, grantRevision: 0, profileFingerprint: claude.profileFingerprint, deadlineMs: 20_000, candidates: [{ id: "c1", title: "A", labelQuality: "published" }], maxPicks: 3 }, { toolSurface: { scout: { socketPath: core.socketPath, token: core.token } } })).result).toMatchObject({ status: "unavailable", reason: "agent_unavailable" });
+    } finally {
+      await wiring?.close(Date.now() + 5000);
+      await core.close();
+    }
   });
 
   it("no change is acted on after close", async () => {
