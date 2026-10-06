@@ -70,7 +70,7 @@ describe("agent profile", () => {
     ["a bare model alias", { ...profile, model: "sonnet" }],
     ["a family alias", { ...profile, model: "claude-sonnet" }],
     ["a model without a minor version", { ...profile, model: "claude-opus-5" }],
-    ["tool references before P1.3 supports them", { ...profile, tools: [{ server: "notes" }] }],
+    ["a bare list of tool references in place of a tools profile", { ...profile, tools: [{ server: "notes" }] }],
     ["another schema version", { ...profile, schemaVersion: 2 }],
     ["an unknown adapter", { ...profile, adapter: "other-agent" }],
     ["no adapter", { schemaVersion: 1, claudePath: "/opt/bin/claude", model: DEFAULT_CLAUDE_CODE_MODEL }],

@@ -21,9 +21,9 @@ import {
 /**
  * Protocol 2: the core answers hello with a capture-disabled capture_policy, and the
  * extension's permissions snapshot carries a revision and the GitHub-capture setting.
- * Protocol 3 adds Scout's window over the relay: the extension may send window commands
- * (`command`) and the core sends it the window's frames (`panel`), so a Chrome side panel
- * can be the UI. Mixed versions fail closed with upgrade_required.
+ * Protocol 3 carries the side panel over the relay: the extension may send panel commands
+ * (`command`) and the core sends it panel frames (`panel`). Mixed versions fail closed with
+ * upgrade_required.
  */
 export const BRIDGE_PROTOCOL = 3;
 

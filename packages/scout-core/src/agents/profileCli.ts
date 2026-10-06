@@ -22,8 +22,9 @@
 //
 // Every write holds `<SCOUT_HOME>/agent-profile.lock` (capabilities/storeLock.ts) for its
 // read-modify-write and bumps `tools.revision` and the connection's `revision`. The running
-// core is meant to hold the same lock and to cancel affected jobs and drop cached results
-// when the revision changes (Phase 3 wires both); while it holds the lock, writes exit 2.
+// core holds the same lock for its lifetime, so while it runs, writes exit 2. When the
+// profile changes, the core cancels the running job and drops cached results
+// (wiring/profileWatcher.ts).
 //
 // Output never carries an environment value: the profile stores bindings (`{file, pointer}`)
 // and non-secret literals only, resolved values live in memory for the one spawn, and
@@ -32,13 +33,13 @@
 // carries a secret draws a warning (argv is stored in the profile and visible to other
 // processes); it is not refused.
 //
-// An auth prompt makes the connection unavailable (P2.7; the plan: "an auth prompt produces
-// an unavailable connection; do not open a hidden login flow"). When the backend makes any
-// request of Scout during inspection (inspectBackend's `auth_prompt`), the command prints
-// the reason and exits 1, and stores nothing from that inspection. For a new connection
-// that is all. For a known one (`refresh`, or `inspect` of a known id) its last stored
-// inspection is left as it was, every selection on it is deselected, and the connection's
-// `unavailable` field records the code, all in one profile write (revisions bumped).
+// An auth prompt makes the connection unavailable: Scout never opens a hidden login flow.
+// When the backend makes any request of Scout during inspection (inspectBackend's
+// `auth_prompt`), the command prints the reason and exits 1, and stores nothing from that
+// inspection. For a new connection that is all. For a known one (`refresh`, or `inspect` of
+// a known id) its last stored inspection is left as it was, every selection on it is
+// deselected, and the connection's `unavailable` field records the code, all in one profile
+// write (revisions bumped).
 // `status` reports it unavailable with that reason and `enable` refuses it until an
 // inspection succeeds, which replaces the connection without the field.
 //

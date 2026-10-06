@@ -69,7 +69,7 @@ export const SourceUrlSchema = z.string().refine(isCanonicalSourceUrl, { message
 export const ResourceIdSchema = z.string().regex(RESOURCE_ID_PATTERN);
 /**
  * A version's content hash: full SHA-256 over the bytes plus the previewed descriptor. The
- * byte encoding of that input is the store's (scout-core, P2.3); this module fixes only its
+ * byte encoding of that input is the store's (scout-core); this module fixes only its
  * shape. Versions are named by this hash on the wire.
  */
 export const ContentHashSchema = z.string().regex(SHA256_HEX_PATTERN);
@@ -92,7 +92,7 @@ export async function deriveResourceId(kind: ResourceKind, canonicalSourceUrl: s
 export const RESOURCE_VERSION_STATES = ["pending", "approved", "superseded", "declined", "revoked"] as const;
 export const ResourceVersionStateSchema = z.enum(RESOURCE_VERSION_STATES);
 
-/** Who made a version's decision: the user in Scout's window, or the per-origin auto-acquire policy. */
+/** Who made a version's decision: the user in the side panel, or the per-origin auto-acquire policy. */
 export const DecisionActorSchema = z.enum(["user", "auto_acquire"]);
 
 export const ResourceDecisionSchema = z.object({

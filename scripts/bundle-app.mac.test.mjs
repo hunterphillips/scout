@@ -1,4 +1,4 @@
-// npm run bundle-app (P4.3). The default suite bundles a stand-in executable (--binary) so it
+// npm run bundle-app. The default suite bundles a stand-in executable (--binary) so it
 // needs no Swift build; SCOUT_BUNDLE_SWIFT=1 adds the real `swift build -c release` run.
 import { spawnSync } from "node:child_process";
 import { chmodSync, mkdirSync, symlinkSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";

@@ -2,8 +2,8 @@ import Foundation
 import Testing
 
 /// ScoutApp is an executable target the tests cannot import, so its AppKit-only rules are pinned
-/// by reading its sources (P4.2): Scout never activates itself (a `results` frame, or any frame,
-/// never brings it forward; the P2.5 non-activating rule), it stays an accessory app, and Quit
+/// by reading its sources: Scout never activates itself (a `results` frame, or any frame,
+/// never brings it forward), it stays an accessory app, and Quit
 /// goes through `applicationShouldTerminate`.
 @Suite struct AppSourceGuardTests {
     private static let appDir = URL(fileURLWithPath: #filePath)

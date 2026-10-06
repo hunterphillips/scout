@@ -1,5 +1,5 @@
 // The agent profile: `<SCOUT_HOME>/agent-profile.json`. Which agent Scout's background jobs run,
-// and how. Not in the plan's P1.2 file list; it is small and every other agents/ file reads it.
+// and how. It is small, and every other agents/ file reads it.
 //
 // - The profile is a union on `adapter`: one strict member per agent adapter (each in its
 //   adapter's folder), so an unknown adapter id, or a field another member owns, is refused.
@@ -22,12 +22,15 @@ import { canonicalJson } from "./toolProfile.js";
 export { AGENT_PROFILE_SCHEMA_VERSION, AgentProfileError, type AgentProfileErrorCode } from "./profileBase.js";
 
 export const AGENT_PROFILE_FILE = "agent-profile.json";
-/** The lock (capabilities/storeLock.ts) the running core holds and every profile CLI write takes. */
+/** The lock (capabilities/storeLock.ts) the core holds; every profile CLI write takes it. */
 export const AGENT_PROFILE_LOCK_FILE = "agent-profile.lock";
 /** Room for the selected tools' frozen input schemas. */
 export const PROFILE_MAX_BYTES = 512 * 1024;
 
-/** Only a plain alias or model name; never anything that parses as a flag. Same rule as the legacy service's MODEL_RE. */
+/**
+ * Only a plain alias or model name; never anything that parses as a flag. Same rule as the
+ * removed package's MODEL_RE.
+ */
 export const MODEL_RE = /^[A-Za-z0-9][A-Za-z0-9._\-[\]]{0,63}$/;
 
 export const AgentProfileSchema = z.discriminatedUnion("adapter", [ClaudeCodeProfileSchema, CodexProfileSchema]);
@@ -49,7 +52,10 @@ export function agentProfilePath(home: string): string {
   return join(home, AGENT_PROFILE_FILE);
 }
 
-/** Read and validate `<home>/agent-profile.json`. It must be a regular file owned by this user, without group/other bits. */
+/**
+ * Read and validate `<home>/agent-profile.json`. It must be a regular file owned by this user,
+ * without group/other bits.
+ */
 export function loadAgentProfile(home: string): AgentProfile {
   let raw: string;
   let fd: number | undefined;

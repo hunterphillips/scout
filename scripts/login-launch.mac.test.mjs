@@ -1,4 +1,4 @@
-// setup --login-launch / bundle-app --install / uninstall and the override rules (P4.3), against
+// setup --login-launch / bundle-app --install / uninstall and the override rules, against
 // a temp home and a stand-in app binary. Nothing is loaded into launchd: the real-home case
 // injects the bootout.
 import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";

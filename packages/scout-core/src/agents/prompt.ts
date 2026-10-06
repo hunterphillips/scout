@@ -1,14 +1,15 @@
 // What a recommendation job is told.
 //
-// Provenance: adapted from the removed personal-context package (see git history before 2026-10-02). Unchanged: the nonce-delimited untrusted block (pinned against the
-// legacy output for marker-free text). Differences:
+// Provenance: adapted from the removed personal-context package (see git history before
+// 2026-10-02). Unchanged: the nonce-delimited untrusted block (pinned against the removed
+// package's output for marker-free text). Differences:
 //   - sanitizeField also replaces every run of three or more `<` or `>` with a space, so
 //     untrusted text can never hold anything shaped like a block marker (`<<<END UNTRUSTED SITE
-//     DATA nonce>>>`), even with a guessed nonce. Otherwise it matches the legacy copy
-//     (parity-tested).
+//     DATA nonce>>>`), even with a guessed nonce. Otherwise it matches the removed package's
+//     copy (parity-tested).
 //   - The instructions are APPENDED to the CLI's default system prompt
 //     (`--append-system-prompt-file`), never a replacement, so the user's own user-level
-//     instructions keep loading. The legacy runner replaced the system prompt, which is not
+//     instructions keep loading. The removed runner replaced the system prompt, which is not
 //     evidence that they load; the instruction marker below is how a check proves it.
 //   - The agent reads Scout context through the `scout` server (current site, recent
 //     activity, approved site resources), not personal source tools; no evidence IDs.
@@ -81,7 +82,10 @@ export interface JobPromptOptions {
   instructionMarkerProbe?: boolean;
 }
 
-/** The stdin request: one `id | title | description | labelQuality` line per candidate, inside the untrusted block. */
+/**
+ * The stdin request: one `id | title | description | labelQuality` line per candidate, inside
+ * the untrusted block.
+ */
 export function buildJobPrompt(req: Pick<JobRequest, "origin" | "candidates" | "maxPicks">, opts: JobPromptOptions = {}): string {
   const nonce = opts.nonce ?? randomBytes(6).toString("hex");
   const begin = `<<<BEGIN UNTRUSTED SITE DATA ${nonce}>>>`;

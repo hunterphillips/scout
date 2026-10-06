@@ -1,5 +1,5 @@
-// Phase 3 verification, B8/B9 "no chat-push path", the core's side. Scout reaches the user's
-// agent in exactly one way: it starts a fresh, non-persistent one-shot run per job (`claude -p`,
+// The "no chat-push path" check, the core's side. Scout reaches the user's agent in exactly
+// one way: it starts a fresh, non-persistent one-shot run per job (`claude -p`,
 // `codex exec --ephemeral`) whose prompt is a fixed template on stdin. It never joins, resumes or streams into an existing session,
 // never opens an IDE/WebSocket channel to a running Claude, and nothing outside the test fakes
 // names a flag that would. (scout-mcp/src/noPush.test.ts covers the MCP server: it only answers.)
@@ -18,7 +18,7 @@ const SESSION_FLAGS = ["--resume", "-r", "--continue", "-c", "--session-id", "--
 /** Codex's equivalents (`-c` is its config override there, not a session flag). */
 const CODEX_SESSION_TOKENS = ["resume", "fork", "--last", "--continue", "--session-id"];
 
-describe("no chat-push path (B8/B9): the core only starts fresh one-shot jobs", () => {
+describe("no chat-push path: the core only starts fresh one-shot jobs", () => {
   it("a job's argv is a fresh non-persistent -p run with no flag that joins, resumes or streams into a session", () => {
     const argv = buildJobArgv("claude-sonnet-5-5", "/run/jobs/j1", "mcp__scout__current_site");
     expect(argv).toContain("-p");

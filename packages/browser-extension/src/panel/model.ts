@@ -22,7 +22,7 @@ import { PauseState } from "./pause.js";
 import { keyId, PreviewAssembler, type PreviewFailure, type PreviewKey, sameKey } from "./preview.js";
 import { type CoreStatus, displaySummary, isLinkDown, LINK_DOWN_TEXT, type LinkOpenRequest, type ResultsDisplay, ResultsModel } from "./results.js";
 
-/** The bottom nav's destinations (P4.7): the Page view holds results, the site's files and its switch; Problems live in Activity. */
+/** The bottom nav's destinations: the Page view holds results, the site's files and its switch; Problems live in Activity. */
 export type PanelSection = "page" | "sites" | "activity" | "settings";
 export const SECTIONS: ReadonlyArray<{ id: PanelSection; title: string }> = [
   { id: "page", title: "Page" },

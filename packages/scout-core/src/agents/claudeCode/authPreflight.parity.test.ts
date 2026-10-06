@@ -1,6 +1,6 @@
-// The copied preflight must decide exactly as the legacy one did, over the same synthetic
-// settings, env and CLI answers. The legacy verdicts, reasons and CLI calls were pinned
-// from the personal-context service's copy before P4.4 removed it (git history has it).
+// The copied preflight must decide exactly as the removed package's one did, over the same
+// synthetic settings, env and CLI answers. Its verdicts, reasons and CLI calls were pinned
+// from the removed personal-context package's copy (git history has it).
 
 import { afterEach, describe, expect, it } from "vitest";
 import { runPreflight } from "./authPreflight.js";
@@ -62,7 +62,7 @@ const CASES: [string, (sb: Sandbox) => void, Parameters<typeof fakeSpawnSync>[0]
 ];
 
 describe("authPreflight parity", () => {
-  it.each(CASES)("%s: same verdict, reasons and CLI calls as the legacy copy", (_label, arrange, cli, verdict, reasons, calls) => {
+  it.each(CASES)("%s: same verdict, reasons and CLI calls as the removed package's copy", (_label, arrange, cli, verdict, reasons, calls) => {
     const sb = makeSandbox();
     arrange(sb);
     const fake = fakeSpawnSync(cli);
@@ -82,7 +82,7 @@ describe("authPreflight parity", () => {
 });
 
 describe("authPreflight parity: the whole report", () => {
-  it("a clean subscription run reports exactly what the legacy copy reported", () => {
+  it("a clean subscription run reports exactly what the removed package's copy reported", () => {
     const sb = makeSandbox();
     const fake = fakeSpawnSync();
     const report = runPreflight({

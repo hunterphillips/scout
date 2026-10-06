@@ -1,5 +1,5 @@
-// Background-job checks (P1.5) through the real job adapter (scout-core dist; the registry
-// builds the one the check's agent profile names: Claude Code by default, Codex with
+// Background-job checks through the real job adapter (scout-core dist; the registry builds
+// the one the check's agent profile names: Claude Code by default, Codex with
 // `--adapter codex`), one inference request each, against a fixture core on a temp socket and a
 // throwaway --home:
 //

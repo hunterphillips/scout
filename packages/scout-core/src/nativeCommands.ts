@@ -1,10 +1,10 @@
-// Executes the mutation commands Scout's window sends (approve, decline, revoke, auto-acquire,
+// Executes the mutation commands the side panel sends (approve, decline, revoke, auto-acquire,
 // the browser-context grant, a site's recommendations switch, the agent choice, refresh) and
 // answers each with exactly one ack.
 //
 // Order: a success ack goes out only after the change is persisted (the store's write, or the
 // config.json rename), and before the export sync it may start has finished (the store's
-// `cleanup`; its outcome reaches the app as a later `capabilities` frame). Failures are acks
+// `cleanup`; its outcome reaches the panel as a later `capabilities` frame). Failures are acks
 // with a closed code set: `stale_revision`, `not_found`, `invalid`, `not_permitted`,
 // `unavailable` (store closed), `store_error`.
 //
@@ -36,7 +36,7 @@
 //   as the agent API reads it; an enable that the agent API does not read back as on (another
 //   invalid key in config.json) puts the previous config.json back and acks `invalid`, so a
 //   later repair of that key cannot turn the grant on without the user.
-//   set_destination (P4.6, the side panel's per-site recommendations switch) compares with
+//   set_destination (the side panel's per-site recommendations switch) compares with
 //   config.json `destinations` as it is on disk (wiring/destinations.ts); `invalid` when the list
 //   is full or the file's `destinations` is malformed, `store_error` when config.json is not a
 //   regular file the user owns or the write failed, `unavailable` without a writer.

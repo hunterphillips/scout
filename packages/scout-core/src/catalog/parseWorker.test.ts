@@ -149,7 +149,7 @@ describe("parse worker", () => {
   });
 });
 
-describe("parse worker: per-pass scopes (P3.4)", () => {
+describe("parse worker: per-pass scopes", () => {
   it("a scope whose session is cancelled refuses new parses before they reach the queue", async () => {
     pool = createParsePool();
     let cancelled = false;

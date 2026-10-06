@@ -196,6 +196,19 @@ describe("result registry", () => {
     expect(registry.resolveLink(link({ candidateId: "c2" }))).toEqual({ ok: true, href: `${ORIGIN}/testing?x=1#top` });
   });
 
+  it("tells onLinkOpened the target of every resolved link, and nothing for a refused one", () => {
+    const opened: string[] = [];
+    const state = { visit: { visitEpoch: 4, origin: ORIGIN }, permitted: true };
+    const registry = createResultRegistry({ coreInstanceId: CORE, activeVisit: () => state.visit, isPermitted: () => state.permitted, onLinkOpened: (href) => void opened.push(href) });
+    registry.beginJob("job-1");
+    registry.publish(ok());
+    registry.resolveLink(link({ candidateId: "c9" }));
+    registry.resolveLink(link({ jobId: "job-0" }));
+    expect(opened).toEqual([]);
+    registry.resolveLink(link({ candidateId: "c2" }));
+    expect(opened).toEqual([`${ORIGIN}/testing?x=1#top`]);
+  });
+
   it("keeps a verified HTML twin as the target", () => {
     const { registry } = setup();
     const twin = ok({

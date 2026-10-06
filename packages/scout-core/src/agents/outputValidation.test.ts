@@ -66,8 +66,8 @@ describe("validateJobOutput", () => {
   });
 });
 
-// Pinned from the legacy personal-context validator before P4.4 removed it (git history has it).
-describe("cleanReason parity with the removed legacy validator (pinned)", () => {
+// Pinned from the removed personal-context package's validator (git history has it).
+describe("cleanReason parity with the removed package's validator (pinned)", () => {
   it.each([
     ["Fits the open billing work", "Fits the open billing work"],
     ["See https://evil.example/x?a=1 and www.evil.example now", "See and now"],

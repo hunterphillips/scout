@@ -99,8 +99,8 @@ describe("setup --agent-integration", () => {
     expect(record.version).toBe(1);
     expect(record.skillsRoot).toBe(skillsRoot);
     expect(record.files.filter((f) => ["skill", "mcp-registration"].includes(f.kind))).toEqual([
-      { path: skillPath(), kind: "skill", sha256: sha256(template()) },
-      { path: `${process.execPath} ${L.mcpMain}`, kind: "mcp-registration", name: "scout", scope: "user" },
+      { path: skillPath(), kind: "skill", agent: "claude-code", sha256: sha256(template()) },
+      { path: `${process.execPath} ${L.mcpMain}`, kind: "mcp-registration", agent: "claude-code", name: "scout", scope: "user" },
     ]);
     expect(record.files).toHaveLength(8);
     // The core's reader accepts what setup wrote.
@@ -312,7 +312,7 @@ describe("setup --agent-integration", () => {
     expect(r.text()).toMatch(/claude mcp add` failed/);
     expect(registry()).toEqual({ scout: ours() });
     expect(json(L.installed).files.filter((f) => f.kind === "mcp-registration")).toEqual([
-      { path: `${process.execPath} ${L.mcpMain}`, kind: "mcp-registration", name: "scout", scope: "user" },
+      { path: `${process.execPath} ${L.mcpMain}`, kind: "mcp-registration", agent: "claude-code", name: "scout", scope: "user" },
     ]);
     fake.setMode("");
     const u = await uninstall(["--yes", "--agent-integration"]);

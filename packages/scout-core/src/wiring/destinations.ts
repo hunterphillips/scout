@@ -1,4 +1,4 @@
-// The live list of recommendation-enabled hosts (`config.json` `destinations`, P4.6). The core
+// The live list of recommendation-enabled hosts (`config.json` `destinations`). The core
 // reads it once at start, then keeps it current two ways, with no restart:
 //   - the side panel's per-site switch (`set_destination`): `set` writes config.json
 //     (config.ts writeDestinations: read-modify-write, other keys kept, atomic, 0600, refused

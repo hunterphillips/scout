@@ -217,7 +217,7 @@ describe("panel view", () => {
     expect(sent.nextElementSibling).toBeNull();
   });
 
-  // P4.7: the Quiet layout.
+  // The Quiet layout.
   it("the nav has four items; the current one carries aria-current and its label, and Activity shows a dot while there are problems", () => {
     const m = running();
     const { root, render } = view(m);
@@ -449,7 +449,7 @@ describe("panel view", () => {
     expect(root.textContent).not.toContain("Recommendations run only");
   });
 
-  // P4.6: the per-site recommendations switch.
+  // The per-site recommendations switch.
   it("the Page tray has a 'Suggest on <host>' switch, off by default, keyed by the full origin; a click sends set_destination", () => {
     const m = running();
     m.apply({ type: "grant", agentBrowserContext: false, destinations: [] });
@@ -506,7 +506,7 @@ describe("panel view", () => {
     expect(box().disabled).toBe(true);
   });
 
-  // P4.4: one delegated listener per event type on the root, and a keyed patch.
+  // One delegated listener per event type on the root, and a keyed patch.
   it("a re-render between mousedown and mouseup keeps the pressed button, so the click lands", () => {
     const m = running();
     m.apply(results(1, { status: "ok", items: [{ candidateId: "c1", title: "A", reason: "r", hostname: "docs.example.com" }] }));

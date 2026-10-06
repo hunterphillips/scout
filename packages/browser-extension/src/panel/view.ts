@@ -1,8 +1,8 @@
 // The side panel's DOM, rendered from the model, the worker's status and the current site.
 // No `chrome.*`: every action goes to an injected handler, so the view runs under jsdom.
 //
-// Each change renders the whole panel into a detached tree, then patches the live one toward it
-// (P4.4): an element is kept when its tag and `data-key` match (unkeyed siblings match by tag, in
+// Each change renders the whole panel into a detached tree, then patches the live one toward it:
+// an element is kept when its tag and `data-key` match (unkeyed siblings match by tag, in
 // order), so its attributes and text are updated in place and an unchanged control is the same
 // node across renders. Focus, scroll and a click in progress (mousedown, a frame, mouseup) all
 // survive; focus and scroll are still restored by `data-key` for a node that was replaced.
@@ -13,7 +13,7 @@
 // Escape is panel-app.ts's document listener.) Text from the core and from sites only ever goes
 // in through textContent; icons are SVG built with createElementNS, never parsed markup.
 //
-// Layout (P4.7, the "Quiet" design): a header with the mark and Pause/Resume, the current view,
+// Layout (the "Quiet" design): a header with the mark and Pause/Resume, the current view,
 // and a bottom pill nav with four destinations: Page (default), Sites, Activity, Settings.
 // Page is bottom-aligned: the results (heading, one line, up to three link cards), the site's
 // files for the user's agent (a pill that expands into the review card), what is approved, then

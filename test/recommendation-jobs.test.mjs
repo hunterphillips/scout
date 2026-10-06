@@ -1,4 +1,4 @@
-// Phase 3 automated verification, end to end: the built native host and core, the real
+// Recommendation jobs, end to end: the built native host and core, the real
 // scout-mcp adapter and agent.sock, the scripted fake `claude` (never a model) and its fake
 // retrieval backend, in a temp SCOUT_HOME. DNS is stubbed in the core (`--import`): every
 // lookup is recorded and either never answers or answers loopback (which the fetch policy
@@ -14,9 +14,10 @@
 //        running job (its token refused on agent.sock, its process gone, the window out of
 //        `working`), GitHub grant loss clears captured activity, and no fixture text reaches
 //        the diagnostics file or the core's stderr.
-//   P4.6: the side panel's per-site recommendations switch (`set_destination`) and a hand edit
-//        of config.json take effect in the running core: a job on the next settled visit after
-//        on, a running job cancelled `revoked` by off, the grant frame carrying the new list.
+//   Switch: the side panel's per-site recommendations switch (`set_destination`) and a hand
+//        edit of config.json take effect in the running core: a job on the next settled visit
+//        after on, a running job cancelled `revoked` by off, the grant frame carrying the new
+//        list.
 //   Settings' agent choice: `set_agent` from the side panel rewrites the profile in the running
 //   core, its watcher swaps the adapter, and the capabilities frame shows the new choice.
 
@@ -35,7 +36,7 @@ const MCP_CLIENT = join(ROOT, "packages/scout-mcp/dist/client.js");
 const FAKE_CLAUDE = join(ROOT, "packages/scout-core/src/agents/claudeCode/testing/fake-claude.mjs");
 const FAKE_BACKEND = join(ROOT, "packages/scout-core/src/agents/testing/fake-backend.mjs");
 const BUILT = existsSync(CORE) && existsSync(HOST) && existsSync(MCP_CLIENT);
-if (!BUILT) console.warn("phase3: skipped: run `npm run build` first");
+if (!BUILT) console.warn("recommendation-jobs: skipped: run `npm run build` first");
 
 const EXT_ID = "a".repeat(32);
 const HOSTNAME = "docs.scout-p3.invalid";
@@ -265,7 +266,7 @@ function leaked(b, home, secrets) {
 
 const SECRETS = [TITLE, BODY, REASON, "P3V-SECRET", ...CANDIDATES.map((c) => c.sourceUrl), "/docs/", "/issues/", "github.com/o/r"];
 
-describe.skipIf(!BUILT)("Phase 3 verification e2e: B10 outcomes and B11 click authorization (one core, a page per case)", () => {
+describe.skipIf(!BUILT)("recommendation jobs e2e: B10 outcomes and B11 click authorization (one core, a page per case)", () => {
   const children = [];
   let home;
   let b;
@@ -528,7 +529,7 @@ describe.skipIf(!BUILT)("Phase 3 verification e2e: B10 outcomes and B11 click au
   });
 });
 
-describe.skipIf(!BUILT)("Phase 3 verification e2e: B7/B12/B13 closing paths end the job, refuse its token, and leak nothing", () => {
+describe.skipIf(!BUILT)("recommendation jobs e2e: B7/B12/B13 closing paths end the job, refuse its token, and leak nothing", () => {
   const children = [];
   let home;
   let b;
@@ -692,7 +693,7 @@ describe.skipIf(!BUILT)("Phase 3 verification e2e: B7/B12/B13 closing paths end 
   }, 60_000);
 });
 
-describe.skipIf(!BUILT)("P4.6 recommendations switch: set_destination and a hand edit act on the running core, no restart", () => {
+describe.skipIf(!BUILT)("recommendations switch: set_destination and a hand edit act on the running core, no restart", () => {
   const children = [];
   let home;
   let b;
@@ -878,7 +879,10 @@ describe.skipIf(!BUILT)("Settings agent choice: set_agent from the side panel sw
     expect(b.diagEvents().filter((e) => e.event === "agent_profile_changed")).toHaveLength(changes);
   }, 30_000);
 
-  it("an agent whose executable is gone is no longer offered, and choosing it is refused with not_found", async () => {
+  // The core also looks in the system install locations, so a machine with its own `claude`
+  // there would still offer Claude Code after the fake is removed.
+  const systemClaude = ["/opt/homebrew/bin/claude", "/usr/local/bin/claude"].some((p) => existsSync(p));
+  it.skipIf(systemClaude)("an agent whose executable is gone is no longer offered, and choosing it is refused with not_found", async () => {
     rmSync(join(home, "bin", "claude"));
     b.panelCommand({ type: "refresh_capabilities", commandId: "agent-refresh" });
     await until(() => agentsFrames().at(-1)?.agents.available.length === 1, "a frame without Claude Code");

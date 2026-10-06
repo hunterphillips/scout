@@ -86,7 +86,7 @@ import { createJsonLineStream } from "../jsonLineStream.js";
 import { createLaunchProfile, LaunchProfileError, runDirectPreflight, type DirectPreflightOptions, type LaunchProfile } from "./launchProfile.js";
 import { mapOutcome, recordUsage } from "./mapOutcome.js";
 import { MODEL_RE, profileFingerprint } from "../profile.js";
-import type { ClaudeCodeProfile } from "./profile.js";
+import { CLAUDE_CODE_ADAPTER_ID, type ClaudeCodeProfile } from "./profile.js";
 import { buildJobInstructions, buildJobPrompt } from "../prompt.js";
 import { writeTreeRecord, type ProcessTracker } from "../processTree.js";
 import { createStreamMonitor } from "./streamMonitor.js";
@@ -99,7 +99,7 @@ export type { SpawnFn, SnapshotFn } from "../childSupervisor.js";
 
 /**
  * The launch flags, verified against the installed CLI 2.1.286 on 2026-10-01 (`claude
- * --help`, plus the option table in the binary for flags the help hides). P1.3 and P1.5
+ * --help`, plus the option table in the binary for flags the help hides). Job launches
  * build on this record; a newer CLI needs these rechecked before jobs are enabled.
  *
  *   --model <m>                    shown   explicit profile model, never inherited
@@ -342,7 +342,7 @@ export function createClaudeJobAdapter(deps: ClaudeJobDeps): ClaudeJobAdapter {
       at: (deps.clock ?? systemClock).now(),
     });
     retryPreflight = !preflight.ok && preflight.version === undefined;
-    deps.diagnostics?.event("agent_preflight", { verdict: preflight.verdict, reasons: preflight.reasons.length, ...(preflight.version ? { cliVersion: preflight.version } : {}) });
+    deps.diagnostics?.event("agent_preflight", { adapter: CLAUDE_CODE_ADAPTER_ID, verdict: preflight.verdict, reasons: preflight.reasons.length, ...(preflight.version ? { cliVersion: preflight.version } : {}) });
     return preflight;
   }
 

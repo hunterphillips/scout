@@ -1,4 +1,4 @@
-// The recommendation result Scout's window shows, and the only way a click becomes a URL.
+// The recommendation result the side panel shows, and the only way a click becomes a URL.
 //
 // The pipeline publishes one result per job; the registry holds at most one, for the current
 // visit. Each job is announced first (`beginJob`), which makes it the visit's current job; a
@@ -8,23 +8,24 @@
 // origin than the visit's, or an origin Chrome no longer grants, so neither a late job nor a
 // replaced one can overwrite a newer answer. A result of the current job replaces the one held.
 //
-// Ordering (the scheduler's contract with the window): the window resets a visit's results on
-// every `state` frame for that visit except `working` for the same job, so a job's state frames
+// Ordering (the scheduler's contract with the side panel): the panel resets a visit's results
+// on every `state` frame for that visit except `working` for the same job, so a job's state frames
 // must all go out before its result. For a job the scheduler emits `working{jobId}`, then the
 // visit's `idle` when the job ends, and only then calls `publish`. Any `idle` (or `resendState`)
-// for the same visit after the publish wipes the window's results while the registry still
+// for the same visit after the publish wipes the panel's results while the registry still
 // holds them, and a later click on one is answered from the registry only if it is still held.
 //
 // Each `ok` item carries the verified target (catalog/verifyTargets.ts `humanHref`, the HTML
-// twin when one was verified). The registry keeps it; the window's frame never carries it
+// twin when one was verified). The registry keeps it; the panel's frame never carries it
 // (toFrame). A click sends back the displayed identity (instance, visit, job, candidate) and
 // `resolveLink` answers with the stored target only after re-checking it: https, no
 // credentials, the default port, the result's origin, and Chrome's grant for that origin now.
-// The registry never fetches.
+// The registry never fetches. Each resolved target goes to `onLinkOpened` (the scheduler starts
+// no job for the page Scout opens).
 //
 // The coordinator clears the result when its visit ends, on pause, on loss of the origin's
 // grant, on disconnect, and on stop, silently: the state frame that follows each of those
-// already resets the window. Listeners hear every publish and every non-silent clear that
+// already resets the panel. Listeners hear every publish and every non-silent clear that
 // dropped a result; the panel channel sends a publish as a `results` frame and answers a
 // non-silent clear (a job clear within the same visit) with `resendState`.
 //
@@ -44,7 +45,7 @@ export interface PublishedItem {
   candidateId: string;
   /** The verified display title (or the candidate's title). */
   title: string;
-  /** The model's reason; shown only in Scout's window, never logged. */
+  /** The model's reason; shown only in the side panel, never logged. */
   reason: string;
   /** The verified target (`humanHref`); kept here, never sent in a frame. */
   href: string;
@@ -95,6 +96,8 @@ export interface ResultRegistryOptions {
   /** The visit a result may be published for now, or null while none may (no visit, paused, disconnected, stopped). */
   activeVisit: () => { visitEpoch: number; origin: string } | null;
   isPermitted: (origin: string) => boolean;
+  /** Hears the target of every resolved link (the page Scout is about to open). */
+  onLinkOpened?: (href: string) => void;
   diagnostics?: Diagnostics;
 }
 
@@ -102,7 +105,7 @@ export interface ClearOptions {
   /**
    * Tell no listener: the caller sends a state frame anyway (the coordinator's clears on a visit
    * change, permission loss, pause, disconnect, and stop). Without it a clear that dropped a
-   * result is heard, and the panel channel re-sends the current state so the window drops it
+   * result is heard, and the panel channel re-sends the current state so the panel drops it
    * (a job clear within the same visit).
    */
   silent?: boolean;
@@ -119,7 +122,7 @@ export interface ResultRegistry {
    * Hold `result` as the current one and tell listeners; returns why not when refused. Checks,
    * in order: `stale_instance`, `stale_visit`, `stale_job`, `wrong_origin`, `not_permitted`,
    * `invalid`. Call it only after the job's state frames (`working`, then the visit's `idle`):
-   * a later `idle` or `resendState` for the visit wipes the window's results (see the header).
+   * a later `idle` or `resendState` for the visit wipes the panel's results (see the header).
    */
   publish(result: PublishedResult): { ok: true } | { ok: false; code: PublishRefusal };
   /** The result held, hrefs included (a copy). */
@@ -132,7 +135,7 @@ export interface ResultRegistry {
   subscribe(listener: (event: ResultsEvent) => void): () => void;
 }
 
-/** The window's frame for `result`: everything but the hrefs. */
+/** The panel's frame for `result`: everything but the hrefs. */
 export function toFrame(result: PublishedResult): PanelResults {
   const identity = {
     type: "results" as const,
@@ -260,6 +263,7 @@ export function createResultRegistry(options: ResultRegistryOptions): ResultRegi
     resolveLink(request) {
       const answer = resolve(request);
       diagnostics?.event("link_resolved", answer.ok ? { ok: true } : { ok: false, code: answer.code });
+      if (answer.ok) options.onLinkOpened?.(answer.href);
       return answer;
     },
     subscribe(listener) {

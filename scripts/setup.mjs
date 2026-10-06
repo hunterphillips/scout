@@ -2,21 +2,28 @@
 // Scout setup: install the extension key, the Scout config, the agent profile, the native host
 // wrapper, and the Chrome native-messaging manifest. Every file written is recorded in
 // <SCOUT_HOME>/installed.json so uninstall.mjs can remove exactly those.
-// --agent-integration also registers the user-scope `scout` MCP server through `claude mcp add`
-// and installs the static scout-integration skill (lib/agent-integration.mjs); without it,
-// setup never touches Claude Code's configuration.
+// --agent <claude-code|codex> picks the agent Scout's jobs run through when setup writes the
+// agent profile. Without it: Claude Code when `claude` is found, else Codex when `codex` is
+// found, else no profile (a warning names both).
+// --agent-integration also registers the `scout` MCP server with that agent's CLI (`claude mcp
+// add` at user scope, or `codex mcp add`) and installs the static scout-integration skill
+// (lib/agent-integration.mjs). The agent is --agent when given, else the profile's adapter,
+// else Claude Code. Without the flag, setup never touches an agent's configuration.
 // --login-launch [--app <Scout.app>] writes the login LaunchAgent; it starts the installed
 // ~/Applications/Scout.app (`npm run bundle-app -- --install`) unless --app names another bundle.
 // Setup registers nothing for the side panel: the extension bundle carries it.
-// <SCOUT_HOME>/agent-profile.json is written only when absent, with the absolute claude path
-// resolved here, so jobs launched from a Finder-started app never look claude up on PATH.
+// <SCOUT_HOME>/agent-profile.json is written only when absent, with the absolute claude or
+// codex path resolved here, so jobs launched from a Finder-started app never look it up on
+// PATH; an existing profile is never rewritten. The Codex profile's adapter id, model and
+// reasoning effort come from the built scout-core (dist/agents/codex/profile.js).
 //
-// Usage: node scripts/setup.mjs [--dry-run] [--scout-root <dir>] [--agent-integration]
-//                               [--login-launch [--app <Scout.app>]]
+// Usage: node scripts/setup.mjs [--dry-run] [--scout-root <dir>] [--agent <claude-code|codex>]
+//                               [--agent-integration] [--login-launch [--app <Scout.app>]]
 // Env overrides: SCOUT_HOME, CHROME_NMH_DIR, SCOUT_SKILLS_ROOT, SCOUT_CLAUDE_BIN,
-// LAUNCH_AGENTS_DIR, SCOUT_APPLICATIONS_DIR (see lib/paths.mjs). All but SCOUT_HOME are for
-// test installs: refused with the real ~/.scout, required with a test home where they apply
-// (without SCOUT_CLAUDE_BIN a test install writes no agent profile).
+// SCOUT_CODEX_BIN, SCOUT_CODEX_HOME, LAUNCH_AGENTS_DIR, SCOUT_APPLICATIONS_DIR (see
+// lib/paths.mjs). All but SCOUT_HOME are for test installs: refused with the real ~/.scout,
+// required with a test home where they apply (without SCOUT_CLAUDE_BIN or SCOUT_CODEX_BIN a
+// test install finds no agent and writes no agent profile).
 // When the Scout home is not the real ~/.scout (SCOUT_HOME or HOME overridden),
 // --scout-root is required so a test install cannot re-key the real built extension.
 // Never touches ~/.rook or any process.
@@ -29,7 +36,7 @@ import { isExecutableFile, resolveNode } from "./lib/executables.mjs";
 import { newMarker, readInstalled, saveInstalled, upsertEntry } from "./lib/installed.mjs";
 import { builtConstant, checkPrivateDir, ensurePrivateDir, exists, fileMarker, readJsonObject, shDoubleQuote, wrapperScript, writeFileMode, writeJson } from "./lib/files.mjs";
 import { isMain } from "./lib/is-main.mjs";
-import { INTEGRATION_EXPLANATION, applyIntegration, describeIntegration, integrationClaude, planIntegration, recordedIntegration } from "./lib/agent-integration.mjs";
+import { AGENTS, AGENT_IDS, applyIntegration, describeIntegration, findAgentBinary, hasRecordedIntegration, integrationExplanation, planIntegration } from "./lib/agent-integration.mjs";
 import { applicationsRefusal, bundleIdOf, launchAgentPlist, launchAgentRefusal, sha256 } from "./lib/app-bundle.mjs";
 
 /** Lines setup prints after an install: the one-time steps it cannot do itself. */
@@ -41,12 +48,17 @@ export const NEXT_STEPS = [
 ];
 
 export function parseArgs(argv) {
-  const opts = { dryRun: false, scoutRoot: REPO_ROOT, scoutRootGiven: false, agentIntegration: false, loginLaunch: false, app: null };
+  const opts = { dryRun: false, scoutRoot: REPO_ROOT, scoutRootGiven: false, agent: null, agentIntegration: false, loginLaunch: false, app: null };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--dry-run") opts.dryRun = true;
     else if (a === "--agent-integration") opts.agentIntegration = true;
     else if (a === "--login-launch") opts.loginLaunch = true;
+    else if (a === "--agent") {
+      const id = argv[++i];
+      if (!AGENT_IDS.includes(id)) throw new Error(`--agent needs one of ${AGENT_IDS.join(", ")}`);
+      opts.agent = id;
+    }
     else if (a === "--app") {
       if (!argv[i + 1]) throw new Error("--app needs a Scout.app path");
       opts.app = resolve(argv[++i]);
@@ -67,11 +79,13 @@ function validDestinations(v) {
 
 /**
  * Work out everything setup would write without writing anything.
- * Returns { L, marker, extensionId, claudePath, warnings, dirs, steps } where each step is
- * { path, kind, mode, summary, entry, keep, write() }. `claudeFallbacks` overrides the
- * places searched for claude after PATH (tests pass [] to make "not found" deterministic).
+ * Returns { L, marker, extensionId, claudePath, agentPath, profileAdapter, warnings, dirs, steps }
+ * where each step is { path, kind, mode, summary, entry, keep, write() }. `profileAdapter` is
+ * the adapter the agent profile names after this run (the existing file's, or the one setup
+ * writes), or null. `claudeFallbacks` / `codexFallbacks` override the places searched after
+ * PATH (tests pass [] to make "not found" deterministic). `agent` is --agent.
  */
-export function planSetup({ env = process.env, scoutRoot = REPO_ROOT, dryRun = false, claudeFallbacks, loginLaunch = false, app = null, realHome } = {}) {
+export function planSetup({ env = process.env, scoutRoot = REPO_ROOT, dryRun = false, agent = null, claudeFallbacks, codexFallbacks, loginLaunch = false, app = null, realHome } = {}) {
   const L = layout({ env, scoutRoot });
   const warnings = [];
   const nmhRefusal = locationOverrideRefusal("CHROME_NMH_DIR", env, realHome);
@@ -98,11 +112,12 @@ export function planSetup({ env = process.env, scoutRoot = REPO_ROOT, dryRun = f
   if (env.SCOUT_HOME) {
     warnings.push(`SCOUT_HOME is set (${L.scoutHome}); the native app only reads ~/.scout, so this install is for testing`);
   }
-  // The same claude the agent integration runs: SCOUT_CLAUDE_BIN on a test home (never the real
-  // one found on PATH), PATH and the usual places on the real home.
-  const claude = integrationClaude(env, claudeFallbacks, realHome);
-  const claudePath = claude.path ?? null;
-  if (!claudePath) warnings.push(`no agent profile is written (${claude.error}), so suggestions stay unavailable until you re-run setup`);
+  // The same CLIs the agent integration runs: SCOUT_CLAUDE_BIN / SCOUT_CODEX_BIN on a test home
+  // (never one found on PATH), PATH and the usual places on the real home.
+  const found = Object.fromEntries(AGENT_IDS.map((id) => [id, findAgentBinary(id, env, { claudeFallbacks, codexFallbacks }, realHome)]));
+  const chosen = agent ?? AGENT_IDS.find((id) => found[id].path) ?? null;
+  const agentPath = chosen ? (found[chosen].path ?? null) : null;
+  const claudePath = found["claude-code"].path ?? null;
 
   // Refuse to overwrite any Scout-owned file that exists without this install's marker.
   const foreign = [
@@ -189,19 +204,36 @@ export function planSetup({ env = process.env, scoutRoot = REPO_ROOT, dryRun = f
       write: () => writeJson(L.nmhManifest, nmh, 0o644),
     },
   ];
-  const profile = agentProfileStep({ L, record, claudePath });
+  const profile = agentProfileStep({ L, record, agent: chosen, agentPath });
   if (profile.step) steps.splice(3, 0, profile.step);
   if (profile.note) warnings.push(profile.note);
+  if (!profile.exists && !agentPath) {
+    const why = chosen ? found[chosen].error : AGENT_IDS.map((id) => found[id].error).join("; ");
+    warnings.push(`no agent profile is written (${why}), so suggestions stay unavailable until you re-run setup`);
+  }
+  if (profile.exists && agent && profile.adapter && profile.adapter !== agent) {
+    warnings.push(`the existing agent profile names ${AGENTS[profile.adapter]?.label ?? profile.adapter}, so Scout's jobs keep running there; --agent only picks the agent for a new profile`);
+  }
   if (loginLaunch) steps.push(launchAgentStep({ L, record, app, env, realHome }));
-  return { L, marker, record, extensionId, nodePath, claudePath, warnings, dirs, steps };
+  return { L, marker, record, extensionId, nodePath, claudePath, agentPath, profileAdapter: profile.adapter ?? null, warnings, dirs, steps };
+}
+
+/** The adapter an agent profile text names, when it is one setup knows; else null. */
+function profileAdapterOf(text) {
+  try {
+    const a = JSON.parse(text)?.adapter;
+    return AGENT_IDS.includes(a) ? a : null;
+  } catch {
+    return null;
+  }
 }
 
 /**
- * The agent profile: written only when absent (with the absolute claude path), kept while it is
- * still exactly what setup wrote, and otherwise left alone and unrecorded by this run.
- * Returns { step?, note? }.
+ * The agent profile: written only when absent (with the absolute claude or codex path), kept
+ * while it is still exactly what setup wrote, and otherwise left alone and unrecorded by this
+ * run. Returns { step?, note?, exists, adapter? }.
  */
-function agentProfileStep({ L, record, claudePath }) {
+function agentProfileStep({ L, record, agent, agentPath }) {
   const recorded = record?.files.find((f) => f.kind === "agent-profile" && f.path === L.agentProfile);
   if (exists(L.agentProfile)) {
     let text = null;
@@ -210,27 +242,48 @@ function agentProfileStep({ L, record, claudePath }) {
     } catch {
       // unreadable: left alone below
     }
+    const adapter = text === null ? null : profileAdapterOf(text);
     if (recorded && text !== null && sha256(text) === recorded.sha256) {
-      return { step: { path: L.agentProfile, kind: "agent-profile", mode: 0o600, summary: "agent profile (exists, written by setup, kept)", entry: recorded, keep: true, write: () => {} } };
+      return { exists: true, adapter, step: { path: L.agentProfile, kind: "agent-profile", mode: 0o600, summary: "agent profile (exists, written by setup, kept)", entry: recorded, keep: true, write: () => {} } };
     }
-    return { note: `kept ${L.agentProfile} as it is (${recorded ? "changed since setup wrote it" : "not written by setup"}); Scout's jobs use the claude path and model it names` };
+    return { exists: true, adapter, note: `kept ${L.agentProfile} as it is (${recorded ? "changed since setup wrote it" : "not written by setup"}); Scout's jobs use the agent and model it names` };
   }
-  if (!claudePath) return {};
-  // The Claude Code profile's adapter id and initial model, from the built scout-core.
-  const built = join(L.scoutRoot, "packages", "scout-core", "dist", "agents", "claudeCode", "profile.js");
-  const adapter = builtConstant(built, "CLAUDE_CODE_ADAPTER_ID");
-  const model = builtConstant(built, "DEFAULT_CLAUDE_CODE_MODEL");
-  if (adapter === null || model === null) throw new Error(`scout-core not built: ${built} is missing\nRun \`npm run build\` in ${L.scoutRoot} first.`);
-  const text = JSON.stringify({ schemaVersion: 1, adapter, model, claudePath }, null, 2) + "\n";
+  if (!agentPath) return { exists: false };
+  const { text, summary } = agent === "codex" ? codexProfileText(L, agentPath) : claudeProfileText(L, agentPath);
   return {
+    exists: false,
+    adapter: agent,
     step: {
       path: L.agentProfile,
       kind: "agent-profile",
       mode: 0o600,
-      summary: `claudePath=${claudePath} model=${model} (written only because none exists)`,
+      summary: `${summary} (written only because none exists)`,
       entry: { path: L.agentProfile, kind: "agent-profile", sha256: sha256(text) },
       write: () => writeFileMode(L.agentProfile, text, 0o600),
     },
+  };
+}
+
+/** Constants from a built scout-core file; throws when it is not built. */
+function builtConstants(L, rel, names) {
+  const built = join(L.scoutRoot, "packages", "scout-core", "dist", ...rel);
+  const values = names.map((n) => builtConstant(built, n));
+  if (values.some((v) => v === null)) throw new Error(`scout-core not built: ${built} is missing\nRun \`npm run build\` in ${L.scoutRoot} first.`);
+  return values;
+}
+
+/** The Claude Code profile: adapter id and initial model from the built scout-core. */
+function claudeProfileText(L, claudePath) {
+  const [adapter, model] = builtConstants(L, ["agents", "claudeCode", "profile.js"], ["CLAUDE_CODE_ADAPTER_ID", "DEFAULT_CLAUDE_CODE_MODEL"]);
+  return { text: JSON.stringify({ schemaVersion: 1, adapter, model, claudePath }, null, 2) + "\n", summary: `claudePath=${claudePath} model=${model}` };
+}
+
+/** The Codex profile: adapter id, initial model and reasoning effort from the built scout-core. */
+function codexProfileText(L, codexPath) {
+  const [adapter, model, reasoningEffort] = builtConstants(L, ["agents", "codex", "profile.js"], ["CODEX_ADAPTER_ID", "DEFAULT_CODEX_MODEL", "DEFAULT_CODEX_REASONING_EFFORT"]);
+  return {
+    text: JSON.stringify({ schemaVersion: 1, adapter, codexPath, model, reasoningEffort }, null, 2) + "\n",
+    summary: `codexPath=${codexPath} model=${model} reasoningEffort=${reasoningEffort}`,
   };
 }
 
@@ -275,8 +328,8 @@ function launchAgentStep({ L, record, app, env, realHome }) {
   };
 }
 
-export function runSetup(argv, { env = process.env, out = console.log, err = console.error, claudeFallbacks, mcpTimeoutMs, realHome } = {}) {
-  let opts, plan, integration;
+export function runSetup(argv, { env = process.env, out = console.log, err = console.error, claudeFallbacks, codexFallbacks, mcpTimeoutMs, realHome } = {}) {
+  let opts, plan, integration, integrationAgent;
   try {
     opts = parseArgs(argv);
     const home = resolve(scoutHome(env));
@@ -286,9 +339,10 @@ export function runSetup(argv, { env = process.env, out = console.log, err = con
           `Pass --scout-root <dir> pointing at a separate built copy.`,
       );
     }
-    plan = planSetup({ env, scoutRoot: opts.scoutRoot, dryRun: opts.dryRun, claudeFallbacks, loginLaunch: opts.loginLaunch, app: opts.app, realHome });
+    plan = planSetup({ env, scoutRoot: opts.scoutRoot, dryRun: opts.dryRun, agent: opts.agent, claudeFallbacks, codexFallbacks, loginLaunch: opts.loginLaunch, app: opts.app, realHome });
+    integrationAgent = opts.agent ?? plan.profileAdapter ?? "claude-code";
     // Every refusal happens here, before anything is written.
-    if (opts.agentIntegration) integration = planIntegration({ env, L: plan.L, nodePath: plan.nodePath, record: plan.record, claudeFallbacks, mcpTimeoutMs, realHome });
+    if (opts.agentIntegration) integration = planIntegration({ agent: integrationAgent, env, L: plan.L, nodePath: plan.nodePath, record: plan.record, claudeFallbacks, codexFallbacks, mcpTimeoutMs, realHome });
   } catch (e) {
     err(`setup: ${e.message}`);
     return 1;
@@ -309,8 +363,8 @@ export function runSetup(argv, { env = process.env, out = console.log, err = con
     if (integration) {
       out("Agent integration:");
       for (const line of describeIntegration(integration)) out(line);
-      for (const line of INTEGRATION_EXPLANATION) out(line);
-    } else integrationHint(plan.record, out);
+      for (const line of integrationExplanation(integration.agent)) out(line);
+    } else integrationHint(plan.record, integrationAgent, out);
     return 0;
   }
 
@@ -354,14 +408,15 @@ export function runSetup(argv, { env = process.env, out = console.log, err = con
   out(`Unpacked extension folder: ${L.extensionManifest.replace(/\/manifest\.json$/, "")}. Then run \`npm run doctor\`.`);
   if (integration) {
     out("Agent integration installed.");
-    for (const line of INTEGRATION_EXPLANATION) out(line);
-  } else integrationHint(record, out);
+    for (const line of integrationExplanation(integration.agent)) out(line);
+  } else integrationHint(record, integrationAgent, out);
   return 0;
 }
 
-function integrationHint(record, out) {
-  const { registration, skill } = recordedIntegration(record);
-  if (!registration && !skill) out("Optional: `npm run setup -- --agent-integration` adds the `scout` MCP connection and skill to all of your Claude Code sessions.");
+function integrationHint(record, agent, out) {
+  if (hasRecordedIntegration(record, agent)) return;
+  const flag = agent === "codex" ? "--agent codex --agent-integration" : "--agent-integration";
+  out(`Optional: \`npm run setup -- ${flag}\` adds the \`scout\` MCP connection and skill to all of your ${AGENTS[agent].label} sessions.`);
 }
 
 if (isMain(import.meta.url)) process.exitCode = runSetup(process.argv.slice(2));

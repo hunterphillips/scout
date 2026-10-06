@@ -156,7 +156,10 @@ export interface SkillExporter {
 
 export interface SkillExporterOptions {
   scoutHome: string;
-  /** From the installer's record (P2.6), checked by `checkSkillsRoot`; never an arbitrary caller path. */
+  /**
+   * From the installer's record (`installed.json`), checked by `checkSkillsRoot`; never an
+   * arbitrary caller path.
+   */
   skillsRoot: string;
   /** The MCP server name wrappers call. Defaults to `scout`. */
   serverName?: string;

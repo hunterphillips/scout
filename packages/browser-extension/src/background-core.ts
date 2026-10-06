@@ -110,7 +110,7 @@ export function createBackground(ch: typeof chrome, deps: BackgroundDeps = {}): 
         },
       )
       .then(() => {
-        // Before P4.1 the extension kept its own paused flag; the core is the one source now.
+        // Drop the paused flag older extensions stored; the core is the one source of pause.
         void Promise.resolve()
           .then(() => ch.storage.local.remove?.("paused"))
           .catch(() => {});

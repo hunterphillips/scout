@@ -10,6 +10,17 @@ Two commands for Phase 1 of the website-agent plan.
   against the installed Claude CLI. Every real run makes model calls on the user's
   subscription, so each one needs separate authorization. Build first (`npm run build`).
 
+`node scripts/agent-check/codex-probe.mjs --home <dir> [--run] [--codex <path>] [--model <m>]
+[--variant no-approval-mode|shell-on]` runs one `codex exec` job against the fixture Scout core, to
+see how the Codex CLI behaves before a Codex adapter exists. Without `--run` it prints the argv
+and env key names and exits. With `--run` it makes one inference request on the user's ChatGPT
+plan, so each run needs separate authorization. It refuses the real `~/.scout`, any
+`CODEX_API_KEY`, `CODEX_ACCESS_TOKEN` or `OPENAI_API_KEY` in the env (exit 2), and a login that
+`codex login status` does not report as ChatGPT (exit 3). Codex gets its own `CODEX_HOME` under
+`<dir>/run/codex-home` whose `auth.json` is a symlink to the user's. The run writes
+`<dir>/probe/events.jsonl`, `stderr.log` and `summary.json` (item counts, Scout tool calls without
+arguments, the final output, usage, and whether Codex touched the user's `auth.json`).
+
 ## Arguments
 
 | Argument | Meaning |

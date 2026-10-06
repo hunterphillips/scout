@@ -306,7 +306,7 @@ describe("main --stdio", () => {
     sock.on("error", () => {});
     await new Promise<void>((r) => sock.once("connect", () => r()));
     const received: Array<{ type: string }> = [];
-    // The window's frames (protocol 3) for the connected side panel, kept apart.
+    // Panel frames (protocol 3) for the connected side panel, kept apart.
     const panelFrames: Array<{ type: string }> = [];
     const dec = toChromeDecoder();
     sock.on("data", (chunk: Buffer) => {
