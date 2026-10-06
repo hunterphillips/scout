@@ -256,6 +256,8 @@ export async function runStdio(deps: StdioDeps): Promise<StdioCore> {
       return { visitEpoch: view.currentSite.visitEpoch, origin: view.currentSite.origin };
     },
     isPermitted: (origin) => coordinator.permissions.isPermitted(origin),
+    // A page Scout opens from its links gets no job of its own.
+    onLinkOpened: (href) => jobs?.scheduler.onLinkOpened(href),
     diagnostics,
   });
   // Recommendation destinations, live (P4.6): the side panel's switch writes them, a hand edit of

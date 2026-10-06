@@ -25,8 +25,8 @@ const CANDIDATES: Candidate[] = ["a", "b", "c", "d"].map((p, i) => ({
   provenance: "llms.txt" as const,
 }));
 
-const catalog = (candidates: Candidate[] = CANDIDATES): CatalogResolution => ({
-  result: { ok: true, source: "fresh", stale: false, catalog: { origin: ORIGIN, version: "cat-v1", fetchedAt: 0, candidates, truncated: false, errors: [] } },
+const catalog = (candidates: Candidate[] = CANDIDATES, version = "cat-v1"): CatalogResolution => ({
+  result: { ok: true, source: "fresh", stale: false, catalog: { origin: ORIGIN, version, fetchedAt: 0, candidates, truncated: false, errors: [] } },
   stats: { requests: 0, refused: 0, bytesReceived: 0, ms: 0 },
 });
 
@@ -107,7 +107,8 @@ const flush = async (): Promise<void> => {
   for (let i = 0; i < 20; i++) await Promise.resolve();
 };
 
-function harness(overrides: Partial<JobSchedulerOptions> & { coreInstanceId?: string; registryInstanceId?: string } = {}) {
+function harness(overrides: Partial<JobSchedulerOptions> & { coreInstanceId?: string; registryInstanceId?: string; withResumeCache?: boolean } = {}) {
+  const { withResumeCache, ...schedulerOverrides } = overrides;
   const clock = { t: 100_000, now: () => clock.t };
   const world = {
     visit: { origin: ORIGIN, url: `${ORIGIN}/billing`, epoch: 3, at: 0, tabId: 1, contextRevision: 0 } as unknown as ActiveVisit | null,
@@ -127,6 +128,7 @@ function harness(overrides: Partial<JobSchedulerOptions> & { coreInstanceId?: st
     coreInstanceId: overrides.registryInstanceId ?? CORE,
     activeVisit: () => (world.visit === null || world.paused ? null : { visitEpoch: world.visit.epoch, origin: world.visit.origin }),
     isPermitted: (o) => world.permitted.has(o),
+    onLinkOpened: (href) => scheduler.onLinkOpened(href),
     diagnostics,
   });
   // Frames as the window gets them: the coordinator's state frames and the channel's results frames on one stream.
@@ -204,7 +206,8 @@ function harness(overrides: Partial<JobSchedulerOptions> & { coreInstanceId?: st
     socketPath: "/tmp/agent.sock",
     verify,
     newJobId: () => `job${++ids}`,
-    ...overrides,
+    ...(withResumeCache ? { resumeCache: createJobResumeCache<JobAnswer>({ clock }) } : {}),
+    ...schedulerOverrides,
   });
   const settle = (at = clock.t, c: CatalogResolution = catalog()) => scheduler.onSettled(world.visit!, c, at);
   const named = (name: string) => events.filter((e) => e.name === name).map((e) => e.fields);
@@ -772,32 +775,26 @@ describe("job scheduler: discards", () => {
 });
 
 describe("job scheduler: resume cache", () => {
-  it("a replacement whose key hits the cache publishes the cached answer once the cancelled run ends, in order: working, idle, results", async () => {
+  it("a new visit on a page whose answer is stored republishes it even under new activity, in order: working, idle, results, with no snapshot", async () => {
     const cache = createJobResumeCache<JobAnswer>({ clock: { now: () => 0 } });
     const h = harness({ resumeCache: cache });
-    // An earlier job answered for the newer activity (same page, same everything else).
-    const newer = [{ ...ISSUE, title: "Newer issue" }, ISSUE];
-    h.world.activity = newer;
     h.settle();
     h.agent.calls[0]!.answer(ok(["c3"]));
     await flush();
-    // A new visit to the same page with the older activity: a model call (another key).
-    h.world.activity = [ISSUE];
+    const releases = h.releases.length;
+    // The user has read another issue since: the page's answer still comes back.
+    h.world.activity = [{ ...ISSUE, title: "Newer issue" }, ISSUE];
     h.world.visit = { ...h.world.visit!, epoch: 4 } as ActiveVisit;
     h.scheduler.onVisitChanged();
     h.settle();
-    expect(h.agent.calls).toHaveLength(2);
-    const before = h.states().length;
-    // The newer issue is read again: the job is replaced, and the replacement's key hits.
-    h.world.activity = newer;
-    h.scheduler.onActivityAccepted(5);
     await flush();
-    expect(h.agent.calls).toHaveLength(2);
-    expect(h.states().slice(before)).toEqual(["working:job3", "idle", "results:ok:job3"]);
-    expect(h.frames.at(-1)).toMatchObject({ type: "results", status: "ok", jobId: "job3", items: [{ candidateId: "c3" }] });
+    expect(h.agent.calls).toHaveLength(1);
+    expect(h.states().slice(-3)).toEqual(["working:job2", "idle", "results:ok:job2"]);
+    expect(h.frames.at(-1)).toMatchObject({ type: "results", status: "ok", jobId: "job2", items: [{ candidateId: "c3" }] });
     expect(h.named("job_finished").at(-1)).toMatchObject({ cached: true });
-    // The cancelled run published nothing.
-    expect(h.frames.some((f) => f.type === "results" && f.jobId === "job2")).toBe(false);
+    // A republished answer takes no snapshot, so it carries no job token.
+    expect(h.releases).toHaveLength(releases);
+    expect(h.registry.size).toBe(0);
   });
 
   // Phase 3 verification: the key alone keeps the answers apart. The profile watcher also clears
@@ -842,7 +839,7 @@ describe("job scheduler: resume cache", () => {
     expect(h.named("job_finished").at(-1)).toMatchObject({ cached: true });
   });
 
-  it("an answer is reused within 30 s for the same key, through the same order; extra user tools never reuse a browser-only answer", async () => {
+  it("an answer is reused for the same key, through the same order; extra user tools never reuse a browser-only answer", async () => {
     const cache = createJobResumeCache<JobAnswer>({ clock: { now: () => 0 } });
     const h = harness({ resumeCache: cache });
     h.settle();
@@ -855,11 +852,10 @@ describe("job scheduler: resume cache", () => {
     expect(h.agent.calls).toHaveLength(1);
     expect(h.states().slice(-3)).toEqual(["working:job2", "idle", "results:ok:job2"]);
     expect(h.named("job_finished").at(-1)).toMatchObject({ cached: true });
-    // New activity is another key.
-    h.world.activity = [{ ...ISSUE, text: "changed" }];
+    // Another catalog is another key.
     h.world.visit = { ...h.world.visit!, epoch: 5 } as ActiveVisit;
     h.scheduler.onVisitChanged();
-    h.settle();
+    h.settle(h.clock.t, catalog(CANDIDATES, "cat-v2"));
     expect(h.agent.calls).toHaveLength(2);
 
     const toolsCache = createJobResumeCache<JobAnswer>({ clock: { now: () => 0 } });
@@ -871,5 +867,157 @@ describe("job scheduler: resume cache", () => {
     t.scheduler.onVisitChanged();
     t.settle();
     expect(t.agent.calls).toHaveLength(2);
+  });
+});
+
+describe("job scheduler: suggestions stick to their page (issue 18)", () => {
+  const MIN = 60_000;
+  const go = (h: ReturnType<typeof harness>, path: string, epoch: number): void => {
+    h.world.visit = { ...h.world.visit!, url: `${ORIGIN}${path}`, epoch } as ActiveVisit;
+    h.scheduler.onVisitChanged();
+  };
+
+  it("a page opened from Scout's links starts no job and publishes nothing for 15 min; onward navigation is a normal visit", async () => {
+    const h = harness({ withResumeCache: true });
+    h.settle();
+    h.agent.calls[0]!.answer(ok(["c0"]));
+    await flush();
+    // The click: the core resolves the link to `${ORIGIN}/a`.
+    expect(h.results.resolveLink({ coreInstanceId: CORE, visitEpoch: 3, jobId: "job1", candidateId: "c0" })).toEqual({ ok: true, href: `${ORIGIN}/a` });
+    go(h, "/a#intro", 4);
+    const before = h.frames.length;
+    h.settle();
+    await flush();
+    expect(h.agent.calls).toHaveLength(1);
+    expect(h.frames.slice(before)).toEqual([]);
+    expect(h.named("job_skipped").at(-1)).toEqual({ epoch: 4, reason: "opened_by_scout" });
+    // The user follows a link on that page in the same tab: an ordinary visit, with its job.
+    go(h, "/b", 5);
+    h.settle();
+    expect(h.agent.calls).toHaveLength(2);
+    h.agent.calls[1]!.answer(ok(["c1"]));
+    await flush();
+    // The opened page again 16 min after the click: a job as usual.
+    h.clock.t += 16 * MIN;
+    go(h, "/a", 6);
+    h.settle();
+    expect(h.agent.calls).toHaveLength(3);
+    // Diagnostics stay scalar: no URL.
+    expect(JSON.stringify(h.events)).not.toContain("://");
+  });
+
+  it("A → B for 5 min → A republishes A's answer with no job, its window counted from when A was left; after 16 min on B a job runs", async () => {
+    const h = harness({ withResumeCache: true });
+    h.settle();
+    h.agent.calls[0]!.answer(ok(["c2"]));
+    await flush();
+    // 12 min on A, then 5 min on B: 17 min since the answer, 5 since A was left.
+    h.clock.t += 12 * MIN;
+    go(h, "/b", 4);
+    h.world.activity = [{ ...ISSUE, text: "read while on B" }];
+    h.clock.t += 5 * MIN;
+    go(h, "/billing", 5);
+    h.settle();
+    await flush();
+    expect(h.agent.calls).toHaveLength(1);
+    expect(h.states().slice(-3)).toEqual(["working:job2", "idle", "results:ok:job2"]);
+    expect(h.frames.at(-1)).toMatchObject({ type: "results", status: "ok", items: [{ candidateId: "c2" }] });
+    expect(h.named("job_finished").at(-1)).toMatchObject({ cached: true });
+    // A republished answer's links resolve like any other.
+    expect(h.results.resolveLink({ coreInstanceId: CORE, visitEpoch: 5, jobId: "job2", candidateId: "c2" })).toEqual({ ok: true, href: `${ORIGIN}/c` });
+    // A → B for 16 min → A: a job.
+    go(h, "/b", 6);
+    h.clock.t += 16 * MIN;
+    go(h, "/billing", 7);
+    h.settle();
+    expect(h.agent.calls).toHaveLength(2);
+  });
+
+  it("a page read for longer than the window keeps its answer: A for 20 min → B → A republishes", async () => {
+    const h = harness({ withResumeCache: true });
+    h.settle();
+    h.agent.calls[0]!.answer(ok(["c2"]));
+    await flush();
+    h.clock.t += 20 * MIN;
+    go(h, "/b", 4);
+    h.settle();
+    h.agent.calls[1]!.answer(ok(["c1"]));
+    await flush();
+    h.clock.t += MIN;
+    go(h, "/billing", 5);
+    h.settle();
+    await flush();
+    expect(h.agent.calls).toHaveLength(2);
+    expect(h.frames.at(-1)).toMatchObject({ type: "results", status: "ok", items: [{ candidateId: "c2" }] });
+  });
+
+  it("issue capture withdrawn drops answers built from issue text, and keeps those built without it", async () => {
+    const h = harness({ withResumeCache: true });
+    h.settle();
+    h.agent.calls[0]!.answer(ok(["c0"]));
+    await flush();
+    // B's job saw no activity.
+    h.world.grant = false;
+    go(h, "/b", 4);
+    h.settle();
+    h.agent.calls[1]!.answer(ok(["c1"]));
+    await flush();
+    h.world.grant = true;
+    go(h, "/c", 5);
+    h.world.capture = false;
+    h.scheduler.onPermissionsChanged();
+    go(h, "/billing", 6);
+    h.settle();
+    expect(h.agent.calls).toHaveLength(3);
+    h.agent.calls[2]!.answer(ok(["c0"]));
+    await flush();
+    go(h, "/b", 7);
+    h.settle();
+    await flush();
+    expect(h.agent.calls).toHaveLength(3);
+    expect(h.frames.at(-1)).toMatchObject({ type: "results", status: "ok", items: [{ candidateId: "c1" }] });
+  });
+
+  it.each<[string, (h: ReturnType<typeof harness>, rev: { n: number }) => void]>([
+    [
+      "pause",
+      (h) => {
+        h.world.paused = true;
+        h.scheduler.onPause();
+        h.world.paused = false;
+      },
+    ],
+    [
+      "loss of the origin's permission",
+      (h) => {
+        h.world.permitted.delete(ORIGIN);
+        h.world.permissionsRevision = 8;
+        h.scheduler.onPermissionsChanged();
+        h.world.permitted.add(ORIGIN);
+        h.world.permissionsRevision = 9;
+        h.scheduler.onPermissionsChanged();
+      },
+    ],
+    [
+      "a revoked resource",
+      // The store bumps its approval revision on a revoke; with no job running, the scheduler's hook has nothing to cancel.
+      (h, rev) => {
+        rev.n += 1;
+        h.scheduler.onResourceRevoked("r1");
+      },
+    ],
+    ["a profile change", (h) => h.scheduler.onProfileChanged("fp-2")],
+  ])("%s still clears the page's stored answer: the next visit runs a job", async (_name, change) => {
+    const rev = { n: 0 };
+    const h = harness({ withResumeCache: true, approvalRevision: () => rev.n });
+    h.settle();
+    h.agent.calls[0]!.answer(ok(["c0"]));
+    await flush();
+    go(h, "/b", 4);
+    change(h, rev);
+    go(h, "/billing", 5);
+    h.settle();
+    expect(h.agent.calls).toHaveLength(2);
+    expect(h.named("job_finished").some((f) => f.cached === true)).toBe(false);
   });
 });
