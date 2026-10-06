@@ -12,7 +12,7 @@ import { ToolListChangedNotificationSchema, type CallToolResult } from "@modelco
 import { afterEach, describe, expect, it } from "vitest";
 import { BRIDGE_DEFAULT_LIMITS, BRIDGE_JOB_MAX_BYTES, BridgeJobError, readBridgeJob, type BridgeJob } from "./contextToolBridge.js";
 import { fakeBackend, selection, type FakeBackendDef } from "./testing/fakeBackend.js";
-import { defaultBridgeEntrypoint } from "./toolPolicy.js";
+import { defaultBridgeEntrypoint } from "./claudeCode/toolPolicy.js";
 import type { ToolSelection } from "./toolProfile.js";
 
 const ENTRY = defaultBridgeEntrypoint();

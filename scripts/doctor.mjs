@@ -229,7 +229,7 @@ export function runReport(env = process.env, { claudeFallbacks, mcpTimeoutMs, re
     // As setup: SCOUT_CLAUDE_BIN on a test home, never a claude found on PATH there.
     claudePath = integrationClaude(env, claudeFallbacks, realHome).path ?? null;
   }
-  const verified = builtConstant(join(L.scoutRoot, "packages", "scout-core", "dist", "agents", "claudeJob.js"), "VERIFIED_CLI_VERSION");
+  const verified = builtConstant(join(L.scoutRoot, "packages", "scout-core", "dist", "agents", "claudeCode", "claudeJob.js"), "VERIFIED_CLI_VERSION");
   let version = null;
   if (claudePath && isExecutableFile(claudePath)) {
     version = claudeVersion(claudePath, env);

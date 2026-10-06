@@ -57,7 +57,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { REPO_ROOT } from "../lib/paths.mjs";
-import { createLaunchProfile, filterChildEnv, runProfilePreflight } from "../../packages/scout-core/dist/agents/launchProfile.js";
+import { createLaunchProfile, filterChildEnv, runProfilePreflight } from "../../packages/scout-core/dist/agents/claudeCode/launchProfile.js";
 import { renderSkillWrapper } from "../../packages/scout-core/dist/capabilities/wrapper.js";
 import { analyzeTurn, classifyTurn2, classifyUse, errorCode, proofServerState } from "./classify.mjs";
 import { runCleanup } from "./cleanup.mjs";

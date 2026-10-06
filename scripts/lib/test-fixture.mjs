@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { REPO_ROOT } from "./paths.mjs";
 
 /** The scripted CLI the agent checks use; its `mcp` subcommands copy CLI 2.1.286's messages and `get` layout. */
-const FAKE_CLAUDE = join(REPO_ROOT, "packages", "scout-core", "src", "agents", "testing", "fake-claude.mjs");
+const FAKE_CLAUDE = join(REPO_ROOT, "packages", "scout-core", "src", "agents", "claudeCode", "testing", "fake-claude.mjs");
 
 export const FAKE_MANIFEST = {
   manifest_version: 3,
@@ -28,7 +28,7 @@ export function makeFixture({ withClaude = true, rootPrefix = "scout setup test 
   for (const d of ["browser-extension", "native-host", "scout-core", "scout-mcp", "contracts"]) mkdirSync(join(scoutRoot, "packages", d, "dist"), { recursive: true });
   mkdirSync(join(scoutRoot, "packages", "scout-core", "dist", "agents", "claudeCode"), { recursive: true });
   writeFileSync(join(scoutRoot, "packages/contracts/dist/bridge.js"), "export const BRIDGE_PROTOCOL = 3;\n");
-  writeFileSync(join(scoutRoot, "packages/scout-core/dist/agents/claudeJob.js"), 'export const VERIFIED_CLI_VERSION = "2.1.286";\n');
+  writeFileSync(join(scoutRoot, "packages/scout-core/dist/agents/claudeCode/claudeJob.js"), 'export const VERIFIED_CLI_VERSION = "2.1.286";\n');
   writeFileSync(join(scoutRoot, "packages/scout-core/dist/agents/claudeCode/profile.js"), 'export const CLAUDE_CODE_ADAPTER_ID = "claude-code";\nexport const DEFAULT_CLAUDE_CODE_MODEL = "claude-sonnet-5-5";\n');
   writeFileSync(join(scoutRoot, "packages/browser-extension/dist/manifest.json"), JSON.stringify(FAKE_MANIFEST, null, 2) + "\n");
   writeFileSync(join(scoutRoot, "packages/native-host/dist/host.js"), "// fake host\n");

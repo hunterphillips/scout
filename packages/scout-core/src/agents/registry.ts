@@ -11,10 +11,10 @@
 import type { Clock } from "../clock.js";
 import type { Diagnostics } from "../diagnostics.js";
 import type { AgentJobAdapter } from "./adapter.js";
-import type { Env } from "./authPreflight.js";
-import { createClaudeJobAdapter } from "./claudeJob.js";
+import type { Env } from "./executables.js";
+import { createClaudeJobAdapter } from "./claudeCode/claudeJob.js";
 import { createDefaultClaudeCodeProfile } from "./claudeCode/profile.js";
-import { createPreflightFacade, type PreflightFacade } from "./preflightWorker.js";
+import { createPreflightFacade, type PreflightFacade } from "./claudeCode/preflightWorker.js";
 import type { ProcessTracker } from "./processTree.js";
 import type { AgentProfile } from "./profile.js";
 

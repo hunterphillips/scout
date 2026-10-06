@@ -73,10 +73,10 @@ import { readdirSync, statSync } from "node:fs";
 import { createRequire } from "node:module";
 import { join } from "node:path";
 import { isExecutableFile, type ManagedPaths } from "./authPreflight.js";
-import { isMissing, readPrivateFile } from "./privateFile.js";
-import { BRIDGE_DEFAULT_LIMITS, BRIDGE_JOB_MAX_BYTES, type BridgeJob } from "./contextToolBridge.js";
+import { isMissing, readPrivateFile } from "../privateFile.js";
+import { BRIDGE_DEFAULT_LIMITS, BRIDGE_JOB_MAX_BYTES, type BridgeJob } from "../contextToolBridge.js";
 import { mcpToolName, SCOUT_SERVER_NAME, SCOUT_TOOL_NAMES, scoutServerSpec, type JobServerSpec, type JobSurfaceSpec, type ScoutServerOptions } from "./jobSurface.js";
-import { resolveEnvBindings, type Connection, type EnvBinding, type ToolsProfile } from "./toolProfile.js";
+import { resolveEnvBindings, type Connection, type EnvBinding, type ToolsProfile } from "../toolProfile.js";
 
 export const BRIDGE_SERVER_NAME = "scout_bridge";
 

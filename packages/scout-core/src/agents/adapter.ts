@@ -1,5 +1,6 @@
 // The generic agent-job adapter the core calls (from Phase 3) to get recommendations from
-// the user's own agent. One implementation per agent CLI; Claude Code is claudeJob.ts.
+// the user's own agent. One implementation per agent, each in its own folder; registry.ts
+// maps a profile to it.
 //
 // An adapter owns launch settings, billing checks, the deadline, cancellation and response
 // decoding. It returns a HostJobResult (the fixed contract the rest of Scout sees) plus job

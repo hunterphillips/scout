@@ -73,26 +73,26 @@ import { renameSync, writeFileSync } from "node:fs";
 import { userInfo } from "node:os";
 import { isAbsolute, join } from "node:path";
 import { AgentTokenSchema, JOB_AGENT_OUTPUT_JSON_SCHEMA, JobRequestSchema, type HostJobResult, type JobRequest } from "@scout/contracts";
-import { systemClock, type Clock } from "../clock.js";
-import type { Diagnostics } from "../diagnostics.js";
-import { hashRequestId, MIN_LAUNCH_MS, toCancelReason, type AgentJobAdapter, type AgentReadiness, type JobDetails, type JobOutcome, type JobRunOptions, type JobTermination } from "./adapter.js";
+import { systemClock, type Clock } from "../../clock.js";
+import type { Diagnostics } from "../../diagnostics.js";
+import { hashRequestId, MIN_LAUNCH_MS, toCancelReason, type AgentJobAdapter, type AgentReadiness, type JobDetails, type JobOutcome, type JobRunOptions, type JobTermination } from "../adapter.js";
 import { managedPathsFor, type Env, type ManagedPaths, type Verdict } from "./authPreflight.js";
-import type { BridgeJob } from "./contextToolBridge.js";
-import { startChild, type SnapshotFn, type SpawnFn, type SupervisedChild } from "./childSupervisor.js";
+import type { BridgeJob } from "../contextToolBridge.js";
+import { startChild, type SnapshotFn, type SpawnFn, type SupervisedChild } from "../childSupervisor.js";
 import type { ExpectedInit } from "./initCheck.js";
 import { buildJobSurface, defaultScoutMcpEntrypoint, type JobSurface } from "./jobSurface.js";
 import { JobStop, type Ending, type Out } from "./jobStop.js";
 import { createJsonLineStream } from "./jsonLineStream.js";
 import { createLaunchProfile, LaunchProfileError, runDirectPreflight, type DirectPreflightOptions, type LaunchProfile } from "./launchProfile.js";
 import { mapOutcome, recordUsage } from "./mapOutcome.js";
-import { MODEL_RE, profileFingerprint, type AgentProfile } from "./profile.js";
-import { buildJobInstructions, buildJobPrompt } from "./prompt.js";
-import { JOB_TREE_FILE, type JobTreeRecord, type ProcessTracker } from "./processTree.js";
+import { MODEL_RE, profileFingerprint, type AgentProfile } from "../profile.js";
+import { buildJobInstructions, buildJobPrompt } from "../prompt.js";
+import { JOB_TREE_FILE, type JobTreeRecord, type ProcessTracker } from "../processTree.js";
 import { createStreamMonitor } from "./streamMonitor.js";
-import { ensureAgentCwd } from "../localSocketFiles.js";
+import { ensureAgentCwd } from "../../localSocketFiles.js";
 import { checkManagedPolicy, defaultBridgeEntrypoint, managedMcpFilesFor, planJobTools, type JobManagedPaths, type ManagedPolicyResult, type ToolPlanOptions } from "./toolPolicy.js";
 
-export type { SpawnFn, SnapshotFn } from "./childSupervisor.js";
+export type { SpawnFn, SnapshotFn } from "../childSupervisor.js";
 
 // ---------- the verified flag set ----------
 
@@ -133,7 +133,7 @@ export const JOB_MAX_TURNS = 16;
 export const JOB_SETTINGS = Object.freeze({ disableAllHooks: true });
 export const KILL_GRACE_MS = 2000;
 export const MAX_STDOUT_BYTES = 4 * 1024 * 1024;
-export { MIN_LAUNCH_MS } from "./adapter.js";
+export { MIN_LAUNCH_MS } from "../adapter.js";
 
 export const JOB_FILES = Object.freeze({ mcp: "mcp.json", settings: "settings.json", instructions: "instructions.md", token: "agent-token", bridge: "bridge.json" });
 

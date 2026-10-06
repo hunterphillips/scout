@@ -11,7 +11,7 @@
 
 import { isAbsolute } from "node:path";
 import { z } from "zod";
-import { resolveOnPath, type Env } from "../authPreflight.js";
+import { resolveOnPath, type Env } from "../executables.js";
 import { AGENT_PROFILE_SCHEMA_VERSION, AgentProfileError } from "../profileBase.js";
 import { ToolsProfileSchema } from "../toolProfile.js";
 
