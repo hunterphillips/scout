@@ -4,8 +4,8 @@
 //
 //   node fake-backend.mjs --mode <mode> --log <file> [--touch <file>] [--proof <phrase>] [--ignore-term] [--helpers]
 //
-// --ignore-term (P3.4 lifecycle): SIGTERM and stdin EOF are ignored; only SIGKILL ends it.
-// --helpers (P4.4 inspection stop): at start, two `sleep` helpers that ignore SIGTERM: one in
+// --ignore-term (job and inspection stop): SIGTERM and stdin EOF are ignored; only SIGKILL ends it.
+// --helpers (inspection stop): at start, two `sleep` helpers that ignore SIGTERM: one in
 // its process group, one that leaves it (its own group); their pids go to the log as
 // {helperPids} before anything is answered.
 //

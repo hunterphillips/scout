@@ -57,8 +57,8 @@ describe("OwnedTree", () => {
     expect(tree.signalAll("SIGKILL")).toEqual({ groupSignalled: false, escapedSignalled: 0 });
   });
 
-  // Pinned from the legacy personal-context copy before P4.4 removed it (git history has it).
-  it("matches the removed legacy copy over a synthetic process table (pinned)", () => {
+  // Pinned from the removed personal-context package's copy (git history has it).
+  it("matches the removed package's copy over a synthetic process table (pinned)", () => {
     const e = (pid: number, ppid: number, pgid: number, state = "S"): [number, PsEntry] => [pid, { pid, ppid, pgid, state, start: `t${pid}` }];
     const steps: PsSnapshot[] = [
       new Map([e(100, 1, 100), e(101, 100, 100), e(102, 101, 102), e(200, 1, 200)]),

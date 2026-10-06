@@ -98,7 +98,7 @@ export type { SpawnFn, SnapshotFn } from "../childSupervisor.js";
 
 /**
  * The launch flags, verified against the installed CLI 2.1.286 on 2026-10-01 (`claude
- * --help`, plus the option table in the binary for flags the help hides). P1.3 and P1.5
+ * --help`, plus the option table in the binary for flags the help hides). Job launches
  * build on this record; a newer CLI needs these rechecked before jobs are enabled.
  *
  *   --model <m>                    shown   explicit profile model, never inherited
