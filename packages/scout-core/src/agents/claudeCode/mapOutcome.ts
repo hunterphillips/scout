@@ -3,7 +3,7 @@
 // every call of which errored (streamMonitor.ts: tool_unavailable, `required_tool_failed`, since
 // the answer would rest on a retrieval that failed); then no init; then the
 // result event (none, max turns, error, non-success, no structured output); then the
-// structured output through validateJobOutput. Only `completed` can be `ok` or `empty`.
+// structured output through outcomeFromOutput (outputValidation.ts). Only `completed` can be `ok` or `empty`.
 // With an instruction marker, the first pick's reason loses the marker; a pick whose reason
 // was only the marker is dropped like any other pick without a reason.
 // Usage counts, API time and permission denials are copied from the result event whatever the
@@ -13,8 +13,7 @@ import type { JobRequest } from "@scout/contracts";
 import type { JobDetails, JobTermination } from "../adapter.js";
 import type { Out } from "../jobStop.js";
 import { isRecord, type StreamRecord } from "../jsonLineStream.js";
-import { validateJobOutput } from "../outputValidation.js";
-import { takeInstructionMarker } from "../prompt.js";
+import { outcomeFromOutput } from "../outputValidation.js";
 import { isAuthOrQuota } from "./streamMonitor.js";
 
 export interface CliRun {
@@ -62,29 +61,5 @@ export function mapOutcome(run: CliRun, req: Pick<JobRequest, "candidates" | "ma
   if (resultEv.subtype !== "success") return agentFailed("process_error");
   if (resultEv.structured_output === undefined) return { result: { status: "error", reason: "invalid_output" }, termination: "invalid_output", detail: "no_structured_output" };
 
-  const v = validateJobOutput(resultEv.structured_output, req);
-  if (v.status === "invalid") {
-    details.droppedPicks = v.droppedPicks;
-    return { result: { status: "error", reason: "invalid_output" }, termination: "invalid_output" };
-  }
-  if (v.status === "empty") {
-    if (instructionMarker !== undefined) details.instructionMarker = "missing";
-    return { result: { status: "empty" }, termination: "completed" };
-  }
-  details.droppedPicks = v.droppedPicks;
-  details.cutPicks = v.cutPicks;
-  const items = v.items.map((i) => ({ ...i }));
-  if (instructionMarker !== undefined) {
-    const first = items[0]!;
-    const taken = takeInstructionMarker(first.reason, instructionMarker);
-    details.instructionMarker = taken.reached ? "reached" : "missing";
-    first.reason = taken.reason;
-    if (first.reason === "") {
-      // The marker was the whole reason: a pick with no reason is dropped, never shown with the marker.
-      items.shift();
-      details.droppedPicks++;
-      if (items.length === 0) return { result: { status: "error", reason: "invalid_output" }, termination: "invalid_output" };
-    }
-  }
-  return { result: { status: "ok", items }, termination: "completed" };
+  return outcomeFromOutput(resultEv.structured_output, req, details, instructionMarker);
 }

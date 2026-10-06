@@ -69,7 +69,7 @@
 // tokens or URLs beyond the origin.
 
 import { spawn as nodeSpawn } from "node:child_process";
-import { renameSync, writeFileSync } from "node:fs";
+import { writeFileSync } from "node:fs";
 import { userInfo } from "node:os";
 import { isAbsolute, join } from "node:path";
 import { AgentTokenSchema, JOB_AGENT_OUTPUT_JSON_SCHEMA, JobRequestSchema, type HostJobResult, type JobRequest } from "@scout/contracts";
@@ -88,7 +88,7 @@ import { mapOutcome, recordUsage } from "./mapOutcome.js";
 import { MODEL_RE, profileFingerprint } from "../profile.js";
 import type { ClaudeCodeProfile } from "./profile.js";
 import { buildJobInstructions, buildJobPrompt } from "../prompt.js";
-import { JOB_TREE_FILE, type JobTreeRecord, type ProcessTracker } from "../processTree.js";
+import { writeTreeRecord, type ProcessTracker } from "../processTree.js";
 import { createStreamMonitor } from "./streamMonitor.js";
 import { ensureAgentCwd } from "../../localSocketFiles.js";
 import { checkManagedPolicy, defaultBridgeEntrypoint, managedMcpFilesFor, planJobTools, type JobManagedPaths, type ManagedPolicyResult, type ToolPlanOptions } from "./toolPolicy.js";
@@ -296,16 +296,7 @@ export function defaultManagedPaths(env: Readonly<Record<string, string>>, usern
   return { ...managedPathsFor(process.platform, configDir, user), mcpFiles: managedMcpFilesFor(process.platform) };
 }
 
-/** `tree.json` in the job dir, replaced atomically (0600). Best effort: a failure is ignored. */
-export function writeTreeRecord(jobDir: string, record: JobTreeRecord): void {
-  const tmp = join(jobDir, `.${JOB_TREE_FILE}.tmp`);
-  try {
-    writeFileSync(tmp, JSON.stringify(record), { mode: 0o600 });
-    renameSync(tmp, join(jobDir, JOB_TREE_FILE));
-  } catch {
-    // the job dir is gone or unwritable: nothing to record into
-  }
-}
+export { writeTreeRecord } from "../processTree.js";
 
 // ---------- the adapter ----------
 

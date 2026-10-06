@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { profileFingerprint, type AgentProfile } from "./profile.js";
-import { createJobAdapter, createReadinessChecks } from "./registry.js";
+import { createDefaultProfileFor, createJobAdapter, createReadinessChecks } from "./registry.js";
 
 const dirs: string[] = [];
 afterEach(() => {
@@ -31,5 +31,25 @@ describe("adapter registry", () => {
     const readiness = await adapter.refreshReadiness();
     // The shared check refused to start a preflight child at all.
     expect(readiness).toMatchObject({ ok: false, reasons: ["internal: preflight cancelled"] });
+  });
+
+  it("builds the Codex adapter for a Codex profile; one cancelAll stops both adapters' checks", async () => {
+    const home = mkdtempSync(join(tmpdir(), "scout-registry-"));
+    dirs.push(home);
+    const codex: AgentProfile = { schemaVersion: 1, adapter: "codex", codexPath: "/nonexistent-scout-test/codex", model: "gpt-6-sol" };
+    const checks = createReadinessChecks();
+    const adapter = createJobAdapter(codex, { home, parentEnv: {}, readinessChecks: checks });
+    expect(adapter.id).toBe("codex");
+    expect(adapter.profileFingerprint).toBe(profileFingerprint(codex));
+    expect(adapter.readiness).toMatchObject({ ok: false, verdict: "unchecked" });
+    const claude = createJobAdapter(profile, { home, parentEnv: {}, readinessChecks: checks });
+    checks.cancelAll();
+    expect(await adapter.refreshReadiness()).toMatchObject({ ok: false, reasons: ["internal: readiness cancelled"] });
+    expect(await claude.refreshReadiness()).toMatchObject({ ok: false, reasons: ["internal: preflight cancelled"] });
+  });
+
+  it("createDefaultProfileFor names each adapter's executable", () => {
+    expect(() => createDefaultProfileFor("codex", { PATH: "/nonexistent-scout-test" })).toThrow("profile: codex not found on PATH");
+    expect(() => createDefaultProfileFor("claude-code", { PATH: "/nonexistent-scout-test" })).toThrow("profile: claude not found on PATH");
   });
 });

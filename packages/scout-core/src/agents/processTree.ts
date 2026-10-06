@@ -23,6 +23,8 @@
 // pid/ppid/pgid/state/start only, never command lines or environments.
 
 import { execFile, spawnSync } from "node:child_process";
+import { renameSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 
 export interface PsEntry {
   pid: number;
@@ -243,6 +245,17 @@ export interface JobTreeRecord {
 /** The record for `tree`, or the CLI alone before ps has seen it. */
 export function jobTreeRecord(pid: number, startedAt: number, members: readonly ProcessIdentity[]): JobTreeRecord {
   return { schemaVersion: 1, pid, pgid: pid, startedAt, members: members.slice(0, JOB_TREE_MAX_MEMBERS).map((m) => ({ pid: m.pid, start: m.start })) };
+}
+
+/** `tree.json` in the job dir, replaced atomically (0600). Best effort: a failure is ignored. */
+export function writeTreeRecord(jobDir: string, record: JobTreeRecord): void {
+  const tmp = join(jobDir, `.${JOB_TREE_FILE}.tmp`);
+  try {
+    writeFileSync(tmp, JSON.stringify(record), { mode: 0o600 });
+    renameSync(tmp, join(jobDir, JOB_TREE_FILE));
+  } catch {
+    // the job dir is gone or unwritable: nothing to record into
+  }
 }
 
 const isPid = (v: unknown): v is number => Number.isSafeInteger(v) && (v as number) > 1;

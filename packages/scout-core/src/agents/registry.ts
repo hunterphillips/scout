@@ -15,6 +15,7 @@ import type { Env } from "./executables.js";
 import { createClaudeJobAdapter } from "./claudeCode/claudeJob.js";
 import { createDefaultClaudeCodeProfile } from "./claudeCode/profile.js";
 import { createPreflightFacade, type PreflightFacade } from "./claudeCode/preflightWorker.js";
+import { createCodexJobAdapter } from "./codex/codexJob.js";
 import { createDefaultCodexProfile } from "./codex/profile.js";
 import { createCodexReadinessFacade, type CodexReadinessFacade } from "./codex/readinessWorker.js";
 import type { ProcessTracker } from "./processTree.js";
@@ -77,7 +78,7 @@ export function createJobAdapter(profile: AgentProfile, deps: AdapterFactoryDeps
     case "claude-code":
       return createClaudeJobAdapter({ ...rest, profile, ...(checks ? { preflightAsync: checks.claudeCode() } : {}) });
     case "codex":
-      throw new Error("registry: the codex adapter is not built yet");
+      return createCodexJobAdapter({ ...rest, profile, ...(checks ? { readinessAsync: checks.codex() } : {}) });
   }
 }
 
