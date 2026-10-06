@@ -1,13 +1,13 @@
 // npm run bundle-app (P4.3). The default suite bundles a stand-in executable (--binary) so it
 // needs no Swift build; SCOUT_BUNDLE_SWIFT=1 adds the real `swift build -c release` run.
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, symlinkSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { runBundle } from "./bundle-app.mjs";
 import { listTree } from "./lib/test-fixture.mjs";
-import { infoPlist } from "./lib/app-bundle.mjs";
+import { bundleHash, infoPlist } from "./lib/app-bundle.mjs";
 
 const has = (cmd) => !spawnSync(cmd, ["--help"], { stdio: "ignore" }).error;
 const HAS_SWIFT = !spawnSync("swift", ["--version"], { stdio: "ignore" }).error;
@@ -90,6 +90,53 @@ describe("bundle-app", () => {
     const c2 = capture();
     expect(runBundle(["--out", join(root, "o2"), "--binary", plain], c2)).toBe(1);
     expect(c2.text()).toMatch(/not an executable file/);
+  });
+});
+
+describe("bundleHash", () => {
+  function bundle() {
+    const app = join(root, "Scout.app");
+    mkdirSync(join(app, "Contents", "MacOS"), { recursive: true });
+    writeFileSync(join(app, "Contents", "Info.plist"), infoPlist({ version: "0.0.0" }));
+    writeFileSync(join(app, "Contents", "MacOS", "Scout"), "#!/bin/sh\nexit 0\n");
+    return app;
+  }
+
+  it("changes when a file is added or edited, not when _CodeSignature/ changes", () => {
+    const app = bundle();
+    const base = bundleHash(app);
+    expect(base).toMatch(/^[0-9a-f]{64}$/);
+    mkdirSync(join(app, "Contents", "_CodeSignature"));
+    writeFileSync(join(app, "Contents", "_CodeSignature", "CodeResources"), "one");
+    expect(bundleHash(app)).toBe(base);
+    writeFileSync(join(app, "Contents", "_CodeSignature", "CodeResources"), "two");
+    expect(bundleHash(app)).toBe(base);
+    writeFileSync(join(app, "Contents", "extra.txt"), "x");
+    expect(bundleHash(app)).not.toBe(base);
+    rmSync(join(app, "Contents", "extra.txt"));
+    expect(bundleHash(app)).toBe(base);
+    writeFileSync(join(app, "Contents", "MacOS", "Scout"), "#!/bin/sh\nexit 1\n");
+    expect(bundleHash(app)).not.toBe(base);
+  });
+
+  it("hashes a symlink's target string, not the content it points to", () => {
+    const app = bundle();
+    const target = join(root, "outside.txt");
+    writeFileSync(target, "a");
+    symlinkSync(target, join(app, "Contents", "link"));
+    const linked = bundleHash(app);
+    writeFileSync(target, "b");
+    expect(bundleHash(app)).toBe(linked);
+    rmSync(join(app, "Contents", "link"));
+    symlinkSync(join(root, "elsewhere"), join(app, "Contents", "link"));
+    expect(bundleHash(app)).not.toBe(linked);
+  });
+
+  it("is null for a missing bundle or a symlink to one", () => {
+    expect(bundleHash(join(root, "nope.app"))).toBeNull();
+    const app = bundle();
+    symlinkSync(app, join(root, "Alias.app"));
+    expect(bundleHash(join(root, "Alias.app"))).toBeNull();
   });
 });
 

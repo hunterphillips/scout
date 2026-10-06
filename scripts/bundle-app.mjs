@@ -14,8 +14,8 @@
 //
 // --install copies the finished bundle to ~/Applications/Scout.app (SCOUT_APPLICATIONS_DIR:
 // required with a test Scout home, refused with the real ~/.scout), the stable path the login
-// LaunchAgent starts, and records it in installed.json (kind app-bundle, hash of Info.plist +
-// binary; `npm run setup` must have run). An existing copy is replaced only while it still
+// LaunchAgent starts, and records it in installed.json (kind app-bundle, hash of every file in the
+// bundle; `npm run setup` must have run). An existing copy is replaced only while it still
 // matches the recorded hash; uninstall removes it on the same condition.
 //
 // The bundle holds only the app binary: at launch the app reads ~/.scout/config.json for the
@@ -28,7 +28,7 @@ import { spawnSync } from "node:child_process";
 import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
 import { APP_BUNDLE_ID, REPO_ROOT, layout } from "./lib/paths.mjs";
-import { APP_EXECUTABLE, APP_NAME, appBundleHash, applicationsRefusal, infoPlist, isScoutBundle } from "./lib/app-bundle.mjs";
+import { APP_EXECUTABLE, APP_NAME, bundleHash, applicationsRefusal, infoPlist, isScoutBundle } from "./lib/app-bundle.mjs";
 import { readInstalled, saveInstalled, upsertEntry } from "./lib/installed.mjs";
 import { isExecutableFile } from "./lib/executables.mjs";
 import { isMain } from "./lib/is-main.mjs";
@@ -164,7 +164,7 @@ function planInstall(env, realHome) {
   const recorded = record.files.find((f) => f.kind === "app-bundle" && f.path === dest);
   let replace = false;
   if (existsSync(dest)) {
-    if (!recorded || appBundleHash(dest) !== recorded.sha256) {
+    if (!recorded || bundleHash(dest) !== recorded.sha256) {
       throw new Error(`--install: ${dest} exists and ${recorded ? "changed since bundle-app installed it" : "was not installed by bundle-app"}; move it aside and re-run`);
     }
     replace = true;
@@ -182,7 +182,7 @@ function installCopy(app, { L, dest }, out) {
     const staged = join(stagingDir, `${APP_NAME}.app`);
     const r = run("ditto", [app, staged]);
     if (r.status !== 0) throw new Error(`ditto failed (${r.error ? r.error.message : (r.stderr || `exit ${r.status}`).trim()})`);
-    const hash = appBundleHash(staged);
+    const hash = bundleHash(staged);
     if (!hash) throw new Error("the copied bundle has no Info.plist or binary");
     replaceInto(staged, dest, stagingDir);
     const record = readInstalled(L.installed);

@@ -20,7 +20,7 @@
 // On the real home a matching login LaunchAgent is booted out of launchd before its plist is
 // removed (a failure is reported, not fatal); on a test home that step is skipped and said so.
 // The installed app (bundle-app --install, kind app-bundle) is removed only while its
-// Info.plist + binary hash matches the record. A failure part way records what is left.
+// whole-bundle hash (every file, _CodeSignature/ aside) matches the record. A failure part way records what is left.
 //
 // Usage: node scripts/uninstall.mjs [--dry-run] [--yes] [--include-key] [--agent-integration]
 // Env overrides: SCOUT_HOME, SCOUT_CLAUDE_BIN, LAUNCH_AGENTS_DIR (see lib/paths.mjs); the other
@@ -39,7 +39,7 @@ import { exists, fileMarker, readJsonObject, writeJson } from "./lib/files.mjs";
 import { isMain } from "./lib/is-main.mjs";
 import { isIntegrationEntry, overrideRefusal, removeIntegration } from "./lib/agent-integration.mjs";
 import { readExportsManifest } from "./lib/integration-skill.mjs";
-import { appBundleHash, applicationsRefusal, launchAgentRefusal, sha256 } from "./lib/app-bundle.mjs";
+import { bundleHash, applicationsRefusal, launchAgentRefusal, sha256 } from "./lib/app-bundle.mjs";
 import { coreLockHolder } from "./lib/core-state.mjs";
 
 export function parseArgs(argv) {
@@ -90,9 +90,9 @@ export function judge(entry, marker, { includeKey }, L, record) {
       // judged below
     }
     if (!dir) return { action: "skip", reason: "not a real directory; not removing" };
-    return typeof entry.sha256 === "string" && appBundleHash(p) === entry.sha256
+    return typeof entry.sha256 === "string" && bundleHash(p) === entry.sha256
       ? { action: "remove-dir", reason: "the app bundle-app --install copied, unchanged" }
-      : { action: "skip", reason: "changed since bundle-app --install copied it; not removing" };
+      : { action: "skip", reason: "Scout.app has files setup did not write; left in place" };
   }
   if (!isRegularFile(p)) return { action: "skip", reason: "not a regular file" };
   switch (entry.kind) {
