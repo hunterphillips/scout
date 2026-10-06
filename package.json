@@ -1,7 +1,7 @@
 {
   "name": "scout-workspace",
   "private": true,
-  "version": "0.0.0",
+  "version": "0.1.0",
   "description": "Scout proof of concept workspace: the website agent (core, MCP adapter, browser extension, native host).",
   "type": "module",
   "engines": {
@@ -31,7 +31,6 @@
     "bundle-app": "node scripts/bundle-app.mjs"
   },
   "devDependencies": {
-    "@modelcontextprotocol/sdk": "^1.30.1",
     "@puppeteer/browsers": "^3.2.3",
     "@types/chrome": "^0.3.0",
     "@types/jsdom": "^30.0.0",

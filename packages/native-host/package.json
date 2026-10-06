@@ -1,6 +1,6 @@
 {
   "name": "@scout/native-host",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "private": true,
   "description": "Chrome native-messaging host for Scout. Chrome runs dist/host.js through the ~/.scout/bin/scout-native-host wrapper.",
   "type": "module",
@@ -24,6 +24,6 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@scout/contracts": "0.0.0"
+    "@scout/contracts": "0.1.0"
   }
 }

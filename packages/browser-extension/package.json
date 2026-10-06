@@ -1,6 +1,6 @@
 {
   "name": "@scout/browser-extension",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "private": true,
   "description": "Scout Sensor: the MV3 Chrome extension. `npm run build` writes the unpacked extension to dist/.",
   "type": "module",
@@ -16,7 +16,7 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@scout/contracts": "0.0.0",
+    "@scout/contracts": "0.1.0",
     "zod": "^4.6.5"
   }
 }

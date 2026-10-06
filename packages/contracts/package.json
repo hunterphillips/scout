@@ -1,6 +1,6 @@
 {
   "name": "@scout/contracts",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "private": true,
   "description": "Scout shared message contracts: zod schemas, types, and the native-messaging frame codec.",
   "type": "module",
