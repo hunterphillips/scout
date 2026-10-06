@@ -21,7 +21,7 @@ export const HOST_NAME = "dev.scout.bridge";
 /** The app bundle's CFBundleIdentifier and the login LaunchAgent's label. */
 export const APP_BUNDLE_ID = "dev.scout.app";
 /**
- * Hosts where background recommendations run (pivot P3.2). Empty by default: the plan
+ * Hosts where background recommendations run. Empty by default: the plan
  * says per-origin enablement starts off, and a destination makes the core spend the
  * user's quota on every settled visit there. docs.stripe.com and www.peakdesign.com are
  * the acceptance examples a user may add to ~/.scout/config.json.

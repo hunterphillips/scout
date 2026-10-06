@@ -23,7 +23,7 @@ public enum SendOutcome: Sendable, Equatable {
 /// The child inherits the app's environment minus `SCOUT_HOME`, so the core always uses
 /// `~/.scout`, the same home the app and the browser side use.
 ///
-/// Stopping (P3.4): `shutdown` is sent and stdin closed, then the core gets
+/// Stopping: `shutdown` is sent and stdin closed, then the core gets
 /// `hardStopAllowance` (7 s) to stop its jobs and exit on its own; its own deadline is 5 s
 /// (`SHUTDOWN_DEADLINE_MS` in scout-core's main.ts), so the allowance is only a backstop. Past
 /// it the core is sent SIGTERM (`terminate()`), then SIGKILL after `terminateGrace` (1 s).

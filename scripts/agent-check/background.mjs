@@ -1,4 +1,4 @@
-// Background-job checks (P1.5) through the real ClaudeJobAdapter (scout-core dist), one
+// Background-job checks through the real ClaudeJobAdapter (scout-core dist), one
 // inference request each, against a fixture core on a temp socket and a throwaway --home:
 //
 //   baseline       Scout context only; expects `ok` with at least one pick and Scout tool use

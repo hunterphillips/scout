@@ -1,5 +1,5 @@
 // Drives a Chrome for Testing instance over CDP for the manual checks; see README.md.
-// The side panel (P4.1) replaced the popup. CDP cannot open the real side panel, so `panel`
+// The side panel replaced the popup. CDP cannot open the real side panel, so `panel`
 // opens the same page, chrome-extension://<id>/panel.html, in an ordinary tab; the hermetic
 // side-panel e2e (test/side-panel.test.mjs) covers the panel itself.
 // usage: node drive.mjs <cmd> [args]
