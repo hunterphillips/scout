@@ -4,7 +4,7 @@
 // an agent or a location.
 
 import { accessSync, constants as fsc, readdirSync, statSync } from "node:fs";
-import { delimiter, isAbsolute, join } from "node:path";
+import { delimiter, dirname, isAbsolute, join } from "node:path";
 
 /** An environment as a child process gets it. */
 export type Env = Readonly<Record<string, string | undefined>>;
@@ -73,6 +73,24 @@ export interface ExecutableSearch {
  */
 export function resolveExecutable(cmd: string, pathValue: string | undefined, fallbacks: readonly string[]): string | undefined {
   return resolveOnPath(cmd, pathValue) ?? fallbacks.find((p) => isAbsolute(p) && isExecutableFile(p));
+}
+
+/**
+ * The PATH an agent CLI's child gets: the CLI's own directory first, then the forwarded PATH.
+ * An npm- or nvm-installed CLI is a `#!/usr/bin/env node` script whose `node` sits beside it,
+ * and an app started from Finder forwards launchd's minimal PATH, which has no `node`. The
+ * directory is not repeated when it is already first; with no parent PATH it stands alone.
+ */
+export function pathWithCliDir(cliPath: string, parentPath: string | undefined): string {
+  const dir = dirname(cliPath);
+  if (parentPath === undefined || parentPath === "") return dir;
+  if (parentPath.split(delimiter)[0] === dir) return parentPath;
+  return `${dir}${delimiter}${parentPath}`;
+}
+
+/** `env` with PATH replaced by `pathWithCliDir(cliPath, env.PATH)`; a new frozen object. */
+export function withCliDirOnPath(env: Readonly<Record<string, string>>, cliPath: string): Readonly<Record<string, string>> {
+  return Object.freeze({ ...env, PATH: pathWithCliDir(cliPath, env.PATH) });
 }
 
 /** `env.HOME` when it is an absolute path, else undefined (never os.homedir(): the lookup reads only the env it is given). */

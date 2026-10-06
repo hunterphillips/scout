@@ -19,7 +19,10 @@
 //
 // Child env: the same allowlist as Claude's launch profile (FORWARD_KEYS: HOME, USER,
 // LOGNAME, PATH, SHELL, LANG, LC_ALL, LC_CTYPE, TMPDIR, those present) plus CODEX_HOME and
-// CODEX_SQLITE_HOME. CODEX_API_KEY, CODEX_ACCESS_TOKEN and OPENAI_API_KEY are never
+// CODEX_SQLITE_HOME. PATH starts with the codex binary's own directory (executables.ts
+// pathWithCliDir): an npm or nvm install is a `#!/usr/bin/env node` script whose `node` sits
+// beside it, and an app started from Finder forwards launchd's PATH, which has no `node`.
+// CODEX_API_KEY, CODEX_ACCESS_TOKEN and OPENAI_API_KEY are never
 // forwarded (readiness.ts refuses to run while any is set).
 //
 // The argv is the shape verified against Codex CLI 0.155.1 on 2026-10-06 (the Phase 0 probe):
@@ -43,7 +46,7 @@ import { AgentRequestIdSchema } from "@scout/contracts";
 import { ensureAgentCwd, ensurePrivateRunDir } from "../../localSocketFiles.js";
 import type { JobToolSurface } from "../adapter.js";
 import type { BridgeJob } from "../contextToolBridge.js";
-import { isExecutableFile, type Env } from "../executables.js";
+import { isExecutableFile, pathWithCliDir, type Env } from "../executables.js";
 import type { Out } from "../jobStop.js";
 import { buildJobSurface, defaultScoutMcpEntrypoint, type JobSurface } from "../claudeCode/jobSurface.js";
 import { ensureJobsRoot, FORWARD_KEYS } from "../claudeCode/launchProfile.js";
@@ -120,13 +123,14 @@ export function ensureCodexHome(home: string, parentEnv: Env, uid: number = proc
 
 // ---------- env and argv ----------
 
-/** The allowlisted child env plus CODEX_HOME and CODEX_SQLITE_HOME. */
-export function codexChildEnv(parentEnv: Env, codexHome: string, sqliteHome: string): Readonly<Record<string, string>> {
+/** The allowlisted child env, PATH led by the codex binary's directory, plus CODEX_HOME and CODEX_SQLITE_HOME. */
+export function codexChildEnv(parentEnv: Env, codexPath: string, codexHome: string, sqliteHome: string): Readonly<Record<string, string>> {
   const env: Record<string, string> = {};
   for (const k of FORWARD_KEYS) {
     const v = parentEnv[k];
     if (typeof v === "string") env[k] = v;
   }
+  env.PATH = pathWithCliDir(codexPath, env.PATH);
   env.CODEX_HOME = codexHome;
   env.CODEX_SQLITE_HOME = sqliteHome;
   return Object.freeze(env);
@@ -291,7 +295,7 @@ export function createCodexLaunch(o: CodexLaunchOptions): CodexLaunchResult {
       schemaFile: join(jobDir, JOB_FILES.schema),
       surface: toolSurface,
     });
-    const env = codexChildEnv(o.parentEnv, o.codexHome, join(jobDir, JOB_FILES.state));
+    const env = codexChildEnv(o.parentEnv, profile.codexPath, o.codexHome, join(jobDir, JOB_FILES.state));
     return { ok: true, launch: Object.freeze({ argv: Object.freeze(argv), env, cwd, jobDir, toolSurface, unavailable: Object.freeze([...plan.unavailable]), cleanup }) };
   } catch {
     try {

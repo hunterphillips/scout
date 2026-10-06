@@ -250,6 +250,22 @@ describe("claude job: happy path", () => {
     expect(sentinelsIn(text)).toEqual([]);
   });
 
+  it("the CLI's PATH leads with the claude binary's directory", async () => {
+    const seen: (string | undefined)[] = [];
+    const e = await setup({
+      deps: {
+        spawn: (c, a, o) => {
+          seen.push(o.env?.PATH);
+          return nodeSpawn(c, [...a], o);
+        },
+      },
+    });
+    const out = await e.adapter.run(request(e), { toolSurface: surface(e) });
+    expect(out.result.status).toBe("ok");
+    const parentPath = gatewayParentEnv(e.userHome).PATH;
+    expect(seen).toEqual([`${join(e.fake.path, "..")}:${parentPath}`]);
+  });
+
   it("writes the job files 0600 in a 0700 job dir while the job runs", async () => {
     const e = await setup({ mode: "hang" });
     const ac = new AbortController();

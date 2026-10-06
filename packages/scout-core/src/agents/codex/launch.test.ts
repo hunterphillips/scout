@@ -1,4 +1,5 @@
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { JOB_AGENT_OUTPUT_JSON_SCHEMA } from "@scout/contracts";
@@ -15,6 +16,33 @@ afterEach(() => {
 });
 
 const TOKEN = "t".repeat(43);
+
+/**
+ * An npm/nvm-shaped install: `<dir>/codex` is a `#!/usr/bin/env node` script and `node` (this
+ * test's own node) sits beside it, so `node` is reachable only through the CLI's directory.
+ * Returns the codex path and a parent PATH with no `node` on it.
+ */
+function envNodeCodex(base: string): { codexPath: string; parentPath: string } {
+  const bin = join(base, "nvm", "versions", "node", "v24.18.0", "bin");
+  mkdirSync(bin, { recursive: true });
+  symlinkSync(process.execPath, join(bin, "node"));
+  const codexPath = join(bin, "codex");
+  writeFileSync(
+    codexPath,
+    [
+      "#!/usr/bin/env node",
+      'const a = process.argv.slice(2).join(" ");',
+      'if (a === "--version") process.stdout.write("codex-cli 0.155.1\\n");',
+      'else if (a === "login status") process.stderr.write("Logged in using ChatGPT\\n");',
+      'else { process.stderr.write("unexpected\\n"); process.exit(9); }',
+      "",
+    ].join("\n"),
+    { mode: 0o755 },
+  );
+  const parentPath = ["/usr/bin", "/bin"].filter((d) => !existsSync(join(d, "node"))).join(":");
+  return { codexPath, parentPath };
+}
+
 
 function setup(profileExtra: Partial<CodexProfile> = {}) {
   const base = realpathSync(mkdtempSync(join(tmpdir(), "scl-")));
@@ -71,7 +99,20 @@ describe("codex launch", () => {
   it("the child env: the allowlist plus CODEX_HOME and a per-job CODEX_SQLITE_HOME; no API key, no stray variable", () => {
     const s = setup();
     const l = ok(s.launch());
-    expect(l.env).toEqual({ HOME: s.parentEnv.HOME, PATH: s.parentEnv.PATH, TMPDIR: "/tmp", CODEX_HOME: s.codexHome, CODEX_SQLITE_HOME: join(l.jobDir, "state") });
+    expect(l.env).toEqual({ HOME: s.parentEnv.HOME, PATH: `${s.base}:${s.parentEnv.PATH}`, TMPDIR: "/tmp", CODEX_HOME: s.codexHome, CODEX_SQLITE_HOME: join(l.jobDir, "state") });
+  });
+
+  it("the child env's PATH leads with the codex directory, so an npm or nvm install finds its node under launchd's PATH", () => {
+    const s = setup();
+    const { codexPath, parentPath } = envNodeCodex(s.base);
+    const r = createCodexLaunch({ home: s.home, profile: { ...s.profile, codexPath }, parentEnv: { ...s.parentEnv, PATH: parentPath }, requestId: "job-node", surface: { scout: { socketPath: join(s.base, "agent.sock"), token: TOKEN } }, codexHome: s.codexHome });
+    const l = ok(r);
+    expect(l.env.PATH).toBe(parentPath === "" ? join(codexPath, "..") : `${join(codexPath, "..")}:${parentPath}`);
+    expect(spawnSync(codexPath, ["--version"], { env: { PATH: parentPath }, encoding: "utf8" }).status).toBe(127);
+    const v = spawnSync(codexPath, ["--version"], { env: { ...l.env }, encoding: "utf8" });
+    expect(v.status).toBe(0);
+    expect(v.stdout).toBe("codex-cli 0.155.1\n");
+    l.cleanup();
   });
 
   it("job files: 0600 token and schema, a 0700 state dir, in a 0700 job dir; cleanup removes it all", () => {

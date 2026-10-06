@@ -3,6 +3,7 @@
 
 import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readlinkSync, realpathSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { ensureCodexHome } from "./launch.js";
@@ -36,6 +37,32 @@ function box(): Box {
   const codexPath = join(base, "codex");
   writeFileSync(codexPath, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
   return { base, scoutHome, userHome, authPath, codexPath, env: { HOME: userHome, PATH: "/usr/bin:/bin", LANG: "C", NODE_OPTIONS: "--inspect" } };
+}
+
+/**
+ * An npm/nvm-shaped install: `<dir>/codex` is a `#!/usr/bin/env node` script and `node` (this
+ * test's own node) sits beside it, so `node` is reachable only through the CLI's directory.
+ * Returns the codex path and a parent PATH with no `node` on it.
+ */
+function envNodeCodex(base: string): { codexPath: string; parentPath: string } {
+  const bin = join(base, "nvm", "versions", "node", "v24.18.0", "bin");
+  mkdirSync(bin, { recursive: true });
+  symlinkSync(process.execPath, join(bin, "node"));
+  const codexPath = join(bin, "codex");
+  writeFileSync(
+    codexPath,
+    [
+      "#!/usr/bin/env node",
+      'const a = process.argv.slice(2).join(" ");',
+      'if (a === "--version") process.stdout.write("codex-cli 0.155.1\\n");',
+      'else if (a === "login status") process.stderr.write("Logged in using ChatGPT\\n");',
+      'else { process.stderr.write("unexpected\\n"); process.exit(9); }',
+      "",
+    ].join("\n"),
+    { mode: 0o755 },
+  );
+  const parentPath = ["/usr/bin", "/bin"].filter((d) => !existsSync(join(d, "node"))).join(":");
+  return { codexPath, parentPath };
 }
 
 interface Call {
@@ -142,6 +169,25 @@ describe("codex readiness: login states and version", () => {
       { mode: 0o755 },
     );
     expect(runCodexReadinessFor({ home: b.scoutHome, parentEnv: b.env, codexPath: b.codexPath, model: "gpt-6-sol" })).toEqual({ verdict: "subscription", reasons: [], version: "0.155.1" });
+  });
+});
+
+describe("codex readiness: an npm or nvm install under launchd's PATH", () => {
+  it("a `#!/usr/bin/env node` codex whose node sits beside it is subscription with a minimal parent PATH", () => {
+    const b = box();
+    const { codexPath, parentPath } = envNodeCodex(b.base);
+    const parentEnv = { ...b.env, PATH: parentPath };
+    // The premise: with the parent's PATH alone, `env` cannot find node.
+    const bare = spawnSync(codexPath, ["--version"], { env: { PATH: parentPath }, encoding: "utf8" });
+    expect(bare.status).toBe(127);
+    expect(runCodexReadinessFor({ home: b.scoutHome, parentEnv, codexPath, model: "gpt-6-sol" })).toEqual({ verdict: "subscription", reasons: [], version: "0.155.1" });
+  });
+
+  it("both invocations get PATH with the codex directory first", () => {
+    const b = box();
+    const s = scripted();
+    expect(run(b, s).verdict).toBe("subscription");
+    for (const c of s.calls) expect(c.env.PATH).toBe(`${b.base}:/usr/bin:/bin`);
   });
 });
 

@@ -2,7 +2,9 @@
 // only through Scout's private Codex home, with no API key in play. Runs NO model calls.
 //
 // Exactly two invocations, both through spawnSync (20 s, SIGKILL) with the job's child env
-// (launch.ts codexChildEnv) and a throwaway CODEX_SQLITE_HOME that is removed afterwards:
+// (launch.ts codexChildEnv, whose PATH starts with the codex binary's directory so an npm or
+// nvm install finds its `node` under launchd's minimal PATH) and a throwaway
+// CODEX_SQLITE_HOME that is removed afterwards:
 //   - `codex --version`: stdout `codex-cli <x.y.z>` (`version_unknown` otherwise);
 //   - `codex login status`: "Logged in using ChatGPT" and exit 0 (`not_chatgpt` otherwise,
 //     which covers "Logged in using an API key" and "Not logged in", exit 1). Codex prints it
@@ -105,7 +107,7 @@ function readiness(o: CodexReadinessOptions): CodexReadinessReport {
   const stateDir = mkdtempSync(join(ensureJobsRoot(join(dirname(o.codexHome), "jobs")), "readiness-"));
   let version: string | undefined;
   try {
-    const env = codexChildEnv(o.parentEnv, o.codexHome, stateDir);
+    const env = codexChildEnv(o.parentEnv, o.codexPath, o.codexHome, stateDir);
     const call = (args: readonly string[]): SpawnSyncResult => spawn(o.codexPath, args, { env, cwd: stateDir, timeout, killSignal: "SIGKILL", encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
 
     const v = call(READINESS_INVOCATIONS[0]!);

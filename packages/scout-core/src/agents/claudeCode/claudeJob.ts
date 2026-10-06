@@ -1,7 +1,9 @@
 // Claude Code as an agent-job adapter: one fresh, unattended, read-only `claude -p` per job.
 //
 // Per job: a direct launch profile (launchProfile.ts: allowlisted child env, the agent
-// profile's absolute claude path and explicit model) whose private 0700 cwd is
+// profile's absolute claude path and explicit model; at the spawn PATH gains the claude
+// binary's own directory first, executables.ts pathWithCliDir, so an npm or nvm install finds
+// its `node` under launchd's minimal PATH) whose private 0700 cwd is
 // `SCOUT_HOME/run/jobs/<request-id>/`. Four 0600 files go there (mcp.json, settings.json,
 // instructions.md, agent-token), plus bridge.json when the profile selects user tools (the
 // bridge's job file, holding the backend environment bindings but never their values, which
@@ -78,6 +80,7 @@ import type { Diagnostics } from "../../diagnostics.js";
 import { hashRequestId, MIN_LAUNCH_MS, toCancelReason, type AgentJobAdapter, type AgentReadiness, type JobDetails, type JobOutcome, type JobRunOptions, type JobTermination } from "../adapter.js";
 import { managedPathsFor, type Env, type ManagedPaths, type Verdict } from "./authPreflight.js";
 import type { BridgeJob } from "../contextToolBridge.js";
+import { withCliDirOnPath } from "../executables.js";
 import { startChild, type SnapshotFn, type SpawnFn, type SupervisedChild } from "../childSupervisor.js";
 import type { ExpectedInit } from "./initCheck.js";
 import { buildJobSurface, defaultScoutMcpEntrypoint, type JobSurface } from "./jobSurface.js";
@@ -573,7 +576,7 @@ export function createClaudeJobAdapter(deps: ClaudeJobDeps): ClaudeJobAdapter {
         spawn,
         command: launch.claudePath,
         args: buildJobArgv(launch.model, jobDir, surface.allowedToolsArg),
-        options: { cwd, env: { ...launch.env }, stdio: ["pipe", "pipe", "pipe"] },
+        options: { cwd, env: { ...withCliDirOnPath(launch.env, launch.claudePath) }, stdio: ["pipe", "pipe", "pipe"] },
         killGraceMs,
         ...(deps.psSnapshot ? { snapshot: deps.psSnapshot } : {}),
         ...(deps.processTracker ? { tracker: deps.processTracker } : {}),

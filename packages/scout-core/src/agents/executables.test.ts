@@ -2,7 +2,7 @@ import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:f
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { homeOf, resolveExecutable, versionedBins, VERSIONED_BINS_MAX } from "./executables.js";
+import { homeOf, pathWithCliDir, resolveExecutable, versionedBins, VERSIONED_BINS_MAX, withCliDirOnPath } from "./executables.js";
 
 const dirs: string[] = [];
 afterEach(() => {
@@ -56,5 +56,25 @@ describe("executable lookup with fallbacks", () => {
     expect(homeOf({ HOME: "/Users/someone" })).toBe("/Users/someone");
     expect(homeOf({ HOME: "relative" })).toBeUndefined();
     expect(homeOf({})).toBeUndefined();
+  });
+
+  it("puts the CLI's own directory first on the child PATH, once", () => {
+    const cli = "/Users/someone/.nvm/versions/node/v24.18.0/bin/codex";
+    const dir = "/Users/someone/.nvm/versions/node/v24.18.0/bin";
+    expect(pathWithCliDir(cli, "/usr/bin:/bin:/usr/sbin:/sbin")).toBe(`${dir}:/usr/bin:/bin:/usr/sbin:/sbin`);
+    expect(pathWithCliDir(cli, `${dir}:/usr/bin`)).toBe(`${dir}:/usr/bin`);
+    // Elsewhere on PATH it still goes first: the CLI's own `node` wins over another one.
+    expect(pathWithCliDir(cli, `/usr/bin:${dir}`)).toBe(`${dir}:/usr/bin:${dir}`);
+    expect(pathWithCliDir(cli, undefined)).toBe(dir);
+    expect(pathWithCliDir(cli, "")).toBe(dir);
+  });
+
+  it("withCliDirOnPath replaces only PATH, in a new frozen object", () => {
+    const env = Object.freeze({ HOME: "/h", PATH: "/usr/bin" });
+    const out = withCliDirOnPath(env, "/opt/tool/bin/claude");
+    expect(out).toEqual({ HOME: "/h", PATH: "/opt/tool/bin:/usr/bin" });
+    expect(Object.isFrozen(out)).toBe(true);
+    expect(env.PATH).toBe("/usr/bin");
+    expect(withCliDirOnPath({ HOME: "/h" }, "/opt/tool/bin/claude")).toEqual({ HOME: "/h", PATH: "/opt/tool/bin" });
   });
 });
