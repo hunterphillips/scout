@@ -4,17 +4,21 @@
 //   SCOUT_HOME             replaces ~/.scout
 //   CHROME_NMH_DIR         replaces ~/Library/Application Support/Google/Chrome/NativeMessagingHosts
 //   SCOUT_SKILLS_ROOT      replaces the Claude Code skills root (agent integration only)
-//   SCOUT_CLAUDE_BIN       the `claude` executable the agent integration runs (lib/agent-integration.mjs)
+//   SCOUT_CLAUDE_BIN       the `claude` executable setup and the agent integration run (lib/agent-integration.mjs)
+//   SCOUT_CODEX_BIN        the `codex` executable setup and the agent integration run
+//   SCOUT_CODEX_HOME       replaces the Codex home (CODEX_HOME, else ~/.codex) the Codex
+//                          integration registers into and installs its skill under
 //   LAUNCH_AGENTS_DIR      replaces ~/Library/LaunchAgents (setup --login-launch only; lib/app-bundle.mjs)
 //   SCOUT_APPLICATIONS_DIR replaces ~/Applications (bundle-app --install, setup --login-launch)
 // Each override moves only its own location. A Scout home that is not the real ~/.scout
-// (isRealScoutHome) never authorizes touching the real Claude Code configuration, and the
-// agent integration refuses SCOUT_SKILLS_ROOT / SCOUT_CLAUDE_BIN on the real ~/.scout.
+// (isRealScoutHome) never authorizes touching the real Claude Code or Codex configuration, and
+// setup, uninstall and doctor refuse SCOUT_SKILLS_ROOT, SCOUT_CLAUDE_BIN, SCOUT_CODEX_BIN and
+// SCOUT_CODEX_HOME on the real ~/.scout.
 // CHROME_NMH_DIR, LAUNCH_AGENTS_DIR and SCOUT_APPLICATIONS_DIR follow one rule
 // (overrideRefusal): required with a test home, refused with the real ~/.scout.
 
 import { homedir, userInfo } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 export const HOST_NAME = "dev.scout.bridge";
@@ -83,6 +87,21 @@ export function skillsRootFor(env = process.env) {
   return resolve(env.CLAUDE_CONFIG_DIR ? join(env.CLAUDE_CONFIG_DIR, "skills") : join(env.HOME || homedir(), ".claude", "skills"));
 }
 
+/**
+ * The Codex home the Codex integration uses: SCOUT_CODEX_HOME, else an absolute CODEX_HOME (as
+ * the Codex CLI reads it), else ~/.codex.
+ */
+export function codexHomeFor(env = process.env) {
+  if (env.SCOUT_CODEX_HOME) return resolve(env.SCOUT_CODEX_HOME);
+  if (env.CODEX_HOME && isAbsolute(env.CODEX_HOME)) return resolve(env.CODEX_HOME);
+  return resolve(join(env.HOME || homedir(), ".codex"));
+}
+
+/** Where Codex reads user skills: `<Codex home>/skills`. */
+export function codexSkillsRootFor(env = process.env) {
+  return join(codexHomeFor(env), "skills");
+}
+
 /** All paths for one install, as absolute strings. */
 export function layout({ env = process.env, scoutRoot = REPO_ROOT } = {}) {
   const home = resolve(scoutHome(env));
@@ -111,6 +130,7 @@ export function layout({ env = process.env, scoutRoot = REPO_ROOT } = {}) {
     agentSock: join(home, "run", "agent.sock"),
     agentToken: join(home, "run", "agent-token"),
     agentProfile: join(home, "agent-profile.json"),
+    codexPrivateHome: join(home, "run", "codex-home"),
     diagnosticsLog: join(home, "logs", "diagnostics.jsonl"),
     launchAgentsDir: agentsDir,
     launchAgent: join(agentsDir, `${APP_BUNDLE_ID}.plist`),

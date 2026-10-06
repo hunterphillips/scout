@@ -11,22 +11,26 @@
 //   Chrome relay        the native-messaging manifest (allowed_origins), wrapper, extension key,
 //                       and the bridge protocol the installed host speaks (read from the built
 //                       contracts; Chrome is never started)
-//   agent integration   the `scout` MCP registration (exact match via `claude mcp get`, which
-//                       the CLI also uses to health-check the server) and the skill
-//   CLI                 the agent profile's claude and `claude --version` against the version
-//                       Scout's flag set was verified with (advisory)
-//   billing             the core's last logged billing preflight verdict, or "not yet checked";
-//                       doctor never runs a preflight and never spends quota
+//   agent integration   per agent it is installed for, the `scout` MCP registration (exact
+//                       match via `claude mcp get`, which that CLI also uses to health-check the
+//                       server, or `codex mcp get --json`) and the skill
+//   CLI                 the agent profile's CLI (claude or codex) and its `--version` against the
+//                       version Scout's flag set was verified with (advisory); for Codex also
+//                       the private Codex home's auth.json link
+//   billing             the core's last logged billing check verdict, for whichever agent, or
+//                       "not yet checked"; doctor never runs one (no `codex login status`
+//                       either) and never spends quota
 //   suggestions         config.json `destinations`; empty means off
-// Runs no model, connects to no socket, writes nothing. SCOUT_SKILLS_ROOT or SCOUT_CLAUDE_BIN
-// with the real ~/.scout is a failed check.
+// Runs no model, connects to no socket, writes nothing. SCOUT_SKILLS_ROOT, SCOUT_CLAUDE_BIN,
+// SCOUT_CODEX_BIN or SCOUT_CODEX_HOME with the real ~/.scout is a failed check.
 //
 // Usage: node scripts/doctor.mjs [--verbose]
-// Env overrides: SCOUT_HOME, CHROME_NMH_DIR, SCOUT_CLAUDE_BIN, LAUNCH_AGENTS_DIR,
-// SCOUT_APPLICATIONS_DIR (see lib/paths.mjs); one that breaks the test-override rule is a FAIL.
+// Env overrides: SCOUT_HOME, CHROME_NMH_DIR, SCOUT_CLAUDE_BIN, SCOUT_CODEX_BIN, SCOUT_CODEX_HOME,
+// LAUNCH_AGENTS_DIR, SCOUT_APPLICATIONS_DIR (see lib/paths.mjs); one that breaks the
+// test-override rule is a FAIL.
 
 import { spawnSync } from "node:child_process";
-import { lstatSync, readFileSync } from "node:fs";
+import { lstatSync, readFileSync, readlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import { HOST_NAME, REPO_ROOT, layout, locationOverrideRefusal } from "./lib/paths.mjs";
@@ -35,7 +39,7 @@ import { isExecutableFile } from "./lib/executables.mjs";
 import { allowedPath, readInstalled } from "./lib/installed.mjs";
 import { builtConstant, exists, readJsonObject, wrapperScript } from "./lib/files.mjs";
 import { isMain } from "./lib/is-main.mjs";
-import { checkIntegration, integrationClaude } from "./lib/agent-integration.mjs";
+import { AGENTS, checkIntegration, integrationClaude } from "./lib/agent-integration.mjs";
 import { bundleHash, applicationsRefusal, isScoutBundle, launchAgentRefusal, sha256 } from "./lib/app-bundle.mjs";
 import { coreLockHolder, inspectPrivate, lastPreflight } from "./lib/core-state.mjs";
 
@@ -54,9 +58,9 @@ const tryRead = (fn) => {
 
 /**
  * Every section: [{ title, status: "ok"|"warn"|"fail", summary, checks: [{ status: "OK"|"WARN"|"FAIL", label, detail }] }].
- * Writes nothing. `claudeVersion(path)` replaces running `<path> --version` (tests).
+ * Writes nothing. `claudeVersion(path)` / `codexVersion(path)` replace running `<path> --version` (tests).
  */
-export function runReport(env = process.env, { claudeFallbacks, mcpTimeoutMs, realHome, claudeVersion = runClaudeVersion } = {}) {
+export function runReport(env = process.env, { claudeFallbacks, codexFallbacks, mcpTimeoutMs, realHome, claudeVersion = runClaudeVersion, codexVersion = runCodexVersion } = {}) {
   const sections = new Map(SECTIONS.map((t) => [t, { title: t, summary: "", checks: [] }]));
   let current;
   const section = (title, summary) => {
@@ -91,7 +95,7 @@ export function runReport(env = process.env, { claudeFallbacks, mcpTimeoutMs, re
   section("install record", record ? `${base.installed}: ${record.files.length} entr${record.files.length === 1 ? "y" : "ies"}` : `${base.installed} ${installed.error ? "unreadable" : "missing"}; run \`npm run setup\``);
   check(record != null, "install record parses", installed.error ?? (record ? base.installed : `${base.installed} missing`));
   if (record) {
-    const outside = record.files.filter((f) => !allowedPath(f.kind, f.path, L, record));
+    const outside = record.files.filter((f) => !allowedPath(f.kind, f.path, L, record, f));
     check(outside.length === 0, "install record lists only paths setup writes", outside.length ? outside.map((f) => `${f.kind} ${f.path}`).join("; ") : base.installed);
   }
   check(scout != null, "scout config exists and parses", sc.error ?? (scout ? base.scoutConfig : `${base.scoutConfig} missing`));
@@ -204,7 +208,7 @@ export function runReport(env = process.env, { claudeFallbacks, mcpTimeoutMs, re
   current.summary = `${originsOk ? `host ${HOST_NAME} allows chrome-extension://${extensionId}/` : "host manifest not usable"}; bridge protocol ${protocol ?? "unknown"}`;
 
   // ---- agent integration
-  const integration = record ? checkIntegration(record, { env, L, claudeFallbacks, mcpTimeoutMs, realHome }) : [];
+  const integration = record ? checkIntegration(record, { env, L, claudeFallbacks, codexFallbacks, mcpTimeoutMs, realHome }) : [];
   section("agent integration", integration.length === 1 && /not installed/.test(integration[0].detail) ? "not installed (optional)" : record ? "installed" : "no install record");
   current.checks.push(...integration);
   if (record && current.summary === "installed") current.summary = integration.every((c) => c.status === "OK") ? "installed; registration and skill are this install's" : "installed; see below";
@@ -214,10 +218,13 @@ export function runReport(env = process.env, { claudeFallbacks, mcpTimeoutMs, re
   const profile = tryRead(() => readJsonObject(L.agentProfile));
   const recordedProfile = record?.files.find((f) => f.kind === "agent-profile");
   let claudePath = null;
-  // The checks below are Claude Code's; another adapter gets none here.
-  const otherAdapter = profile.value && profile.value.adapter !== "claude-code" ? String(profile.value.adapter) : null;
+  let codexLine = null;
+  // Claude Code and Codex have checks here; another adapter gets none.
+  const isCodex = profile.value?.adapter === "codex";
+  const otherAdapter = profile.value && !isCodex && profile.value.adapter !== "claude-code" ? String(profile.value.adapter) : null;
   if (profile.value) {
     if (otherAdapter !== null) add("WARN", "agent profile", `adapter ${otherAdapter}: no checks in doctor`);
+    else if (isCodex) codexLine = codexChecks(profile.value, { L, env, add, check, codexVersion });
     else {
       claudePath = typeof profile.value.claudePath === "string" && isAbsolute(profile.value.claudePath) ? profile.value.claudePath : null;
       check(isExecutableFile(claudePath), "agent profile names an executable claude", `${L.agentProfile}: ${String(profile.value.claudePath)}`);
@@ -225,7 +232,7 @@ export function runReport(env = process.env, { claudeFallbacks, mcpTimeoutMs, re
     const text = tryRead(() => readFileSync(L.agentProfile, "utf8")).value;
     if (recordedProfile && text != null && sha256(text) !== recordedProfile.sha256) add("OK", "agent profile", "edited since setup wrote it (yours now; uninstall leaves it)");
   } else {
-    add("WARN", "agent profile", profile.error ? `${L.agentProfile} unreadable` : `${L.agentProfile} missing: suggestions are unavailable; re-run \`npm run setup\` once claude is installed`);
+    add("WARN", "agent profile", profile.error ? `${L.agentProfile} unreadable` : `${L.agentProfile} missing: suggestions are unavailable; re-run \`npm run setup\` once claude or codex is installed`);
     // As setup: SCOUT_CLAUDE_BIN on a test home, never a claude found on PATH there.
     claudePath = integrationClaude(env, claudeFallbacks, realHome).path ?? null;
   }
@@ -237,18 +244,19 @@ export function runReport(env = process.env, { claudeFallbacks, mcpTimeoutMs, re
     else if (verified && version !== verified) add("WARN", "claude version matches the verified one (advisory)", `${version}; Scout's flag set was verified with ${verified}. Jobs still run; a new version triggers one re-check of billing`);
     else add("OK", "claude version matches the verified one (advisory)", `${version}${verified ? "" : " (verified version unknown: scout-core not built)"}`);
   } else if (!profile.value) add("WARN", "claude", "not found on PATH, ~/.local/bin, or /opt/homebrew/bin");
-  current.summary = claudePath ? `${claudePath}${version ? ` ${version}` : ""}${verified ? ` (verified ${verified})` : ""}` : otherAdapter !== null ? `adapter ${otherAdapter}` : "no claude";
+  current.summary = codexLine ?? (claudePath ? `${claudePath}${version ? ` ${version}` : ""}${verified ? ` (verified ${verified})` : ""}` : otherAdapter !== null ? `adapter ${otherAdapter}` : "no claude");
 
   // ---- billing
   const pre = lastPreflight(L.diagnosticsLog);
-  section("billing", pre ? `last preflight: ${pre.verdict}${pre.cliVersion ? ` (CLI ${pre.cliVersion})` : ""}` : "not yet checked");
+  const preDetail = [pre?.adapter ? (AGENTS[pre.adapter]?.label ?? pre.adapter) : null, pre?.cliVersion ? `CLI ${pre.cliVersion}` : null].filter(Boolean).join(", ");
+  section("billing", pre ? `last preflight: ${pre.verdict}${preDetail ? ` (${preDetail})` : ""}` : "not yet checked");
   if (!pre) add("WARN", "billing preflight", "not yet checked: the core runs it before the first job; doctor never runs one");
   else add(pre.verdict === "subscription" ? "OK" : "WARN", "billing preflight", `${pre.verdict} at ${new Date(pre.t).toISOString()}${pre.verdict === "subscription" ? "" : ": jobs run only on a subscription verdict"}`);
 
   // ---- suggestions
   const destinations = Array.isArray(scout?.destinations) ? scout.destinations : [];
   section("suggestions", destinations.length ? `on for ${destinations.join(", ")}` : "off (no destinations in config.json)");
-  add("OK", "destinations", destinations.length ? `${destinations.length} host(s); every settled visit there spends your Claude quota` : "off");
+  add("OK", "destinations", destinations.length ? `${destinations.length} host(s); every settled visit there spends your agent's quota` : "off");
 
   return [...sections.values()].map((s) => ({
     ...s,
@@ -259,6 +267,47 @@ export function runReport(env = process.env, { claudeFallbacks, mcpTimeoutMs, re
 /** Every check, flattened, each with its section title. */
 export function runChecks(env = process.env, opts = {}) {
   return runReport(env, opts).flatMap((s) => s.checks.map((c) => ({ ...c, section: s.title })));
+}
+
+/**
+ * The CLI section's Codex checks: the profile's codexPath, `codex --version` against the
+ * verified version (advisory), and the private Codex home's auth.json link. Never runs
+ * `codex login status` or anything else. Returns the section summary.
+ */
+function codexChecks(profile, { L, env, add, check, codexVersion }) {
+  const codexPath = typeof profile.codexPath === "string" && isAbsolute(profile.codexPath) ? profile.codexPath : null;
+  check(isExecutableFile(codexPath), "agent profile names an executable codex", `${L.agentProfile}: ${String(profile.codexPath)}`);
+  const verified = builtConstant(join(L.scoutRoot, "packages", "scout-core", "dist", "agents", "codex", "codexJob.js"), "VERIFIED_CODEX_VERSION");
+  let version = null;
+  if (codexPath && isExecutableFile(codexPath)) {
+    version = codexVersion(codexPath, env);
+    if (!version) add("WARN", "codex --version", `${codexPath} printed no version`);
+    else if (verified && version !== verified) add("WARN", "codex version matches the verified one (advisory)", `${version}; Scout's flag set was verified with ${verified}. Jobs still run`);
+    else add("OK", "codex version matches the verified one (advisory)", `${version}${verified ? "" : " (verified version unknown: scout-core not built)"}`);
+  }
+  const link = join(L.codexPrivateHome, "auth.json");
+  const label = "Scout's Codex home links to your Codex login";
+  let st = null;
+  try {
+    st = lstatSync(link);
+  } catch {
+    // not made yet
+  }
+  if (!st) add("WARN", label, `${link} not created yet: Scout makes it before the first Codex job`);
+  else if (!st.isSymbolicLink()) add("FAIL", label, `${link} is not a link; Codex jobs will not run until it is moved aside`);
+  else {
+    const target = tryRead(() => readlinkSync(link)).value;
+    const t = target ? tryRead(() => lstatSync(target)).value : undefined;
+    if (!t) add("FAIL", label, `${link} -> ${String(target)}, which is missing; log in with \`codex login\``);
+    else check(t.isFile() && t.uid === process.getuid() && (t.mode & 0o777) === 0o600, label, `${link} -> ${target} (${t.isFile() ? oct(t.mode) : "not a file"} uid=${t.uid})`);
+  }
+  return codexPath ? `${codexPath}${version ? ` ${version}` : ""}${verified ? ` (verified ${verified})` : ""}` : "no codex";
+}
+
+/** `<codex> --version` ("codex-cli 0.155.1") → "0.155.1", or null. Read-only; no model call. */
+export function runCodexVersion(codexPath, env = process.env) {
+  const r = spawnSync(codexPath, ["--version"], { env: { ...env }, cwd: tmpdir(), encoding: "utf8", timeout: CLI_VERSION_TIMEOUT_MS, killSignal: "SIGKILL", stdio: ["ignore", "pipe", "pipe"] });
+  return /^codex-cli (\d+\.\d+\.\d+)/.exec((r.stdout ?? "").trim())?.[1] ?? null;
 }
 
 /** `<claude> --version` → "2.1.286", or null. Read-only; no model call. */
