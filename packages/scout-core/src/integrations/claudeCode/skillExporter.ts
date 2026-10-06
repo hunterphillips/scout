@@ -2,13 +2,13 @@
 // of them Scout owns (`<scoutHome>/capabilities/exports.json`).
 //
 // Only `skill` resources with an unblocked approved default get a wrapper. Each is
-// `<skillsRoot>/<wrapperName>/SKILL.md`, rendered by wrapper.ts (Scout's text; no website
+// `<skillsRoot>/<wrapperName>/SKILL.md`, rendered by skillWrapper.ts (Scout's text; no website
 // text beyond the bounded description). Nothing else is ever written: no CLAUDE.md, hooks,
 // settings, permissions, or MCP configuration. `llms.txt` and `AGENTS.md` stay on-demand
 // resources behind the static integration skill.
 //
 // Ownership comes only from the manifest, never from a `scout-` prefix. A manifest entry
-// records the exact files and their ownership hash (identity.ts). Scout replaces or removes
+// records the exact files and their ownership hash (skillIdentity.ts). Scout replaces or removes
 // a wrapper only when the directory is a real directory (not a symlink) holding exactly the
 // recorded files, every file opens with O_NOFOLLOW, the content hashes to a recorded value,
 // and the directory's inode is unchanged when it acts. Anything else is a conflict, left in
@@ -29,13 +29,13 @@ import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { ResourceIdSchema, SHA256_HEX_PATTERN } from "@scout/contracts";
 import { z } from "zod";
-import { PrivateFileError, readPrivateFile } from "../agents/privateFile.js";
-import type { Diagnostics } from "../diagnostics.js";
-import { checkPrivateDir } from "../privateCacheFile.js";
-import { fsyncDir, sweepTempFiles, tempNamePattern, writeFileAtomic } from "./atomicWrite.js";
-import type { StoreState } from "./decisions.js";
-import { ownershipHash, wrapperName } from "./identity.js";
-import { DEFAULT_SERVER_NAME, renderSkillWrapper, WRAPPER_FILE } from "./wrapper.js";
+import { PrivateFileError, readPrivateFile } from "../../agents/privateFile.js";
+import type { Diagnostics } from "../../diagnostics.js";
+import { checkPrivateDir } from "../../privateCacheFile.js";
+import { fsyncDir, sweepTempFiles, tempNamePattern, writeFileAtomic } from "../../capabilities/atomicWrite.js";
+import type { StoreState } from "../../capabilities/decisions.js";
+import { ownershipHash, wrapperName } from "./skillIdentity.js";
+import { DEFAULT_SERVER_NAME, renderSkillWrapper, WRAPPER_FILE } from "./skillWrapper.js";
 
 export const EXPORTS_SCHEMA_VERSION = 1;
 export const EXPORTS_FILE_MAX_BYTES = 4 * 1024 * 1024;

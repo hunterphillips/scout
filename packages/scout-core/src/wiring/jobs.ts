@@ -1,13 +1,13 @@
 // The core's recommendation-job wiring (construction and ownership, no job policy of its own):
-// the agent adapter for `agent-profile.json` (none without a usable profile: every job is then
-// `unavailable`), its child-process billing preflight (agents/preflightWorker.ts), the
-// one-thread catalog parse pool, the job scheduler over the coordinator's live view, and the
-// registry of every job process tree the core started (agents/processTree.ts ProcessTracker).
+// the agent adapter for `agent-profile.json` (agents/registry.ts; none without a usable profile:
+// every job is then `unavailable`), the adapters' shared readiness checks, the one-thread catalog
+// parse pool, the job scheduler over the coordinator's live view, and the registry of every job
+// process tree the core started (agents/processTree.ts ProcessTracker).
 //
-// The preflight starts at once only when some host is recommendation-enabled
+// The readiness check starts at once only when some host is recommendation-enabled
 // (`config.destinations`), or (P4.6) as soon as the first host is enabled while the core runs;
-// otherwise no `claude` runs, and the first job (after the first enabled settle) starts it and
-// waits for it (claudeJob.ts).
+// otherwise no agent runs, and the first job (after the first enabled settle) starts it and
+// waits for it.
 //
 // The browser-context grant reaches the scheduler through the `grant` frames the panel channel
 // emits (the same signal the window gets): `observePanel` sees every frame, and each change
@@ -29,8 +29,8 @@
 // not match; clearing just frees it). The replaced adapter is closed (`abortAll`) and awaited at
 // close. An edit that leaves the profile unusable leaves no adapter: jobs are `unavailable`.
 //
-// Shutdown (main.ts calls each step in its order): `killPreflight()` (synchronous) kills a running
-// preflight child; `stopScheduler()` cancels the running job (`shutdown`); `abortJobs()` waits for
+// Shutdown (main.ts calls each step in its order): `cancelReadinessChecks()` (synchronous) stops every
+// running readiness check; `stopScheduler()` cancels the running job (`shutdown`); `abortJobs()` waits for
 // every adapter's job process tree (SIGTERM → 2 s grace → SIGKILL → tracked descendants);
 // `closeParsers()` terminates the parse worker; `releaseProfile()` stops the watcher and releases
 // the lock; `reapDescendants(deadline)` SIGKILLs and waits for any tracked descendant a job's own
@@ -45,10 +45,10 @@ import type { PanelState } from "@scout/contracts";
 import type { SnapshotRegistry } from "../activity/snapshots.js";
 import type { ActivityStore } from "../activity/store.js";
 import { readBrowserContextGrant } from "../agentApi/grants.js";
-import { createClaudeJobAdapter, type ClaudeJobAdapter } from "../agents/claudeJob.js";
-import { createPreflightFacade } from "../agents/preflightWorker.js";
+import type { AgentJobAdapter } from "../agents/adapter.js";
 import { AGENT_PROFILE_LOCK_FILE, AgentProfileError, agentProfilePath, loadAgentProfile, profileFingerprint, type AgentProfile } from "../agents/profile.js";
 import { ProcessTracker, type ProcessIdentity } from "../agents/processTree.js";
+import { createJobAdapter, createReadinessChecks } from "../agents/registry.js";
 import type { CapabilityStore } from "../capabilities/store.js";
 import { acquireStoreLock, StoreLockedError, type StoreLock } from "../capabilities/storeLock.js";
 import { createParsePool } from "../catalog/parseWorker.js";
@@ -70,7 +70,7 @@ export const PROFILE_LOCK_RETRY_MS = 5000;
 export interface JobWiringOptions {
   /** SCOUT_HOME. */
   home: string;
-  /** The core's environment (the adapter's launch profile and preflight read it). */
+  /** The core's environment (the adapter and its readiness check read it). */
   env: NodeJS.ProcessEnv;
   /** Recommendation-enabled hosts at start (`config.destinations`); later lists come through `destinationsChanged`. */
   destinations: readonly string[];
@@ -92,7 +92,7 @@ export interface JobWiringOptions {
 export interface JobWiring {
   readonly scheduler: JobScheduler;
   /** The adapter for the current profile; null without a usable one. */
-  readonly adapter: ClaudeJobAdapter | null;
+  readonly adapter: AgentJobAdapter | null;
   /** Catalog parsers that run in the parse worker (no pass scope: the dev path and tests). */
   readonly parsers: CatalogParsers;
   /** A discovery pass's fetch session; cancelling it also cancels that pass's parses. */
@@ -101,7 +101,7 @@ export interface JobWiring {
   parsersFor(session: OriginFetchSession): CatalogParsers;
   /**
    * The recommendation-enabled hosts changed (wiring/destinations.ts): the scheduler gets the new
-   * list, and the first host enabled while none was starts the preflight.
+   * list, and the first host enabled while none was starts the readiness check.
    */
   destinationsChanged(hosts: readonly string[]): void;
   /** Every panel frame passes here: a browser-context grant change reaches the scheduler. */
@@ -112,8 +112,8 @@ export interface JobWiring {
   readonly holdsProfileLock: boolean;
   /** The registry of job process trees. */
   readonly processes: ProcessTracker;
-  /** Kill a running preflight child now, and start none from now on. Synchronous. */
-  killPreflight(): void;
+  /** Stop every running readiness check now, and start none from now on. Synchronous. */
+  cancelReadinessChecks(): void;
   /** Cancel the running job (`shutdown`) and start none from now on. */
   stopScheduler(): void;
   /** Close every adapter (current and replaced) and wait for their jobs' process trees. */
@@ -132,7 +132,7 @@ export function createJobWiring(o: JobWiringOptions): JobWiring {
   const { home, clock, diagnostics } = o;
   const timers = o.timers ?? systemTimers;
   const parsePool = createParsePool({ diagnostics });
-  const preflight = createPreflightFacade();
+  const readinessChecks = createReadinessChecks();
   const processes = new ProcessTracker();
 
   // ---------- the profile lock ----------
@@ -153,9 +153,9 @@ export function createJobWiring(o: JobWiringOptions): JobWiring {
   takeLock();
 
   // ---------- the profile and its adapter ----------
-  const buildAdapter = (p: AgentProfile | null): ClaudeJobAdapter | null =>
-    p === null ? null : createClaudeJobAdapter({ home, profile: p, parentEnv: o.env, preflightAsync: preflight, clock, diagnostics, processTracker: processes });
-  const schedulerProfile = (p: AgentProfile | null, a: ClaudeJobAdapter | null): SchedulerProfile => ({
+  const buildAdapter = (p: AgentProfile | null): AgentJobAdapter | null =>
+    p === null ? null : createJobAdapter(p, { home, parentEnv: o.env, readinessChecks, clock, diagnostics, processTracker: processes });
+  const schedulerProfile = (p: AgentProfile | null, a: AgentJobAdapter | null): SchedulerProfile => ({
     fingerprint: a?.profileFingerprint ?? "none",
     toolsRevision: p?.tools?.revision ?? 0,
     hasUserTools: (p?.tools?.selections.length ?? 0) > 0,
@@ -174,7 +174,7 @@ export function createJobWiring(o: JobWiringOptions): JobWiring {
   const retired = new Set<Promise<void>>();
   // Off the event loop; the first job waits for it. With no enabled host, the first job starts it.
   let destinations = o.destinations;
-  if (destinations.length > 0) void adapter?.refreshPreflightAsync();
+  if (destinations.length > 0) void adapter?.refreshReadiness();
 
   // The grant as the window was last told it.
   let shownGrant: boolean | null = null;
@@ -232,7 +232,7 @@ export function createJobWiring(o: JobWiringOptions): JobWiring {
       retired.add(p);
       void p.finally(() => retired.delete(p));
     }
-    if (adapter !== null && destinations.length > 0) void adapter.refreshPreflightAsync();
+    if (adapter !== null && destinations.length > 0) void adapter.refreshReadiness();
   };
 
   const sessions = new WeakMap<OriginFetchSession, CatalogParsers>();
@@ -251,7 +251,7 @@ export function createJobWiring(o: JobWiringOptions): JobWiring {
   };
   const abortJobs = async (): Promise<void> => {
     stopScheduler();
-    preflight.cancelAll();
+    readinessChecks.cancelAll();
     await Promise.all([adapter?.abortAll(), ...retired]);
   };
 
@@ -282,8 +282,8 @@ export function createJobWiring(o: JobWiringOptions): JobWiring {
       if (stopped) return;
       const wasNone = destinations.length === 0;
       destinations = hosts;
-      // The preflight first: a job the change starts at once shares this run instead of starting its own.
-      if (wasNone && hosts.length > 0) void adapter?.refreshPreflightAsync();
+      // The readiness check first: a job the change starts at once shares this run instead of starting its own.
+      if (wasNone && hosts.length > 0) void adapter?.refreshReadiness();
       scheduler.onDestinationsChanged(hosts);
     },
     observePanel(state) {
@@ -301,7 +301,7 @@ export function createJobWiring(o: JobWiringOptions): JobWiring {
       return lock !== null;
     },
     processes,
-    killPreflight: () => preflight.cancelAll(),
+    cancelReadinessChecks: () => readinessChecks.cancelAll(),
     stopScheduler,
     abortJobs,
     closeParsers: () => parsePool.close(),
@@ -309,7 +309,7 @@ export function createJobWiring(o: JobWiringOptions): JobWiring {
     reapDescendants: (deadlineAt) => processes.killAll(deadlineAt),
     close: (deadlineAt) =>
       (closing ??= (async () => {
-        preflight.cancelAll();
+        readinessChecks.cancelAll();
         stopScheduler();
         await abortJobs();
         await parsePool.close();

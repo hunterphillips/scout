@@ -106,3 +106,15 @@ export function exists(path) {
     return false;
   }
 }
+
+/** `export const NAME = <number or "string">` from a built file, or null (missing file or constant). */
+export function builtConstant(path, name) {
+  let text;
+  try {
+    text = readFileSync(path, "utf8");
+  } catch {
+    return null;
+  }
+  const m = new RegExp(`export const ${name} = ("[^"]*"|\\d+);`).exec(text);
+  return m ? JSON.parse(m[1]) : null;
+}

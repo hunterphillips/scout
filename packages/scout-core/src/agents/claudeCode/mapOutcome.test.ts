@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { JobDetails } from "./adapter.js";
+import type { JobDetails } from "../adapter.js";
 import { mapOutcome, type CliRun } from "./mapOutcome.js";
 
 const MARKER = "SCOUTMARK0123456789ab";

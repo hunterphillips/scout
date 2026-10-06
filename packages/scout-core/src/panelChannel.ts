@@ -29,11 +29,10 @@
 // `working{jobId}` and then the visit's `idle` before the result is published; an `idle` or
 // `resendState` for the same visit after the publish wipes the window's results.
 
-import { GRANT_DESTINATIONS_MAX, isHttpsOrigin, type PanelAck, type PanelAudit, type PanelCommand, type PanelState } from "@scout/contracts";
+import { GRANT_DESTINATIONS_MAX, isHttpsOrigin, type CapabilityConflict, type PanelAck, type PanelAudit, type PanelCommand, type PanelState } from "@scout/contracts";
 import type { GrantWrite } from "./agentApi/grants.js";
 import type { ReadAuditEntry } from "./agentApi/readAudit.js";
 import type { StoreState } from "./capabilities/decisions.js";
-import type { ExportConflict } from "./capabilities/exports.js";
 import type { Clock, Timers } from "./clock.js";
 import { createDebounced } from "./debounced.js";
 import type { Diagnostics } from "./diagnostics.js";
@@ -53,7 +52,7 @@ export interface PanelChannelOptions {
   /** This core start's id (the one agent.sock replies carry); stamped on every `capabilities` frame. */
   coreInstanceId: string;
   /** The exporter's last recorded conflicts; empty when there is no exporter. */
-  exportConflicts: () => readonly ExportConflict[];
+  exportConflicts: () => readonly CapabilityConflict[];
   readBrowserContextGrant: () => boolean;
   /**
    * `config.json` `destinations` (bare hosts), sent on every `grant` frame as `https://<host>`
@@ -113,7 +112,7 @@ export function createPanelChannel(options: PanelChannelOptions): PanelChannel {
 
   const capabilities = createCapabilitiesEmitter({
     input: () => {
-      let conflicts: readonly ExportConflict[] = [];
+      let conflicts: readonly CapabilityConflict[] = [];
       try {
         conflicts = options.exportConflicts();
       } catch {

@@ -1,12 +1,8 @@
-// The agent profile: `<SCOUT_HOME>/agent-profile.json`. Which agent CLI Scout's background
-// jobs run, and with which model. Not in the plan's P1.2 file list; it is small and every
-// other agents/ file reads it.
+// The agent profile: `<SCOUT_HOME>/agent-profile.json`. Which agent Scout's background jobs run,
+// and how. Not in the plan's P1.2 file list; it is small and every other agents/ file reads it.
 //
-// - `claudePath` is absolute; jobs never look `claude` up on PATH. createDefaultAgentProfile
-//   resolves it once, from the PATH it is given, when the profile is first written.
-// - `model` is explicit, required and a full model name (no alias). The initial value is `claude-sonnet-5-5`,
-//   the initial model for the Claude Code profile; editable in the profile file. A job never inherits a CLI, settings or gateway
-//   default model, and the init check stops a job whose CLI reports a different model.
+// - The profile is a union on `adapter`: one strict member per agent adapter (each in its
+//   adapter's folder), so an unknown adapter id, or a field another member owns, is refused.
 // - The fingerprint is a hash of the canonical profile content. Job requests and revisit
 //   cache keys carry it, so an edited profile never reuses an older job's result.
 //
@@ -16,58 +12,29 @@
 
 import { createHash } from "node:crypto";
 import { closeSync, constants as fsc, fstatSync, openSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { isAbsolute, join } from "node:path";
+import { join } from "node:path";
 import { z } from "zod";
-import { resolveOnPath, type Env } from "./authPreflight.js";
-import { canonicalJson, ToolsProfileSchema } from "./toolProfile.js";
+import { ClaudeCodeProfileSchema } from "./claudeCode/profile.js";
+import { AgentProfileError } from "./profileBase.js";
+import { canonicalJson } from "./toolProfile.js";
+
+export { AGENT_PROFILE_SCHEMA_VERSION, AgentProfileError, type AgentProfileErrorCode } from "./profileBase.js";
 
 export const AGENT_PROFILE_FILE = "agent-profile.json";
 /** The lock (capabilities/storeLock.ts) the running core holds and every profile CLI write takes. */
 export const AGENT_PROFILE_LOCK_FILE = "agent-profile.lock";
-export const AGENT_PROFILE_SCHEMA_VERSION = 1;
-/** The initial model for the Claude Code profile; editable in the profile file. */
-export const DEFAULT_AGENT_MODEL = "claude-sonnet-5-5";
 /** Room for the selected tools' frozen input schemas. */
 export const PROFILE_MAX_BYTES = 512 * 1024;
 
 /** Only a plain alias or model name; never anything that parses as a flag. Same rule as the legacy service's MODEL_RE. */
 export const MODEL_RE = /^[A-Za-z0-9][A-Za-z0-9._\-[\]]{0,63}$/;
 
-/**
- * A profile's model: the full `claude-<family>-<major>-<minor>` name, optionally dated
- * (`-YYYYMMDD`). A bare alias such as `sonnet` is refused: the init event reports the
- * resolved name, so a job launched with an alias would always fail its model check.
- */
-export const PROFILE_MODEL_RE = /^claude-[a-z]+-\d{1,3}-\d{1,3}(?:-\d{8})?$/;
-
-export const AgentProfileSchema = z.strictObject({
-  schemaVersion: z.literal(AGENT_PROFILE_SCHEMA_VERSION),
-  adapter: z.literal("claude-code"),
-  claudePath: z
-    .string()
-    .max(1024)
-    .refine((p) => isAbsolute(p) && !p.includes("\0"), { message: "claudePath must be absolute" }),
-  model: z.string().regex(PROFILE_MODEL_RE, {
-    message: "model must be a full Claude model name such as claude-sonnet-5-5, not an alias such as sonnet",
-  }),
-  tools: ToolsProfileSchema.optional(),
-});
+export const AgentProfileSchema = z.discriminatedUnion("adapter", [ClaudeCodeProfileSchema]);
 
 export type AgentProfile = z.infer<typeof AgentProfileSchema>;
 
-export type AgentProfileErrorCode =
-  | "profile: missing"
-  | "profile: unreadable"
-  | "profile: invalid"
-  | "profile: not a private regular file"
-  | "profile: claude not found on PATH";
-
-export class AgentProfileError extends Error {
-  constructor(readonly code: AgentProfileErrorCode) {
-    super(code); // fixed code only: never a path or value
-    this.name = "AgentProfileError";
-  }
-}
+/** Every adapter id a profile may name. */
+export const AGENT_ADAPTER_IDS = ["claude-code"] as const satisfies readonly AgentProfile["adapter"][];
 
 /**
  * Stable hash of the profile content (keys sorted at every depth), hex. Any change to the
@@ -79,13 +46,6 @@ export function profileFingerprint(profile: AgentProfile): string {
 
 export function agentProfilePath(home: string): string {
   return join(home, AGENT_PROFILE_FILE);
-}
-
-/** The initial Claude profile: the `claude` found on `parentEnv.PATH`, and the default model. */
-export function createDefaultAgentProfile(parentEnv: Env): AgentProfile {
-  const claudePath = resolveOnPath("claude", parentEnv.PATH);
-  if (!claudePath) throw new AgentProfileError("profile: claude not found on PATH");
-  return { schemaVersion: AGENT_PROFILE_SCHEMA_VERSION, adapter: "claude-code", claudePath, model: DEFAULT_AGENT_MODEL };
 }
 
 /** Read and validate `<home>/agent-profile.json`. It must be a regular file owned by this user, without group/other bits. */

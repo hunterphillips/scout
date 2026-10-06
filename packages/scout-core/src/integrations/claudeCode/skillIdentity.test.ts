@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { deriveResourceId } from "@scout/contracts";
 import { createHash } from "node:crypto";
-import { assignWrapperNames, isScoutOwnedName, isValidSkillName, OWNERSHIP_HASH_TAG, ownershipHash, SKILL_NAME_MAX, wrapperName, WrapperIdentityError } from "./identity.js";
+import { assignWrapperNames, isScoutOwnedName, isValidSkillName, OWNERSHIP_HASH_TAG, ownershipHash, SKILL_NAME_MAX, wrapperName, WrapperIdentityError } from "./skillIdentity.js";
 
 const id = (hex: string) => `res_${hex.padEnd(64, "0")}`;
 

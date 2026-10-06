@@ -381,7 +381,7 @@ export function resolvePointer(doc: unknown, pointer: string): unknown {
 /**
  * Resolve a connection's environment bindings in memory. Each file is read once. The result
  * holds secret values: it may go only into the backend's environment at spawn, never to
- * disk (job files included), a profile, report, log, or the Claude process's environment.
+ * disk (job files included), a profile, report, log, or the agent process's environment.
  */
 export function resolveEnvBindings(env: Readonly<Record<string, EnvBinding>>, fs: BindingFs = {}): Record<string, string> {
   const docs = new Map<string, unknown>();

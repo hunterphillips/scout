@@ -4,8 +4,7 @@ import { createSnapshotRegistry, type SnapshotReleaseReason } from "./activity/s
 import type { StoredActivity } from "./activity/store.js";
 import { createAgentAuth } from "./agentApi/auth.js";
 import { MIN_LAUNCH_MS, type JobDetails, type JobOutcome, type JobRunOptions } from "./agents/adapter.js";
-import type { Ending } from "./agents/jobStop.js";
-import type { PromptActivity } from "./agents/prompt.js";
+import type { Ending } from "./agents/claudeCode/jobStop.js";
 import { emptyState } from "./capabilities/decisions.js";
 import type { CatalogResolution } from "./catalog/resolveCatalog.js";
 import type { DiagnosticFields, Diagnostics } from "./diagnostics.js";
@@ -80,7 +79,7 @@ const details = (extra: Partial<JobDetails> = {}): JobDetails => ({
 
 interface AgentCall {
   request: JobRequest;
-  options: JobRunOptions & { activity?: readonly PromptActivity[] };
+  options: JobRunOptions;
   answer(ending: Ending, extra?: Partial<JobDetails>): void;
 }
 
@@ -89,7 +88,7 @@ function fakeAgent() {
   const calls: AgentCall[] = [];
   let drainOk = false;
   const agent = {
-    run(request: JobRequest, options: JobRunOptions & { activity?: readonly PromptActivity[] }): Promise<JobOutcome> {
+    run(request: JobRequest, options: JobRunOptions): Promise<JobOutcome> {
       return new Promise((resolve) => {
         const identity = { requestId: request.requestId, coreInstanceId: request.coreInstanceId, visitEpoch: request.visitEpoch };
         const answer = (ending: Ending, extra: Partial<JobDetails> = {}): void => resolve({ result: { ...identity, ...ending } as HostJobResult, details: details(extra) });

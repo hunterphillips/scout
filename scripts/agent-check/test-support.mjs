@@ -1,7 +1,8 @@
 // Test-only: a temp world for the agent-check scripts. A temp HOME with an empty user
-// skills root, the scripted fake `claude` (packages/scout-core/src/agents/testing/
-// fake-claude.mjs) behind a wrapper, hermetic managed-settings paths, and a gateway-shaped
-// parent env carrying sentinel values that must never reach a report.
+// skills root, the scripted fake `claude`
+// (packages/scout-core/src/agents/claudeCode/testing/fake-claude.mjs) behind a wrapper,
+// hermetic managed-settings paths, and a gateway-shaped parent env carrying sentinel values
+// that must never reach a report.
 
 import { spawn } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
@@ -10,7 +11,7 @@ import { join } from "node:path";
 import { REPO_ROOT } from "../lib/paths.mjs";
 import { runAgentCheck } from "./run.mjs";
 
-const FAKE = join(REPO_ROOT, "packages", "scout-core", "src", "agents", "testing", "fake-claude.mjs");
+const FAKE = join(REPO_ROOT, "packages", "scout-core", "src", "agents", "claudeCode", "testing", "fake-claude.mjs");
 const HARNESS = join(REPO_ROOT, "scripts", "agent-check", "abort-harness.mjs");
 const FAST = { settleMs: 50, turnTimeoutMs: 20_000, killGraceMs: 500, cancelAfterInitMs: 300, registryRecheckMs: 50 };
 export const SENTINELS = ["SENTINEL-API-KEY-7f3a", "sentinel-gateway.example.invalid"];

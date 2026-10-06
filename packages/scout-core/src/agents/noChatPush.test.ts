@@ -8,7 +8,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { buildJobArgv } from "./claudeJob.js";
+import { buildJobArgv } from "./claudeCode/claudeJob.js";
 
 const SRC = fileURLToPath(new URL("..", import.meta.url));
 
@@ -27,7 +27,7 @@ describe("no chat-push path (B8/B9): the core only starts fresh one-shot jobs", 
     const files = readdirSync(SRC, { recursive: true, encoding: "utf8" }).filter(
       (f) => /\.(ts|mjs|js)$/.test(f) && !/\.test\.ts$/.test(f) && !f.includes("testing/") && !f.endsWith(".d.ts"),
     );
-    expect(files).toContain(join("agents", "claudeJob.ts"));
+    expect(files).toContain(join("agents", "claudeCode", "claudeJob.ts"));
     const quoted = new RegExp(`["'\`](${SESSION_FLAGS.map((f) => f.replace(/-/g, "\\-")).join("|")})["'\`]`);
     const channel = /\bWebSocket\b|from\s+["']ws["']|\.claude\/ide\b|CLAUDE_CODE_SSE_PORT/;
     for (const f of files) {

@@ -22,7 +22,7 @@ import { OwnedTree } from "./agents/processTree.js";
 const pkgDir = join(dirname(fileURLToPath(import.meta.url)), "..");
 const mainJs = join(pkgDir, "dist", "main.js");
 const cliJs = join(pkgDir, "dist", "cli.js");
-const fakeClaude = join(pkgDir, "src", "agents", "testing", "fake-claude.mjs");
+const fakeClaude = join(pkgDir, "src", "agents", "claudeCode", "testing", "fake-claude.mjs");
 
 // dist/ is built once by the global setup (test/global-setup.mjs). Never rebuild it from a
 // test file: other files run in parallel and spawn dist entrypoints, and one that loads a

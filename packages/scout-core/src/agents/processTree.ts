@@ -14,7 +14,7 @@
 //     process seen so far, so a core that was hard-killed mid-job can kill that tree on its next
 //     start (killRecordedTree) instead of leaving it spending quota.
 //
-// Track and clean up the process tree one spawned `claude` owns.
+// Track and clean up the process tree one spawned agent CLI owns.
 //
 // Lifted from the Phase 0 spike without changing its
 // invariants; only types were added. Only the caller's own tree is ever signalled: the

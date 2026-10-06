@@ -3,7 +3,8 @@ import { chmodSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { AgentProfileSchema, DEFAULT_AGENT_MODEL, loadAgentProfile, profileFingerprint, writeAgentProfile, type AgentProfile } from "./profile.js";
+import { DEFAULT_CLAUDE_CODE_MODEL } from "./claudeCode/profile.js";
+import { AgentProfileSchema, loadAgentProfile, profileFingerprint, writeAgentProfile, type AgentProfile } from "./profile.js";
 import { EMPTY_SCHEMA, LOOKUP_SCHEMA, selection } from "./testing/fakeBackend.js";
 import { BINDING_FILE_MAX_BYTES, BindingError, canonicalJson, isAllowedEnvName, MAX_LITERAL_ENV, MAX_LITERAL_ENV_CHARS, resolveEnvBindings, schemaHash, ToolsProfileSchema, type Connection, type ToolsProfile } from "./toolProfile.js";
 
@@ -27,7 +28,7 @@ const conn = (patch: Partial<Connection> = {}): Connection => ({
   ...patch,
 });
 const tools = (patch: Partial<ToolsProfile> = {}): ToolsProfile => ({ connections: [conn()], selections: [selection("notes", "lookup", true)], ...patch });
-const base: AgentProfile = { schemaVersion: 1, adapter: "claude-code", claudePath: "/opt/bin/claude", model: DEFAULT_AGENT_MODEL };
+const base: AgentProfile = { schemaVersion: 1, adapter: "claude-code", claudePath: "/opt/bin/claude", model: DEFAULT_CLAUDE_CODE_MODEL };
 
 describe("selected tools in the agent profile", () => {
   it("accepts a reviewed definition and selection, and stores bindings, not values", () => {

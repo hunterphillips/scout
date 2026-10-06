@@ -25,7 +25,7 @@
 
 import { JOB_MAX_PICKS, type Candidate, type HostJobResult, type JobRequest } from "@scout/contracts";
 import type { JobSnapshot } from "./activity/snapshots.js";
-import { MIN_LAUNCH_MS, type AgentJobAdapter, type JobDetails, type JobRunOptions } from "./agents/adapter.js";
+import { MIN_LAUNCH_MS, type AgentJobAdapter, type JobDetails } from "./agents/adapter.js";
 import type { PromptActivity } from "./agents/prompt.js";
 import { VERIFY_BUDGET_MS, type VerifyResult } from "./catalog/verifyTargets.js";
 import type { Clock } from "./clock.js";
@@ -57,10 +57,8 @@ export type JobRun =
   | { kind: "answer"; answer: JobAnswer; details: JobDetails | undefined; verifyAllFailed: boolean; verify?: VerifyCounts }
   | { kind: "discard"; stage: DiscardStage; why: string; details: JobDetails | undefined; verify?: VerifyCounts };
 
-/** The adapter as the pipeline calls it: the generic contract plus the prompt's activity. */
-export type JobAgent = Pick<AgentJobAdapter, "run"> & {
-  run(request: JobRequest, options: JobRunOptions & { activity?: readonly PromptActivity[] }): ReturnType<AgentJobAdapter["run"]>;
-};
+/** The part of the adapter a job calls. */
+export type JobAgent = Pick<AgentJobAdapter, "run">;
 
 /** The bounded target check. It must end promptly once `signal` aborts (the job was cancelled). */
 export type VerifyFn = (candidates: readonly Candidate[], options: { origin: string; budgetMs: number; clock: Clock; signal: AbortSignal }) => Promise<VerifyResult>;

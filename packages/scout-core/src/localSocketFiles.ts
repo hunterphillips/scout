@@ -143,7 +143,7 @@ export function ensurePrivateRunDir(dir: string, uid: number = process.getuid?.(
   if ((st.mode & 0o777) !== 0o700) throw new SocketServerError("runtime-dir-not-private");
 }
 
-/** The agent CLI's working directory under the run dir: the same for every job (agents/claudeJob.ts). */
+/** The agent CLI's working directory under the run dir: the same for every job. */
 export const AGENT_CWD_DIR = "agent-cwd";
 
 /**

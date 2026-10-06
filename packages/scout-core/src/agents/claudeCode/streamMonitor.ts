@@ -26,8 +26,8 @@
 //
 // Adapted from the removed personal-context package's event handler; isAuthOrQuota is verbatim.
 
-import type { Clock } from "../clock.js";
-import type { JobDetails, JobTermination } from "./adapter.js";
+import type { Clock } from "../../clock.js";
+import type { JobDetails, JobTermination } from "../adapter.js";
 import { checkInit, type ExpectedInit } from "./initCheck.js";
 import { SCOUT_SERVER_NAME, STRUCTURED_OUTPUT_TOOL } from "./jobSurface.js";
 import type { JobStop } from "./jobStop.js";

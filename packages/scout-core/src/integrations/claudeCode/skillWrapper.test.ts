@@ -3,8 +3,8 @@
 
 import { describe, expect, it } from "vitest";
 import { STATUS_EXPLANATIONS } from "@scout/scout-mcp/tools";
-import { wrapperName } from "./identity.js";
-import { parseWrapperFrontmatter, plainSiteText, renderSkillWrapper, SITE_DESCRIPTION_MAX, WRAPPER_DESCRIPTION_MAX, WrapperError, type WrapperInput } from "./wrapper.js";
+import { wrapperName } from "./skillIdentity.js";
+import { parseWrapperFrontmatter, plainSiteText, renderSkillWrapper, SITE_DESCRIPTION_MAX, WRAPPER_DESCRIPTION_MAX, WrapperError, type WrapperInput } from "./skillWrapper.js";
 
 const RID = `res_${"0123456789abcdef".repeat(4)}`;
 const VERSION = "ab".repeat(32);

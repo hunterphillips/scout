@@ -10,7 +10,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { analyzeTurn, classifyTurn2, classifyUse, listedSkillNames, proofServerState, readErrorCode } from "./classify.mjs";
 import { userSkillsRoot } from "./hotload.mjs";
 import { cleanupWorlds, makeWorld, SENTINELS, snapshotTree } from "./test-support.mjs";
-import { FOREIGN_SERVER, FOREIGN_SKILL } from "../../packages/scout-core/src/agents/testing/fake-claude-session.mjs";
+import { FOREIGN_SERVER, FOREIGN_SKILL } from "../../packages/scout-core/src/agents/claudeCode/testing/fake-claude-session.mjs";
 
 afterEach(cleanupWorlds);
 

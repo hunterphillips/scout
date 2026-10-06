@@ -26,13 +26,13 @@ import {
   CAPABILITY_ORIGINS_MAX,
   CAPABILITIES_FRAME_MAX_BYTES,
   LIBRARY_VERSIONS_MAX,
+  type CapabilityConflict,
   type CapabilityOffer,
   type LibraryEntry,
   type OriginSetting,
   type PanelCapabilities,
 } from "@scout/contracts";
 import type { StoreState } from "./capabilities/decisions.js";
-import type { ExportConflict } from "./capabilities/exports.js";
 import type { Timers } from "./clock.js";
 import { createDebounced } from "./debounced.js";
 import type { Diagnostics } from "./diagnostics.js";
@@ -42,7 +42,7 @@ export const CAPABILITIES_DEBOUNCE_MS = 100;
 
 export interface CapabilitiesInput {
   state: StoreState;
-  conflicts: readonly ExportConflict[];
+  conflicts: readonly CapabilityConflict[];
   isPermitted: (origin: string) => boolean;
   /** The current visit's origin, listed among the origin settings even with no resources. */
   currentOrigin: string | null;

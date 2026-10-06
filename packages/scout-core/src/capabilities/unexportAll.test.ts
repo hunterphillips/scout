@@ -8,8 +8,8 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { runCli } from "../cli.js";
 import type { Diagnostics } from "../diagnostics.js";
 import type { DiscoveryResult, ProbeItem } from "./discovery.js";
-import { createSkillExporter } from "./exports.js";
-import { wrapperName } from "./identity.js";
+import { createSkillExporter } from "../integrations/claudeCode/skillExporter.js";
+import { wrapperName } from "../integrations/claudeCode/skillIdentity.js";
 import { type CapabilityStore, createCapabilityStore } from "./store.js";
 
 const ORIGIN = "https://s.example";

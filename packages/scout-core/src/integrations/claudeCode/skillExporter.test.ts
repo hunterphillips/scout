@@ -3,11 +3,11 @@ import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSyn
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import type { DiscoveryResult, ProbeItem } from "./discovery.js";
-import { createSkillExporter, ExportError, resolveSkillsRoot, type SkillExporter } from "./exports.js";
-import { wrapperName } from "./identity.js";
-import { type CapabilityStore, createCapabilityStore } from "./store.js";
-import { parseWrapperFrontmatter } from "./wrapper.js";
+import type { DiscoveryResult, ProbeItem } from "../../capabilities/discovery.js";
+import { createSkillExporter, ExportError, resolveSkillsRoot, type SkillExporter } from "./skillExporter.js";
+import { wrapperName } from "./skillIdentity.js";
+import { type CapabilityStore, createCapabilityStore } from "../../capabilities/store.js";
+import { parseWrapperFrontmatter } from "./skillWrapper.js";
 
 const ORIGIN = "https://s.example";
 const sha = (s: string) => createHash("sha256").update(s, "utf8").digest("hex");

@@ -171,7 +171,7 @@ export const LibraryEntrySchema = z.object({
   resourceRevision: Revision,
 });
 
-/** A skill wrapper the exporter left alone (see scout-core capabilities/exports.ts). */
+/** A skill wrapper the exporter left alone (see the scout-core skill exporter). */
 export const CapabilityConflictSchema = z.object({
   name: z.string(),
   resourceId: ResourceIdSchema,

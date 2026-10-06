@@ -51,7 +51,8 @@ import { scoutHome } from "../diagnostics.js";
 import { commandDrift, inspectBackend, INSPECT_DEFAULT_LIMITS, loadBackendDefinition, SECRET_NAME_RE, type BackendDefinition, type CommandDrift, type InspectLimits, type InspectOutcome } from "./backendDefinition.js";
 import { selectedToolDropReason, type BridgeDropCode } from "./contextToolBridge.js";
 import { BINDING_STATUS_TEXT, checkEnvBindings, resolveBackendEnv, type BindingStatus } from "./environmentBindings.js";
-import { AGENT_PROFILE_LOCK_FILE, AgentProfileError, createDefaultAgentProfile, loadAgentProfile, PROFILE_MAX_BYTES, writeAgentProfile, type AgentProfile } from "./profile.js";
+import { AGENT_PROFILE_LOCK_FILE, AgentProfileError, loadAgentProfile, PROFILE_MAX_BYTES, writeAgentProfile, type AgentProfile } from "./profile.js";
+import { createDefaultAgentProfile } from "./registry.js";
 import { canonicalJson, MAX_CONNECTIONS, MAX_INSPECTED_TOOLS, MAX_SELECTIONS, type Connection, type ToolSelection, type ToolsProfile } from "./toolProfile.js";
 
 /**
@@ -244,7 +245,7 @@ async function reviewAndInspect(ctx: Ctx, file: string, allowStart: boolean, ref
       try {
         profile = createDefaultAgentProfile(ctx.io.env ?? process.env);
       } catch (e) {
-        return ctx.fail(e instanceof AgentProfileError ? `${e.code}: the agent profile needs the claude CLI; install it or put it on PATH` : "profile: could not be created");
+        return ctx.fail(e instanceof AgentProfileError ? `${e.code}: the agent profile needs it; install it or put it on PATH` : "profile: could not be created");
       }
     }
     const tools: ToolsProfile = profile.tools ?? { connections: [], selections: [] };

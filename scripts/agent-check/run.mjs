@@ -124,7 +124,7 @@ export async function runAgentCheck(argv, io = {}) {
     mods = {
       fixtures: await import("./fixtures.mjs"),
       report: await import("./report.mjs"),
-      preflight: await import("../../packages/scout-core/dist/agents/authPreflight.js"),
+      preflight: await import("../../packages/scout-core/dist/agents/claudeCode/authPreflight.js"),
     };
   } catch {
     err("verify:agent: built packages not found; run `npm run build` first");
