@@ -352,7 +352,7 @@ Run from `scout/`:
   and script tests minus `*.mac.test.*`; `npm run test:mac` (macOS): only the
   `*.mac.test.*` files (anything needing `codesign`/`plutil`/`launchctl`) plus `test:swift`.
   CI (`.github/workflows/ci.yml`): job `node` on ubuntu runs `test:node`; job `mac` on
-  macos-15 runs `test:mac`, `test:e2e` and the side-panel e2e in Chrome for Testing
+  macos-15 runs `npm test`, `test:e2e` and the side-panel e2e in Chrome for Testing
 - `npm run test:e2e` (after a build); `npm run test:all` builds then runs both
 - `npm run setup [--dry-run] [--scout-root <dir>] [--agent-integration] [--login-launch [--app <Scout.app>]]`,
   `npm run doctor [-- --verbose]`, `npm run uninstall [--yes] [--include-key] [--dry-run]`

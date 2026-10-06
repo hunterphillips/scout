@@ -37,10 +37,10 @@ Run from this directory (Node 22.12+, npm):
     npm run test:mac     # macOS: the *.mac.test.* files plus the Swift tests
     npm run test:e2e     # macOS: real native host against the real core (needs npm run build)
     npm run test:swift   # the Mac app's tests
-    npm run test:all     # build, then npm test and test:e2e
+    npm run test:all     # macOS: build, then npm test and test:e2e
 
 A test that needs macOS tools (`codesign`, `plutil`, `launchctl`) goes in a
-`*.mac.test.*` file. CI runs `test:node` on Ubuntu, and `test:mac`, `test:e2e` and the
+`*.mac.test.*` file. CI runs `test:node` on Ubuntu, and the full suite plus the Chrome
 side-panel e2e test on macOS.
 
 The side-panel e2e test drives the real panel in Chrome for Testing and is opt-in:
