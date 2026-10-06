@@ -13,6 +13,7 @@ import {
 } from "./profile.js";
 import { createDefaultAgentProfile } from "./registry.js";
 import { DEFAULT_CLAUDE_CODE_MODEL } from "./claudeCode/profile.js";
+import { createDefaultCodexProfile, DEFAULT_CODEX_MODEL } from "./codex/profile.js";
 
 const dirs: string[] = [];
 afterEach(() => {
@@ -95,5 +96,48 @@ describe("agent profile", () => {
     writeFileSync(agentProfilePath(h), JSON.stringify(profile));
     chmodSync(agentProfilePath(h), 0o644);
     expect(codeOf(() => loadAgentProfile(h))).toBe("profile: not a private regular file");
+  });
+});
+
+describe("agent profile: the Codex member", () => {
+  const codex: AgentProfile = { schemaVersion: 1, adapter: "codex", codexPath: "/opt/bin/codex", model: DEFAULT_CODEX_MODEL };
+
+  it("an existing Claude Code file still parses next to a Codex one", () => {
+    const h = home();
+    writeFileSync(agentProfilePath(h), JSON.stringify(profile), { mode: 0o600 });
+    expect(loadAgentProfile(h)).toEqual(profile);
+    writeAgentProfile(h, { ...codex, reasoningEffort: "medium" });
+    expect(loadAgentProfile(h)).toEqual({ ...codex, reasoningEffort: "medium" });
+  });
+
+  it("defaults to gpt-6-sol and the codex found on PATH", () => {
+    const h = home();
+    const bin = join(h, "bin");
+    mkdirSync(bin);
+    writeFileSync(join(bin, "codex"), "#!/bin/sh\n");
+    chmodSync(join(bin, "codex"), 0o755);
+    expect(createDefaultCodexProfile({ PATH: bin })).toEqual({ ...codex, codexPath: join(bin, "codex") });
+    expect(codeOf(() => createDefaultCodexProfile({ PATH: h }))).toBe("profile: codex not found on PATH");
+  });
+
+  it("fingerprints differ between the two adapters", () => {
+    expect(profileFingerprint(codex)).not.toBe(profileFingerprint(profile));
+    expect(profileFingerprint({ ...codex, reasoningEffort: "high" })).not.toBe(profileFingerprint(codex));
+  });
+
+  it.each<[string, unknown]>([
+    ["a relative codex path", { ...codex, codexPath: "codex" }],
+    ["a NUL in the codex path", { ...codex, codexPath: "/opt/bin/co\0dex" }],
+    ["a flag-shaped model", { ...codex, model: "--yolo" }],
+    ["an upper-case model", { ...codex, model: "GPT-6" }],
+    ["no model", { schemaVersion: 1, adapter: "codex", codexPath: "/opt/bin/codex" }],
+    ["an unknown reasoning effort", { ...codex, reasoningEffort: "max" }],
+    ["a Claude field on a Codex profile", { ...codex, claudePath: "/opt/bin/claude" }],
+    ["a Codex field on a Claude profile", { ...profile, codexPath: "/opt/bin/codex" }],
+    ["an unknown adapter", { ...codex, adapter: "other-agent" }],
+  ])("refuses %s", (_l, content) => {
+    const h = home();
+    writeFileSync(agentProfilePath(h), JSON.stringify(content), { mode: 0o600 });
+    expect(codeOf(() => loadAgentProfile(h))).toBe("profile: invalid");
   });
 });

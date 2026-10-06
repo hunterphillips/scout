@@ -64,6 +64,8 @@ export function createJobAdapter(profile: AgentProfile, deps: AdapterFactoryDeps
   switch (profile.adapter) {
     case "claude-code":
       return createClaudeJobAdapter({ ...rest, profile, ...(checks ? { preflightAsync: checks.claudeCode() } : {}) });
+    case "codex":
+      throw new Error("registry: the codex adapter is not built yet");
   }
 }
 
