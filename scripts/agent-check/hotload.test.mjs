@@ -660,7 +660,7 @@ describe("hotload: --two-session preflight", () => {
     const w = makeWorld("hotload-static");
     const r = await w.run(["--case", "hotload", "--authorize-real-root", "--two-session", "--max-inference", "3", "--acknowledge-budget"]);
     expect(r.report.preflight.beforeRestart).toMatchObject({ verdict: "subscription" });
-  });
+  }, 30_000); // two fake sessions; over 5 s on a slow Linux runner
 });
 
 describe("hotload: turn 2 classification against the init state", () => {
