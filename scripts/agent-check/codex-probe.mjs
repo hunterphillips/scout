@@ -409,7 +409,27 @@ export async function main(argv, deps = {}) {
     let result;
     try {
       writeFileSync(paths.tokenFile, `${token}\n`, { mode: 0o600, flag: "wx" });
-      writeFileSync(paths.schemaFile, `${JSON.stringify(JOB_AGENT_OUTPUT_JSON_SCHEMA, null, 2)}\n`, { mode: 0o600, flag: "wx" });
+      // OpenAI strict structured outputs: every property required, no pattern/min/max keywords.
+      // `{status:"empty", items:[]}` is the empty answer; the adapter drops the empty list before validation.
+      const strictSchema = {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          status: { type: "string", enum: ["ok", "empty"] },
+          items: {
+            type: "array",
+            items: {
+              type: "object",
+              additionalProperties: false,
+              properties: { id: { type: "string" }, reason: { type: "string" } },
+              required: ["id", "reason"],
+            },
+          },
+        },
+        required: ["status", "items"],
+      };
+      void JOB_AGENT_OUTPUT_JSON_SCHEMA;
+      writeFileSync(paths.schemaFile, `${JSON.stringify(strictSchema, null, 2)}\n`, { mode: 0o600, flag: "wx" });
       const prompt = buildProbePrompt();
       result = await runExec({ codex, execArgv, env: cEnv, cwd: paths.agentCwd, prompt, probeDir: paths.probeDir, timeoutMs, killGraceMs, abortSignal: deps.abortSignal });
       result.promptBytes = Buffer.byteLength(prompt);
