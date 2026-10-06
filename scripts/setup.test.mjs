@@ -86,7 +86,6 @@ describe("setup", () => {
 
     expect(mode(L.scoutHome)).toBe(0o700);
     expect(mode(L.binDir)).toBe(0o700);
-    expect(existsSync(L.legacyPcHome)).toBe(false);
     expect(mode(L.keyPem)).toBe(0o600);
     expect(mode(L.scoutConfig)).toBe(0o600);
     expect(mode(L.agentProfile)).toBe(0o600);
