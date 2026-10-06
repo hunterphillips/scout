@@ -165,7 +165,7 @@ export async function runBackground(caseName, o, deps) {
       ...(deps.killGraceMs ? { killGraceMs: deps.killGraceMs } : {}),
     });
     const pf = adapter.refreshPreflight();
-    preflight = { verdict: pf.verdict, reasons: [...pf.reasons], cliVersion: pf.cliVersion };
+    preflight = { verdict: pf.verdict, reasons: [...pf.reasons], cliVersion: pf.version };
     if (pf.verdict !== "subscription") {
       outcome = "preflight_failed";
       failures.push("preflight");

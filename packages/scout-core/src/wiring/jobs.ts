@@ -174,7 +174,7 @@ export function createJobWiring(o: JobWiringOptions): JobWiring {
   const retired = new Set<Promise<void>>();
   // Off the event loop; the first job waits for it. With no enabled host, the first job starts it.
   let destinations = o.destinations;
-  if (destinations.length > 0) void adapter?.refreshPreflightAsync();
+  if (destinations.length > 0) void adapter?.refreshReadiness();
 
   // The grant as the window was last told it.
   let shownGrant: boolean | null = null;
@@ -232,7 +232,7 @@ export function createJobWiring(o: JobWiringOptions): JobWiring {
       retired.add(p);
       void p.finally(() => retired.delete(p));
     }
-    if (adapter !== null && destinations.length > 0) void adapter.refreshPreflightAsync();
+    if (adapter !== null && destinations.length > 0) void adapter.refreshReadiness();
   };
 
   const sessions = new WeakMap<OriginFetchSession, CatalogParsers>();
@@ -283,7 +283,7 @@ export function createJobWiring(o: JobWiringOptions): JobWiring {
       const wasNone = destinations.length === 0;
       destinations = hosts;
       // The preflight first: a job the change starts at once shares this run instead of starting its own.
-      if (wasNone && hosts.length > 0) void adapter?.refreshPreflightAsync();
+      if (wasNone && hosts.length > 0) void adapter?.refreshReadiness();
       scheduler.onDestinationsChanged(hosts);
     },
     observePanel(state) {

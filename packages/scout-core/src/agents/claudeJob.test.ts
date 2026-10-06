@@ -337,7 +337,7 @@ describe("claude job: the init event and the stream stop a misconfigured job", (
     expect(out.details.cliVersionChanged).toBe(true);
     expect(out.details.cliVersion).toBe("2.1.299");
     expect(seen).toEqual(["2.1.299"]);
-    expect(e.adapter.preflight).toMatchObject({ verdict: "subscription", cliVersion: "2.1.299" });
+    expect(e.adapter.readiness).toMatchObject({ verdict: "subscription", version: "2.1.299" });
     const lines = diagLines(e);
     expect(lines.some((l) => l.event === "cli_version_changed" && l.cliVersion === "2.1.299")).toBe(true);
     expect(lines.find((l) => l.event === "agent_job")).toMatchObject({ cliVersionChanged: true });
@@ -382,21 +382,21 @@ describe("claude job: the init event and the stream stop a misconfigured job", (
     });
     const e = await setup({ mode: "ok", deps: { preflightAsync: facade } });
     // The core's start-up preflight, still running when the first job arrives.
-    void e.adapter.refreshPreflightAsync();
+    void e.adapter.refreshReadiness();
     const firstJob = e.adapter.run(request(e), { toolSurface: surface(e) });
     release();
     const first = await firstJob;
     expect(first.result).toMatchObject({ status: "error", reason: "preflight_failed" });
     expect(first.details.detail).toBe("unverified");
-    expect(e.adapter.preflight).toMatchObject({ verdict: "ambiguous" });
-    expect(e.adapter.preflight.cliVersion).toBeUndefined();
+    expect(e.adapter.readiness).toMatchObject({ ok: false, verdict: "ambiguous" });
+    expect(e.adapter.readiness.version).toBeUndefined();
     expect(e.spawnCalls).toBe(0);
     expect(runs).toBe(1);
 
     const second = await e.adapter.run(request(e, { requestId: "job-2" }), { toolSurface: surface(e) });
     expect(second.result).toMatchObject({ status: "ok" });
     expect(runs).toBe(2);
-    expect(e.adapter.preflight).toMatchObject({ verdict: "subscription", cliVersion: VERIFIED_CLI_VERSION });
+    expect(e.adapter.readiness).toMatchObject({ ok: true, verdict: "subscription", version: VERIFIED_CLI_VERSION });
     expect(diagLines(e).filter((l) => l.event === "agent_preflight_retry")).toHaveLength(1);
     // A cached subscription verdict: no further runs.
     expect((await e.adapter.run(request(e, { requestId: "job-3" }), { toolSurface: surface(e) })).result).toMatchObject({ status: "ok" });
@@ -414,8 +414,8 @@ describe("claude job: the init event and the stream stop a misconfigured job", (
         },
       },
     });
-    const refreshing = e.adapter.refreshPreflightAsync();
-    expect(e.adapter.refreshPreflightAsync()).toBe(refreshing);
+    const refreshing = e.adapter.refreshReadiness();
+    expect(e.adapter.refreshReadiness()).toBe(refreshing);
     const job = e.adapter.run(request(e), { toolSurface: surface(e) });
     await new Promise((r) => setTimeout(r, 30));
     expect(e.spawnCalls).toBe(0);
@@ -425,7 +425,7 @@ describe("claude job: the init event and the stream stop a misconfigured job", (
 
   it("a preflight still in flight at the deadline: preflight_failed (preflight_pending), never spawns; a cancel while waiting: cancelled", async () => {
     const e = await setup({ deps: { preflightAsync: () => new Promise(() => {}) } });
-    void e.adapter.refreshPreflightAsync();
+    void e.adapter.refreshReadiness();
     const timedOut = await e.adapter.run(request(e, { deadlineMs: 50 }), { toolSurface: surface(e) });
     expect(timedOut.result).toMatchObject({ status: "error", reason: "preflight_failed" });
     expect(timedOut.details.termination).toBe("preflight_failed");
@@ -686,12 +686,12 @@ describe("claude job: gates before launch", () => {
         throw new Error("must not spawn");
       },
     });
-    expect(fresh.preflight.verdict).toBe("unchecked");
+    expect(fresh.readiness.verdict).toBe("unchecked");
     const out = await fresh.run(request(e), { toolSurface: surface(e) });
     expect(out.result).toMatchObject({ status: "error", reason: "preflight_failed" });
     expect(out.details.detail).toBe("unverified");
     expect(runs).toBe(1);
-    expect(fresh.preflight).toMatchObject({ verdict: "ambiguous" });
+    expect(fresh.readiness).toMatchObject({ ok: false, verdict: "ambiguous" });
     // A verdict exists now (with a version): the next job reuses it.
     await fresh.run(request(e, { requestId: "job-2" }), { toolSurface: surface(e) });
     expect(runs).toBe(1);
@@ -708,8 +708,8 @@ describe("claude job: gates before launch", () => {
         },
       },
     });
-    await e.adapter.refreshPreflightAsync();
-    expect(e.adapter.preflight.cliVersion).toBeUndefined();
+    await e.adapter.refreshReadiness();
+    expect(e.adapter.readiness.version).toBeUndefined();
     const out = await e.adapter.run(request(e, { deadlineMs: 80 }), { toolSurface: surface(e) });
     expect(runs).toBe(2);
     expect(out.result).toMatchObject({ status: "error", reason: "preflight_failed" });

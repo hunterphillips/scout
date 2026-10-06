@@ -36,8 +36,8 @@
 // still tracked by ps and signalled on its own, and with `processTracker` the core's shutdown
 // waits for any the reap left behind.
 //
-// Billing gate: refreshPreflight() runs the direct preflight (blocking; the dev CLI and the
-// compatibility checks use it) and refreshPreflightAsync() runs it through `preflightAsync`
+// Billing gate (the adapter's readiness): refreshPreflight() runs the direct preflight (blocking;
+// the dev CLI and the compatibility checks use it) and refreshReadiness() runs it through `preflightAsync`
 // (the core passes preflightWorker.ts's child-process facade, so its event loop never blocks);
 // either caches the verdict with the CLI version it saw. An adapter is bound to one profile
 // (an edited profile means a new adapter and a new preflight). A job waits for a refresh in
@@ -75,7 +75,7 @@ import { isAbsolute, join } from "node:path";
 import { AgentTokenSchema, JOB_AGENT_OUTPUT_JSON_SCHEMA, JobRequestSchema, type HostJobResult, type JobRequest } from "@scout/contracts";
 import { systemClock, type Clock } from "../clock.js";
 import type { Diagnostics } from "../diagnostics.js";
-import { hashRequestId, MIN_LAUNCH_MS, toCancelReason, type AgentJobAdapter, type JobDetails, type JobOutcome, type JobRunOptions, type JobTermination } from "./adapter.js";
+import { hashRequestId, MIN_LAUNCH_MS, toCancelReason, type AgentJobAdapter, type AgentReadiness, type JobDetails, type JobOutcome, type JobRunOptions, type JobTermination } from "./adapter.js";
 import { managedPathsFor, type Env, type ManagedPaths, type Verdict } from "./authPreflight.js";
 import type { BridgeJob } from "./contextToolBridge.js";
 import { startChild, type SnapshotFn, type SpawnFn, type SupervisedChild } from "./childSupervisor.js";
@@ -86,7 +86,7 @@ import { createJsonLineStream } from "./jsonLineStream.js";
 import { createLaunchProfile, LaunchProfileError, runDirectPreflight, type DirectPreflightOptions, type LaunchProfile } from "./launchProfile.js";
 import { mapOutcome, recordUsage } from "./mapOutcome.js";
 import { MODEL_RE, profileFingerprint, type AgentProfile } from "./profile.js";
-import { buildJobInstructions, buildJobPrompt, type PromptActivity } from "./prompt.js";
+import { buildJobInstructions, buildJobPrompt } from "./prompt.js";
 import { JOB_TREE_FILE, type JobTreeRecord, type ProcessTracker } from "./processTree.js";
 import { createStreamMonitor } from "./streamMonitor.js";
 import { ensureAgentCwd } from "../localSocketFiles.js";
@@ -186,12 +186,9 @@ export type AsyncPreflightFn = (
   knownCliVersion?: string,
 ) => Promise<{ verdict: Verdict; reasons: readonly string[]; cliVersion?: string }>;
 
-export interface PreflightState {
-  verdict: Verdict | "unchecked";
-  /** Fixed reason codes with local paths removed. */
-  reasons: readonly string[];
-  cliVersion?: string;
-  at?: number;
+/** The billing preflight's verdict as readiness: `ok` only for `subscription`; `version` is the CLI version it saw. */
+export interface PreflightReadiness extends AgentReadiness {
+  readonly verdict: Verdict | "unchecked";
 }
 
 export interface ClaudeJobDeps {
@@ -215,7 +212,7 @@ export interface ClaudeJobDeps {
   diagnostics?: Diagnostics;
   spawn?: SpawnFn;
   preflight?: PreflightFn;
-  /** The off-thread preflight refreshPreflightAsync uses. Defaults to `preflight` (which blocks). */
+  /** The off-thread preflight refreshReadiness uses. Defaults to `preflight` (which blocks). */
   preflightAsync?: AsyncPreflightFn;
   /** Test seam for the ps query (default: psSnapshotAsync). */
   psSnapshot?: SnapshotFn;
@@ -231,20 +228,14 @@ export interface ClaudeJobDeps {
 export interface ClaudeJobRunOptions extends JobRunOptions {
   /** Compatibility checks only: the marker a user-level instructions file defines. */
   instructionMarker?: string;
-  /** The job snapshot's activity entries, for the prompt's untrusted block (prompt.ts). */
-  activity?: readonly PromptActivity[];
 }
 
 export interface ClaudeJobAdapter extends AgentJobAdapter {
   /** Blocking (spawnSync, up to minutes): only when the profile is loaded or edited, never in the core. */
-  refreshPreflight(): PreflightState;
-  /**
-   * The same through `preflightAsync`, off the caller's event loop. One at a time: a call while
-   * one is in flight returns that one. A job waits for it.
-   */
-  refreshPreflightAsync(knownCliVersion?: string): Promise<PreflightState>;
-  readonly preflight: PreflightState;
-  readonly profileFingerprint: string;
+  refreshPreflight(): PreflightReadiness;
+  /** The same through `preflightAsync`, off the caller's event loop. A job waits for one in flight. */
+  refreshReadiness(knownCliVersion?: string): Promise<PreflightReadiness>;
+  readonly readiness: PreflightReadiness;
   /** Whether a job is running. */
   readonly active: boolean;
   run(request: JobRequest, options: ClaudeJobRunOptions): Promise<JobOutcome>;
@@ -331,13 +322,13 @@ export function createClaudeJobAdapter(deps: ClaudeJobDeps): ClaudeJobAdapter {
   }
   const profile = deps.profile;
   const fingerprint = profileFingerprint(profile);
-  let preflight: PreflightState = { verdict: "unchecked", reasons: [] };
+  let preflight: PreflightReadiness = Object.freeze({ ok: false, verdict: "unchecked", reasons: [] });
   let current: { stop: JobStop; done: Promise<unknown> } | undefined;
   /** Set by abortAll: the adapter runs no further jobs. */
   let closed = false;
 
-  /** In flight from refreshPreflightAsync; jobs wait for it. */
-  let refreshing: Promise<PreflightState> | undefined;
+  /** In flight from refreshReadiness; jobs wait for it. */
+  let refreshing: Promise<PreflightReadiness> | undefined;
   /** The last verdict could not read the CLI version and was not subscription: the next job re-runs the preflight. */
   let retryPreflight = false;
 
@@ -348,20 +339,22 @@ export function createClaudeJobAdapter(deps: ClaudeJobDeps): ClaudeJobAdapter {
   };
 
   /** Cache a preflight report (or a failure to get one) as the adapter's verdict. */
-  function settlePreflight(r: { verdict: Verdict; reasons: readonly string[]; cliVersion?: string } | undefined): PreflightState {
-    let next: PreflightState = { verdict: "ambiguous", reasons: ["internal: preflight failed unexpectedly"] };
-    if (r !== undefined) {
-      next = { verdict: r.verdict === "subscription" ? "subscription" : "ambiguous", reasons: Object.freeze(r.reasons.map(redactReason)) };
-      if (r.cliVersion !== undefined) next.cliVersion = r.cliVersion;
-    }
-    next.at = (deps.clock ?? systemClock).now();
-    preflight = Object.freeze(next);
-    retryPreflight = preflight.verdict !== "subscription" && preflight.cliVersion === undefined;
-    deps.diagnostics?.event("agent_preflight", { verdict: preflight.verdict, reasons: preflight.reasons.length, ...(preflight.cliVersion ? { cliVersion: preflight.cliVersion } : {}) });
+  function settlePreflight(r: { verdict: Verdict; reasons: readonly string[]; cliVersion?: string } | undefined): PreflightReadiness {
+    const verdict = r?.verdict === "subscription" ? "subscription" : "ambiguous";
+    const reasons = r === undefined ? ["internal: preflight failed unexpectedly"] : r.reasons.map(redactReason);
+    preflight = Object.freeze({
+      ok: verdict === "subscription",
+      verdict,
+      reasons: Object.freeze(reasons),
+      ...(r?.cliVersion !== undefined ? { version: r.cliVersion } : {}),
+      at: (deps.clock ?? systemClock).now(),
+    });
+    retryPreflight = !preflight.ok && preflight.version === undefined;
+    deps.diagnostics?.event("agent_preflight", { verdict: preflight.verdict, reasons: preflight.reasons.length, ...(preflight.version ? { cliVersion: preflight.version } : {}) });
     return preflight;
   }
 
-  function refreshPreflight(): PreflightState {
+  function refreshPreflight(): PreflightReadiness {
     let r: ReturnType<PreflightFn> | undefined;
     try {
       r = preflightFn(preflightInput());
@@ -371,7 +364,7 @@ export function createClaudeJobAdapter(deps: ClaudeJobDeps): ClaudeJobAdapter {
     return settlePreflight(r);
   }
 
-  function refreshPreflightAsync(knownCliVersion?: string): Promise<PreflightState> {
+  function refreshReadiness(knownCliVersion?: string): Promise<PreflightReadiness> {
     if (refreshing) return refreshing;
     const fn: AsyncPreflightFn = deps.preflightAsync ?? (async (o) => preflightFn(o));
     const p = (async () => {
@@ -443,10 +436,10 @@ export function createClaudeJobAdapter(deps: ClaudeJobDeps): ClaudeJobAdapter {
       // The last preflight could not read the CLI version: this job runs one fresh one and waits for it.
       retryPreflight = false;
       deps.diagnostics?.event("agent_preflight_retry", {});
-      void refreshPreflightAsync();
+      void refreshReadiness();
     } else if (!refreshing && preflight.verdict === "unchecked") {
       // No preflight has run yet (the core starts none while no host is enabled): this job starts it.
-      void refreshPreflightAsync();
+      void refreshReadiness();
     }
     if (refreshing) {
       // A preflight is in flight (the core's start, or a CLI update another job saw): wait for its verdict.
@@ -458,7 +451,7 @@ export function createClaudeJobAdapter(deps: ClaudeJobDeps): ClaudeJobAdapter {
       if (closed) return finish({ status: "unavailable", reason: "agent_unavailable" }, "agent_unavailable", "closed");
       if (current) return finish({ status: "unavailable", reason: "busy" }, "busy");
     }
-    if (preflight.verdict !== "subscription") return finish({ status: "error", reason: "preflight_failed" }, "preflight_failed", "unverified");
+    if (!preflight.ok) return finish({ status: "error", reason: "preflight_failed" }, "preflight_failed", "unverified");
     if (req.profileFingerprint !== fingerprint) return finish({ status: "error", reason: "unsupported_configuration" }, "unsupported_configuration", "profile_mismatch");
     const scout = options.toolSurface.scout;
     if (!isAbsolute(scout.socketPath) || scout.socketPath.includes("\0") || !AgentTokenSchema.safeParse(scout.token).success) {
@@ -495,7 +488,7 @@ export function createClaudeJobAdapter(deps: ClaudeJobDeps): ClaudeJobAdapter {
       if (signal?.aborted) return { result: { status: "cancelled", reason: toCancelReason(signal.reason) }, termination: "cancelled" };
       return { result: { status: "error", reason: "timeout" }, termination: "timeout", detail: "cli_version_changed" };
     }
-    if (settled.verdict !== "subscription") return { result: { status: "error", reason: "preflight_failed" }, termination: "preflight_failed", detail: "cli_version_changed" };
+    if (!settled.ok) return { result: { status: "error", reason: "preflight_failed" }, termination: "preflight_failed", detail: "cli_version_changed" };
     return out;
   }
 
@@ -546,7 +539,7 @@ export function createClaudeJobAdapter(deps: ClaudeJobDeps): ClaudeJobAdapter {
         return { result: { status: "error", reason: "agent_failed" }, termination: "process_error", detail: "setup_failed" };
       }
       const expected: ExpectedInit = { servers: surface.expected, model: profile.model };
-      if (preflight.cliVersion !== undefined) expected.cliVersion = preflight.cliVersion;
+      if (preflight.version !== undefined) expected.cliVersion = preflight.version;
       const promptOpts: Parameters<typeof buildJobPrompt>[1] = { instructionMarkerProbe: options.instructionMarker !== undefined };
       if (options.activity !== undefined) promptOpts.activity = options.activity;
       const nonce = deps.nonce?.();
@@ -609,7 +602,7 @@ export function createClaudeJobAdapter(deps: ClaudeJobDeps): ClaudeJobAdapter {
         startedAt,
         onCliVersionChanged: (version) => {
           deps.diagnostics?.event("cli_version_changed", { ...(version !== undefined && /^[0-9][0-9A-Za-z.+-]{0,31}$/.test(version) ? { cliVersion: version } : {}) });
-          void refreshPreflightAsync(version);
+          void refreshReadiness(version);
         },
       });
       const stream = createJsonLineStream({
@@ -689,8 +682,8 @@ export function createClaudeJobAdapter(deps: ClaudeJobDeps): ClaudeJobAdapter {
   return {
     id: "claude-code",
     refreshPreflight,
-    refreshPreflightAsync,
-    get preflight() {
+    refreshReadiness,
+    get readiness() {
       return preflight;
     },
     profileFingerprint: fingerprint,

@@ -9,6 +9,7 @@
 import { createHash } from "node:crypto";
 import { JOB_CANCELLED_REASONS, type HostJobResult, type JobRequest } from "@scout/contracts";
 import type { Clock } from "../clock.js";
+import type { PromptActivity } from "./prompt.js";
 
 /**
  * What the job gets from Scout: the core's agent socket and this job's token. The user's
@@ -25,6 +26,8 @@ export interface JobRunOptions {
   /** Absolute deadline on `clock`. The job also never runs past `request.deadlineMs`. */
   deadline?: number;
   clock?: Clock;
+  /** The job snapshot's activity entries, for the prompt's untrusted block (prompt.ts). */
+  activity?: readonly PromptActivity[];
 }
 
 /**
@@ -109,8 +112,31 @@ export interface JobOutcome {
   details: JobDetails;
 }
 
+/** Whether the adapter may run inference now, as its last readiness check found. */
+export interface AgentReadiness {
+  /** Inference may run. */
+  readonly ok: boolean;
+  /** Adapter-defined code, e.g. `subscription` or `unchecked`. */
+  readonly verdict: string;
+  /** Fixed reason codes, without local paths. */
+  readonly reasons: readonly string[];
+  /** The agent's own version string, as the check saw it (advisory). */
+  readonly version?: string;
+  /** When the check settled, on the adapter's clock. */
+  readonly at?: number;
+}
+
 export interface AgentJobAdapter {
   readonly id: string;
+  /** The fingerprint of the profile this adapter was built from; job requests carry it. */
+  readonly profileFingerprint: string;
+  /** The last readiness check's result (`ok: false` before the first one settles). */
+  readonly readiness: AgentReadiness;
+  /**
+   * Re-check readiness off the caller's event loop. One at a time: a call while one is in flight
+   * returns that one. `knownVersion`, when given, is an agent version a job reported.
+   */
+  refreshReadiness(knownVersion?: string): Promise<AgentReadiness>;
   run(request: JobRequest, options: JobRunOptions): Promise<JobOutcome>;
   /** Close the adapter: cancel every running job (reason `shutdown`) and wait for cleanup. A later `run` is `unavailable`. */
   abortAll(): Promise<void>;
