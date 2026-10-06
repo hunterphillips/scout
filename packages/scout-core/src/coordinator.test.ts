@@ -252,7 +252,7 @@ describe("coordinator", () => {
     const state = panel.at(-1);
     expect(state).toEqual({ type: "state", status: "idle", visitEpoch: coordinator.tracker.epoch, detail: "docs.stripe.com", permitted: true });
     expect(JSON.stringify(state)).not.toContain("payments");
-    coordinator.handleNativeCommand({ type: "frontmost", bundleId: "com.apple.Terminal", at: 1 }, STDIO);
+    c.observe(focus({ tabId: 11, url: "https://example.com/" }));
     expect(panel.at(-1)).toEqual({ type: "state", status: "idle", visitEpoch: coordinator.tracker.epoch, permitted: false });
     expect(panel.at(-1)).not.toHaveProperty("detail");
   });
@@ -272,6 +272,21 @@ describe("coordinator", () => {
     expect(coordinator.agentView().paused).toBe(true);
     c.observe(focus({ url: "https://example.com/" }));
     expect(coordinator.agentView().currentSite).toBeNull();
+  });
+
+  it("agentView hides the visit while another app is in front; shownVisit keeps it", () => {
+    const { coordinator, focus, chrome, connect } = setup();
+    const c = connect();
+    chrome();
+    c.observe(focus());
+    const visit = coordinator.tracker.current();
+    coordinator.handleNativeCommand({ type: "frontmost", bundleId: "com.apple.Terminal", at: 1 }, STDIO);
+    expect(coordinator.agentView()).toEqual({ currentSite: null, paused: false, recommendationsEnabled: false });
+    expect(coordinator.shownVisit()).toBe(visit);
+    chrome();
+    expect(coordinator.agentView().currentSite).toMatchObject({ visitEpoch: visit!.epoch });
+    coordinator.handleNativeCommand({ type: "pause" }, STDIO);
+    expect(coordinator.shownVisit()).toBeNull();
   });
 
   it("a permitted focus while Chrome is frontmost emits idle with the new epoch; a repeat emits nothing", () => {
@@ -308,9 +323,26 @@ describe("coordinator", () => {
     const c = connect();
     chrome();
     c.observe(focus());
-    coordinator.handleNativeCommand({ type: "frontmost", bundleId: "com.apple.Terminal", at: 1 }, STDIO);
+    c.observe(focus({ tabId: 11, url: "https://example.com/" }));
     expect(coordinator.tracker.current()).toBeNull();
     expect(panel.at(-1)).toEqual({ type: "state", status: "idle", visitEpoch: coordinator.tracker.epoch, permitted: false });
+  });
+
+  it("another app in front and back on the same page sends no state frame and keeps the epoch", () => {
+    const { coordinator, panel, focus, chrome, connect } = setup();
+    const c = connect();
+    chrome();
+    c.observe(focus());
+    const epoch = coordinator.tracker.epoch;
+    const before = panel.length;
+    coordinator.handleNativeCommand({ type: "frontmost", bundleId: "com.apple.Terminal", at: 1 }, STDIO);
+    c.observe({ kind: "focus", seq: 99, at: 1, browserFocused: false, windowId: -1 });
+    expect(coordinator.tracker.away).toBe(true);
+    chrome();
+    c.observe(focus());
+    expect(coordinator.tracker.away).toBe(false);
+    expect(coordinator.tracker.epoch).toBe(epoch);
+    expect(panel.length).toBe(before);
   });
 
   it("page_text from the focused tab is accepted into the activity store and acked to the host", () => {
@@ -700,7 +732,8 @@ describe("coordinator dwell and discovery", () => {
   it.each<[string, (s: ReturnType<typeof visiting>) => void, string]>([
     ["pause", (s) => s.coordinator.handleNativeCommand({ type: "pause" }, STDIO), "paused"],
     ["navigation", (s) => s.c.observe(s.focus({ url: "https://docs.stripe.com/billing" })), "visit_changed"],
-    ["Chrome losing the foreground", (s) => s.coordinator.handleNativeCommand({ type: "frontmost", bundleId: "com.apple.Terminal", at: 1 }, STDIO), "visit_ended"],
+    ["the visit ending (an unpermitted page)", (s) => s.c.observe(s.focus({ tabId: 11, url: "https://example.com/" })), "visit_ended"],
+    ["another app in front", (s) => s.coordinator.handleNativeCommand({ type: "frontmost", bundleId: "com.apple.Terminal", at: 1 }, STDIO), "visit_suspended"],
     ["permission loss", (s) => s.grant(s.c, ["https://github.com/*"]), "permission_lost"],
     ["disconnect", (s) => s.c.disconnect(), "disconnected"],
     ["shutdown", (s) => s.coordinator.stop(), "stopped"],
@@ -719,6 +752,47 @@ describe("coordinator dwell and discovery", () => {
       s.advance(DWELL_MS);
       expect(s.passes).toHaveLength(1);
     }
+  });
+
+  it("another app in front before the settle: no pass while away, a full dwell on the return", () => {
+    const s = visiting();
+    s.advance(DWELL_MS - 1);
+    s.coordinator.handleNativeCommand({ type: "frontmost", bundleId: "com.apple.Terminal", at: 1 }, STDIO);
+    s.advance(DWELL_MS * 3);
+    expect(s.passes).toHaveLength(0);
+    s.chrome();
+    s.advance(DWELL_MS - 1);
+    expect(s.passes).toHaveLength(0);
+    s.advance(1);
+    expect(s.passes).toHaveLength(1);
+    expect(s.events.filter((e) => e.name === "dwell_settled")).toHaveLength(1);
+  });
+
+  it("another app in front after the settle: the pass carries on and ingests; the return arms no second dwell", async () => {
+    const s = visiting();
+    s.advance(DWELL_MS);
+    expect(s.passes).toHaveLength(1);
+    s.coordinator.handleNativeCommand({ type: "frontmost", bundleId: "com.apple.Terminal", at: 1 }, STDIO);
+    s.passes[0]!.discover.resolve(discoveryFor("https://docs.stripe.com"));
+    await flush();
+    expect(s.ingests).toEqual([{ origin: "https://docs.stripe.com", chromePermitted: true }]);
+    expect(s.sessions[0]!.cancels).toBe(0);
+    s.chrome();
+    s.advance(DWELL_MS * 3);
+    expect(s.passes).toHaveLength(1);
+    expect(s.events.some((e) => e.name === "dwell_cancelled" || e.name === "discovery_discarded")).toBe(false);
+  });
+
+  it("resume while another app is in front waits for the return to start the dwell", () => {
+    const s = visiting();
+    s.coordinator.handleNativeCommand({ type: "pause" }, STDIO);
+    s.coordinator.handleNativeCommand({ type: "frontmost", bundleId: "com.apple.Terminal", at: 1 }, STDIO);
+    s.coordinator.handleNativeCommand({ type: "resume" }, STDIO);
+    s.advance(DWELL_MS * 2);
+    expect(s.passes).toHaveLength(0);
+    s.chrome();
+    s.advance(DWELL_MS);
+    expect(s.passes).toHaveLength(1);
   });
 
   it("resume starts a fresh dwell for the visit tracked while paused", () => {
@@ -901,7 +975,7 @@ describe("coordinator dwell and discovery", () => {
     s.advance(DWELL_MS);
     s.c.observe(s.focus({ url: "https://www.peakdesign.com/a" }));
     s.advance(DWELL_MS);
-    s.coordinator.handleNativeCommand({ type: "frontmost", bundleId: "com.apple.Terminal", at: 1 }, STDIO);
+    s.c.observe(s.focus({ tabId: 11, url: "https://example.com/" }));
     for (const p of s.passes) p.discover.resolve(discoveryFor(p.origin));
     await flush();
     s.advance(DWELL_MS * 3);
@@ -1404,7 +1478,7 @@ describe("coordinator: recommendation job hooks", () => {
     expect(s.calls.filter((c) => c[0] === "onActivityAccepted")).toHaveLength(1);
   });
 
-  it("Chrome leaving the foreground while a job runs reaches onVisitChanged, and the real scheduler cancels the job visit_changed", async () => {
+  it("another app in front while a job runs leaves it running; a navigation before the return cancels it visit_changed", async () => {
     const caps = fakeCapabilities();
     const candidate = { id: "c0", sourceUrl: "https://docs.stripe.com/a", title: "A", labelQuality: "published", provenance: "llms.txt" };
     caps.capabilities.resolveCatalog = async () => {
@@ -1465,7 +1539,7 @@ describe("coordinator: recommendation job hooks", () => {
       results: { beginJob: () => ({ ok: true }), publish: () => ({ ok: true }) } as never,
       snapshots: () => snapshots as never,
       view: {
-        visit: () => (s.coordinator.stopped || s.coordinator.agentView().paused ? null : s.coordinator.tracker.current()),
+        visit: () => s.coordinator.shownVisit(),
         permissionsRevision: () => s.coordinator.permissions.revision,
         isPermitted: (origin) => s.coordinator.permissions.isPermitted(origin),
         captureAllowed: () => s.coordinator.captureAllowed(),
@@ -1492,6 +1566,15 @@ describe("coordinator: recommendation job hooks", () => {
     forwarded.length = 0; // the visit's own start
 
     s.coordinator.handleNativeCommand({ type: "frontmost", bundleId: "com.apple.Terminal", at: s.clock.t }, STDIO);
+    c.observe({ kind: "focus", seq: 99, at: s.clock.t, browserFocused: false, windowId: -1 });
+    expect(forwarded).toEqual([]);
+    expect(signals[0]!.aborted).toBe(false);
+    expect(scheduler.running).toMatchObject({ jobId: "job-1" });
+    expect(s.panel.at(-1)).toMatchObject({ status: "working", jobId: "job-1" });
+
+    // Back in Chrome on another page of the site: the old visit ends.
+    s.chrome();
+    c.observe(s.focus({ url: "https://docs.stripe.com/billing" }));
     expect(forwarded).toEqual(["onVisitChanged"]);
     expect(signals[0]!.aborted).toBe(true);
     expect(signals[0]!.reason).toBe("visit_changed");

@@ -173,9 +173,7 @@ describe("job wiring: process ownership and the agent profile", () => {
       snapshots: () => null,
       coordinator: () =>
         ({
-          stopped: false,
-          agentView: () => ({ paused: false }),
-          tracker: { current: () => visit },
+          shownVisit: () => visit,
           permissions: { revision: 0, isPermitted: () => true },
           captureAllowed: () => true,
           showWorking: () => {},

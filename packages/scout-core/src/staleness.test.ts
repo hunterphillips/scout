@@ -1,5 +1,8 @@
 // Switching tab, document, or app during discovery, model execution, target checks, and click
-// authorization. Old results and links are refused at every stage.
+// authorization. A tab or document switch refuses the old results and links at every stage. An
+// app switch keeps them: the page is still the one focused in Chrome, the job carries on and
+// publishes, and the return to the same page changes nothing; a navigation made before the
+// return ends the visit like any other.
 //
 // Wired as main.ts wires the core: the real coordinator (dwell, visit tracker, permissions,
 // discovery runner), the real job scheduler and pipeline, the real result registry, the real
@@ -146,10 +149,8 @@ function core() {
   // eslint-disable-next-line prefer-const
   let coordinator: ReturnType<typeof createCoordinator>;
   const activeVisit = () => {
-    if (coordinator.stopped) return null;
-    const view = coordinator.agentView();
-    if (view.paused || view.currentSite === null) return null;
-    return { visitEpoch: view.currentSite.visitEpoch, origin: view.currentSite.origin };
+    const visit = coordinator.shownVisit();
+    return visit === null ? null : { visitEpoch: visit.epoch, origin: visit.origin };
   };
   const results = createResultRegistry({ coreInstanceId: CORE, activeVisit, isPermitted: (o) => coordinator.permissions.isPermitted(o), diagnostics });
   const panel = createPanelChannel({
@@ -160,7 +161,7 @@ function core() {
     writeBrowserContextGrant: () => ({ restore: () => {} }),
     getAudit: () => [],
     isPermitted: (o) => coordinator.permissions.isPermitted(o),
-    currentOrigin: () => coordinator.agentView().currentSite?.origin ?? null,
+    currentOrigin: () => coordinator.shownVisit()?.origin ?? null,
     emit: (f) => void frames.push(f),
     results,
     resendState: () => coordinator.resendState(),
@@ -184,7 +185,7 @@ function core() {
     results,
     snapshots: () => snapshots,
     view: {
-      visit: () => (coordinator.stopped || coordinator.agentView().paused ? null : coordinator.tracker.current()),
+      visit: () => coordinator.shownVisit(),
       permissionsRevision: () => coordinator.permissions.revision,
       isPermitted: (o) => coordinator.permissions.isPermitted(o),
       captureAllowed: () => coordinator.captureAllowed(),
@@ -247,6 +248,16 @@ function core() {
   const focus = (tabId: number, documentId: string) =>
     observe({ kind: "focus", seq: ++seq, at: clock.t, browserFocused: true, windowId: 1, tabId, url: PAGE, documentId, title: "Billing", incognito: false, permissionsRevision: 1 });
   focus(10, "doc-a");
+  /** Another app comes to the front: the Mac app's report, then Chrome's unfocused one. */
+  const away = () => {
+    coordinator.handleNativeCommand({ type: "frontmost", bundleId: "com.apple.Terminal", at: clock.t }, STDIO);
+    observe({ kind: "focus", seq: ++seq, at: clock.t, browserFocused: false, windowId: -1, permissionsRevision: 1 });
+  };
+  /** Chrome back in front, its window focused on `tabId`/`documentId`. */
+  const back = (tabId = 10, documentId = "doc-a") => {
+    coordinator.handleNativeCommand({ type: "frontmost", bundleId: "com.google.Chrome", at: clock.t }, STDIO);
+    focus(tabId, documentId);
+  };
 
   let commands = 0;
   const openLink = async (identity: { visitEpoch: number; jobId: string; candidateId: string }) => {
@@ -260,15 +271,21 @@ function core() {
     stats: { requests: 0, refused: 0, bytesReceived: 0, ms: 0 },
   });
   const named = (name: string) => events.filter((e) => e.name === name).map((e) => e.fields);
-  return { clock, advance: t.advance, frames, events, named, coordinator, scheduler, results, snapshots, catalogs, discoveries, agentCalls, verifyCalls, focus, openLink, catalogReady };
+  return { clock, advance: t.advance, frames, events, named, coordinator, scheduler, results, snapshots, catalogs, discoveries, agentCalls, verifyCalls, focus, away, back, openLink, catalogReady };
 }
 
 type Core = ReturnType<typeof core>;
 
-const SWITCHES: Array<[string, (c: Core) => void, boolean]> = [
-  ["another tab (same URL)", (c) => c.focus(11, "doc-t"), true],
-  ["another document in the same tab (same URL)", (c) => c.focus(10, "doc-b"), true],
-  ["another app (Chrome leaves the foreground)", (c) => c.coordinator.handleNativeCommand({ type: "frontmost", bundleId: "com.apple.Terminal", at: c.clock.t }, STDIO), false],
+const SWITCHES: Array<[string, (c: Core) => void]> = [
+  ["another tab (same URL)", (c) => c.focus(11, "doc-t")],
+  ["another document in the same tab (same URL)", (c) => c.focus(10, "doc-b")],
+  [
+    "another app, then another document before coming back",
+    (c) => {
+      c.away();
+      c.back(10, "doc-n");
+    },
+  ],
 ];
 
 /** Drive the visit to the stage, recording the job identity a window could hold by then. */
@@ -298,8 +315,8 @@ async function reach(c: Core, stage: "discovery" | "model" | "verify" | "click")
   return { epoch, jobId };
 }
 
-describe("B11: a tab, document or app switch at every stage refuses the old visit's results and links", () => {
-  for (const [switchName, doSwitch, keepsVisit] of SWITCHES) {
+describe("B11: a tab or document switch at every stage refuses the old visit's results and links", () => {
+  for (const [switchName, doSwitch] of SWITCHES) {
     describe(`switching to ${switchName}`, () => {
       it("during discovery: the late catalog starts no job and nothing is shown for the old visit", async () => {
         const c = core();
@@ -366,15 +383,8 @@ describe("B11: a tab, document or app switch at every stage refuses the old visi
         for (const candidateId of ["c0", "c1"]) {
           expect(await c.openLink({ visitEpoch: epoch, jobId: jobId!, candidateId })).toMatchObject({ ok: false, code: "stale_revision" });
         }
-        if (keepsVisit) {
-          // The new visit's epoch with the old job is stale too: a job belongs to its visit.
-          expect(await c.openLink({ visitEpoch: c.coordinator.tracker.epoch, jobId: jobId!, candidateId: "c0" })).toMatchObject({ ok: false, code: "stale_revision" });
-        } else {
-          // Back to Chrome on the same tab and document: a new visit, and the old link stays refused.
-          c.coordinator.handleNativeCommand({ type: "frontmost", bundleId: "com.google.Chrome", at: c.clock.t }, STDIO);
-          expect(c.coordinator.tracker.epoch).toBeGreaterThan(epoch);
-          expect(await c.openLink({ visitEpoch: epoch, jobId: jobId!, candidateId: "c0" })).toMatchObject({ ok: false, code: "stale_revision" });
-        }
+        // The new visit's epoch with the old job is stale too: a job belongs to its visit.
+        expect(await c.openLink({ visitEpoch: c.coordinator.tracker.epoch, jobId: jobId!, candidateId: "c0" })).toMatchObject({ ok: false, code: "stale_revision" });
         // No href ever reached a frame other than the one ok ack before the switch.
         const withHref = c.frames.filter((f) => JSON.stringify(f).includes(`${ORIGIN}/`));
         expect(withHref).toHaveLength(1);
@@ -382,4 +392,95 @@ describe("B11: a tab, document or app switch at every stage refuses the old visi
       });
     });
   }
+});
+
+describe("an app switch keeps the page's links: the job carries on, and the return to the same page changes nothing", () => {
+  /** Nothing the side panel would act on, and no clear or job start, since `before`. */
+  const quietSince = (c: Core, before: number, eventsBefore: number) => {
+    expect(c.frames.slice(before).filter((f) => f.type !== "ack")).toEqual([]);
+    const names = c.events.slice(eventsBefore).map((e) => e.name);
+    for (const name of ["results_cleared", "job_started", "job_cancelled", "visit_change", "dwell_settled"]) expect(names).not.toContain(name);
+  };
+
+  it("at click authorization: away and back, the result stays and its links resolve throughout", async () => {
+    const c = core();
+    const { epoch, jobId } = await reach(c, "click");
+    const before = c.frames.length;
+    const eventsBefore = c.events.length;
+    c.away();
+    expect(c.coordinator.tracker.epoch).toBe(epoch);
+    expect(c.results.current()).toMatchObject({ status: "ok", jobId, visitEpoch: epoch });
+    expect(await c.openLink({ visitEpoch: epoch, jobId: jobId!, candidateId: "c1" })).toMatchObject({ ok: true, target: { href: `${ORIGIN}/b` } });
+    c.clock.t += 60_000;
+    c.advance(DWELL_MS * 3);
+    c.back();
+    c.advance(DWELL_MS * 3);
+    await flush();
+    quietSince(c, before, eventsBefore);
+    expect(c.named("visit_suspended")).toEqual([{ epoch }]);
+    expect(c.named("visit_resumed")).toEqual([{ epoch }]);
+    expect(c.agentCalls).toHaveLength(1);
+    expect(c.frames.filter((f) => f.type === "results")).toHaveLength(1);
+    expect(await c.openLink({ visitEpoch: epoch, jobId: jobId!, candidateId: "c0" })).toMatchObject({ ok: true, target: { href: `${ORIGIN}/a` } });
+  });
+
+  it("during model execution: the job is not cancelled and publishes while away; the return repaints nothing", async () => {
+    const c = core();
+    const { epoch, jobId } = await reach(c, "model");
+    c.away();
+    expect(c.agentCalls[0]!.signal.aborted).toBe(false);
+    expect(c.scheduler.running).toMatchObject({ jobId, visitEpoch: epoch });
+    expect(c.snapshots.size).toBe(1);
+    c.agentCalls[0]!.answerOk(["c2"]);
+    await flush();
+    c.verifyCalls[0]!.release();
+    await flush();
+    const shown = c.frames.filter((f) => f.type === "results");
+    expect(shown).toEqual([expect.objectContaining({ status: "ok", jobId, visitEpoch: epoch, items: [expect.objectContaining({ candidateId: "c2" })] })]);
+    expect(c.named("job_finished")).toEqual([expect.objectContaining({ status: "ok" })]);
+    expect(await c.openLink({ visitEpoch: epoch, jobId: jobId!, candidateId: "c2" })).toMatchObject({ ok: true, target: { href: `${ORIGIN}/c` } });
+    const before = c.frames.length;
+    const eventsBefore = c.events.length;
+    c.back();
+    c.advance(DWELL_MS * 3);
+    await flush();
+    quietSince(c, before, eventsBefore);
+    expect(c.results.current()).toMatchObject({ jobId, visitEpoch: epoch });
+  });
+
+  it("during target checks: verification finishing while away publishes for the still-focused page", async () => {
+    const c = core();
+    const { epoch, jobId } = await reach(c, "verify");
+    c.away();
+    c.verifyCalls[0]!.release();
+    await flush();
+    expect(c.frames.filter((f) => f.type === "results")).toEqual([expect.objectContaining({ status: "ok", jobId, visitEpoch: epoch })]);
+    expect(c.named("results_cleared")).toEqual([]);
+  });
+
+  it("during discovery: the pass carries on while away and its job runs for the page", async () => {
+    const c = core();
+    const { epoch } = await reach(c, "discovery");
+    c.away();
+    c.catalogs[0]!.resolve(c.catalogReady());
+    await flush();
+    expect(c.agentCalls).toHaveLength(1);
+    expect(c.agentCalls[0]!.request.visitEpoch).toBe(epoch);
+    expect(c.named("discovery_discarded")).toEqual([]);
+  });
+
+  it("a navigation seen while away ends the visit: the result is cleared and its links refused", async () => {
+    const c = core();
+    const { epoch, jobId } = await reach(c, "click");
+    c.away();
+    c.back(10, "doc-n");
+    expect(c.coordinator.tracker.epoch).toBeGreaterThan(epoch);
+    expect(c.results.current()).toBeNull();
+    expect(c.named("results_cleared")).toEqual([expect.objectContaining({ epoch, reason: "visit_changed" })]);
+    expect(await c.openLink({ visitEpoch: epoch, jobId: jobId!, candidateId: "c0" })).toMatchObject({ ok: false, code: "stale_revision" });
+    // The new page gets its own visit: idle at once, a pass after the dwell.
+    expect(c.frames.some((f) => f.type === "state" && f.status === "idle" && f.visitEpoch === c.coordinator.tracker.epoch)).toBe(true);
+    c.advance(DWELL_MS);
+    expect(c.catalogs).toHaveLength(2);
+  });
 });

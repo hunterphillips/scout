@@ -251,10 +251,8 @@ export async function runStdio(deps: StdioDeps): Promise<StdioCore> {
   const results = createResultRegistry({
     coreInstanceId,
     activeVisit: () => {
-      if (coordinator.stopped) return null;
-      const view = coordinator.agentView();
-      if (view.paused || view.currentSite === null) return null;
-      return { visitEpoch: view.currentSite.visitEpoch, origin: view.currentSite.origin };
+      const visit = coordinator.shownVisit();
+      return visit === null ? null : { visitEpoch: visit.epoch, origin: visit.origin };
     },
     isPermitted: (origin) => coordinator.permissions.isPermitted(origin),
     // A page Scout opens from its links gets no job of its own.
@@ -286,7 +284,7 @@ export async function runStdio(deps: StdioDeps): Promise<StdioCore> {
     writeBrowserContextGrant: (enabled) => writeBrowserContextGrant(home, enabled),
     getAudit: () => audit.entries(),
     isPermitted: (origin) => coordinator.permissions.isPermitted(origin),
-    currentOrigin: () => coordinator.agentView().currentSite?.origin ?? null,
+    currentOrigin: () => coordinator.shownVisit()?.origin ?? null,
     emit: emitPanel,
     results,
     resendState: () => coordinator.resendState(),
