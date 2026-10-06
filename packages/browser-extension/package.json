@@ -13,7 +13,9 @@
   "scripts": {
     "build": "node build.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "test:node": "vitest run --exclude '**/*.mac.test.*'",
+    "test:mac": "vitest run --passWithNoTests .mac.test."
   },
   "dependencies": {
     "@scout/contracts": "0.1.0",

@@ -25,7 +25,9 @@
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "test:node": "vitest run --exclude '**/*.mac.test.*'",
+    "test:mac": "vitest run --passWithNoTests .mac.test."
   },
   "dependencies": {
     "zod": "^4.6.5"

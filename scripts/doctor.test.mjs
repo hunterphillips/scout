@@ -7,7 +7,6 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { runSetup } from "./setup.mjs";
 import { SECTIONS, runDoctor, runReport } from "./doctor.mjs";
 import { layout } from "./lib/paths.mjs";
-import { infoPlist } from "./lib/app-bundle.mjs";
 import { makeFixture } from "./lib/test-fixture.mjs";
 import { lastPreflight } from "./lib/core-state.mjs";
 
@@ -24,13 +23,6 @@ afterEach(() => fx.cleanup());
 
 const report = (e = env, extra = {}) => Object.fromEntries(runReport(e, { claudeFallbacks: [], ...extra }).map((s) => [s.title, s]));
 const json = (p) => JSON.parse(readFileSync(p, "utf8"));
-
-function fakeBundle(app) {
-  mkdirSync(join(app, "Contents", "MacOS"), { recursive: true });
-  writeFileSync(join(app, "Contents", "Info.plist"), infoPlist({ version: "0.0.0" }));
-  writeFileSync(join(app, "Contents", "MacOS", "Scout"), "#!/bin/sh\nexit 0\n");
-  chmodSync(join(app, "Contents", "MacOS", "Scout"), 0o755);
-}
 
 describe("doctor report", () => {
   it("has the eight sections in order, each ok|warn|fail with one line, and exits 0 on warnings alone", () => {
@@ -51,17 +43,6 @@ describe("doctor report", () => {
     rmSync(L.installed);
     const r = report();
     expect(r["install record"]).toMatchObject({ status: "fail", summary: expect.stringMatching(/missing; run `npm run setup`/) });
-  });
-
-  it("Mac app: warns when the app is not installed, notes a build, and reports a foreign LaunchAgent", () => {
-    expect(report()["Mac app"]).toMatchObject({ status: "warn", summary: "not installed; login launch off" });
-    fakeBundle(L.appBundle);
-    expect(report()["Mac app"]).toMatchObject({ status: "warn", summary: `built at ${L.appBundle}, not installed; login launch off` });
-    const foreignDir = join(fx.root, "OtherAgents");
-    mkdirSync(foreignDir);
-    writeFileSync(join(foreignDir, "dev.scout.app.plist"), "<plist/>");
-    const r = report({ ...env, LAUNCH_AGENTS_DIR: foreignDir })["Mac app"];
-    expect(r.checks.find((c) => c.label === "login LaunchAgent")).toMatchObject({ status: "WARN", detail: expect.stringMatching(/setup did not write it/) });
   });
 
   it("Chrome relay: a test home without CHROME_NMH_DIR fails the override rule", () => {

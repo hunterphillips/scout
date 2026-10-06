@@ -11,7 +11,8 @@ Scout runs on macOS. Most of the Node code also builds and tests on Linux.
 | `npm run test:mac` | macOS | The `*.mac.test.*` files plus the Swift tests |
 | `npm run test:e2e` | macOS | The real native host against the real core (after a build) |
 
-CI runs the full suite on macOS.
+CI runs `test:node` on Ubuntu, and the full suite plus the Chrome side-panel e2e test on
+macOS.
 
 ## Build and test
 
