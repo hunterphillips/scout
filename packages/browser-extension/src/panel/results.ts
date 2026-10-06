@@ -64,25 +64,19 @@ export type ResultsDisplay =
   | { kind: "error"; reason: ErrorReason }
   | { kind: "cancelled"; reason: CancelledReason };
 
+/** Each reason as the results slot's one line. */
 const UNAVAILABLE_TEXT: Record<UnavailableReason, string> = {
-  no_time_left: "not enough time was left on this visit",
-  agent_unavailable: "Your agent is not available",
-  busy: "Scout is busy with another request",
+  no_time_left: "Not enough time was left on this visit.",
+  agent_unavailable: "Your agent is not available.",
+  busy: "Scout is busy with another request.",
 };
 const ERROR_TEXT: Record<ErrorReason, string> = {
-  timeout: "it took too long",
-  invalid_output: "the answer was not usable",
-  tool_unavailable: "a required tool was unavailable",
-  preflight_failed: "the subscription check failed",
-  unsupported_configuration: "this setup is not supported",
-  agent_failed: "the agent failed",
-};
-const CANCELLED_TEXT: Record<CancelledReason, string> = {
-  superseded: "a newer request replaced this one",
-  visit_changed: "you moved on",
-  revoked: "access was revoked",
-  paused: "Scout was paused",
-  shutdown: "Scout is shutting down",
+  timeout: "It took too long.",
+  invalid_output: "The answer was not usable.",
+  tool_unavailable: "A required tool was unavailable.",
+  preflight_failed: "The subscription check failed.",
+  unsupported_configuration: "This setup is not supported.",
+  agent_failed: "The agent failed.",
 };
 
 /** A few words for the header; null when there is nothing to say. */
@@ -113,65 +107,48 @@ export function displaySummary(d: ResultsDisplay): string | null {
   }
 }
 
-/** The Page view's heading over the results: "Worth a look" with links, a quiet word otherwise. */
-export function displayHeading(d: ResultsDisplay): string {
+/**
+ * The top of the Page view. Quiet unless Scout has something to show: nothing at all before a
+ * job and after a stopped one, the typing dots while a job runs, the links, or one plain line.
+ */
+export type ResultsSlot =
+  | { kind: "quiet" }
+  | { kind: "working" }
+  | { kind: "caption"; text: string }
+  | { kind: "links"; items: PanelResultItem[] };
+
+export const EMPTY_TEXT = "No suggestions for this page.";
+
+export function resultsSlot(d: ResultsDisplay): ResultsSlot {
   switch (d.kind) {
     case "none":
-      return "Nothing yet";
-    case "link_down":
-      return d.link === "core_unavailable" ? "Scout isn't running" : d.link === "upgrade_required" ? "Update needed" : "Can't reach Scout";
-    case "connecting":
-      return "Connecting…";
-    case "paused":
-      return "Paused";
-    case "disconnected":
-      return "Chrome not connected";
-    case "working":
-      return "Looking for links…";
-    case "ready":
-      return "Worth a look";
-    case "empty":
-      return "Nothing relevant here";
-    case "unavailable":
-      return "Links unavailable";
-    case "timeout":
-      return "Out of time";
-    case "error":
-      return "Couldn't get links";
     case "cancelled":
-      return "Stopped looking";
+      return { kind: "quiet" };
+    case "working":
+      return { kind: "working" };
+    case "ready":
+      return { kind: "links", items: d.items };
+    case "link_down":
+      return { kind: "caption", text: LINK_DOWN_TEXT[d.link] };
+    case "connecting":
+      return { kind: "caption", text: "Connecting to Scout…" };
+    case "paused":
+      return { kind: "caption", text: "Scout is paused." };
+    case "disconnected":
+      return { kind: "caption", text: "Scout can't see Chrome right now." };
+    case "empty":
+      return { kind: "caption", text: EMPTY_TEXT };
+    case "unavailable":
+      return { kind: "caption", text: UNAVAILABLE_TEXT[d.reason] };
+    case "timeout":
+      return { kind: "caption", text: "Scout ran out of time looking for links on this visit." };
+    case "error":
+      return { kind: "caption", text: ERROR_TEXT[d.reason] };
   }
 }
 
-/** One sentence under the Page view's heading, also the link list's accessible description. */
-export function displayExplanation(d: ResultsDisplay): string {
-  switch (d.kind) {
-    case "none":
-      return "No links for this page yet. Scout suggests links once you stay on a site with suggestions on.";
-    case "link_down":
-      return LINK_DOWN_TEXT[d.link];
-    case "connecting":
-      return "Connecting to Scout…";
-    case "paused":
-      return "Scout is paused.";
-    case "disconnected":
-      return "Scout can't see Chrome right now.";
-    case "working":
-      return "Looking for links on this site…";
-    case "ready":
-      return d.items.length === 1 ? "1 link for this page." : `${d.items.length} links for this page.`;
-    case "empty":
-      return "Nothing on this site looks relevant to what you are doing.";
-    case "unavailable":
-      return `Links are unavailable: ${UNAVAILABLE_TEXT[d.reason]}.`;
-    case "timeout":
-      return "Scout ran out of time looking for links on this visit.";
-    case "error":
-      return `Scout couldn't get links: ${ERROR_TEXT[d.reason]}.`;
-    case "cancelled":
-      return `Scout stopped looking: ${CANCELLED_TEXT[d.reason]}.`;
-  }
-}
+/** The line under "Worth a look" while links are shown, also the link list's accessible description. */
+export const linksText = (n: number): string => (n === 1 ? "1 link for this page." : `${n} links for this page.`);
 
 /** A link the core authorized for the user's click and links.ts passed: the panel opens it once. */
 export interface LinkOpenRequest {

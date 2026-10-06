@@ -7,7 +7,7 @@ import { describe, expect, it } from "vitest";
 import { BLOCKER_TEXT } from "./capabilities.js";
 import type { PanelCommand } from "./commands.js";
 import { MISSING_CAPABILITIES, PanelModel } from "./model.js";
-import { displayExplanation, LINK_DOWN_TEXT } from "./results.js";
+import { LINK_DOWN_TEXT, resultsSlot } from "./results.js";
 import { ackFailed, ackOk, AGENTS, answer, applyVerified, capabilities, chunks, entry, F, offer, originSetting, results, state, tracker, withId } from "./test-frames.js";
 
 const key = { resourceId: F.rid, version: F.v1 };
@@ -30,12 +30,12 @@ describe("PanelModel (PanelModelTests)", () => {
   it("Results says the link is down (never idle) while the core can't be reached, and shows results again on reconnect", () => {
     const m = new PanelModel();
     expect(m.resultsDisplay).toEqual({ kind: "connecting" });
-    expect(displayExplanation(m.resultsDisplay)).toBe("Connecting to Scout…");
+    expect(resultsSlot(m.resultsDisplay)).toEqual({ kind: "caption", text: "Connecting to Scout…" });
     expect(m.headerLine).toBe("Connecting…"); // no results summary
     for (const link of ["disconnected", "core_unavailable", "upgrade_required"] as const) {
       m.applyLink(link);
       expect(m.resultsDisplay).toEqual({ kind: "link_down", link });
-      expect(displayExplanation(m.resultsDisplay)).toBe(LINK_DOWN_TEXT[link]);
+      expect(resultsSlot(m.resultsDisplay)).toEqual({ kind: "caption", text: LINK_DOWN_TEXT[link] });
       expect(m.problems[0]).toEqual({ kind: "link", text: LINK_DOWN_TEXT[link] });
       expect(m.headerLine).toBe(m.statusLine); // no results summary next to the link state
     }

@@ -97,8 +97,9 @@ has files for your agent. **Review** streams the exact text, and **Approve** ena
 once the whole text has arrived and its hash checks out. **Not now** declines. Approved
 files are listed below, each with **Revoke**.
 
-On a site with suggestions on, **Page** shows up to three links after the job finishes, or
-says why there are none. A link opens in a new tab only when you click it; Scout runs no
+On a site with suggestions on, **Page** shows up to three links after the job finishes.
+While the job runs, three dots pulse where the links will go. When there are no links, or
+something is wrong, a short line says so. A link opens in a new tab only when you click it; Scout runs no
 job for the page it opened, and when you return to a page within 15 minutes its links come
 back without a new job. **Activity**
 lists problems first, then your agent's reads. **Settings** has Pause, the **Agent** row

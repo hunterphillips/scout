@@ -63,8 +63,9 @@ and limits; `CONTRIBUTING.md` has the platform matrix.
   Layout (mockups under `docs/design/`): a header with the mark (its dot pulses while
   Scout looks for links; `prefers-reduced-motion` stops it) and a Pause icon, then four
   destinations in a bottom pill nav (`nav-page`, `nav-sites`, `nav-activity`,
-  `nav-settings`; Activity carries a problem dot). **Page**: results heading, up to 3 link
-  cards, a review pill that expands into an inline review card, and a tray with the
+  `nav-settings`; Activity carries a problem dot). **Page**: the results slot (empty before a
+  job, typing dots while one runs, then "Worth a look" and up to 3 link cards, or one caption
+  line), a review pill that expands into an inline review card, and a tray with the
   context chip and the "Suggest on <host>" switch (`destination-<origin>`) or an Allow row.
   **Sites**: rows for allowed sites and `grant.destinations`, Remove, and the per-site
   auto-approve switch with its confirmation sheet. **Activity**: Problems, then agent
@@ -72,9 +73,9 @@ and limits; `CONTRIBUTING.md` has the platform matrix.
   found, labels from each adapter's `profile.ts`, current one pressed; a click sends
   `set_agent`; the list travels in the `capabilities` frame's optional `agents` field),
   Pause, Refresh files, Reconnect, and a Diagnostics disclosure ending with the "Sent to
-  Scout" counters (`#sent-line`). The results heading
+  Scout" counters (`#sent-line`). The results caption
   shows the link copy while the link is disconnected, `core_unavailable` or
-  `upgrade_required`, and "Connecting to Scout…" while connecting, never the idle text.
+  `upgrade_required`, and "Connecting to Scout…" while connecting.
   Assets: `assets/mark.svg`, `scripts/render-icons.mjs` (renders the committed
   `icons/*.png` through headless Chrome), `assets/fonts` (Figtree, OFL). Permissions:
   `https://*/*` is optional-only plus `activeTab`; nothing is posted until the core's

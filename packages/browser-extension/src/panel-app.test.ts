@@ -149,10 +149,10 @@ describe("side panel page", () => {
     await withResults(h);
     lastPort(h.f).onMessage.emit({ type: "core_unavailable", reason: "unreachable" });
     await h.settle();
-    expect(h.$("#results-heading")!.textContent).toBe("Scout isn't running");
     expect(h.byKey("open-c1")).toBeNull();
-    // Results says so too, never the idle "No links for this page yet".
-    expect(h.$("#results-explanation")!.textContent).toBe("Scout isn't running. Open the Scout app and this panel reconnects on its own.");
+    // The results slot says so in one line, no heading.
+    expect(h.$("#results-heading")).toBeNull();
+    expect(h.$("#results-caption")!.textContent).toBe("Scout isn't running. Open the Scout app and this panel reconnects on its own.");
     await h.click("nav-settings");
     expect(h.now()).toContain("Scout isn't running");
     await h.click("nav-activity");
@@ -161,7 +161,7 @@ describe("side panel page", () => {
     await h.click("nav-page");
     lastPort(h.f).onMessage.emit({ type: "ready" });
     await h.settle();
-    expect(h.$("#results-explanation")!.textContent).toContain("No links for this page yet");
+    expect(h.$("section.results")).toBeNull(); // no job yet: the slot is empty
     await withResults(h); // the core's repaint, then a job's results
     expect(h.byKey("open-c1")).not.toBeNull();
   });
@@ -292,7 +292,7 @@ describe("side panel page", () => {
     p.onDisconnect.emit(p);
     await h.settle();
     expect(h.byKey("open-c1")).toBeNull();
-    expect(h.$("#results-heading")!.textContent).toBe("Connecting…"); // the worker is already reconnecting
+    expect(h.$("#results-caption")!.textContent).toBe("Connecting to Scout…"); // the worker is already reconnecting
     await h.click("nav-settings");
     expect(h.now()).not.toContain("links");
   });

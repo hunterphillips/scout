@@ -79,16 +79,37 @@ describe("panel view", () => {
     expect(root.querySelector<HTMLElement>("pre.preview-text")!.scrollTop).toBe(120);
   });
 
-  it("the results heading is updated in place, so its live region is not re-created", () => {
+  it("the results slot is empty before a job: no heading, no text, just the rest of Page", () => {
+    const { root } = view(running());
+    expect(root.querySelector("section.results")).toBeNull();
+    expect(root.querySelector("#results-heading")).toBeNull();
+    expect(root.querySelector(".page-stack")!.textContent).not.toMatch(/link|Nothing/i);
+    expect(root.querySelector('[data-key="review-open"]')).not.toBeNull(); // the review pill is still there
+    expect(root.querySelector(".tray")).not.toBeNull();
+  });
+
+  it("while a job runs the slot holds three typing dots, kept as the same node across repaints, and links replace them", () => {
     const m = running();
+    m.apply(state("working", { epoch: 1, jobId: "job-1" }));
     const { root, render } = view(m);
-    const heading = root.querySelector("#results-heading")!;
-    expect(heading.getAttribute("aria-live")).toBe("polite");
-    expect(heading.textContent).toBe("Nothing yet");
+    const typing = root.querySelector<HTMLElement>('[data-key="results-typing"]')!;
+    expect(typing.getAttribute("aria-label")).toBe("Looking for links");
+    expect(typing.getAttribute("aria-live")).toBe("off");
+    expect(typing.querySelectorAll("span.typing-dot")).toHaveLength(3);
+    expect(typing.textContent).toBe("");
+    expect(root.querySelector("section.results")!.textContent).toBe("");
+    const dot = typing.firstElementChild;
+    m.apply(F.frame("frame.audit.json"));
+    render();
     m.apply(state("working", { epoch: 1, jobId: "job-1" }));
     render();
-    expect(root.querySelector("#results-heading")).toBe(heading);
-    expect(heading.textContent).toBe("Looking for links…");
+    expect(root.querySelector('[data-key="results-typing"]')).toBe(typing);
+    expect(typing.firstElementChild).toBe(dot);
+    m.apply(results(1, { status: "ok", items: [{ candidateId: "c1", title: "A", reason: "r", hostname: "docs.example.com" }] }, { job: "job-1" }));
+    render();
+    expect(root.querySelector('[data-key="results-typing"]')).toBeNull();
+    expect(root.querySelector('[data-key="open-c1"]')).not.toBeNull();
+    expect(root.querySelector("#results-heading")!.textContent).toBe("Worth a look.");
   });
 
   it("Settings' Diagnostics opens on a 'Now' row with the status, host and offer count", () => {
@@ -362,26 +383,32 @@ describe("panel view", () => {
     expect(mark().classList.contains("working")).toBe(false);
   });
 
-  it("panel.html animates only the working mark's dot, and prefers-reduced-motion turns every animation off", () => {
+  it("panel.html animates the working mark's dot and the typing dots, and prefers-reduced-motion turns every animation off (the dots stand still as a static …)", () => {
     const css = readFileSync(new URL("../panel.html", import.meta.url), "utf8");
     expect(css).toMatch(/\.mark\.working \.mark-dot \{[^}]*animation: pulse/);
+    expect(css).toMatch(/\.typing-dot \{[^}]*animation: typing/);
     const reduced = css.slice(css.indexOf("@media (prefers-reduced-motion: reduce)"));
     expect(reduced).toMatch(/^@media \(prefers-reduced-motion: reduce\) \{\s*\*, \*::before, \*::after \{ animation: none !important;/);
   });
 
-  it("every results state renders its own sentence and its own heading", () => {
+  it("each results state renders as nothing, the dots, one caption line with no heading, or the links", () => {
     const m = running();
-    const seen = new Set<string>();
-    const headings = new Set<string>();
     const { root, render } = view(m);
-    const grab = () => {
-      seen.add(root.querySelector("#results-explanation")!.textContent!);
-      headings.add(root.querySelector("#results-heading")!.textContent!);
+    const slot = () => {
+      const box = root.querySelector("section.results");
+      if (box === null) return "quiet";
+      if (box.querySelector('[data-key="results-typing"]')) return "dots";
+      if (box.querySelector('[data-key^="open-"]')) return `links ${box.querySelectorAll('[data-key^="open-"]').length}`;
+      expect(box.querySelector("h2")).toBeNull();
+      expect(box.children).toHaveLength(1);
+      const caption = box.querySelector("#results-caption")!;
+      expect(caption.className).toBe("results-caption");
+      return caption.textContent;
     };
-    grab();
+    const seen: Array<[string, string | null]> = [["none", slot()]];
     m.apply(state("working", { epoch: 1, jobId: "job-1" }));
     render();
-    grab();
+    seen.push(["working", slot()]);
     for (const name of F.names("frame.results.")) {
       const f = F.frame(name);
       if (f.type !== "results") continue;
@@ -389,48 +416,68 @@ describe("panel view", () => {
       m.apply(state("idle", { epoch: f.visitEpoch, detail: "docs.example.com", permitted: true }));
       m.apply(f);
       render();
-      grab();
+      seen.push([name.replace("frame.results.", "").replace(".json", ""), slot()]);
     }
     m.apply(state("paused"));
     render();
-    grab();
+    seen.push(["paused", slot()]);
     m.apply(state("disconnected"));
     render();
-    grab();
+    seen.push(["core disconnected", slot()]);
     for (const link of ["disconnected", "core_unavailable", "upgrade_required", "connecting"] as const) {
       m.applyLink(link);
       render();
-      grab();
+      seen.push([link, slot()]);
     }
-    expect(seen.size).toBe(14);
-    expect(headings.size).toBe(14);
+    const ok = F.frame("frame.results.ok.json");
+    expect(Object.fromEntries(seen)).toEqual({
+      none: "quiet",
+      working: "dots",
+      cancelled: "quiet",
+      empty: "No suggestions for this page.",
+      error: expect.stringMatching(/^[A-Z][^:]*\.$/),
+      ok: `links ${ok.type === "results" && ok.status === "ok" ? Math.min(ok.items.length, 3) : 0}`,
+      timeout: "Scout ran out of time looking for links on this visit.",
+      unavailable: expect.stringMatching(/^[A-Z][^:]*\.$/),
+      paused: "Scout is paused.",
+      "core disconnected": "Scout can't see Chrome right now.",
+      disconnected: "Chrome can't reach Scout. Check that Scout is installed, then choose Reconnect in Settings.",
+      core_unavailable: "Scout isn't running. Open the Scout app and this panel reconnects on its own.",
+      upgrade_required: "This extension and the Scout app are different versions. Run Scout's setup again, then reload the extension.",
+      connecting: "Connecting to Scout…",
+    });
   });
 
-  it("Results says Scout can't be reached (or is connecting) while the link isn't up, and goes back to the results state on reconnect", () => {
+  it("a failed job shows only its reason as the caption", () => {
+    const m = running();
+    m.apply(results(1, { status: "error", reason: "preflight_failed" }));
+    const { root } = view(m);
+    expect(root.querySelector("section.results")!.textContent).toBe("The subscription check failed.");
+    expect(root.querySelector("#results-heading")).toBeNull();
+  });
+
+  it("the caption says Scout can't be reached (or is connecting) while the link isn't up, and goes back to the results state on reconnect", () => {
     const m = running();
     m.apply(results(1, { status: "empty" }));
     const { root, render } = view(m);
-    const explanation = () => root.querySelector("#results-explanation")!;
-    expect(explanation().className).toBe("state state-empty");
-    for (const [link, words, kind] of [
-      ["core_unavailable", "Scout isn't running.", "link_down"],
-      ["disconnected", "Chrome can't reach Scout", "link_down"],
-      ["connecting", "Connecting to Scout…", "connecting"],
+    const caption = () => root.querySelector("#results-caption")?.textContent ?? null;
+    expect(caption()).toBe("No suggestions for this page.");
+    for (const [link, words] of [
+      ["core_unavailable", "Scout isn't running."],
+      ["disconnected", "Chrome can't reach Scout"],
+      ["connecting", "Connecting to Scout…"],
     ] as const) {
       m.applyLink(link);
       render();
-      expect(explanation().className).toBe(`state state-${kind}`);
-      expect(explanation().textContent).toContain(words);
-      expect(explanation().textContent).not.toContain("No links for this page yet");
+      expect(caption()).toContain(words);
       m.applyLink("connected");
       render();
-      expect(explanation().className).toBe("state state-none");
-      expect(explanation().textContent).toContain("No links for this page yet");
+      expect(root.querySelector("section.results")).toBeNull(); // reconnected, no job yet: quiet
       m.apply(capabilities({ offers: [offer()], origins: [originSetting()] }));
       m.apply(state("idle", { epoch: 1, detail: "docs.example.com", permitted: true }));
       m.apply(results(1, { status: "empty" }));
       render();
-      expect(explanation().className).toBe("state state-empty");
+      expect(caption()).toBe("No suggestions for this page.");
     }
   });
 

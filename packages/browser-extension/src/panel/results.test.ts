@@ -4,7 +4,7 @@
 // check what the model queues and refuses.
 import { describe, expect, it } from "vitest";
 import { PanelModel } from "./model.js";
-import { displayExplanation, displaySummary, type ResultsDisplay } from "./results.js";
+import { displaySummary, EMPTY_TEXT, type ResultsDisplay, resultsSlot } from "./results.js";
 import { ackFailed, ackOk, capabilities, F, offer, type Outcome, results, state, tracker } from "./test-frames.js";
 
 const items = [
@@ -58,7 +58,20 @@ describe("ResultsModel (ResultsModelTests.swift)", () => {
     m.apply(state("disconnected"));
     seen.push(m.resultsDisplay);
     expect(seen.slice(-2)).toEqual([{ kind: "paused" }, { kind: "disconnected" }]);
-    expect(new Set(seen.map(displayExplanation)).size).toBe(seen.length);
+    // The slot: nothing before a job and after a stopped one, the dots while one runs, the links,
+    // else one caption line, each its own.
+    expect(seen.map(resultsSlot).map((x) => (x.kind === "caption" ? x.text : x.kind))).toEqual([
+      "quiet",
+      "working",
+      "links",
+      EMPTY_TEXT,
+      "Not enough time was left on this visit.",
+      "Scout ran out of time looking for links on this visit.",
+      "The agent failed.",
+      "quiet",
+      "Scout is paused.",
+      "Scout can't see Chrome right now.",
+    ]);
     const failures: ResultsDisplay[] = [
       { kind: "unavailable", reason: "busy" },
       { kind: "timeout" },
@@ -69,14 +82,13 @@ describe("ResultsModel (ResultsModelTests.swift)", () => {
     ];
     for (const f of failures) {
       expect(displaySummary(f)).not.toBe(displaySummary({ kind: "empty" }));
-      expect(displayExplanation(f)).not.toBe(displayExplanation({ kind: "empty" }));
+      expect(resultsSlot(f)).not.toEqual(resultsSlot({ kind: "empty" }));
     }
   });
 
-  it("agentUnavailableNamesNoSpecificAgent", () => {
-    expect(displayExplanation({ kind: "unavailable", reason: "agent_unavailable" })).toBe(
-      "Links are unavailable: Your agent is not available.",
-    );
+  it("a failure's caption is its reason alone; the agent is never named", () => {
+    expect(resultsSlot({ kind: "unavailable", reason: "agent_unavailable" })).toEqual({ kind: "caption", text: "Your agent is not available." });
+    expect(resultsSlot({ kind: "error", reason: "preflight_failed" })).toEqual({ kind: "caption", text: "The subscription check failed." });
   });
 
   it("compactLineShowsTheResultsState (the panel header)", () => {

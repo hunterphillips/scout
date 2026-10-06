@@ -70,9 +70,16 @@
   .page-stack { margin-top: auto; display: flex; flex-direction: column; gap: 14px; padding-top: 16px; }
   .results { display: flex; flex-direction: column; gap: 4px; }
   .results-heading { font-size: 26px; font-weight: 500; letter-spacing: -0.02em; line-height: 1.2; }
-  .results-heading.quiet { font-size: 20px; }
   .accent-dot { color: var(--accent); }
   #results-explanation { color: var(--muted); }
+  .results-caption { font-size: 13px; color: var(--muted); }
+  /* While a job runs: three dots pulsing in turn, one link card tall (padding, title line, reason
+     line). Under prefers-reduced-motion the dots stand still, a static "…". */
+  .typing { display: flex; align-items: center; gap: 5px; min-height: calc(28px + 21px + 19.5px); padding: 0 16px; }
+  .typing-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); animation: typing 1.2s ease-in-out infinite; }
+  .typing-dot:nth-child(2) { animation-delay: .2s; }
+  .typing-dot:nth-child(3) { animation-delay: .4s; }
+  @keyframes typing { 0%, 60%, 100% { opacity: .3; transform: scale(.8); } 30% { opacity: 1; transform: none; } }
   .links { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }
   .link-card { width: 100%; min-height: 44px; display: flex; align-items: center; gap: 12px; padding: 14px 16px; background: var(--surface); border-radius: 20px; text-align: left; transition: background-color var(--ease), transform var(--ease); }
   .link-card:hover:not(:disabled) { background: color-mix(in srgb, var(--surface) 88%, var(--accent)); }
@@ -105,6 +112,7 @@
   .reviewing .accent-dot, .reviewing #results-explanation, .reviewing .reason { display: none; }
   .reviewing .links { gap: 6px; margin-top: 6px; }
   .reviewing .link-card { padding: 10px 14px; border-radius: 16px; }
+  .reviewing .typing { min-height: 44px; padding: 0 14px; }
   .approved { display: flex; flex-direction: column; gap: 2px; font-size: 13px; color: var(--muted); }
   .approved li { overflow-wrap: anywhere; }
   .approved .text-button { font-size: 13px; }
