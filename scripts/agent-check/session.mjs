@@ -12,7 +12,7 @@
 
 import { spawn as nodeSpawn } from "node:child_process";
 import { startChild } from "../../packages/scout-core/dist/agents/childSupervisor.js";
-import { createJsonLineStream } from "../../packages/scout-core/dist/agents/claudeCode/jsonLineStream.js";
+import { createJsonLineStream } from "../../packages/scout-core/dist/agents/jsonLineStream.js";
 import { OwnedTree, psSnapshot } from "../../packages/scout-core/dist/agents/processTree.js";
 
 const MAX_STDOUT_BYTES = 8 * 1024 * 1024;

@@ -12,10 +12,10 @@ import type { Clock } from "../clock.js";
 import type { Diagnostics } from "../diagnostics.js";
 import type { AgentJobAdapter } from "./adapter.js";
 import type { Env } from "./executables.js";
-import { createClaudeJobAdapter } from "./claudeCode/claudeJob.js";
+import { createClaudeJobAdapter, type ClaudeJobDeps } from "./claudeCode/claudeJob.js";
 import { createDefaultClaudeCodeProfile } from "./claudeCode/profile.js";
 import { createPreflightFacade, type PreflightFacade } from "./claudeCode/preflightWorker.js";
-import { createCodexJobAdapter } from "./codex/codexJob.js";
+import { createCodexJobAdapter, type CodexJobDeps } from "./codex/codexJob.js";
 import { createDefaultCodexProfile } from "./codex/profile.js";
 import { createCodexReadinessFacade, type CodexReadinessFacade } from "./codex/readinessWorker.js";
 import type { ProcessTracker } from "./processTree.js";
@@ -69,16 +69,28 @@ export interface AdapterFactoryDeps {
   clock?: Clock;
   diagnostics?: Diagnostics;
   processTracker?: ProcessTracker;
+  /**
+   * Extra options for whichever adapter the profile names, keyed by adapter id. The compatibility
+   * checks (scripts/agent-check) pass their spawn observer and hermetic readiness seams here; the
+   * core passes none.
+   */
+  seams?: AdapterSeams;
+}
+
+type SeamsOf<D> = Partial<Omit<D, "home" | "profile" | "parentEnv">>;
+export interface AdapterSeams {
+  "claude-code"?: SeamsOf<ClaudeJobDeps>;
+  codex?: SeamsOf<CodexJobDeps>;
 }
 
 export function createJobAdapter(profile: AgentProfile, deps: AdapterFactoryDeps): AgentJobAdapter {
-  const { readinessChecks, ...rest } = deps;
+  const { readinessChecks, seams, ...rest } = deps;
   const checks = readinessChecks instanceof AdapterReadinessChecks ? readinessChecks : undefined;
   switch (profile.adapter) {
     case "claude-code":
-      return createClaudeJobAdapter({ ...rest, profile, ...(checks ? { preflightAsync: checks.claudeCode() } : {}) });
+      return createClaudeJobAdapter({ ...rest, profile, ...(checks ? { preflightAsync: checks.claudeCode() } : {}), ...seams?.["claude-code"] });
     case "codex":
-      return createCodexJobAdapter({ ...rest, profile, ...(checks ? { readinessAsync: checks.codex() } : {}) });
+      return createCodexJobAdapter({ ...rest, profile, ...(checks ? { readinessAsync: checks.codex() } : {}), ...seams?.codex });
   }
 }
 

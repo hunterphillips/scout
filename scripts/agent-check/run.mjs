@@ -1,14 +1,16 @@
 #!/usr/bin/env node
 // `npm run verify:agent -- --case <hotload|baseline|selected-tool|cancel> --home <throwaway> [options]`
 //
-// Separately authorized live compatibility checks against the installed Claude CLI. Each
-// real run makes model calls on the user's subscription (after a successful billing
-// preflight); --dry-run prints the plan and changes and launches nothing. See README.md.
+// Separately authorized live compatibility checks against the installed Claude CLI, or, for
+// the background cases with `--adapter codex`, the installed Codex CLI. Each real run makes
+// model calls on the user's subscription (after a successful billing or login check);
+// --dry-run prints the plan and changes and launches nothing. See README.md.
 
 import { resolve } from "node:path";
 import { isMain } from "../lib/is-main.mjs";
 
 export const CASES = Object.freeze(["hotload", "baseline", "selected-tool", "cancel"]);
+export const ADAPTERS = Object.freeze(["claude-code", "codex"]);
 const MAX_INFERENCE = 4;
 /** The plan's per-check budget; more needs --acknowledge-budget. */
 export const PLAN_INFERENCE = 2;
@@ -19,7 +21,9 @@ const USAGE = `usage: npm run verify:agent -- --case <${CASES.join("|")}> --home
   --max-inference <n>     inference requests this run may make (default ${PLAN_INFERENCE}; at most ${MAX_INFERENCE};
                           above ${PLAN_INFERENCE} needs --acknowledge-budget)
   --acknowledge-budget    allow --max-inference above ${PLAN_INFERENCE}, past the plan's "${PLAN_BUDGET_QUOTE}"
+  --adapter <id>          ${ADAPTERS.join(" or ")} (default claude-code); codex runs the background cases only
   --claude <path>         the claude binary (default: \`claude\` on PATH, resolved to an absolute path)
+  --codex <path>          with --adapter codex: the codex binary (default: \`codex\` on PATH)
 hotload only:
   --authorize-real-root   acceptance run: proof skill in the real user skills root and a user-scope
                           MCP registration, both scout-proof-<nonce>, removed afterwards
@@ -30,9 +34,9 @@ hotload only:
 
 /** Parse argv; returns { opts } or { error }. */
 export function parseArgs(argv) {
-  const o = { maxInference: PLAN_INFERENCE, dryRun: false, authorizeRealRoot: false, preliminary: false, withRevocation: false, twoSession: false, acknowledgeBudget: false };
+  const o = { adapter: "claude-code", maxInference: PLAN_INFERENCE, dryRun: false, authorizeRealRoot: false, preliminary: false, withRevocation: false, twoSession: false, acknowledgeBudget: false };
   const bools = { "--dry-run": "dryRun", "--authorize-real-root": "authorizeRealRoot", "--preliminary": "preliminary", "--with-revocation": "withRevocation", "--two-session": "twoSession", "--acknowledge-budget": "acknowledgeBudget" };
-  const values = { "--case": "case", "--home": "home", "--max-inference": "maxInference", "--claude": "claude" };
+  const values = { "--case": "case", "--home": "home", "--max-inference": "maxInference", "--claude": "claude", "--adapter": "adapter", "--codex": "codex" };
   const seen = new Set();
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -55,6 +59,10 @@ export function parseArgs(argv) {
     return { error: `--max-inference ${n} is over the plan's budget ("${PLAN_BUDGET_QUOTE}"); pass --acknowledge-budget to run it anyway, or split the check` };
   }
   if (o.case !== "hotload" && (o.authorizeRealRoot || o.preliminary || o.withRevocation || o.twoSession)) return { error: `${o.case} takes no hotload options` };
+  if (!ADAPTERS.includes(o.adapter)) return { error: `--adapter must be one of ${ADAPTERS.join(", ")}` };
+  if (o.adapter === "codex" && o.case === "hotload") return { error: "hotload checks Claude Code only; --adapter codex runs baseline, selected-tool or cancel" };
+  if (o.adapter === "codex" && o.claude !== undefined) return { error: "--claude does not apply to --adapter codex; use --codex" };
+  if (o.adapter !== "codex" && o.codex !== undefined) return { error: "--codex needs --adapter codex" };
   o.home = resolve(o.home);
   return { opts: o };
 }
@@ -124,17 +132,20 @@ export async function runAgentCheck(argv, io = {}) {
     mods = {
       fixtures: await import("./fixtures.mjs"),
       report: await import("./report.mjs"),
-      preflight: await import("../../packages/scout-core/dist/agents/claudeCode/authPreflight.js"),
+      executables: await import("../../packages/scout-core/dist/agents/executables.js"),
     };
   } catch {
     err("verify:agent: built packages not found; run `npm run build` first");
     return 1;
   }
-  o.claudePath = o.claude ? resolve(o.claude) : mods.preflight.resolveOnPath("claude", env.PATH);
-  if (!o.claudePath || !mods.preflight.isExecutableFile(o.claudePath)) {
-    err("verify:agent: no executable claude found (PATH or --claude)");
+  const cli = o.adapter === "codex" ? "codex" : "claude";
+  const given = o.adapter === "codex" ? o.codex : o.claude;
+  o.agentPath = given ? resolve(given) : mods.executables.resolveOnPath(cli, env.PATH);
+  if (!o.agentPath || !mods.executables.isExecutableFile(o.agentPath)) {
+    err(`verify:agent: no executable ${cli} found (PATH or --${cli})`);
     return 2;
   }
+  if (o.adapter !== "codex") o.claudePath = o.agentPath; // hotload's name for it
   if (o.case === "hotload") {
     const refusal = (await import("./hotload.mjs")).hotloadRefusal(o);
     if (refusal) {
