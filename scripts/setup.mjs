@@ -7,9 +7,7 @@
 // setup never touches Claude Code's configuration.
 // --login-launch [--app <Scout.app>] writes the login LaunchAgent; it starts the installed
 // ~/Applications/Scout.app (`npm run bundle-app -- --install`) unless --app names another bundle.
-// Setup registers nothing for the side panel: the extension bundle carries it. It no longer
-// touches ~/.personal-context-mcp (legacy `config-merged` records are only read: uninstall
-// drops the entry, doctor reports it; neither edits the file).
+// Setup registers nothing for the side panel: the extension bundle carries it.
 // <SCOUT_HOME>/agent-profile.json is written only when absent, with the absolute claude path
 // resolved here, so jobs launched from a Finder-started app never look claude up on PATH.
 //

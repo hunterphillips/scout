@@ -2,11 +2,8 @@
 //
 // { "version": 1, "marker": "<token>", "skillsRoot"?: "<abs dir>", "skillsRootCreated"?: true,
 //   "files": [ { "path", "kind", ...extra } ] }
-// kinds: config | config-merged | wrapper | nmh-manifest | key | extension-manifest-key
-//        | mcp-registration | skill | agent-profile | launch-agent
-// config-merged (legacy, read only): setup before P4.3 merged `keys` into the personal-context
-// config. Setup no longer writes it; uninstall reports such an entry and drops it from the
-// record, and never edits or deletes that file or its directory.
+// kinds: config | wrapper | nmh-manifest | key | extension-manifest-key
+//        | mcp-registration | skill | agent-profile | launch-agent | app-bundle
 // agent-profile { path: "<SCOUT_HOME>/agent-profile.json", sha256 }: written only when absent,
 //                     with the absolute claude path setup resolved; removed only while unchanged
 // launch-agent  { path: "<LaunchAgents>/dev.scout.app.plist", sha256, program }: the optional
@@ -29,9 +26,9 @@
 import { randomBytes } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { writeJson } from "./files.mjs";
-import { basename, dirname, isAbsolute, join, resolve } from "node:path";
+import { basename, isAbsolute, join, resolve } from "node:path";
 
-export const KINDS = ["config", "config-merged", "wrapper", "nmh-manifest", "key", "extension-manifest-key", "mcp-registration", "skill", "agent-profile", "launch-agent", "app-bundle"];
+export const KINDS = ["config", "wrapper", "nmh-manifest", "key", "extension-manifest-key", "mcp-registration", "skill", "agent-profile", "launch-agent", "app-bundle"];
 
 /** Kinds that may appear at most once; a new entry replaces the old one whatever its path. */
 const SINGLETON_KINDS = ["mcp-registration", "skill", "agent-profile", "launch-agent", "app-bundle"];
@@ -116,8 +113,6 @@ export function allowedPath(kind, path, L, record) {
       return path === L.wrapper;
     case "nmh-manifest":
       return basename(path) === "dev.scout.bridge.json";
-    case "config-merged":
-      return path === L.legacyPcConfig || (basename(path) === "config.json" && basename(dirname(path)) === ".personal-context-mcp");
     case "extension-manifest-key":
       return path.endsWith(EXTENSION_MANIFEST_SUFFIX);
     case "agent-profile":

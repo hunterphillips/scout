@@ -86,9 +86,6 @@ export function skillsRootFor(env = process.env) {
 /** All paths for one install, as absolute strings. */
 export function layout({ env = process.env, scoutRoot = REPO_ROOT } = {}) {
   const home = resolve(scoutHome(env));
-  // The legacy personal-context home (removed in P4.4). Setup never writes it; uninstall and
-  // doctor only recognise a pre-P4.3 `config-merged` record pointing at its config.json.
-  const legacyPcHome = resolve(join(env.HOME || homedir(), ".personal-context-mcp"));
   const nmhDir = resolve(chromeNmhDir(env));
   const agentsDir = resolve(launchAgentsDir(env));
   const root = resolve(scoutRoot);
@@ -101,8 +98,6 @@ export function layout({ env = process.env, scoutRoot = REPO_ROOT } = {}) {
     keyPem: join(home, "extension-key.pem"),
     installed: join(home, "installed.json"),
     wrapper: join(home, "bin", "scout-native-host"),
-    legacyPcHome,
-    legacyPcConfig: join(legacyPcHome, "config.json"),
     nmhDir,
     nmhManifest: join(nmhDir, `${HOST_NAME}.json`),
     scoutRoot: root,

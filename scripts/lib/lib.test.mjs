@@ -110,9 +110,7 @@ describe("allowedPath", () => {
     expect(allowedPath("wrapper", L.wrapper, L)).toBe(true);
     expect(allowedPath("nmh-manifest", "/elsewhere/dev.scout.bridge.json", L)).toBe(true);
     expect(allowedPath("nmh-manifest", "/elsewhere/other.json", L)).toBe(false);
-    expect(allowedPath("config-merged", L.legacyPcConfig, L)).toBe(true);
-    expect(allowedPath("config-merged", "/u/.personal-context-mcp/config.json", L)).toBe(true);
-    expect(allowedPath("config-merged", "/u/.ssh/config.json", L)).toBe(false);
+    expect(allowedPath("config-merged", L.scoutConfig, L)).toBe(false);
     expect(allowedPath("extension-manifest-key", "/x/packages/browser-extension/dist/manifest.json", L)).toBe(true);
     expect(allowedPath("extension-manifest-key", "/x/manifest.json", L)).toBe(false);
     expect(allowedPath("config", "/s/../s/config.json", L)).toBe(false);

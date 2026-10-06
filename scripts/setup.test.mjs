@@ -41,7 +41,6 @@ describe("setup --dry-run", () => {
     expect(r.status, r.stderr).toBe(0);
     const L = layout({ env: fx.env, scoutRoot: fx.scoutRoot });
     for (const p of [L.keyPem, L.extensionManifest, L.scoutConfig, L.agentProfile, L.wrapper, L.nmhManifest, L.installed]) expect(r.stdout).toContain(p);
-    expect(r.stdout).not.toContain(L.legacyPcConfig);
     expect(r.stdout).toContain("Application Support/Google/Chrome/NativeMessagingHosts/dev.scout.bridge.json");
     expect(r.stdout).toMatch(/would write .*extension-key\.pem.*would generate/);
     expect(listTree(fx.root)).toEqual(before);
@@ -233,33 +232,6 @@ describe("setup", () => {
     expect(rec.kinds).toEqual(["agent-profile", "config", "extension-manifest-key", "key", "nmh-manifest", "wrapper"]);
   });
 
-  it("never touches the personal-context home or config, even when one exists", () => {
-    const L = layout({ env: fx.env, scoutRoot: fx.scoutRoot });
-    mkdirSync(L.legacyPcHome, { recursive: true, mode: 0o755 });
-    const original = JSON.stringify({ port: 47821, sources: [{ id: "focus", kind: "focus_http", enabled: true }] });
-    writeFileSync(L.legacyPcConfig, original);
-    const before = listTree(L.legacyPcHome);
-    for (const args of [["--dry-run"], []]) {
-      const r = setup(args);
-      expect(r.code, r.text()).toBe(0);
-      expect(r.text()).not.toContain(L.legacyPcConfig);
-    }
-    expect(readFileSync(L.legacyPcConfig, "utf8")).toBe(original);
-    expect(mode(L.legacyPcHome)).toBe(0o755);
-    expect(listTree(L.legacyPcHome)).toEqual(before);
-    expect(json(L.installed).files.some((f) => f.kind === "config-merged")).toBe(false);
-  });
-
-  it("keeps a legacy config-merged record on re-run without acting on it", () => {
-    expect(setup().code).toBe(0);
-    const L = layout({ env: fx.env, scoutRoot: fx.scoutRoot });
-    const legacy = { path: L.legacyPcConfig, kind: "config-merged", keys: ["x_scout_marker", "nodePath", "claudePath"] };
-    writeFileSync(L.installed, JSON.stringify({ ...json(L.installed), files: [...json(L.installed).files, legacy] }));
-    expect(setup().code).toBe(0);
-    expect(json(L.installed).files).toContainEqual(legacy);
-    expect(existsSync(L.legacyPcConfig)).toBe(false);
-  });
-
   it("warns that a SCOUT_HOME install is for testing", () => {
     const r = setup(["--dry-run"]);
     expect(r.text()).toMatch(/warning: SCOUT_HOME is set .*native app only reads ~\/\.scout/);
@@ -433,21 +405,21 @@ describe("uninstall", () => {
 });
 
 describe("uninstall: out-of-scope entries", () => {
-  it("touches nothing outside what setup writes and exits 2", async () => {
+  it("touches nothing outside what setup writes, reports an unknown kind (config-merged) and skips it, and exits 2", async () => {
     const L = layout({ env: fx.env, scoutRoot: fx.scoutRoot });
     const marker = "m".repeat(32);
     const victimConfig = join(fx.root, "victim", "config.json");
-    const victimMerged = join(fx.root, "victim", "settings.json");
+    const victimUnknown = join(fx.root, "victim", "settings.json");
     mkdirSync(dirname(victimConfig), { recursive: true });
     writeFileSync(victimConfig, JSON.stringify({ x_scout_marker: marker }));
-    writeFileSync(victimMerged, JSON.stringify({ x_scout_marker: marker, nodePath: "/n", keep: 1 }));
+    writeFileSync(victimUnknown, JSON.stringify({ x_scout_marker: marker, nodePath: "/n", keep: 1 }));
     mkdirSync(L.scoutHome, { recursive: true, mode: 0o700 });
     const record = {
       version: 1,
       marker,
       files: [
         { path: victimConfig, kind: "config" },
-        { path: victimMerged, kind: "config-merged", keys: ["keep"] },
+        { path: victimUnknown, kind: "config-merged", keys: ["keep"] },
       ],
     };
     writeFileSync(L.installed, JSON.stringify(record));
@@ -457,66 +429,12 @@ describe("uninstall: out-of-scope entries", () => {
     const code = await runUninstall(["--yes"], { env: fx.env, out: c.out, err: c.err });
     expect(code).toBe(2);
     expect(c.text()).toMatch(/SKIP .*victim\/config\.json \(not a path setup writes for kind config/);
-    expect(c.text()).toMatch(/SKIP .*victim\/settings\.json \(not a path setup writes for kind config-merged/);
+    expect(c.text()).toMatch(/SKIP .*victim\/settings\.json \(not a path setup writes for kind config-merged; not touching\)/);
     expect(json(L.installed).files).toHaveLength(2);
     expect(listTree(fx.root).map((f) => [f, readFileSync(join(fx.root, f), "utf8")])).toEqual(before);
 
     const bad = runChecks(fx.env).find((r) => r.label === "install record lists only paths setup writes");
     expect(bad.status).toBe("FAIL");
-  });
-});
-
-describe("uninstall: legacy merged personal-context config", () => {
-  const uninstall = async (args = ["--yes"]) => {
-    const c = capture();
-    const code = await runUninstall(args, { env: fx.env, out: c.out, err: c.err });
-    return { code, ...c };
-  };
-  /** A pre-P4.3 install: setup had merged Scout's keys into the personal-context config. */
-  const legacyInstall = () => {
-    expect(setup().code).toBe(0);
-    const L = layout({ env: fx.env, scoutRoot: fx.scoutRoot });
-    const record = json(L.installed);
-    mkdirSync(L.legacyPcHome, { recursive: true, mode: 0o700 });
-    const merged = { port: 47821, x_scout_marker: record.marker, nodePath: process.execPath, claudePath: join(fx.binDir, "claude") };
-    writeFileSync(L.legacyPcConfig, JSON.stringify(merged));
-    writeFileSync(L.installed, JSON.stringify({ ...record, files: [...record.files, { path: L.legacyPcConfig, kind: "config-merged", keys: ["x_scout_marker", "nodePath", "claudePath"] }] }));
-    return { L, text: readFileSync(L.legacyPcConfig, "utf8") };
-  };
-
-  it("never edits or deletes the file or its directory, even with only Scout's keys; it drops the entry", async () => {
-    const { L } = legacyInstall();
-    const onlyScout = JSON.stringify({ x_scout_marker: json(L.installed).marker, nodePath: process.execPath, claudePath: "/c" });
-    writeFileSync(L.legacyPcConfig, onlyScout);
-    const r = await uninstall(["--yes", "--include-key"]);
-    expect(r.code, r.text()).toBe(0);
-    expect(readFileSync(L.legacyPcConfig, "utf8")).toBe(onlyScout);
-    expect(existsSync(L.legacyPcHome)).toBe(true);
-    expect(r.text()).toMatch(/leave .*\.personal-context-mcp\/config\.json \(legacy record: .*never edits or deletes it or its directory; drop the entry\)/);
-    expect(existsSync(L.installed)).toBe(false);
-  });
-
-  it("keeps the user's edits and other keys", async () => {
-    const { L, text } = legacyInstall();
-    const r = await uninstall();
-    expect(r.code, r.text()).toBe(0);
-    expect(readFileSync(L.legacyPcConfig, "utf8")).toBe(text);
-  });
-
-  it("--dry-run says the same and changes nothing", async () => {
-    legacyInstall();
-    const before = listTree(fx.root);
-    const r = await uninstall(["--dry-run"]);
-    expect(r.code).toBe(0);
-    expect(r.text()).toMatch(/leave .*config\.json \(legacy record.*would drop the entry\)/);
-    expect(listTree(fx.root)).toEqual(before);
-  });
-
-  it("doctor notes the legacy record and does not fail on it", () => {
-    legacyInstall();
-    const results = runChecks(fx.env);
-    expect(results.find((r) => r.label.startsWith("legacy personal-context record"))).toMatchObject({ status: "OK", section: "install record" });
-    expect(results.filter((r) => r.status === "FAIL")).toEqual([]);
   });
 });
 

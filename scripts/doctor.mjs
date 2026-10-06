@@ -3,8 +3,7 @@
 // sections, each ok / warn / fail with one line, followed by its checks that are not OK
 // (all checks with --verbose). Exits 1 if any check fails, else 0.
 //
-//   install record      installed.json, its marker and entries, a legacy `config-merged` entry
-//                       (noted, never acted on), the Scout config, private dirs
+//   install record      installed.json, its marker and entries, the Scout config, private dirs
 //   Mac app             the installed Scout.app (bundle-app --install, hash-checked) and the
 //                       login LaunchAgent (FAIL when the binary it starts is missing)
 //   core                whether Scout runs (pid from capabilities/store.lock), run/core.sock,
@@ -101,9 +100,6 @@ export function runReport(env = process.env, { claudeFallbacks, mcpTimeoutMs, re
   if (record) {
     const outside = record.files.filter((f) => !allowedPath(f.kind, f.path, L, record));
     check(outside.length === 0, "install record lists only paths setup writes", outside.length ? outside.map((f) => `${f.kind} ${f.path}`).join("; ") : base.installed);
-    for (const f of record.files.filter((x) => x.kind === "config-merged")) {
-      add("OK", "legacy personal-context record noted, never acted on", `${f.path}: setup no longer merges into it; uninstall drops the entry and leaves the file and its directory`);
-    }
   }
   check(scout != null, "scout config exists and parses", sc.error ?? (scout ? base.scoutConfig : `${base.scoutConfig} missing`));
   if (scout) markerCheck(scout.x_scout_marker, "scout config carries the recorded marker");
@@ -277,7 +273,7 @@ export function runDoctor(env = process.env, out = console.log, opts = {}) {
   const sections = runReport(env, opts);
   for (const s of sections) {
     out(`${s.status.padEnd(4)} ${s.title}: ${s.summary}`);
-    for (const c of s.checks) if (opts.verbose || c.status !== "OK" || c.label.startsWith("legacy")) out(`     ${c.status.padEnd(4)} ${c.label}${c.detail ? `: ${c.detail}` : ""}`);
+    for (const c of s.checks) if (opts.verbose || c.status !== "OK") out(`     ${c.status.padEnd(4)} ${c.label}${c.detail ? `: ${c.detail}` : ""}`);
   }
   const failed = sections.flatMap((s) => s.checks).filter((c) => c.status === "FAIL").length;
   out(failed ? `${failed} check(s) failed.` : "No failed checks.");

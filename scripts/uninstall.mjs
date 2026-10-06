@@ -5,9 +5,7 @@
 // Without a terminal on stdin and without --yes, it aborts.
 //
 // Entries whose path is outside what setup could have written (lib/installed.mjs
-// allowedPath) are skipped and reported. A legacy `config-merged` entry (the personal-context
-// config setup used to merge into) is reported and dropped from the record; uninstall never
-// edits or deletes that file or its directory.
+// allowedPath), including entries of an unknown kind, are skipped and reported.
 //
 // Order: first, when installed.json records a skillsRoot and capabilities/exports.json lists
 // skill wrappers, the Scout app's wrappers go through the core's one-shot
@@ -78,13 +76,10 @@ export async function ttyConfirm(question, { input = process.stdin, output = pro
   }
 }
 
-/** Decide what to do with one entry: { action: "remove"|"remove-dir"|"strip-key"|"legacy"|"gone"|"keep"|"skip", reason }. */
+/** Decide what to do with one entry: { action: "remove"|"remove-dir"|"strip-key"|"gone"|"keep"|"skip", reason }. */
 export function judge(entry, marker, { includeKey }, L, record) {
   const p = entry.path;
   if (!allowedPath(entry.kind, p, L, record)) return { action: "skip", reason: `not a path setup writes for kind ${entry.kind}; not touching` };
-  if (entry.kind === "config-merged") {
-    return { action: "legacy", reason: "legacy record: setup no longer merges into the personal-context config; uninstall never edits or deletes it or its directory" };
-  }
   if (!exists(p)) return { action: "gone", reason: "already absent" };
   if (entry.kind === "app-bundle") {
     let dir = false;
@@ -299,8 +294,6 @@ export async function runUninstall(argv, { env = process.env, out = console.log,
           writeJson(entry.path, m, statSync(entry.path).mode & 0o777);
         }
         out(`${would}strip "key" from ${entry.path} (${reason})`);
-      } else if (action === "legacy") {
-        out(`leave ${entry.path} (${reason}; ${would}drop the entry)`);
       } else if (action === "gone") {
         out(`skip ${entry.path} (${reason})`);
       } else {
