@@ -645,6 +645,7 @@ describe.skipIf(!BUILT)("recommendation jobs e2e: B7/B12/B13 closing paths end t
     expect(entry).toBeDefined();
     const started = () => b.diagEvents().filter((e) => e.event === "job_started").length;
     const n = started();
+    const framesBefore = b.panel().length; // only frames after the revoke can be the replacement's
     b.panelCommand({ type: "revoke", commandId: "rv1", resourceId, expectedRevision: entry.resourceRevision });
     await until(() => b.panel().some((f) => f.type === "ack" && f.commandId === "rv1"), "the revoke ack");
     expect(b.panel().find((f) => f.type === "ack" && f.commandId === "rv1")).toMatchObject({ ok: true });
@@ -657,7 +658,7 @@ describe.skipIf(!BUILT)("recommendation jobs e2e: B7/B12/B13 closing paths end t
     const launches = () => b.fake().filter((l) => typeof l.pid === "number" && Array.isArray(l.argv));
     await until(() => launches().at(-1).pid !== job.pid, "the replacement's CLI");
     // The `working` frame for the replacement can land after its job_started event on a slow runner.
-    const workingFor = () => b.panel().filter((f) => f.type === "state" && f.status === "working" && f.jobId !== job.jobId).at(-1);
+    const workingFor = () => b.panel().slice(framesBefore).filter((f) => f.type === "state" && f.status === "working" && f.jobId !== job.jobId).at(-1);
     await until(() => workingFor() !== undefined, "the replacement's working frame");
     const replacement = { pid: launches().at(-1).pid, jobId: workingFor().jobId };
     const jobsRoot = join(home, "run", "jobs");
