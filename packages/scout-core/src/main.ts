@@ -172,7 +172,7 @@ export async function runStdio(deps: StdioDeps): Promise<StdioCore> {
   }
 
   const runDir = join(home, "run");
-  // The skill exporter is the Claude Code integration's; a second integration registers its own here.
+  // The skill exporter belongs to the first agent integration; a second integration registers its own here.
   const exporter = openExporter(home, diagnostics);
 
   // The agent socket is built once the token exists; the store's revocation hook reaches it then.

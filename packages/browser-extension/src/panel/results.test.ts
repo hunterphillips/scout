@@ -73,6 +73,12 @@ describe("ResultsModel (ResultsModelTests.swift)", () => {
     }
   });
 
+  it("agentUnavailableNamesNoSpecificAgent", () => {
+    expect(displayExplanation({ kind: "unavailable", reason: "agent_unavailable" })).toBe(
+      "Links are unavailable: Your agent is not available.",
+    );
+  });
+
   it("compactLineShowsTheResultsState (the panel header)", () => {
     const m = ready();
     expect(m.headerLine).toBe("Idle · docs.example.com · 2 links");

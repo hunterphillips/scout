@@ -2,7 +2,7 @@
   "name": "scout-workspace",
   "private": true,
   "version": "0.1.0",
-  "description": "Scout proof of concept workspace: the website agent (core, MCP adapter, browser extension, native host).",
+  "description": "Scout: a browser companion that hands website agent resources to your agent and suggests links.",
   "type": "module",
   "engines": {
     "node": ">=22.12.0"
