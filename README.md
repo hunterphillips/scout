@@ -64,11 +64,14 @@ run out of `~/.scout`.
 1. `npm run build`
 2. `npm run setup` writes `~/.scout/config.json`, the native-host wrapper in
    `~/.scout/bin`, Chrome's native-messaging manifest, and the job profile
-   (`agent-profile.json`, which names the `claude` binary and model the jobs use).
-   Everything it writes is listed in `~/.scout/installed.json`. `--dry-run` shows the
-   paths first. `--agent-integration` also registers the `scout` MCP connection at user
-   scope through `claude mcp add` and installs the `scout-integration` skill. Setup
-   refuses if a foreign `scout` registration exists.
+   (`agent-profile.json`, which names the agent binary and model the jobs use). Jobs run
+   through Claude Code or Codex: `--agent claude-code` or `--agent codex` picks one;
+   without the flag, setup uses Claude Code if `claude` is installed, else Codex if
+   `codex` is. Everything it writes is listed in `~/.scout/installed.json`. `--dry-run`
+   shows the paths first. `--agent-integration` also registers the `scout` MCP connection
+   with that agent (`claude mcp add` at user scope, or `codex mcp add`) and installs the
+   `scout-integration` skill where the agent reads skills. Setup refuses if a foreign
+   `scout` registration exists.
 3. In Chrome, open `chrome://extensions`, turn on Developer mode, and load
    `packages/browser-extension/dist` unpacked. Reload it there after every
    `npm run build`.
@@ -98,8 +101,10 @@ On a site with suggestions on, **Page** shows up to three links after the job fi
 says why there are none. A link opens in a new tab only when you click it; Scout runs no
 job for the page it opened, and when you return to a page within 15 minutes its links come
 back without a new job. **Activity**
-lists problems first, then your agent's reads. **Settings** has Pause, issue text on
-github.com, the switch that lets your agent read the current site, and Diagnostics. With
+lists problems first, then your agent's reads. **Settings** has Pause, the **Agent** row
+(every installed agent Scout finds, **Claude Code** or **Codex**; picking one applies at
+once, with no restart), issue text on github.com, the switch that lets your agent read the
+current site, and Diagnostics. With
 the panel closed, the toolbar badge counts new links (blue) or files to review (amber), and
 the icon turns grey while Scout is paused. Pause works from the panel or the menu bar.
 Quitting the app makes the panel say the core is unavailable, and relaunching reconnects
@@ -122,7 +127,14 @@ still match what setup recorded: first the skill wrappers Scout exported, then t
 manifest, config, profile, LaunchAgent, and the installed app. It refuses while Scout is
 running. It keeps the extension key unless you pass `--include-key` and never touches
 `~/.scout/logs`. `npm run uninstall -- --agent-integration` removes only the MCP
-registration and the skill.
+registration and the skill, for whichever agent they were installed with.
+
+Codex jobs run with a private Codex home under `~/.scout/run/codex-home`, so none of
+your Codex config, rules, history or sessions reach a job. Its only link to your own
+Codex setup is `auth.json`, a symlink to `~/.codex/auth.json`, so your ChatGPT login is
+used and a token refresh lands in your file. Codex runs only on a ChatGPT login; an API
+key in the environment stops jobs. Doctor checks the link; uninstall removes the private
+home (the link only, never the file it points to).
 
 ## Chrome for Testing
 

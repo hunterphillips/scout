@@ -110,12 +110,25 @@ Scout is agent-agnostic. Agent-specific code lives in two places:
 
 `agents/registry.ts` builds the adapter with `createJobAdapter`, an exhaustive switch on
 `profile.adapter`. The profile file `~/.scout/agent-profile.json` is a discriminated union
-on `adapter` (`AgentProfileSchema` in `agents/profile.ts`). Claude Code is the first
-adapter (`agents/claudeCode/`) and the first integration (`integrations/claudeCode/`).
+on `adapter` (`AgentProfileSchema` in `agents/profile.ts`). Two adapters exist: Claude
+Code (`agents/claudeCode/`, with the skill-export integration in
+`integrations/claudeCode/`) and Codex (`agents/codex/`).
 
 The Claude Code adapter runs one `claude -p` per job with a strict MCP config, an exact
 `--allowedTools` list, hooks off, and no session persistence. Before any job runs, a
 preflight in a separate child process must confirm the CLI bills to a subscription.
+
+The Codex adapter runs one `codex exec --ephemeral` per job in a read-only sandbox with
+the shell, web search and apps off, and Scout's MCP server passed as `-c mcp_servers.*`
+overrides. Jobs get a private `CODEX_HOME` (`~/.scout/run/codex-home`) that holds only
+Codex's caches and an `auth.json` symlink to the user's own; each job's SQLite state lives
+in its job dir. A job runs only on a ChatGPT login with no API key in the environment.
+
+The user picks the agent in the side panel's Settings. The `capabilities` frame lists the
+adapters whose CLI the core found (PATH, then each agent's usual install locations) and
+the current one; `set_agent` writes that adapter's default profile under the core's
+profile lock, keeping any selected tools. The profile watcher then swaps the adapter, the
+same path a hand edit of the file takes.
 
 ## Limits
 

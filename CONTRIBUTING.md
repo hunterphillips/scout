@@ -29,31 +29,40 @@ To run one package's tests:
 
 Tests that touch install paths need a throwaway `SCOUT_HOME` and every override set:
 `CHROME_NMH_DIR`, `LAUNCH_AGENTS_DIR`, `SCOUT_APPLICATIONS_DIR`, `SCOUT_SKILLS_ROOT`,
-`SCOUT_CLAUDE_BIN`. Setup refuses these overrides against the real `~/.scout`.
+`SCOUT_CLAUDE_BIN`, `SCOUT_CODEX_BIN`, `SCOUT_CODEX_HOME`. Setup refuses these overrides
+against the real `~/.scout`.
 
-## The fake agent CLI
+## The fake agent CLIs
 
 Tests never call a real model. Job tests point `SCOUT_CLAUDE_BIN` at the fake CLI in
-`packages/scout-core/src/agents/claudeCode/testing/fake-claude.mjs`.
+`packages/scout-core/src/agents/claudeCode/testing/fake-claude.mjs` and `SCOUT_CODEX_BIN`
+at `packages/scout-core/src/agents/codex/testing/fake-codex.mjs`, which also answers
+`codex mcp add|get|remove` against the temp Codex home in `SCOUT_CODEX_HOME`.
 
-A real model call spends the maintainer's quota. Don't make one, and don't add a test that
-makes one, unless the maintainer has approved that specific run.
+A real model call spends the maintainer's quota on either plan. Don't make one, and don't
+add a test that makes one, unless the maintainer has approved that specific run.
 
 ## Adding an agent adapter
 
-Claude Code is the first adapter. Scout core outside the adapter folder and the
-integration folder must not assume any particular agent. A second adapter needs three
-changes:
+Claude Code and Codex are the two adapters; `agents/codex/` is the smaller one to read
+first. Scout core outside the adapter folders and the integration folder must not assume
+any particular agent. A new adapter needs:
 
-1. A new folder under `packages/scout-core/src/agents/<name>/` that implements
+1. A folder under `packages/scout-core/src/agents/<name>/` that implements
    `AgentJobAdapter` from `agents/adapter.ts` (`id`, `profileFingerprint`, `readiness`,
-   `refreshReadiness`, `run`, `abortAll`).
-2. A case in `createJobAdapter` in `agents/registry.ts`. The switch on `profile.adapter`
-   is exhaustive, so the compiler flags a missing case.
-3. A member in the `AgentProfileSchema` discriminated union in `agents/profile.ts`.
+   `refreshReadiness`, `run`, `abortAll`), plus a `profile.ts` with the union member, a
+   label for the Settings row, a default-profile factory and the agent's usual install
+   locations.
+2. Cases in `agents/registry.ts`: `createJobAdapter`, `createDefaultProfileFor`,
+   `adapterLabel` and `profileExecutable`. Every switch on `profile.adapter` is
+   exhaustive, so the compiler flags a missing case.
+3. The member in the `AgentProfileSchema` discriminated union in `agents/profile.ts`.
+4. A scripted fake CLI under `agents/<name>/testing/` and a `SCOUT_<NAME>_BIN` override,
+   so no test runs the real one.
 
 If the agent needs install-time wiring (an MCP registration or exported skills), add it
-under `packages/scout-core/src/integrations/<name>/`.
+under `scripts/lib/` next to `claude-mcp.mjs` and `codex-mcp.mjs`, and under
+`packages/scout-core/src/integrations/<name>/` for anything the running core does.
 
 ## Landing changes
 
