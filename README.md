@@ -29,16 +29,19 @@ Run from this directory (Node 22.12+, npm):
     npm ci
     npm run build
     npm run typecheck
-    npm test             # everything on macOS: workspace tests, script tests, Swift tests
-    npm run test:node    # Linux-safe subset (skips *.mac.test.* files)
-    npm run test:mac     # the macOS-only test files plus the Swift tests
-    npm run test:e2e     # real native host against the real core (needs npm run build)
+    npm test             # test:node, then test:mac (macOS)
+    npm run test:node    # macOS or Linux: workspace and script tests minus the *.mac.test.* files
+    npm run test:mac     # macOS: the *.mac.test.* files plus the Swift tests
+    npm run test:e2e     # macOS: real native host against the real core (needs npm run build)
     npm run test:swift   # the Mac app's tests
-    npm run test:all     # build, then npm test and test:e2e
+    npm run test:all     # macOS: build, then npm test and test:e2e
 
-CI runs the full suite on macOS. The side-panel e2e test drives the real panel in Chrome
-for Testing and is opt-in: `SCOUT_E2E_CHROME=1 SCOUT_E2E_BROWSERS=<dir with a Chrome for
-Testing install>`.
+A test that needs macOS tools (`codesign`, `plutil`, `launchctl`) goes in a
+`*.mac.test.*` file. CI runs `test:node` on Ubuntu, and the full suite plus the Chrome
+side-panel e2e test on macOS.
+
+Locally the side-panel e2e test drives the real panel in Chrome for Testing and is
+opt-in: `SCOUT_E2E_CHROME=1 SCOUT_E2E_BROWSERS=<dir with a Chrome for Testing install>`.
 
 Core dev CLI (after `npm run build`; `catalog`, `discover`, `verify`, and `capability
 ingest` make network requests; nothing runs a model):

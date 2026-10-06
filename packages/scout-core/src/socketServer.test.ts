@@ -181,13 +181,13 @@ describe("socketServer", () => {
     const exited = new Promise<void>((r) => child.once("exit", () => r()));
     child.kill("SIGKILL");
     await exited;
-    const staleIno = lstatSync(path).ino;
     expect(lstatSync(path).isSocket()).toBe(true);
 
+    // No inode comparison: Linux hands the freed inode straight to the new socket. A stale
+    // socket refuses connections, so the hello below is what proves the file was replaced.
     const clients: SocketClient[] = [];
     const { server: s } = await start((c) => clients.push(c));
     const st = lstatSync(s.socketPath);
-    expect(st.ino).not.toBe(staleIno);
     expect(st.mode & 0o777).toBe(0o600);
     const c = await rawClient(s.socketPath);
     extra.push(c.sock);
