@@ -2,7 +2,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import type { z } from "zod";
-import { NATIVE_COMMAND_MAX_BYTES, NativeCommandSchema, PanelStateSchema } from "./index.js";
+import { NATIVE_COMMAND_MAX_BYTES, NativeCommandSchema, PanelCapabilitiesSchema, PanelStateSchema } from "./index.js";
 
 // The panel fixtures: one hand-written JSON file per frame or command, valid under this
 // contract. Every file in the directory is checked, so a new fixture is covered without editing
@@ -91,5 +91,14 @@ describe("panel fixtures", () => {
 
   it("every NativeCommand member has a fixture", () => {
     expect(uncovered(NativeCommandSchema, commands)).toEqual([]);
+  });
+
+  it("a capabilities fixture carries the agent choice, and its current agent is one of the options", () => {
+    const withAgents = frames.filter(({ value }) => PanelCapabilitiesSchema.safeParse(value).data?.agents !== undefined);
+    expect(withAgents.map((f) => f.file)).toEqual(["frame.capabilities.agents.json"]);
+    const agents = PanelCapabilitiesSchema.parse(withAgents[0]!.value).agents!;
+    expect(agents.available.map((a) => a.id)).toContain(agents.current);
+    const setAgent = commands.find(({ value }) => (value as { type?: string }).type === "set_agent");
+    expect(agents.available.map((a) => a.id)).toContain((setAgent?.value as { agent?: string } | undefined)?.agent);
   });
 });

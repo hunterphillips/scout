@@ -1,5 +1,6 @@
 // The `capabilities` frame: the native app's whole view of website resources (offers waiting
-// for the user, the library, export conflicts, per-origin auto-acquire settings), rebuilt from
+// for the user, the library, export conflicts, per-origin auto-acquire settings) plus Settings'
+// agent choice (`agents`, passed through as given), rebuilt from
 // the store and re-sent on every change rather than patched.
 //
 // An offer is a resource's newest recorded version while it is pending (the same rule ingest's
@@ -30,6 +31,7 @@ import {
   type CapabilityOffer,
   type LibraryEntry,
   type OriginSetting,
+  type PanelAgents,
   type PanelCapabilities,
 } from "@scout/contracts";
 import type { StoreState } from "./capabilities/decisions.js";
@@ -46,6 +48,8 @@ export interface CapabilitiesInput {
   isPermitted: (origin: string) => boolean;
   /** The current visit's origin, listed among the origin settings even with no resources. */
   currentOrigin: string | null;
+  /** Settings' agent choice, passed through; absent leaves it off the frame. */
+  agents?: PanelAgents;
 }
 
 export type CapabilitiesBody = Omit<PanelCapabilities, "type" | "coreInstanceId" | "revision">;
@@ -117,6 +121,7 @@ export function buildCapabilities(input: CapabilitiesInput): CapabilitiesBody {
     conflicts: c.items.map((x) => ({ name: x.name, resourceId: x.resourceId, code: x.code })),
     origins: g.items,
     truncated: o.cut || l.cut || c.cut || g.cut,
+    ...(input.agents ? { agents: input.agents } : {}),
   };
   return fitFrame(body);
 }

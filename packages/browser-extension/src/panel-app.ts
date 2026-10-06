@@ -345,6 +345,11 @@ export function createPanelApp(deps: PanelAppDeps): PanelApp {
       if (c) send([c]);
       render();
     },
+    agent(id) {
+      const c = model.setAgent(id);
+      if (c) send([c]);
+      render();
+    },
     pause() {
       const pause = model.pauseState.request();
       if (pause === null) return;

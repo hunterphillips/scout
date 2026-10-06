@@ -75,8 +75,9 @@ export function capabilities({
   library = [] as ReturnType<typeof entry>[],
   origins = [] as ReturnType<typeof originSetting>[],
   conflicts = [] as Array<{ name: string; resourceId: string; code: "foreign_collision" | "left_modified" | "left_symlink" | "name_collision" | "io_error" }>,
+  agents = undefined as { available: Array<{ id: string; label: string }>; current?: string } | undefined,
 } = {}): PanelState {
-  return PanelStateSchema.parse({ type: "capabilities", coreInstanceId: instance, revision, approvalRevision: 0, truncated: false, offers, library, conflicts, origins });
+  return PanelStateSchema.parse({ type: "capabilities", coreInstanceId: instance, revision, approvalRevision: 0, truncated: false, offers, library, conflicts, origins, ...(agents ? { agents } : {}) });
 }
 
 export type Outcome =
@@ -163,3 +164,12 @@ export async function answer(model: PanelModel, first: PanelCommand, with_: Pane
 }
 
 export { acceptAndVerify };
+
+/** Settings' agent choice as a core that found both test agents sends it. */
+export const AGENTS = {
+  available: [
+    { id: "agent-a", label: "Agent A" },
+    { id: "agent-b", label: "Agent B" },
+  ],
+  current: "agent-a",
+};

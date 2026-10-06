@@ -252,6 +252,38 @@ describe("side panel page", () => {
     expect(lastCommand(h.f)).toMatchObject({ type: "set_destination", origin: "https://docs.example.com", enabled: false, expectedEnabled: true });
   });
 
+  it("Settings' Agent row sends set_agent from the click; the core's ack and next capabilities frame keep the new agent pressed", async () => {
+    const h = await harness();
+    await withResults(h);
+    const agents = (F.raw("frame.capabilities.agents.json") as { agents: unknown }).agents;
+    await h.core(caps({ revision: 2, agents }));
+    await h.click("nav-settings");
+    const pressed = () => [...h.doc.querySelectorAll('[data-key="agent-card"] button')].map((b) => [b.textContent, b.getAttribute("aria-pressed")]);
+    expect(pressed()).toEqual([
+      ["Claude Code", "true"],
+      ["Codex", "false"],
+    ]);
+    await h.click("agent-option-codex");
+    const cmd = lastCommand(h.f);
+    expect(cmd).toEqual({ type: "set_agent", commandId: expect.stringMatching(/^sp-/), agent: "codex" });
+    expect(pressed()).toEqual([
+      ["Claude Code", "false"],
+      ["Codex", "true"],
+    ]);
+    expect(h.byKey("agent-option-claude-code")!.disabled).toBe(true);
+    await h.core({ type: "ack", commandId: cmd["commandId"], ok: true, revision: 0, approvalRevision: 0 });
+    await h.core(caps({ revision: 3, agents: { ...(agents as object), current: "codex" } }));
+    expect(pressed()).toEqual([
+      ["Claude Code", "false"],
+      ["Codex", "true"],
+    ]);
+    expect(h.byKey("agent-option-claude-code")!.disabled).toBe(false);
+    // The pressed option sends nothing.
+    const sent = commandsPosted(h.f).length;
+    await h.click("agent-option-codex");
+    expect(commandsPosted(h.f)).toHaveLength(sent);
+  });
+
   it("the link going down clears the results and says so", async () => {
     const h = await harness();
     await withResults(h);

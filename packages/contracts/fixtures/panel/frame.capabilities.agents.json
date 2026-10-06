@@ -1,0 +1,18 @@
+{
+  "type": "capabilities",
+  "coreInstanceId": "core-7f3a9c",
+  "revision": 2,
+  "approvalRevision": 0,
+  "offers": [],
+  "library": [],
+  "conflicts": [],
+  "origins": [],
+  "truncated": false,
+  "agents": {
+    "available": [
+      { "id": "claude-code", "label": "Claude Code" },
+      { "id": "codex", "label": "Codex" }
+    ],
+    "current": "claude-code"
+  }
+}

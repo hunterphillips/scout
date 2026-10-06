@@ -87,6 +87,7 @@ import { NATIVE_COMMAND_MAX_BYTES, NativeCommandSchema, type PanelState } from "
 import type { AgentJobAdapter } from "./agents/adapter.js";
 import { JOB_TREE_FILE, killRecordedTree, parseJobTreeRecord, psSnapshot, type ProcessIdentity, type PsSnapshot } from "./agents/processTree.js";
 import { readPrivateFile } from "./agents/privateFile.js";
+import { agentChoices } from "./agents/profileSwitch.js";
 import type { JobScheduler } from "./jobScheduler.js";
 import { createActivityStore } from "./activity/store.js";
 import { createSnapshotRegistry, type SnapshotRegistry } from "./activity/snapshots.js";
@@ -279,6 +280,9 @@ export async function runStdio(deps: StdioDeps): Promise<StdioCore> {
     readBrowserContextGrant: () => readBrowserContextGrant(home),
     readDestinations: () => destinations.current(),
     setDestination: (origin, enabled, expectedEnabled) => destinations.set(origin, enabled, expectedEnabled),
+    // Settings' agent choice; the job wiring (built below) owns the profile lock and its watcher.
+    readAgents: () => agentChoices(home, deps.env),
+    setAgent: (agent) => jobs?.switchAgent(agent) ?? { ok: false, code: "unavailable" },
     writeBrowserContextGrant: (enabled) => writeBrowserContextGrant(home, enabled),
     getAudit: () => audit.entries(),
     isPermitted: (origin) => coordinator.permissions.isPermitted(origin),
@@ -309,6 +313,7 @@ export async function runStdio(deps: StdioDeps): Promise<StdioCore> {
     coordinator: () => coordinator,
     activity,
     store,
+    onProfileChanged: () => panelChannel.capabilitiesChanged(),
   });
   jobs = jobWiring;
   const scheduler = jobWiring.scheduler;

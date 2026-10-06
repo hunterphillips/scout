@@ -18,6 +18,8 @@
 //        edit of config.json take effect in the running core: a job on the next settled visit
 //        after on, a running job cancelled `revoked` by off, the grant frame carrying the new
 //        list.
+//   Settings' agent choice: `set_agent` from the side panel rewrites the profile in the running
+//   core, its watcher swaps the adapter, and the capabilities frame shows the new choice.
 
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -819,5 +821,80 @@ describe.skipIf(!BUILT)("recommendations switch: set_destination and a hand edit
     } finally {
       writeFileSync(join(home, "config.json"), good, { mode: 0o600 });
     }
+  }, 30_000);
+});
+
+describe.skipIf(!BUILT)("Settings agent choice: set_agent from the side panel switches the running core's agent, no restart", () => {
+  const children = [];
+  let home;
+  let b;
+  let ids = 0;
+  const profile = () => JSON.parse(readFileSync(join(home, "agent-profile.json"), "utf8"));
+  const agentsFrames = () => b.panel().filter((f) => f.type === "capabilities" && f.agents !== undefined);
+  async function setAgent(agent) {
+    const commandId = `agent-${++ids}`;
+    b.panelCommand({ type: "set_agent", commandId, agent });
+    await until(() => b.panel().some((f) => f.type === "ack" && f.commandId === commandId), `the ${commandId} ack`);
+    return b.panel().find((f) => f.type === "ack" && f.commandId === commandId);
+  }
+
+  beforeAll(async () => {
+    // No site enabled, so no readiness check or job ever runs either agent's CLI.
+    ({ home } = await makeHome("scout-agent-", { destinations: [] }));
+    // A stub `codex` beside the fake `claude`; only its path is recorded, it is never run.
+    writeFileSync(join(home, "bin", "codex"), "#!/bin/sh\nexit 1\n");
+    chmodSync(join(home, "bin", "codex"), 0o755);
+    const env = { PATH: `${join(home, "bin")}:/usr/bin:/bin`, HOME: join(home, "u"), USER: "p3v", LOGNAME: "p3v", LANG: "en_US.UTF-8", TMPDIR: tmpdir(), SCOUT_HOME: home };
+    b = await boot(home, env, children);
+  }, 60_000);
+
+  afterAll(async () => {
+    if (b && b.core.exitCode === null) {
+      b.core.stdin.end();
+      await Promise.race([b.exited, new Promise((r) => setTimeout(r, 8_000))]);
+    }
+    for (const c of children.splice(0)) if (c.exitCode === null && c.signalCode === null) c.kill("SIGKILL");
+    if (home) rmSync(home, { recursive: true, force: true });
+  });
+
+  it("the capabilities frame offers both agents found on PATH, the profile's one current", async () => {
+    await until(() => agentsFrames().length > 0, "a capabilities frame with agents");
+    expect(agentsFrames().at(-1).agents).toEqual({ available: [{ id: "claude-code", label: "Claude Code" }, { id: "codex", label: "Codex" }], current: "claude-code" });
+  }, 30_000);
+
+  it("choosing Codex writes its default profile (0600), the watcher swaps the adapter, and the next frame shows it; choosing it again writes nothing", async () => {
+    const before = agentsFrames().length;
+    expect(await setAgent("codex")).toMatchObject({ ok: true, revision: 0 });
+    expect(profile()).toEqual({ schemaVersion: 1, adapter: "codex", codexPath: join(home, "bin", "codex"), model: "gpt-6-sol" });
+    expect(statSync(join(home, "agent-profile.json")).mode & 0o777).toBe(0o600);
+    await until(() => agentsFrames().slice(before).some((f) => f.agents.current === "codex"), "a frame showing Codex");
+    await until(() => b.diagEvents().some((e) => e.event === "agent_profile_changed"), "the watcher's swap");
+    expect(b.diagEvents().find((e) => e.event === "agent_profile_switched")).toMatchObject({ adapter: "codex" });
+
+    const changes = b.diagEvents().filter((e) => e.event === "agent_profile_changed").length;
+    const ino = statSync(join(home, "agent-profile.json")).ino;
+    expect(await setAgent("codex")).toMatchObject({ ok: true });
+    await new Promise((r) => setTimeout(r, 1_000));
+    expect(statSync(join(home, "agent-profile.json")).ino).toBe(ino);
+    expect(b.diagEvents().filter((e) => e.event === "agent_profile_changed")).toHaveLength(changes);
+  }, 30_000);
+
+  // The core also looks in the system install locations, so a machine with its own `claude`
+  // there would still offer Claude Code after the fake is removed.
+  const systemClaude = ["/opt/homebrew/bin/claude", "/usr/local/bin/claude"].some((p) => existsSync(p));
+  it.skipIf(systemClaude)("an agent whose executable is gone is no longer offered, and choosing it is refused with not_found", async () => {
+    rmSync(join(home, "bin", "claude"));
+    b.panelCommand({ type: "refresh_capabilities", commandId: "agent-refresh" });
+    await until(() => agentsFrames().at(-1)?.agents.available.length === 1, "a frame without Claude Code");
+    expect(agentsFrames().at(-1).agents).toEqual({ available: [{ id: "codex", label: "Codex" }], current: "codex" });
+    expect(await setAgent("claude-code")).toEqual({ type: "ack", commandId: expect.any(String), ok: false, code: "not_found" });
+    expect(profile().adapter).toBe("codex");
+  }, 30_000);
+
+  it("a hand edit of the profile is shown in Settings too", async () => {
+    const before = agentsFrames().length;
+    saveProfile(home, profileJson(home, { claude: "claude-apikey" }));
+    await until(() => agentsFrames().slice(before).some((f) => f.agents.current === "claude-code"), "a frame showing the hand edit");
+    expect(b.core.exitCode).toBeNull();
   }, 30_000);
 });

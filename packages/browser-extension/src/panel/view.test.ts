@@ -3,7 +3,7 @@ import { JSDOM } from "jsdom";
 import { describe, expect, it, vi } from "vitest";
 import type { StatusSnapshot } from "../messages.js";
 import { PanelModel } from "./model.js";
-import { capabilities, entry, F, offer, originSetting, results, state, tracker } from "./test-frames.js";
+import { ackFailed, ackOk, AGENTS, capabilities, entry, F, offer, originSetting, results, state, tracker } from "./test-frames.js";
 import { type PanelHandlers, renderPanel, reviewTitle, sentText, siteName, statusRows, type ViewState } from "./view.js";
 
 const STATUS: StatusSnapshot = {
@@ -18,7 +18,7 @@ const STATUS: StatusSnapshot = {
 
 function handlers(): PanelHandlers {
   const h = {} as Record<string, unknown>;
-  for (const k of ["select", "open", "allow", "remove", "allowTyped", "showPreview", "restartPreview", "closePreview", "approve", "decline", "revoke", "autoAcquire", "cancelSheet", "grant", "destination", "pause", "githubCapture", "reconnect", "refresh", "retry", "dismiss"])
+  for (const k of ["select", "open", "allow", "remove", "allowTyped", "showPreview", "restartPreview", "closePreview", "approve", "decline", "revoke", "autoAcquire", "cancelSheet", "grant", "destination", "agent", "pause", "githubCapture", "reconnect", "refresh", "retry", "dismiss"])
     h[k] = vi.fn();
   return h as unknown as PanelHandlers;
 }
@@ -103,6 +103,79 @@ describe("panel view", () => {
     m.apply(state("working", { epoch: 1, jobId: "job-1" }));
     render();
     expect(now()).toBe("Working · Looking for links…");
+  });
+
+  it("Settings has an Agent row: one button per agent the core found, the current one pressed, no other text", () => {
+    const m = running();
+    m.apply(capabilities({ revision: 2, origins: [originSetting()], agents: { available: [{ id: "claude-code", label: "Claude Code" }, { id: "codex", label: "Codex" }], current: "claude-code" } }));
+    m.select("settings");
+    const { root, on } = view(m);
+    const card = root.querySelector('[data-key="agent-card"]')!;
+    expect(card.textContent).toBe("AgentClaude CodeCodex");
+    const buttons = [...card.querySelectorAll<HTMLButtonElement>("button")];
+    expect(buttons.map((b) => [b.textContent, b.getAttribute("aria-pressed"), b.disabled])).toEqual([
+      ["Claude Code", "true", false],
+      ["Codex", "false", false],
+    ]);
+    expect(card.querySelector('[role="group"]')!.getAttribute("aria-labelledby")).toBe("agent-label");
+    expect(root.querySelector("#agent-label")!.textContent).toBe("Agent");
+    buttons[1]!.click();
+    expect(on.agent).toHaveBeenCalledWith("codex");
+  });
+
+  it("an agent whose executable the core did not find has no button; with none found, or from an older core, there is no Agent row", () => {
+    const m = running();
+    m.select("settings");
+    const { root, render } = view(m);
+    expect(root.querySelector('[data-key="agent-card"]')).toBeNull(); // the frame carries no agents
+    m.apply(capabilities({ revision: 2, agents: { available: [{ id: "codex", label: "Codex" }], current: "codex" } }));
+    render();
+    expect([...root.querySelectorAll('[data-key="agent-card"] button')].map((b) => b.textContent)).toEqual(["Codex"]);
+    m.apply(capabilities({ revision: 3, agents: { available: [] } }));
+    render();
+    expect(root.querySelector('[data-key="agent-card"]')).toBeNull();
+  });
+
+  it("choosing an agent presses it at once and disables the row until the core answers; a refusal puts the current one back", () => {
+    const m = running();
+    m.apply(capabilities({ revision: 2, agents: AGENTS }));
+    m.select("settings");
+    const { root, render } = view(m);
+    const pressed = () => [...root.querySelectorAll<HTMLButtonElement>('[data-key="agent-card"] button')].map((b) => [b.textContent, b.getAttribute("aria-pressed"), b.disabled]);
+    const c = m.setAgent("agent-b")!;
+    render();
+    expect(pressed()).toEqual([
+      ["Agent A", "false", true],
+      ["Agent B", "true", true],
+    ]);
+    m.apply(ackFailed(c.commandId, "not_found"));
+    render();
+    expect(pressed()).toEqual([
+      ["Agent A", "true", false],
+      ["Agent B", "false", false],
+    ]);
+    expect(m.problems.some((p) => p.kind === "command" && p.record.id === c.commandId)).toBe(true);
+    const ok = m.setAgent("agent-b")!;
+    m.apply(ackOk(ok.commandId));
+    render();
+    expect(pressed()).toEqual([
+      ["Agent A", "false", false],
+      ["Agent B", "true", false],
+    ]);
+    m.applyLink("core_unavailable");
+    render();
+    expect(root.querySelector('[data-key="agent-card"]')).toBeNull();
+  });
+
+  it("a failed agent choice reads 'Agent failed' in Activity's Problems", () => {
+    const m = running();
+    m.apply(capabilities({ revision: 2, agents: AGENTS }));
+    const c = m.setAgent("agent-b")!;
+    m.apply(ackFailed(c.commandId, "store_error"));
+    m.select("activity");
+    const { root } = view(m);
+    expect(root.querySelector(".problems")!.textContent).toContain("Agent failed: Scout couldn't save it.");
+    expect(root.querySelector(`[data-key="problem-retry-${c.commandId}"]`)).toBeNull();
   });
 
   it("Approve is disabled with its reason until the shown preview is complete", () => {

@@ -3,9 +3,10 @@
 // `capabilities` frames replace each other whole; a frame from the same core instance with a
 // lower `revision` than the one held is stale and dropped; another `coreInstanceId` starts a
 // new revision sequence. A `grant` frame also carries the sites with recommendations on
-// (`destinations`; absent from an older core, which reads as none). Pure: no `chrome.*`.
+// (`destinations`; absent from an older core, which reads as none). The capabilities frame also
+// carries Settings' agent choice (`agents`; absent from an older core). Pure: no `chrome.*`.
 
-import type { CapabilityConflict, CapabilityOffer, LibraryEntry, OriginSetting, PanelAudit, PanelCapabilities } from "@scout/contracts";
+import type { CapabilityConflict, CapabilityOffer, LibraryEntry, OriginSetting, PanelAgents, PanelAudit, PanelCapabilities } from "@scout/contracts";
 import type { PreviewKey } from "./preview.js";
 
 export type ApprovalBlocker = "notOffered" | "alreadyApproved" | "siteNotPermitted";
@@ -68,6 +69,10 @@ export class CapabilityModel {
   }
   get origins(): OriginSetting[] {
     return this.capabilities?.origins ?? [];
+  }
+  /** Settings' agent choice; null before a frame, or from a core that sends none. */
+  get agents(): PanelAgents | null {
+    return this.capabilities?.agents ?? null;
   }
 
   /** Offers whose site is `host`. */

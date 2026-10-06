@@ -1,0 +1,5 @@
+{
+  "type": "set_agent",
+  "commandId": "sp-14",
+  "agent": "codex"
+}

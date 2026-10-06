@@ -18,7 +18,7 @@
 // Page is bottom-aligned: the results (heading, one line, up to three link cards), the site's
 // files for the user's agent (a pill that expands into the review card), what is approved, then
 // a tray with the agent-context chip and the site's "Suggest on <host>" switch or Allow row.
-// Activity holds Problems at the top; Settings holds the switches, Pause, Reconnect and a
+// Activity holds Problems at the top; Settings holds the switches, the agent choice, Pause, Reconnect and a
 // Diagnostics disclosure (which ends with the "Sent to Scout" counters). Escape collapses the review card, then returns to Page (panel-app.ts).
 
 import type { CapabilityOffer, LibraryEntry } from "@scout/contracts";
@@ -63,6 +63,8 @@ export interface PanelHandlers {
   grant(enabled: boolean): void;
   /** The site's background recommendations switch (`origin` is `https://host`). */
   destination(origin: string, enabled: boolean): void;
+  /** Settings' agent choice: run background jobs through adapter `id`. */
+  agent(id: string): void;
   pause(): void;
   githubCapture(enabled: boolean): void;
   reconnect(): void;
@@ -513,6 +515,7 @@ const REQUEST_TEXT: Record<string, string> = {
   set_auto_acquire: "Auto-approve",
   set_agent_browser_context: "Agent access",
   set_destination: "Suggestions",
+  set_agent: "Agent",
   refresh_capabilities: "Refresh files",
   open_link: "Open link",
 };
@@ -561,13 +564,27 @@ function activityView(doc: Document, v: ViewState, on: PanelHandlers): HTMLEleme
 
 // ---------- Settings ----------
 
+/** The agent row: one button per agent the core found, the chosen one pressed. None without options. */
+function agentCard(doc: Document, v: ViewState, on: PanelHandlers): HTMLElement | null {
+  const m = v.model;
+  const agents = m.capabilities.agents;
+  if (!agents || agents.available.length === 0) return null;
+  const selected = m.selectedAgent;
+  const choices = el(doc, "span", { class: "row agent-choices", role: "group", "aria-labelledby": "agent-label" });
+  for (const a of agents.available) {
+    const chosen = a.id === selected;
+    choices.append(button(doc, `agent-option-${a.id}`, a.label, () => on.agent(a.id), { class: chosen ? "secondary small chosen" : "secondary small", "aria-pressed": chosen ? "true" : "false", disabled: !m.canSetAgent }));
+  }
+  return el(doc, "div", { class: "card", "data-key": "agent-card" }, el(doc, "div", { class: "setting-line" }, el(doc, "span", { id: "agent-label", text: "Agent" }), choices));
+}
+
 function settingsView(doc: Document, v: ViewState, on: PanelHandlers): HTMLElement[] {
   const m = v.model;
   const c = m.pauseState.control;
   const gh = v.status?.granted.includes("https://github.com/*") === true;
   const grant = m.capabilities.agentBrowserContext;
   const grec = m.grantRecord;
-  const out: HTMLElement[] = [
+  const out = [
     el(
       doc,
       "div",
@@ -583,6 +600,7 @@ function settingsView(doc: Document, v: ViewState, on: PanelHandlers): HTMLEleme
         grec?.state === "pending" || grant === null ? "Waiting for Scout…" : undefined,
       ),
     ),
+    agentCard(doc, v, on),
     el(
       doc,
       "div",
@@ -598,7 +616,7 @@ function settingsView(doc: Document, v: ViewState, on: PanelHandlers): HTMLEleme
   }
   // A <details> keeps the user's open state across renders (patchNode leaves its `open` alone).
   out.push(el(doc, "details", { class: "diagnostics", "data-key": "diagnostics" }, el(doc, "summary", { text: "Diagnostics" }), dl));
-  return out;
+  return out.filter((x): x is HTMLElement => x !== null);
 }
 
 // ---------- the keyed patch ----------

@@ -28,6 +28,9 @@
 // resume cache (its key already carries the fingerprint and tools revision, so an old entry could
 // not match; clearing just frees it). The replaced adapter is closed (`abortAll`) and awaited at
 // close. An edit that leaves the profile unusable leaves no adapter: jobs are `unavailable`.
+// The side panel's agent choice (`set_agent`) writes the profile through `switchAgent`
+// (agents/profileSwitch.ts) only while the core holds the lock, and the watcher swaps the adapter
+// as for any other edit; `onProfileChanged` tells the panel so Settings shows the new choice.
 //
 // Shutdown (main.ts calls each step in its order): `cancelReadinessChecks()` (synchronous) stops every
 // running readiness check; `stopScheduler()` cancels the running job (`shutdown`); `abortJobs()` waits for
@@ -48,6 +51,7 @@ import { readBrowserContextGrant } from "../agentApi/grants.js";
 import type { AgentJobAdapter } from "../agents/adapter.js";
 import { AGENT_PROFILE_LOCK_FILE, AgentProfileError, agentProfilePath, loadAgentProfile, profileFingerprint, type AgentProfile } from "../agents/profile.js";
 import { ProcessTracker, type ProcessIdentity } from "../agents/processTree.js";
+import { switchAgent, type SwitchAgentOutcome } from "../agents/profileSwitch.js";
 import { createJobAdapter, createReadinessChecks } from "../agents/registry.js";
 import type { CapabilityStore } from "../capabilities/store.js";
 import { acquireStoreLock, StoreLockedError, type StoreLock } from "../capabilities/storeLock.js";
@@ -84,6 +88,8 @@ export interface JobWiringOptions {
   coordinator: () => Coordinator;
   activity: Pick<ActivityStore, "entries">;
   store: Pick<CapabilityStore, "approvalRevision">;
+  /** The profile changed (a new fingerprint, after the adapter swap). */
+  onProfileChanged?: () => void;
   /** Test seams for the profile watcher and the lock retry. */
   timers?: Timers;
   watch?: WatchFn;
@@ -110,6 +116,11 @@ export interface JobWiring {
   readonly grantRevision: number;
   /** Whether the core holds `agent-profile.lock`. */
   readonly holdsProfileLock: boolean;
+  /**
+   * `set_agent`: write the default profile for adapter `id` (agents/profileSwitch.ts); the watcher
+   * swaps the adapter. `unavailable` unless the core holds the profile lock or after shutdown began.
+   */
+  switchAgent(id: string): SwitchAgentOutcome;
   /** The registry of job process trees. */
   readonly processes: ProcessTracker;
   /** Stop every running readiness check now, and start none from now on. Synchronous. */
@@ -233,6 +244,7 @@ export function createJobWiring(o: JobWiringOptions): JobWiring {
       void p.finally(() => retired.delete(p));
     }
     if (adapter !== null && destinations.length > 0) void adapter.refreshReadiness();
+    o.onProfileChanged?.();
   };
 
   const sessions = new WeakMap<OriginFetchSession, CatalogParsers>();
@@ -299,6 +311,14 @@ export function createJobWiring(o: JobWiringOptions): JobWiring {
     },
     get holdsProfileLock() {
       return lock !== null;
+    },
+    switchAgent(id) {
+      if (stopped || released || lock === null) return { ok: false, code: "unavailable" };
+      const result = switchAgent(home, id, o.env);
+      if (result.ok) {
+        if (result.written) diagnostics.event("agent_profile_switched", { adapter: id });
+      } else diagnostics.event("agent_profile_switch_failed", { code: result.code });
+      return result;
     },
     processes,
     cancelReadinessChecks: () => readinessChecks.cancelAll(),
