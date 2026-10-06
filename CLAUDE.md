@@ -126,9 +126,12 @@ and limits; `CONTRIBUTING.md` has the platform matrix.
     threshold), `wiring/jobs.ts` (adapter, preflight child, parse pool, scheduler),
     `wiring/profileWatcher.ts` (watches `agent-profile.json`, 250 ms debounce, 5 s poll
     fallback; a change cancels the running job `superseded`, swaps the adapter, clears the
-    resume cache and starts the visit's one replacement), `resumeCache.ts` (30 s, keyed
-    incl. tools revision), `results.ts` (job-aware result registry that panel results and
-    `open_link` resolve against; hrefs never leave it in a frame), `activity/store.ts` +
+    resume cache and starts the visit's one replacement), `resumeCache.ts` (a page's answer
+    kept 15 min from when its visit ends, ≤32 entries, keyed incl. tools revision, activity
+    not matched; republished on the next visit before any job; pause clears it, permission
+    loss drops the origin's), `results.ts` (job-aware result registry that panel results and
+    `open_link` resolve against; hrefs never leave it in a frame; a resolved target is
+    "opened by Scout" for 15 min and its visit is `job_skipped opened_by_scout`), `activity/store.ts` +
     `activity/snapshots.ts` (≤10 issue entries, 15 min TTL, cleared when issue capture or
     its grant is withdrawn; deep-frozen per-job snapshots that pin approved versions and
     issue deadline-bound job tokens).

@@ -92,7 +92,9 @@ once the whole text has arrived and its hash checks out. **Not now** declines. A
 files are listed below, each with **Revoke**.
 
 On a site with suggestions on, **Page** shows up to three links after the job finishes, or
-says why there are none. A link opens in a new tab only when you click it. **Activity**
+says why there are none. A link opens in a new tab only when you click it; Scout runs no
+job for the page it opened, and when you return to a page within 15 minutes its links come
+back without a new job. **Activity**
 lists problems first, then your agent's reads. **Settings** has Pause, issue text on
 github.com, the switch that lets your agent read the current site, and Diagnostics. With
 the panel closed, the toolbar badge counts new links (blue) or files to review (amber), and
