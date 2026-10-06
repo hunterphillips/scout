@@ -6,12 +6,12 @@ import {
   AgentProfileError,
   agentProfilePath,
   AgentProfileSchema,
-  createDefaultAgentProfile,
   loadAgentProfile,
   profileFingerprint,
   writeAgentProfile,
   type AgentProfile,
 } from "./profile.js";
+import { createDefaultAgentProfile } from "./registry.js";
 import { DEFAULT_CLAUDE_CODE_MODEL } from "./claudeCode/profile.js";
 
 const dirs: string[] = [];

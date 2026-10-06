@@ -14,8 +14,7 @@ import { createHash } from "node:crypto";
 import { closeSync, constants as fsc, fstatSync, openSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { z } from "zod";
-import type { Env } from "./authPreflight.js";
-import { ClaudeCodeProfileSchema, createDefaultClaudeCodeProfile } from "./claudeCode/profile.js";
+import { ClaudeCodeProfileSchema } from "./claudeCode/profile.js";
 import { AgentProfileError } from "./profileBase.js";
 import { canonicalJson } from "./toolProfile.js";
 
@@ -47,11 +46,6 @@ export function profileFingerprint(profile: AgentProfile): string {
 
 export function agentProfilePath(home: string): string {
   return join(home, AGENT_PROFILE_FILE);
-}
-
-/** The initial profile, for the default adapter. */
-export function createDefaultAgentProfile(parentEnv: Env): AgentProfile {
-  return createDefaultClaudeCodeProfile(parentEnv);
 }
 
 /** Read and validate `<home>/agent-profile.json`. It must be a regular file owned by this user, without group/other bits. */
