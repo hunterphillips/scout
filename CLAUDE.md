@@ -317,8 +317,8 @@ the plan's phase log):
   Setup refuses to run against a non-default Scout home without `--scout-root`;
   uninstall touches only recorded paths inside setup's own locations. Pivot P4.3: setup
   writes `agent-profile.json` when absent (absolute `claude` from `integrationClaude`,
-  recorded with hash, never rewritten) and no longer touches `~/.personal-context-mcp`
-  (legacy `config-merged` records are read and reported, never acted on); one override
+  recorded with hash, never rewritten); an `installed.json` entry of an unknown kind is
+  reported and skipped, never acted on; one override
   rule for `CHROME_NMH_DIR`, `LAUNCH_AGENTS_DIR`, `SCOUT_APPLICATIONS_DIR`,
   `SCOUT_SKILLS_ROOT`, `SCOUT_CLAUDE_BIN` — required with a test Scout home, refused with
   the real `~/.scout`; `setup --login-launch [--app]` writes a hash-recorded LaunchAgent
@@ -383,8 +383,12 @@ sitemap counters), `catalog_cache` (source, stale, ageMs), `catalog_cache_invali
 - **All coding is delegated to agents.** The coordinating session plans, reviews, and
   keeps the docs current. Each task gets a spec review and a quality review.
 - **Never modify `../rook/`.** Rook code may be copied in for local testing.
-- **Subscription billing only.** Model calls must go through Hunter's existing Claude Code
-  subscription. Never fall back to a separately billed API without his consent.
+- **Scout is agent-agnostic.** Claude Code is the first job adapter and the first agent
+  integration, not Scout's identity. Keep agent-specific code inside the adapter and the
+  integration scripts; nothing else may assume Claude.
+- **No unapproved spend.** Agents never make a model call that costs money Hunter hasn't
+  approved. Today that means the Claude Code subscription route; another provider or a
+  local model is fine once he has said so for that use.
 - **Auth gate.** No model inference runs unless the preflight for the environment that
   will make the call exits 0 (`subscription`); the job adapter's preflight child runs it
   (`agents/authPreflight.ts`, fully tested in `authPreflight.test.ts`). Never change user
