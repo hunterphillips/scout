@@ -218,7 +218,7 @@ describe("agent inspect", () => {
     expect(r.err).not.toContain("argument 1 ");
     expect(r.err).not.toContain("argument 3 ");
     // A flag spelled --password is warned about too.
-    f.writeDef({ id: "notes", command: f.wrapper, args: ["--password", "hunter2"], env: { LANG: "C" } });
+    f.writeDef({ id: "notes", command: f.wrapper, args: ["--password", "secret2"], env: { LANG: "C" } });
     expect((await f.run(["inspect", f.def])).err).toContain("warning: argument 1 ");
   });
 

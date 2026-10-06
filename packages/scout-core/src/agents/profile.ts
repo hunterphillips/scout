@@ -4,8 +4,8 @@
 //
 // - `claudePath` is absolute; jobs never look `claude` up on PATH. createDefaultAgentProfile
 //   resolves it once, from the PATH it is given, when the profile is first written.
-// - `model` is explicit, required and a full model name (no alias). The initial value is Hunter's 2026-09-30 choice,
-//   `claude-sonnet-5-5`; he may edit it. A job never inherits a CLI, settings or gateway
+// - `model` is explicit, required and a full model name (no alias). The initial value is `claude-sonnet-5-5`,
+//   the initial model for the Claude Code profile; editable in the profile file. A job never inherits a CLI, settings or gateway
 //   default model, and the init check stops a job whose CLI reports a different model.
 // - The fingerprint is a hash of the canonical profile content. Job requests and revisit
 //   cache keys carry it, so an edited profile never reuses an older job's result.
@@ -25,7 +25,7 @@ export const AGENT_PROFILE_FILE = "agent-profile.json";
 /** The lock (capabilities/storeLock.ts) the running core holds and every profile CLI write takes. */
 export const AGENT_PROFILE_LOCK_FILE = "agent-profile.lock";
 export const AGENT_PROFILE_SCHEMA_VERSION = 1;
-/** Hunter's 2026-09-30 choice for the initial Claude profile. Editable in the profile file. */
+/** The initial model for the Claude Code profile; editable in the profile file. */
 export const DEFAULT_AGENT_MODEL = "claude-sonnet-5-5";
 /** Room for the selected tools' frozen input schemas. */
 export const PROFILE_MAX_BYTES = 512 * 1024;

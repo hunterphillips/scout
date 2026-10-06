@@ -36,7 +36,7 @@ function codeOf(fn: () => unknown): string | undefined {
 }
 
 describe("agent profile", () => {
-  it("defaults to Hunter's 2026-09-30 model and the claude found on PATH", () => {
+  it("defaults to the initial model and the claude found on PATH", () => {
     const h = home();
     const bin = join(h, "bin");
     const claude = join(bin, "claude");
