@@ -656,7 +656,10 @@ describe.skipIf(!BUILT)("recommendation jobs e2e: B7/B12/B13 closing paths end t
     await until(() => started() > n, "the replacement job");
     const launches = () => b.fake().filter((l) => typeof l.pid === "number" && Array.isArray(l.argv));
     await until(() => launches().at(-1).pid !== job.pid, "the replacement's CLI");
-    const replacement = { pid: launches().at(-1).pid, jobId: b.panel().filter((f) => f.type === "state" && f.status === "working").at(-1).jobId };
+    // The `working` frame for the replacement can land after its job_started event on a slow runner.
+    const workingFor = () => b.panel().filter((f) => f.type === "state" && f.status === "working" && f.jobId !== job.jobId).at(-1);
+    await until(() => workingFor() !== undefined, "the replacement's working frame");
+    const replacement = { pid: launches().at(-1).pid, jobId: workingFor().jobId };
     const jobsRoot = join(home, "run", "jobs");
     const token = () => readdirSync(jobsRoot).map((d) => join(jobsRoot, d, "agent-token")).find((f) => existsSync(f));
     await until(() => token() !== undefined, "the replacement's token");
