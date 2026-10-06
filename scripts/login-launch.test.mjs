@@ -1,7 +1,7 @@
 // setup --login-launch / bundle-app --install / uninstall and the override rules (P4.3), against
 // a temp home and a stand-in app binary. Nothing is loaded into launchd: the real-home case
 // injects the bootout.
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -10,7 +10,7 @@ import { runUninstall } from "./uninstall.mjs";
 import { runBundle } from "./bundle-app.mjs";
 import { runChecks } from "./doctor.mjs";
 import { appBinary, layout } from "./lib/paths.mjs";
-import { appBundleHash, infoPlist, launchAgentPlist, sha256 } from "./lib/app-bundle.mjs";
+import { bundleHash, infoPlist, launchAgentPlist, sha256 } from "./lib/app-bundle.mjs";
 import { listTree, makeFixture } from "./lib/test-fixture.mjs";
 
 let fx, env, L, agents, apps;
@@ -68,7 +68,7 @@ describe("bundle-app --install", () => {
     expect(c.text()).toContain(`installed ${L.installedApp}`);
     expect(existsSync(appBinary(L.installedApp))).toBe(true);
     const entry = record().files.find((f) => f.kind === "app-bundle");
-    expect(entry).toEqual({ path: L.installedApp, kind: "app-bundle", sha256: appBundleHash(L.installedApp) });
+    expect(entry).toEqual({ path: L.installedApp, kind: "app-bundle", sha256: bundleHash(L.installedApp) });
     expect(record().kinds).toContain("app-bundle");
     if (!spawnSync("codesign", ["--help"]).error) expect(spawnSync("codesign", ["--verify", "--deep", "--strict", L.installedApp]).status).toBe(0);
     // A re-install replaces its own unchanged copy.
@@ -236,9 +236,23 @@ describe("uninstall: LaunchAgent and installed app", () => {
     expect(existsSync(L.launchAgent)).toBe(true);
     expect(existsSync(L.installedApp)).toBe(true);
     expect(r.text()).toMatch(/SKIP .*dev\.scout\.app\.plist \(changed since setup wrote it; not removing\)/);
-    expect(r.text()).toMatch(/SKIP .*Scout\.app \(changed since bundle-app --install copied it; not removing\)/);
+    expect(r.text()).toMatch(/SKIP .*Scout\.app \(Scout\.app has files setup did not write; left in place\)/);
     expect(record().files.map((f) => f.kind).sort()).toEqual(["app-bundle", "launch-agent"]);
     expect(record().kinds).toEqual(["app-bundle", "launch-agent"]);
+  });
+
+  it("leaves an installed app holding an extra file in place, says so, and exits 2; removes a clean one", async () => {
+    installApp();
+    writeFileSync(join(L.installedApp, "Contents", "Resources", "notes.txt"), "mine\n");
+    const r = await uninstall(["--yes", "--include-key"]);
+    expect(r.code, r.text()).toBe(2);
+    expect(existsSync(join(L.installedApp, "Contents", "Resources", "notes.txt"))).toBe(true);
+    expect(r.text()).toMatch(/SKIP .*Scout\.app \(Scout\.app has files setup did not write; left in place\)/);
+    expect(record().files.map((f) => f.kind)).toEqual(["app-bundle"]);
+    rmSync(join(L.installedApp, "Contents", "Resources", "notes.txt"));
+    const clean = await uninstall(["--yes", "--include-key"]);
+    expect(clean.code, clean.text()).toBe(0);
+    expect(existsSync(L.installedApp)).toBe(false);
   });
 
   it("refuses up front when a recorded LaunchAgent's override is missing, changing nothing", async () => {

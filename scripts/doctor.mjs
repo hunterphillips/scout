@@ -36,7 +36,7 @@ import { allowedPath, readInstalled } from "./lib/installed.mjs";
 import { exists, readJsonObject, wrapperScript } from "./lib/files.mjs";
 import { isMain } from "./lib/is-main.mjs";
 import { checkIntegration, integrationClaude } from "./lib/agent-integration.mjs";
-import { appBundleHash, applicationsRefusal, isScoutBundle, launchAgentRefusal, sha256 } from "./lib/app-bundle.mjs";
+import { bundleHash, applicationsRefusal, isScoutBundle, launchAgentRefusal, sha256 } from "./lib/app-bundle.mjs";
 import { coreLockHolder, inspectPrivate, lastPreflight } from "./lib/core-state.mjs";
 
 const oct = (m) => (m & 0o777).toString(8).padStart(4, "0");
@@ -124,8 +124,8 @@ export function runReport(env = process.env, { claudeFallbacks, mcpTimeoutMs, re
     } else if (!exists(installedApp.path)) {
       add("FAIL", "installed Scout.app", `${installedApp.path} is gone; re-run \`npm run bundle-app -- --install\``);
       appLine = "installed app missing";
-    } else if (appBundleHash(installedApp.path) !== installedApp.sha256) {
-      add("WARN", "installed Scout.app is unchanged since bundle-app --install", `${installedApp.path} changed; uninstall will leave it`);
+    } else if (bundleHash(installedApp.path) !== installedApp.sha256) {
+      add("WARN", "installed Scout.app is unchanged since bundle-app --install", `${installedApp.path}: Scout.app has files setup did not write; uninstall will leave it in place`);
       appLine = `installed at ${installedApp.path} (changed)`;
     } else {
       add("OK", "installed Scout.app", installedApp.path);

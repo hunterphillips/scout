@@ -11,13 +11,14 @@
 // of launchd. LAUNCH_AGENTS_DIR moves it for tests (lib/paths.mjs locationOverrideRefusal).
 //
 // The installed copy (bundle-app --install) is `~/Applications/Scout.app`
-// (SCOUT_APPLICATIONS_DIR for tests), recorded as kind `app-bundle` with appBundleHash.
+// (SCOUT_APPLICATIONS_DIR for tests), recorded as kind `app-bundle` with bundleHash (every
+// file in the bundle, so uninstall never deletes files bundle-app did not put there).
 
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { lstatSync, readFileSync } from "node:fs";
+import { lstatSync, readFileSync, readdirSync, readlinkSync } from "node:fs";
 import { join } from "node:path";
-import { APP_BUNDLE_ID, appBinary, locationOverrideRefusal } from "./paths.mjs";
+import { APP_BUNDLE_ID, locationOverrideRefusal } from "./paths.mjs";
 
 export const APP_NAME = "Scout";
 export const APP_EXECUTABLE = "Scout";
@@ -98,20 +99,37 @@ export function isScoutBundle(app) {
 }
 
 /**
- * The installed bundle's ownership hash: SHA-256 over its Info.plist and its binary (each
- * length-prefixed), or null when either cannot be read as a regular file.
+ * The installed bundle's ownership hash: SHA-256 over every entry under `dir`, sorted by
+ * relative path. A file contributes its path and its own SHA-256, a symlink its path and its
+ * target string (never the pointed-to content), a directory its path. `_CodeSignature/`
+ * directories are left out, since `codesign` rewrites them. Null when `dir` is not a real
+ * directory or holds anything unreadable or of another type.
  */
-export function appBundleHash(app) {
-  const h = createHash("sha256");
-  for (const p of [join(app, "Contents", "Info.plist"), appBinary(app)]) {
-    let bytes;
-    try {
-      if (!lstatSync(p).isFile()) return null;
-      bytes = readFileSync(p);
-    } catch {
-      return null;
+export function bundleHash(dir) {
+  const entries = [];
+  const walk = (abs, rel) => {
+    for (const name of readdirSync(abs)) {
+      const a = join(abs, name);
+      const r = rel ? `${rel}/${name}` : name;
+      const st = lstatSync(a);
+      if (st.isSymbolicLink()) entries.push([r, `link\0${readlinkSync(a)}`]);
+      else if (st.isDirectory()) {
+        if (name === "_CodeSignature") continue;
+        entries.push([r, "dir"]);
+        walk(a, r);
+      } else if (st.isFile()) entries.push([r, `file\0${createHash("sha256").update(readFileSync(a)).digest("hex")}`]);
+      else throw new Error(`not a file, directory or symlink: ${a}`);
     }
-    h.update(`${bytes.length}:`).update(bytes);
+  };
+  try {
+    const st = lstatSync(dir);
+    if (!st.isDirectory() || st.isSymbolicLink()) return null;
+    walk(dir, "");
+  } catch {
+    return null;
   }
+  entries.sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+  const h = createHash("sha256");
+  for (const [rel, what] of entries) h.update(`${rel}\0${what}\n`);
   return h.digest("hex");
 }

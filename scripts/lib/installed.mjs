@@ -9,7 +9,7 @@
 // launch-agent  { path: "<LaunchAgents>/dev.scout.app.plist", sha256, program }: the optional
 //                     login launch (setup --login-launch); removed only while unchanged
 // app-bundle    { path: "<Applications>/Scout.app", sha256 }: the installed app (bundle-app
-//                     --install); sha256 is appBundleHash (Info.plist + binary); removed only
+//                     --install); sha256 is bundleHash (every file in the bundle); removed only
 //                     while it matches
 // `kinds` (P4.3): the sorted kind names present, rewritten on every save (saveInstalled), so a
 // later reader can tell a record written since P4.3 from an older one. `version` stays 1.
