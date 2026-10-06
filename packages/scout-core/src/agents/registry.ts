@@ -11,12 +11,12 @@
 import type { Clock } from "../clock.js";
 import type { Diagnostics } from "../diagnostics.js";
 import type { AgentJobAdapter } from "./adapter.js";
-import type { Env } from "./executables.js";
+import type { Env, ExecutableSearch } from "./executables.js";
 import { createClaudeJobAdapter, type ClaudeJobDeps } from "./claudeCode/claudeJob.js";
-import { CLAUDE_CODE_LABEL, createDefaultClaudeCodeProfile } from "./claudeCode/profile.js";
+import { CLAUDE_CODE_LABEL, createDefaultClaudeCodeProfile, findExecutable as findClaudeExecutable } from "./claudeCode/profile.js";
 import { createPreflightFacade, type PreflightFacade } from "./claudeCode/preflightWorker.js";
 import { createCodexJobAdapter, type CodexJobDeps } from "./codex/codexJob.js";
-import { CODEX_LABEL, createDefaultCodexProfile } from "./codex/profile.js";
+import { CODEX_LABEL, createDefaultCodexProfile, findExecutable as findCodexExecutable } from "./codex/profile.js";
 import { createCodexReadinessFacade, type CodexReadinessFacade } from "./codex/readinessWorker.js";
 import type { ProcessTracker } from "./processTree.js";
 import type { AgentProfile } from "./profile.js";
@@ -99,13 +99,26 @@ export function createDefaultAgentProfile(parentEnv: Env): AgentProfile {
   return createDefaultClaudeCodeProfile(parentEnv);
 }
 
-/** The initial profile for a named adapter; throws AgentProfileError when its executable is not on PATH. */
-export function createDefaultProfileFor(id: AgentProfile["adapter"], parentEnv: Env): AgentProfile {
+/**
+ * The initial profile for a named adapter; throws AgentProfileError when its executable is found
+ * neither on PATH nor in the adapter's fallback locations.
+ */
+export function createDefaultProfileFor(id: AgentProfile["adapter"], parentEnv: Env, search: ExecutableSearch = {}): AgentProfile {
   switch (id) {
     case "claude-code":
-      return createDefaultClaudeCodeProfile(parentEnv);
+      return createDefaultClaudeCodeProfile(parentEnv, search);
     case "codex":
-      return createDefaultCodexProfile(parentEnv);
+      return createDefaultCodexProfile(parentEnv, search);
+  }
+}
+
+/** The adapter's executable as a new profile would record it (PATH, then its fallbacks), or undefined. */
+export function findAdapterExecutable(id: AgentProfile["adapter"], parentEnv: Env, search: ExecutableSearch = {}): string | undefined {
+  switch (id) {
+    case "claude-code":
+      return findClaudeExecutable(parentEnv, search);
+    case "codex":
+      return findCodexExecutable(parentEnv, search);
   }
 }
 

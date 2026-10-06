@@ -3,7 +3,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { agentProfilePath, writeAgentProfile, type AgentProfile } from "./profile.js";
-import { agentChoices, switchAgent } from "./profileSwitch.js";
+import { agentChoices as choices, switchAgent as doSwitch } from "./profileSwitch.js";
+import type { Env } from "./executables.js";
+import { createDefaultProfileFor, findAdapterExecutable } from "./registry.js";
+
+// The machine's own system directories (/opt/homebrew/bin, …) are never searched here.
+const NO_SYSTEM = { systemDirs: [] };
+const agentChoices = (home: string, env: Env) => choices(home, env, NO_SYSTEM);
+const switchAgent = (home: string, id: string, env: Env) => doSwitch(home, id, env, NO_SYSTEM);
 
 const dirs: string[] = [];
 afterEach(() => {
@@ -107,5 +114,45 @@ describe("switching the agent", () => {
     expect(switchAgent(home, "codex", { PATH: bin })).toEqual({ ok: false, code: "store_error" });
     chmodSync(home, 0o700);
     expect(read(home)).toEqual(claudeProfile(bin));
+  });
+});
+
+describe("finding an agent outside PATH (an app started from Finder or at login)", () => {
+  it("finds each adapter's CLI in its home fallback when PATH has nothing, and PATH wins over fallbacks", () => {
+    const { home, bin } = setup("claude", "codex");
+    const user = join(home, "user");
+    const local = join(user, ".local", "bin");
+    const nvm = join(user, ".nvm", "versions", "node", "v24.18.0", "bin");
+    mkdirSync(local, { recursive: true });
+    mkdirSync(nvm, { recursive: true });
+    writeFileSync(join(local, "claude"), "#!/bin/sh\n", { mode: 0o755 });
+    writeFileSync(join(nvm, "codex"), "#!/bin/sh\n", { mode: 0o755 });
+    const finder = { PATH: "/usr/bin:/bin:/usr/sbin:/sbin", HOME: user };
+    expect(findAdapterExecutable("claude-code", finder, NO_SYSTEM)).toBe(join(local, "claude"));
+    expect(findAdapterExecutable("codex", finder, NO_SYSTEM)).toBe(join(nvm, "codex"));
+    expect(agentChoices(home, finder).available.map((a) => a.id)).toEqual(["claude-code", "codex"]);
+    expect(switchAgent(home, "codex", finder)).toEqual({ ok: true, written: true });
+    expect(read(home)).toMatchObject({ adapter: "codex", codexPath: join(nvm, "codex") });
+    // PATH first.
+    expect(createDefaultProfileFor("codex", { ...finder, PATH: bin }, NO_SYSTEM)).toMatchObject({ codexPath: join(bin, "codex") });
+    expect(findAdapterExecutable("claude-code", { ...finder, PATH: bin }, NO_SYSTEM)).toBe(join(bin, "claude"));
+  });
+
+  it("skips a fallback that is not executable, and searches the system directories it is given", () => {
+    const { home } = setup();
+    const user = join(home, "user");
+    const local = join(user, ".local", "bin");
+    const sys = join(home, "sys");
+    mkdirSync(local, { recursive: true });
+    mkdirSync(sys);
+    writeFileSync(join(local, "claude"), "#!/bin/sh\n", { mode: 0o644 });
+    const finder = { PATH: "/usr/bin:/bin", HOME: user };
+    expect(findAdapterExecutable("claude-code", finder, NO_SYSTEM)).toBeUndefined();
+    expect(agentChoices(home, finder)).toEqual({ available: [] });
+    writeFileSync(join(sys, "claude"), "#!/bin/sh\n", { mode: 0o755 });
+    expect(findAdapterExecutable("claude-code", finder, { systemDirs: [sys] })).toBe(join(sys, "claude"));
+    // No HOME in the env: no home fallbacks (never the real home).
+    chmodSync(join(local, "claude"), 0o755);
+    expect(findAdapterExecutable("claude-code", { PATH: "/usr/bin:/bin" }, NO_SYSTEM)).toBeUndefined();
   });
 });

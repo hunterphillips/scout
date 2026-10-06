@@ -1,7 +1,8 @@
 // The Claude Code member of the agent profile (agents/profile.ts):
 //
 // - `claudePath` is absolute; jobs never look `claude` up on PATH. createDefaultClaudeCodeProfile
-//   resolves it once, from the PATH it is given, when the profile is first written.
+//   resolves it once, from the PATH it is given and then defaultExecutableFallbacks, when the
+//   profile is first written.
 // - `model` is explicit, required and a full model name (no alias). The initial value is
 //   DEFAULT_CLAUDE_CODE_MODEL; editable in the profile file. A job never inherits a CLI, settings
 //   or gateway default model, and the init check stops a job whose CLI reports a different model.
@@ -9,9 +10,9 @@
 // scripts/setup.mjs reads CLAUDE_CODE_ADAPTER_ID and DEFAULT_CLAUDE_CODE_MODEL from the built
 // file as plain `export const` literals: keep them literals.
 
-import { isAbsolute } from "node:path";
+import { isAbsolute, join } from "node:path";
 import { z } from "zod";
-import { resolveOnPath, type Env } from "../executables.js";
+import { homeOf, resolveExecutable, versionedBins, type Env, type ExecutableSearch } from "../executables.js";
 import { AGENT_PROFILE_SCHEMA_VERSION, AgentProfileError } from "../profileBase.js";
 import { ToolsProfileSchema } from "../toolProfile.js";
 
@@ -43,9 +44,32 @@ export const ClaudeCodeProfileSchema = z.strictObject({
 
 export type ClaudeCodeProfile = z.infer<typeof ClaudeCodeProfileSchema>;
 
-/** The initial Claude Code profile: the `claude` found on `parentEnv.PATH`, and the default model. */
-export function createDefaultClaudeCodeProfile(parentEnv: Env): ClaudeCodeProfile {
-  const claudePath = resolveOnPath("claude", parentEnv.PATH);
+/** System directories searched for `claude` after PATH. */
+export const CLAUDE_SYSTEM_DIRS: readonly string[] = ["/opt/homebrew/bin"];
+
+/**
+ * Where `claude` usually lives when PATH does not have it (an app started from Finder or at login
+ * gets launchd's minimal PATH), in search order. Home locations come from `env.HOME` only; the
+ * nvm entries are a bounded directory listing (executables.ts versionedBins). Candidates: the
+ * lookup checks each one.
+ */
+export function defaultExecutableFallbacks(env: Env, systemDirs: readonly string[] = CLAUDE_SYSTEM_DIRS): string[] {
+  const home = homeOf(env);
+  return [
+    ...(home ? [join(home, ".local", "bin", "claude")] : []),
+    ...systemDirs.map((d) => join(d, "claude")),
+    ...(home ? versionedBins(join(home, ".nvm", "versions", "node"), "claude") : []),
+  ];
+}
+
+/** The `claude` a new profile records: PATH first, then defaultExecutableFallbacks. */
+export function findExecutable(env: Env, search: ExecutableSearch = {}): string | undefined {
+  return resolveExecutable("claude", env.PATH, defaultExecutableFallbacks(env, search.systemDirs));
+}
+
+/** The initial Claude Code profile: the `claude` findExecutable finds, and the default model. */
+export function createDefaultClaudeCodeProfile(parentEnv: Env, search: ExecutableSearch = {}): ClaudeCodeProfile {
+  const claudePath = findExecutable(parentEnv, search);
   if (!claudePath) throw new AgentProfileError("profile: claude not found on PATH");
   return { schemaVersion: AGENT_PROFILE_SCHEMA_VERSION, adapter: CLAUDE_CODE_ADAPTER_ID, claudePath, model: DEFAULT_CLAUDE_CODE_MODEL };
 }
