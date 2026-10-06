@@ -1,8 +1,8 @@
 import Foundation
 @testable import ScoutKit
 
-/// The hand-written contract fixtures in Tests/Fixtures: one JSON file per frame or command,
-/// shaped to packages/contracts panel.ts so a TypeScript test can parse the same files.
+/// The contract fixtures the app reads, in Tests/Fixtures: byte-identical copies of files in
+/// packages/contracts/fixtures/panel, which a contracts test checks.
 enum ContractFixtures {
     static let directory = URL(fileURLWithPath: #filePath)
         .deletingLastPathComponent().deletingLastPathComponent()
