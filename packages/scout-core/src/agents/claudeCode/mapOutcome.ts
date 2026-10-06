@@ -11,8 +11,8 @@
 
 import type { JobRequest } from "@scout/contracts";
 import type { JobDetails, JobTermination } from "../adapter.js";
-import type { Out } from "./jobStop.js";
-import { isRecord, type StreamRecord } from "./jsonLineStream.js";
+import type { Out } from "../jobStop.js";
+import { isRecord, type StreamRecord } from "../jsonLineStream.js";
 import { validateJobOutput } from "../outputValidation.js";
 import { takeInstructionMarker } from "../prompt.js";
 import { isAuthOrQuota } from "./streamMonitor.js";

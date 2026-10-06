@@ -30,8 +30,8 @@ import type { Clock } from "../../clock.js";
 import type { JobDetails, JobTermination } from "../adapter.js";
 import { checkInit, type ExpectedInit } from "./initCheck.js";
 import { SCOUT_SERVER_NAME, STRUCTURED_OUTPUT_TOOL } from "./jobSurface.js";
-import type { JobStop } from "./jobStop.js";
-import { isRecord, type StreamRecord } from "./jsonLineStream.js";
+import type { JobStop } from "../jobStop.js";
+import { isRecord, type StreamRecord } from "../jsonLineStream.js";
 
 const MAX_TOOL_USES_RECORDED = 64;
 

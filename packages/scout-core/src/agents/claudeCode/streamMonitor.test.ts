@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { JobDetails } from "../adapter.js";
-import { JobStop } from "./jobStop.js";
+import { JobStop } from "../jobStop.js";
 import { createStreamMonitor } from "./streamMonitor.js";
 
 const scoutTools = ["current_site", "recent_activity"].map((t) => `mcp__scout__${t}`);

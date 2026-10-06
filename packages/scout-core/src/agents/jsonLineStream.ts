@@ -1,4 +1,4 @@
-// The CLI's stdout as stream-json events: UTF-8 text split on newlines, each line parsed as
+// An agent CLI's stdout as JSON-line events: UTF-8 text split on newlines, each line parsed as
 // JSON, objects handed on. Blank lines, lines that are not JSON, and JSON that is not an
 // object are skipped. A last line without a trailing newline is parsed at end(). Past
 // `maxBytes` (UTF-8 bytes) the stream reports once and ignores everything after, including

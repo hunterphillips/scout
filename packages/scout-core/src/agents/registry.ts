@@ -3,8 +3,8 @@
 // member does not compile until it does.
 //
 // Readiness checks outlive adapters: the core builds a new adapter on every profile edit, but an
-// adapter's check (Claude Code's billing preflight, run in a killable child process) keeps its
-// cache and its running children across them. `createReadinessChecks` holds that per-adapter
+// adapter's check (Claude Code's billing preflight, Codex's login check, each run in a killable
+// child process) keeps its cache and its running children across them. `createReadinessChecks` holds that per-adapter
 // state for the core's lifetime, creates each adapter's part only when one is first built, and
 // `cancelAll()` stops every check synchronously at shutdown.
 
@@ -15,6 +15,8 @@ import type { Env } from "./executables.js";
 import { createClaudeJobAdapter } from "./claudeCode/claudeJob.js";
 import { createDefaultClaudeCodeProfile } from "./claudeCode/profile.js";
 import { createPreflightFacade, type PreflightFacade } from "./claudeCode/preflightWorker.js";
+import { createDefaultCodexProfile } from "./codex/profile.js";
+import { createCodexReadinessFacade, type CodexReadinessFacade } from "./codex/readinessWorker.js";
 import type { ProcessTracker } from "./processTree.js";
 import type { AgentProfile } from "./profile.js";
 
@@ -27,6 +29,7 @@ export interface ReadinessChecks {
 class AdapterReadinessChecks implements ReadinessChecks {
   #closed = false;
   #claudeCode: PreflightFacade | undefined;
+  #codex: CodexReadinessFacade | undefined;
 
   claudeCode(): PreflightFacade {
     if (this.#claudeCode === undefined) {
@@ -36,9 +39,18 @@ class AdapterReadinessChecks implements ReadinessChecks {
     return this.#claudeCode;
   }
 
+  codex(): CodexReadinessFacade {
+    if (this.#codex === undefined) {
+      this.#codex = createCodexReadinessFacade();
+      if (this.#closed) this.#codex.cancelAll();
+    }
+    return this.#codex;
+  }
+
   cancelAll(): void {
     this.#closed = true;
     this.#claudeCode?.cancelAll();
+    this.#codex?.cancelAll();
   }
 }
 
@@ -72,4 +84,14 @@ export function createJobAdapter(profile: AgentProfile, deps: AdapterFactoryDeps
 /** The initial profile, for the default adapter (Claude Code). */
 export function createDefaultAgentProfile(parentEnv: Env): AgentProfile {
   return createDefaultClaudeCodeProfile(parentEnv);
+}
+
+/** The initial profile for a named adapter; throws AgentProfileError when its executable is not on PATH. */
+export function createDefaultProfileFor(id: AgentProfile["adapter"], parentEnv: Env): AgentProfile {
+  switch (id) {
+    case "claude-code":
+      return createDefaultClaudeCodeProfile(parentEnv);
+    case "codex":
+      return createDefaultCodexProfile(parentEnv);
+  }
 }
