@@ -1,4 +1,4 @@
-// Scout.app bundle metadata and the optional login LaunchAgent (P4.3).
+// Scout.app bundle metadata and the optional login LaunchAgent.
 //
 // The bundle (scripts/bundle-app.mjs) is `Scout.app/Contents/{MacOS/Scout, Info.plist,
 // Resources/}`: CFBundleIdentifier dev.scout.app, LSUIElement (menu-bar only, no Dock icon),

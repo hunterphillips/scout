@@ -13,7 +13,7 @@ public struct PauseControl: Sendable, Equatable {
     }
 }
 
-/// Pause as the core reports it, plus the app's own pause or resume still in flight (P4.2).
+/// Pause as the core reports it, plus the app's own pause or resume still in flight.
 ///
 /// Every place that can pause Scout (the Chrome side panel, the menu bar) follows the
 /// core's `state` frame: `paused` is what the latest frame says, never what the app last sent.
