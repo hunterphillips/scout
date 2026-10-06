@@ -8,7 +8,7 @@ import { BLOCKER_TEXT } from "./capabilities.js";
 import type { PanelCommand } from "./commands.js";
 import { MISSING_CAPABILITIES, PanelModel } from "./model.js";
 import { displayExplanation, LINK_DOWN_TEXT } from "./results.js";
-import { ackFailed, ackOk, answer, applyVerified, capabilities, chunks, entry, F, offer, originSetting, results, state, tracker, withId } from "./test-frames.js";
+import { ackFailed, ackOk, AGENTS, answer, applyVerified, capabilities, chunks, entry, F, offer, originSetting, results, state, tracker, withId } from "./test-frames.js";
 
 const key = { resourceId: F.rid, version: F.v1 };
 
@@ -539,6 +539,60 @@ describe("PanelModel capabilities (PanelModelCapabilityTests)", () => {
     m.applyLink("core_unavailable");
     expect(m.applyLink("connected")).toEqual([]);
     expect(m.destinationRecord(F.origin)?.state).toBe("unknown");
+  });
+
+  it("set_agent names one offered agent; the pending choice, then the ok ack, show as selected until the next capabilities frame", () => {
+    const m = onSite();
+    expect(m.capabilities.agents).toBeNull(); // a frame without agents (an older core)
+    expect(m.canSetAgent).toBe(false);
+    expect(m.setAgent("agent-b")).toBeNull();
+    m.apply(capabilities({ revision: 2, agents: AGENTS }));
+    expect(m.selectedAgent).toBe("agent-a");
+    expect(m.canSetAgent).toBe(true);
+    expect(m.setAgent("agent-a")).toBeNull(); // already selected
+    expect(m.setAgent("agent-z")).toBeNull(); // not offered
+    const c = m.setAgent("agent-b")!;
+    expect(c).toEqual({ type: "set_agent", commandId: expect.stringMatching(/^t/), agent: "agent-b" });
+    expect(m.selectedAgent).toBe("agent-b");
+    expect(m.canSetAgent).toBe(false);
+    expect(m.setAgent("agent-a")).toBeNull(); // one choice at a time
+    m.apply(ackOk(c.commandId));
+    expect(m.agentRecord?.state).toBe("ok");
+    expect(m.selectedAgent).toBe("agent-b"); // the frame that shows it has not arrived yet
+    m.apply(capabilities({ revision: 3, agents: { ...AGENTS, current: "agent-b" } }));
+    expect(m.selectedAgent).toBe("agent-b");
+    // A later hand edit back is what the frame says.
+    m.apply(capabilities({ revision: 4, agents: AGENTS }));
+    expect(m.selectedAgent).toBe("agent-a");
+    m.applyLink("core_unavailable");
+    expect(m.canSetAgent).toBe(false);
+    expect(m.selectedAgent).toBeNull();
+  });
+
+  it("a refused set_agent is a Problem without Retry, and the frame's agent stays selected", () => {
+    const m = onSite();
+    m.apply(capabilities({ revision: 2, agents: AGENTS }));
+    const c = m.setAgent("agent-b")!;
+    m.apply(ackFailed(c.commandId, "not_found"));
+    expect(m.selectedAgent).toBe("agent-a");
+    expect(m.canSetAgent).toBe(true);
+    expect(m.canRetry(c.commandId)).toBe(false);
+    expect(m.problems.some((p) => p.kind === "command" && p.record.id === c.commandId && p.record.code === "not_found")).toBe(true);
+  });
+
+  it("a pending set_agent settles unknown on expiry and on a core restart, never re-sent", () => {
+    const m = onSite();
+    m.apply(capabilities({ revision: 2, agents: AGENTS }));
+    const a = m.setAgent("agent-b")!;
+    m.markSent(a, "written", 1000);
+    m.expirePending(1000 + 10_000);
+    expect(m.agentRecord?.state).toBe("unknown");
+    expect(m.selectedAgent).toBe("agent-a");
+    const b = m.setAgent("agent-b")!;
+    m.markSent(b, "written", 2000);
+    m.applyLink("core_unavailable");
+    expect(m.applyLink("connected")).toEqual([]);
+    expect(m.agentRecord?.state).toBe("unknown");
   });
 
   it("ackForAnUnknownCommandIsIgnored", async () => {

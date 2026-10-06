@@ -61,6 +61,8 @@ export class PanelModel {
   /** Versions decided (ok ack) since the last `capabilities` frame. */
   private decidedSinceFrame = new Set<string>();
   private revokedSinceFrame = new Set<string>();
+  /** The agent a `set_agent` ok ack chose since the last `capabilities` frame (which shows it next). */
+  private agentSinceFrame: string | null = null;
   private dismissed = new Set<string>();
 
   constructor(readonly commands: CommandTracker = new CommandTracker()) {}
@@ -87,6 +89,7 @@ export class PanelModel {
       this.capabilities.reset();
       this.decidedSinceFrame.clear();
       this.revokedSinceFrame.clear();
+      this.agentSinceFrame = null;
       return [];
     }
     return wasRunning ? [] : this.coreRestarted();
@@ -123,6 +126,7 @@ export class PanelModel {
         if (this.capabilities.apply(state)) {
           this.decidedSinceFrame.clear();
           this.revokedSinceFrame.clear();
+          this.agentSinceFrame = null;
           this.settleMoot();
           // Another core answered without the panel seeing the link drop: treat it as a restart.
           if (previous !== undefined && previous !== state.coreInstanceId) return this.coreRestarted();
@@ -145,6 +149,7 @@ export class PanelModel {
           }
         } else if ((r.type === "approve" || r.type === "decline") && state.ok) this.decidedSinceFrame.add(keyId(r));
         else if (r.type === "revoke" && state.ok) this.revokedSinceFrame.add(r.resourceId);
+        else if (r.type === "set_agent" && state.ok && wasPending) this.agentSinceFrame = r.agent;
         else if (!state.ok && state.code === "stale_revision" && (isToggle(r) || isDecision(r))) this.settleMoot();
         break;
       }
@@ -359,6 +364,28 @@ export class PanelModel {
     return this.commands.issue({ type: "set_destination", origin, enabled, expectedEnabled: current });
   }
 
+  /**
+   * The agent Settings shows as chosen: the one a pending `set_agent` names, else the one an ok
+   * ack chose (until the next capabilities frame shows it), else the frame's current agent.
+   */
+  get selectedAgent(): string | null {
+    const rec = this.agentRecord;
+    if (rec?.state === "pending" && rec.request.type === "set_agent") return rec.request.agent;
+    return this.agentSinceFrame ?? this.capabilities.agents?.current ?? null;
+  }
+
+  /** The agent choice can change: connected, a frame offered agents, and no choice is waiting on the core. */
+  get canSetAgent(): boolean {
+    return this.running && this.capabilities.agents !== null && this.agentRecord?.state !== "pending";
+  }
+
+  /** Run background jobs through `agent`, one of the offered options. */
+  setAgent(agent: string): PanelCommand | null {
+    const agents = this.capabilities.agents;
+    if (!this.canSetAgent || !agents || agent === this.selectedAgent || !agents.available.some((a) => a.id === agent)) return null;
+    return this.commands.issue({ type: "set_agent", agent });
+  }
+
   refreshCapabilities(): PanelCommand | null {
     return this.running ? this.commands.issue({ type: "refresh_capabilities" }) : null;
   }
@@ -421,6 +448,10 @@ export class PanelModel {
 
   destinationRecord(origin: string): CommandRecord | undefined {
     return this.commands.latest((r) => r.type === "set_destination" && r.origin === origin);
+  }
+
+  get agentRecord(): CommandRecord | undefined {
+    return this.commands.latest((r) => r.type === "set_agent");
   }
 
   get grantRecord(): CommandRecord | undefined {
