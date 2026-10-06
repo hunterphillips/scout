@@ -1,6 +1,6 @@
 import Foundation
 
-/// The one Pause/Resume control the window's Settings button and the menu-bar item both show.
+/// The menu bar's Pause/Resume control.
 public struct PauseControl: Sendable, Equatable {
     public let title: String
     public let enabled: Bool
@@ -15,10 +15,10 @@ public struct PauseControl: Sendable, Equatable {
 
 /// Pause as the core reports it, plus the app's own pause or resume still in flight (P4.2).
 ///
-/// Every place that can pause Scout (the Chrome side panel, the window, the menu bar) follows the
+/// Every place that can pause Scout (the Chrome side panel, the menu bar) follows the
 /// core's `state` frame: `paused` is what the latest frame says, never what the app last sent.
-/// `pause` and `resume` carry no command ID and get no ack, so `CommandTracker` cannot follow
-/// them; this reducer holds the one pending request instead. It settles when a `state` frame
+/// `pause` and `resume` carry no command ID and get no ack; this reducer holds the one pending
+/// request instead. It settles when a `state` frame
 /// shows its target (paused for a pause, anything else for a resume): it settles on the first
 /// frame showing the target, whoever caused it, and a frame the core emitted before it read the
 /// request does not settle it. A write the pipe refused settles it at once (the user clicks

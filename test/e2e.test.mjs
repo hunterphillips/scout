@@ -328,12 +328,11 @@ describe.skipIf(!BUILT)("host <-> core end to end", () => {
     const dns = dnsStub(home);
     const core = spawn(process.execPath, ["--import", dns.importArg, CORE, "--stdio"], { env: { ...env, SCOUT_DWELL_MS: "1500" }, cwd: ROOT, stdio: ["pipe", "pipe", "pipe"] });
     children.push(core);
-    let coreOut = "";
     let coreErr = "";
-    core.stdout.on("data", (c) => (coreOut += c));
+    core.stdout.resume();
     core.stderr.on("data", (c) => (coreErr += c));
     const coreExit = exitOf(core);
-    const panel = () => coreOut.split("\n").filter(Boolean).map((l) => JSON.parse(l));
+    const panel = () => toChrome.filter((f) => f.type === "panel").map((f) => f.state);
     core.stdin.write(`${JSON.stringify({ type: "frontmost", bundleId: "com.google.Chrome", at: Date.now() })}\n`);
     await until(() => toChrome.some((f) => f.type === "ready"), "ready from the host");
 

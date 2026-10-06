@@ -1,8 +1,7 @@
-// Builds one version's text from its `preview` chunks. A port of ScoutKit's PreviewAssembler
-// (native/Scout/Sources/ScoutKit/PreviewAssembler.swift). Chunks must arrive in `seq` order,
-// each starting where the last ended, with the same `totalBytes`, blob hash and descriptor;
-// the last one (no `nextCursor`) must end exactly at `totalBytes`. Any violation fails the
-// preview for good; the user restarts it from the first chunk.
+// Builds one version's text from its `preview` chunks. A port of ScoutKit's PreviewAssembler.
+// Chunks must arrive in `seq` order, each starting where the last ended, with the same
+// `totalBytes`, blob hash and descriptor; the last one (no `nextCursor`) must end exactly at
+// `totalBytes`. Any violation fails the preview for good; the user restarts it from the first chunk.
 //
 // The browser difference: SHA-256 comes from WebCrypto, which is asynchronous. After the last
 // chunk the preview is `verifying`; `verified(digest)` (the hex SHA-256 of `bytes`, see

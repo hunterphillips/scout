@@ -96,8 +96,8 @@ public final class SidecarProcess {
 
     /// Never blocks: stdin is non-blocking, and a line that doesn't fit in the pipe right now
     /// is not written. Lines under `PIPE_BUF` bytes are written whole or not at all, so nothing
-    /// ever leaves half a line in the pipe. The caller keeps a `.retryLater` window command
-    /// pending and re-sends it; an `.oversize` one can never be written and is failed instead.
+    /// ever leaves half a line in the pipe. A command not `.written` was not sent; the caller
+    /// does not re-send it.
     @discardableResult
     public func send(_ command: NativeCommand) -> SendOutcome {
         let line = command.jsonLine()
@@ -290,7 +290,7 @@ public final class SidecarProcess {
         }
         let dropped = parser.ignoredLineCount - before
         if dropped > 0 {
-            log("ignored \(dropped) malformed line(s); total \(ignoredLineCount)")
+            log("ignored \(dropped) unknown or malformed line(s); total \(ignoredLineCount)")
         }
     }
 

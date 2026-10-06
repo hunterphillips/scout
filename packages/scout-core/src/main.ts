@@ -221,7 +221,8 @@ export async function runStdio(deps: StdioDeps): Promise<StdioCore> {
     id: "stdio",
     kind: "stdio",
     send(frame) {
-      if (!stdoutOpen) return;
+      // The Mac app consumes only `state` frames; the rest are the side panel's.
+      if (!stdoutOpen || frame.type !== "state") return;
       deps.stdout.write(`${JSON.stringify(frame)}\n`);
     },
   };

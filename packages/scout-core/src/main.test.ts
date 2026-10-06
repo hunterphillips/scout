@@ -101,6 +101,21 @@ describe("main --stdio", () => {
     return c;
   };
   const socketPath = () => join(home, "run", "core.sock");
+  /** A protocol-3 connection on core.sock, as the side panel's relay: its panel frames, and its commands. */
+  const connectRelay = async () => {
+    const sock = connect({ path: socketPath() });
+    sock.on("error", () => {});
+    await new Promise<void>((r) => sock.once("connect", () => r()));
+    const panel: Array<{ type: string; commandId?: string }> = [];
+    const dec = toChromeDecoder();
+    sock.on("data", (chunk: Buffer) => {
+      for (const r of dec.push(chunk)) if (r.ok && r.value["type"] === "panel") panel.push(r.value["state"] as (typeof panel)[number]);
+    });
+    sock.write(encodeFrame({ type: "hello", protocol: BRIDGE_PROTOCOL }, MAX_FRAME_FROM_CHROME));
+    const command = (c: object) => sock.write(encodeFrame({ type: "command", command: c }, MAX_FRAME_FROM_CHROME));
+    return { sock, panel, command };
+  };
+  const ofType = (frames: unknown[], type: string) => frames.filter((f) => (f as { type?: string }).type === type);
 
   it("exits 0 within 1 s of stdin closing and removes its socket", async () => {
     const c = await startReady();
@@ -172,24 +187,31 @@ describe("main --stdio", () => {
     expect(existsSync(socketPath())).toBe(false);
   });
 
-  it("sends Scout's window the browser-context grant, the capability view, and the audit on start", async () => {
+  it("stdout carries state frames only; the side panel gets the grant, the capability view, the audit and every capabilities change", async () => {
     writeFileSync(join(home, "config.json"), JSON.stringify({ agentBrowserContext: true }));
     const c = await startReady();
-    await until(() => ["grant", "capabilities", "audit"].every((t) => c.lines.some((l) => (l as { type?: string }).type === t)));
-    expect(c.lines.find((l) => (l as { type?: string }).type === "grant")).toEqual({ type: "grant", agentBrowserContext: true, destinations: [] });
-    expect(c.lines.find((l) => (l as { type?: string }).type === "capabilities")).toMatchObject({ offers: [], library: [], truncated: false });
+    const relay = await connectRelay();
+    await until(() => ["grant", "capabilities", "audit", "state"].every((t) => ofType(relay.panel, t).length > 0));
+    expect(ofType(relay.panel, "grant")[0]).toEqual({ type: "grant", agentBrowserContext: true, destinations: [] });
+    expect(ofType(relay.panel, "capabilities")[0]).toMatchObject({ offers: [], library: [], truncated: false });
+    relay.command({ type: "refresh_capabilities", commandId: "r1" });
+    await until(() => ofType(relay.panel, "ack").length > 0 && ofType(relay.panel, "capabilities").length >= 2);
+    await until(() => c.lines.length >= 2);
+    expect(c.lines.every((l) => (l as { type?: string }).type === "state")).toBe(true);
+    relay.sock.destroy();
     c.child.stdin.end();
     expect((await c.exited).code).toBe(0);
   });
 
   it("answers open_link from the result registry: with no result held, its identity is stale", async () => {
     const c = await startReady();
-    await until(() => c.lines.some((l) => (l as { type?: string }).type === "capabilities"));
-    const caps = c.lines.find((l) => (l as { type?: string }).type === "capabilities") as { coreInstanceId: string };
-    const cmd = { type: "open_link", commandId: "o1", coreInstanceId: caps.coreInstanceId, visitEpoch: 0, jobId: "job-1", candidateId: "c1" };
-    c.child.stdin.write(`${JSON.stringify(cmd)}\n`);
-    await until(() => c.lines.some((l) => (l as { type?: string }).type === "ack"));
-    expect(c.lines.find((l) => (l as { type?: string }).type === "ack")).toEqual({ type: "ack", commandId: "o1", ok: false, code: "stale_revision" });
+    const relay = await connectRelay();
+    await until(() => ofType(relay.panel, "capabilities").length > 0);
+    const caps = ofType(relay.panel, "capabilities")[0] as { coreInstanceId: string };
+    relay.command({ type: "open_link", commandId: "o1", coreInstanceId: caps.coreInstanceId, visitEpoch: 0, jobId: "job-1", candidateId: "c1" });
+    await until(() => ofType(relay.panel, "ack").length > 0);
+    expect(ofType(relay.panel, "ack")[0]).toEqual({ type: "ack", commandId: "o1", ok: false, code: "stale_revision" });
+    relay.sock.destroy();
     c.child.stdin.end();
     expect((await c.exited).code).toBe(0);
   });
@@ -227,13 +249,14 @@ describe("main --stdio", () => {
     const { resourceId, version } = report.results[0]!;
 
     const c = await startReady();
+    const relay = await connectRelay();
     const chunks: Array<{ seq: number; text: string; sha256: string; nextCursor?: string }> = [];
     let cursor: string | undefined;
     for (let i = 0; ; i++) {
       const commandId = `p${i}`;
-      c.child.stdin.write(`${JSON.stringify({ type: "preview", commandId, resourceId, version, ...(cursor ? { cursor } : {}) })}\n`);
-      await until(() => c.lines.some((l) => (l as { commandId?: string }).commandId === commandId));
-      const chunk = c.lines.find((l) => (l as { commandId?: string }).commandId === commandId) as (typeof chunks)[number] & { type: string };
+      relay.command({ type: "preview", commandId, resourceId, version, ...(cursor ? { cursor } : {}) });
+      await until(() => relay.panel.some((l) => l.commandId === commandId));
+      const chunk = relay.panel.find((l) => l.commandId === commandId) as unknown as (typeof chunks)[number] & { type: string };
       expect(chunk.type).toBe("preview");
       chunks.push(chunk);
       cursor = chunk.nextCursor;
@@ -244,6 +267,7 @@ describe("main --stdio", () => {
     expect(chunks.map((ch) => ch.text).join("")).toBe(text);
     expect(chunks.at(-1)!.nextCursor).toBeUndefined();
 
+    relay.sock.destroy();
     c.child.stdin.end();
     expect((await c.exited).code).toBe(0);
     const log = readFileSync(join(home, "logs", "diagnostics.jsonl"), "utf8");
@@ -252,22 +276,21 @@ describe("main --stdio", () => {
     expect(log).not.toContain("😀");
   });
 
-  it("refuses a stdin line whose bytes with the newline reach the command size limit: counted, never answered", async () => {
+  it("refuses a stdin line whose bytes with the newline reach the command size limit: counted, never applied", async () => {
     // A valid command padded with JSON whitespace to exactly `bytes` before the newline.
-    const padded = (commandId: string, bytes: number): string => {
-      const head = `{"type":"refresh_capabilities","commandId":"${commandId}"`;
+    const padded = (type: string, bytes: number): string => {
+      const head = `{"type":"${type}"`;
       return `${head}${" ".repeat(bytes - head.length - 1)}}`;
     };
     const c = await startReady();
-    const atLimit = padded("atlimit", NATIVE_COMMAND_MAX_BYTES - 1); // + newline = NATIVE_COMMAND_MAX_BYTES
-    const under = padded("under", NATIVE_COMMAND_MAX_BYTES - 2); // + newline = one byte under
+    const atLimit = padded("pause", NATIVE_COMMAND_MAX_BYTES - 1); // + newline = NATIVE_COMMAND_MAX_BYTES
+    const under = padded("shutdown", NATIVE_COMMAND_MAX_BYTES - 2); // + newline = one byte under
     expect(Buffer.byteLength(atLimit)).toBe(NATIVE_COMMAND_MAX_BYTES - 1);
     c.child.stdin.write(`${atLimit}\n`);
     c.child.stdin.write(`${under}\n`);
-    await until(() => c.lines.some((l) => (l as { commandId?: string }).commandId === "under"));
-    expect(c.lines.some((l) => (l as { commandId?: string }).commandId === "atlimit")).toBe(false);
-    c.child.stdin.end();
+    // The shutdown one byte under the limit applies; the pause at the limit never did.
     expect((await c.exited).code).toBe(0);
+    expect(c.lines.some((l) => (l as { status?: string }).status === "paused")).toBe(false);
     const log = readFileSync(join(home, "logs", "diagnostics.jsonl"), "utf8");
     const invalid = log.trim().split("\n").map((l) => JSON.parse(l) as { event: string; count?: number }).filter((e) => e.event === "native_command_invalid");
     expect(invalid.map((e) => e.count)).toEqual([1]);
@@ -275,8 +298,7 @@ describe("main --stdio", () => {
 
   it("relays host frames into panel states, answers hello with a policy, and acks page_text back to the host", async () => {
     const c = await startReady();
-    // Scout's window frames (grant, capabilities, audit) interleave; this test follows the states.
-    const states = () => c.lines.filter((l) => (l as { type?: string }).type === "state");
+    const states = () => ofType(c.lines, "state");
     expect(states()[0]).toEqual({ type: "state", status: "disconnected" });
     c.child.stdin.write("not json\n");
 

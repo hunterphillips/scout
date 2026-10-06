@@ -1,6 +1,6 @@
-// Test-only (never bundled): the Swift suite's ContractFixtures and TestFrames, ported, so the
-// panel's tests are the ScoutKit tests' cases over the same hand-written fixtures
-// (native/Scout/Tests/Fixtures, also parsed by contracts' panelFixtures.test.ts).
+// Test-only (never bundled): fixture loading and frame builders for the panel's tests, over the
+// hand-written fixtures in packages/contracts/fixtures/panel (also parsed by contracts'
+// panelFixtures.test.ts).
 
 import { createHash } from "node:crypto";
 import { readdirSync, readFileSync } from "node:fs";
@@ -10,7 +10,7 @@ import { CommandTracker, type PanelCommand } from "./commands.js";
 import type { PanelModel } from "./model.js";
 import { acceptAndVerify, type PreviewKey, sha256Hex } from "./preview.js";
 
-export const FIXTURES_DIR = fileURLToPath(new URL("../../../../native/Scout/Tests/Fixtures/", import.meta.url));
+export const FIXTURES_DIR = fileURLToPath(new URL("../../../contracts/fixtures/panel/", import.meta.url));
 
 export const F = {
   rid: `res_${"a".repeat(64)}`,
@@ -33,7 +33,7 @@ export const F = {
   },
 };
 
-/** Deterministic IDs like the Swift tests' `CommandTracker(prefix:)`: `<prefix>-1`, `<prefix>-2`, … */
+/** Deterministic IDs: `<prefix>-1`, `<prefix>-2`, … */
 export function counterIds(prefix = "t"): () => string {
   let n = 0;
   return () => `${prefix}-${++n}`;

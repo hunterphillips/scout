@@ -1,7 +1,7 @@
 // End-to-end, bridge protocol 3: Scout's window over the relay. The built native host and
 // the built core in a temp SCOUT_HOME; a scripted stand-in for the extension speaks Chrome's
 // native-messaging framing on the host's stdio, and the core's stdout stands in for the
-// native app. The user's agent is the scripted fake CLI (never a model); DNS is stubbed.
+// native app, which gets `state` frames only. The user's agent is the scripted fake CLI (never a model); DNS is stubbed.
 // Builds nothing; run `npm run build` first. Never touches the real ~/.scout.
 
 import { spawn } from "node:child_process";
@@ -92,7 +92,7 @@ describe.skipIf(!BUILT)("bridge protocol 3: Scout's window over the relay", () =
     if (home) rmSync(home, { recursive: true, force: true });
   });
 
-  it("panel frames reach the side panel and the app; commands from the side panel act, and their acks come back only to it", async () => {
+  it("panel frames reach the side panel and state frames the app; commands from the side panel act, and their acks come back only to it", async () => {
     home = mkdtempSync(join(tmpdir(), "scout-relay-"));
     const userHome = join(home, "u");
     mkdirSync(join(userHome, ".claude"), { recursive: true });
@@ -154,15 +154,15 @@ describe.skipIf(!BUILT)("bridge protocol 3: Scout's window over the relay", () =
     // 3. frontmost from the extension never leaves the host (counted at exit, below).
     command({ type: "frontmost", bundleId: "com.google.Chrome", at: Date.now() });
 
-    // 4. A settled visit to a recommendation host: the fake agent's results reach both surfaces.
+    // 4. A settled visit to a recommendation host: the fake agent's results reach the side panel;
+    // the app's stdout carries state frames only.
     const at = Date.now();
     host.stdin.write(frame({ kind: "permissions", revision: 1, at, granted: [`${SITE}/*`], githubCapture: false }));
     host.stdin.write(frame({ kind: "focus", seq: 1, at, browserFocused: true, windowId: 1, tabId: 8, url: `${SITE}/docs/billing`, title: "Billing", incognito: false, permissionsRevision: 1 }));
     await until(() => panel().some((f) => f.type === "results"), "results on the side panel", 40_000);
-    await until(() => app().some((f) => f.type === "results"), "results on the app");
     const results = panel().find((f) => f.type === "results");
     expect(results).toMatchObject({ status: "ok", origin: SITE });
-    expect(app().find((f) => f.type === "results")).toEqual(results);
+    expect(app().some((f) => f.status === "working") && app().every((f) => f.type === "state")).toBe(true);
     expect(JSON.stringify(results)).not.toContain(`${SITE}/`);
 
     // 5. open_link from the side panel: the ack with the target goes to the side panel only.

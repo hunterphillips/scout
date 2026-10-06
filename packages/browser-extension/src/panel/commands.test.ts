@@ -1,4 +1,4 @@
-// Ported from native/Scout/Tests/ScoutKitTests/CommandTrackerTests.swift, case for case, plus
+// Ported from ScoutKit's CommandTrackerTests.swift, case for case, plus
 // the browser rules (random `sp-` IDs, open_link never left unsent, the byte limit).
 import { CommandIdSchema, NATIVE_COMMAND_MAX_BYTES, RelayCommandSchema } from "@scout/contracts";
 import { describe, expect, it } from "vitest";

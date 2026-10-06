@@ -1,8 +1,8 @@
 import Foundation
 
-/// Splits the sidecar's stdout into lines and decodes each as a `PanelState`.
+/// Splits the sidecar's stdout into lines and decodes each as a `PanelState` (a `state` frame).
 /// Chunks may end mid-line; the remainder is kept for the next `append`.
-/// Unknown or malformed lines are dropped and counted, never thrown.
+/// Other frame types and malformed lines are dropped and counted, never thrown.
 /// Each byte is scanned for a newline once and the consumed prefix is dropped once per
 /// `append`, so a large line arriving in many chunks costs linear time.
 public struct JSONLParser: Sendable {

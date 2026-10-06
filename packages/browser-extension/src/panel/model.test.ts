@@ -1,4 +1,4 @@
-// Ported from native/Scout/Tests/ScoutKitTests/PanelModelTests.swift (PanelModelTests and
+// Ported from ScoutKit's PanelModelTests.swift (PanelModelTests and
 // PanelModelCapabilityTests). Browser mapping: the app's sidecar `.running` is the worker's
 // link `connected`, `.starting` is `connecting`, `.stopped` is `core_unavailable`; the app's
 // expanded/collapsed window has no counterpart (the side panel is always open when shown), so

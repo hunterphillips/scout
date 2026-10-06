@@ -1,6 +1,5 @@
 // Command IDs for the side panel's window commands, and each command's way to its ack.
-// A port of ScoutKit's CommandTracker (native/Scout/Sources/ScoutKit/CommandTracker.swift);
-// the rules are the same, with two browser differences:
+// A port of ScoutKit's CommandTracker; the rules are the same, with two browser differences:
 // - IDs are `sp-` plus 128 random bits (never a counter), so they can never collide with the
 //   Mac app's IDs or with another panel's, and a reopened panel never reuses one.
 // - An `open_link` the worker could not hand to a ready port fails at once as `unavailable`

@@ -1,5 +1,5 @@
 // The current visit's recommendation results and the links clicked on them. A port of
-// ScoutKit's ResultsModel (native/Scout/Sources/ScoutKit/ResultsModel.swift).
+// ScoutKit's ResultsModel.
 //
 // One results state per visit. A `state` frame for a new visit, or one that is not `working`
 // (an `idle` for the same visit is how the core says it cleared them), resets it; `working`

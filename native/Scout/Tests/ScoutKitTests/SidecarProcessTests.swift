@@ -69,6 +69,7 @@ import Testing
             echo '{"type":"state","status":"idle"}'
             echo 'garbage'
             echo '{"type":"results","coreInstanceId":"core-1","visitEpoch":1,"origin":"https://docs.example.com","jobId":"job-1","status":"empty"}'
+            echo '{"type":"state","status":"working","visitEpoch":1}'
             while read line; do
               echo "$line" >> '\(received.path)'
               case "$line" in *shutdown*) exit 0;; esac
@@ -82,11 +83,9 @@ import Testing
         sidecar.start()
         await waitUntil { states.count == 2 }
 
-        #expect(states == [
-            .state(status: .idle, visitEpoch: nil, detail: nil),
-            .results(ResultsFrame(coreInstanceId: "core-1", visitEpoch: 1, origin: "https://docs.example.com", jobId: "job-1", outcome: .empty)),
-        ])
-        #expect(sidecar.ignoredLineCount == 1)
+        // The garbage line and the results frame are skipped; only state frames reach the app.
+        #expect(states == [.state(StateFrame(status: .idle)), .state(StateFrame(status: .working, visitEpoch: 1))])
+        #expect(sidecar.ignoredLineCount == 2)
 
         sidecar.send(.frontmost(bundleId: "com.google.Chrome", at: 42))
         await waitUntil { lines(received).count == 1 }
@@ -166,7 +165,7 @@ import Testing
         sidecar.start()
         await waitUntil { sidecar.ignoredLineCount == 1 }
         sidecar.shutdown(timeout: 1)
-        #expect(states == [.state(status: .idle, visitEpoch: nil, detail: nil)])
+        #expect(states == [.state(StateFrame(status: .idle))])
         #expect(sidecar.ignoredLineCount == 1)
     }
 

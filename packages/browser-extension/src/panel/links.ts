@@ -1,12 +1,11 @@
 // Which recommended links the side panel may open: only a target the core sent back in the ok
-// ack of the user's own `open_link`, checked again here. A port of ScoutKit's LinkOpener rules
-// (native/Scout/Sources/ScoutKit/LinkOpener.swift): `https`, no user or password, no explicit
-// port (not even 443, nor an empty one), and exactly the result's host, compared byte for byte
-// with the link's authority as written. Any path, query or fragment on that host passes, so a
+// ack of the user's own `open_link`, checked again here. A port of ScoutKit's LinkOpener rules:
+// `https`, no user or password, no explicit port (not even 443, nor an empty one), and exactly
+// the result's host, compared byte for byte with the link's authority as written. Any path, query or fragment on that host passes, so a
 // verified HTML twin does. The panel opens a passing link with chrome.tabs.create; a failed
 // create is refused as `open_failed`. Pure: no `chrome.*`.
 
-/** `SOURCE_URL_MAX_CHARS` in @scout/contracts (the app's `PanelLimits.urlMaxBytes`). */
+/** `SOURCE_URL_MAX_CHARS` in @scout/contracts. */
 export const URL_MAX_BYTES = 2048;
 
 export type LinkRefusal = "malformed" | "not_https" | "credentials" | "port" | "wrong_host" | "open_failed";

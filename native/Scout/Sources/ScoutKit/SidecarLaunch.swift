@@ -2,41 +2,8 @@ import Foundation
 
 /// `~/.scout/config.json`, written by `scripts/setup.mjs`. Extra keys are ignored.
 public struct ScoutConfig: Sendable, Equatable, Decodable {
-    public static let defaultChromeBundleId = "com.google.Chrome"
-
     public let nodePath: String
     public let scoutRoot: String
-    /// The browser recommended links open in (the same key the core reads); nil when absent or
-    /// not a string.
-    public let chromeBundleId: String?
-
-    private enum CodingKeys: String, CodingKey {
-        case nodePath, scoutRoot, chromeBundleId
-    }
-
-    public init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        nodePath = try container.decode(String.self, forKey: .nodePath)
-        scoutRoot = try container.decode(String.self, forKey: .scoutRoot)
-        // A bad value here is the core's to refuse; it must not hide the sidecar settings.
-        chromeBundleId = try? container.decodeIfPresent(String.self, forKey: .chromeBundleId)
-    }
-
-    /// The bundle id links open in: the config's `chromeBundleId` when it matches the core's
-    /// pattern (`[A-Za-z0-9.-]+`, config.ts), else Chrome's. An unreadable config means Chrome too.
-    public static func chromeBundleId(configURL: URL = SidecarLaunch.defaultConfigURL) -> String {
-        guard let data = try? Data(contentsOf: configURL),
-              let config = try? JSONDecoder().decode(ScoutConfig.self, from: data),
-              let id = config.chromeBundleId, isBundleId(id) else { return defaultChromeBundleId }
-        return id
-    }
-
-    static func isBundleId(_ id: String) -> Bool {
-        !id.isEmpty && id.utf8.allSatisfy { byte in
-            byte == UInt8(ascii: ".") || byte == UInt8(ascii: "-") || (0x30...0x39).contains(byte)
-                || (0x41...0x5A).contains(byte) || (0x61...0x7A).contains(byte)
-        }
-    }
 }
 
 public struct LaunchSpec: Sendable, Equatable {

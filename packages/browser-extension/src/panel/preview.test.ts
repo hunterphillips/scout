@@ -1,4 +1,4 @@
-// Ported from native/Scout/Tests/ScoutKitTests/PreviewAssemblerTests.swift, over the same
+// Ported from ScoutKit's PreviewAssemblerTests.swift, over the same
 // fixtures; the hash check is WebCrypto's (asynchronous), so a complete preview passes
 // through `verifying` first.
 import { PREVIEW_CHUNK_MAX_BYTES as CONTRACT_CHUNK, RESOURCE_MAX_BYTES as CONTRACT_RESOURCE, type PanelPreviewChunk } from "@scout/contracts";

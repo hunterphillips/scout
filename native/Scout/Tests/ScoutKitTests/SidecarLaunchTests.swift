@@ -43,27 +43,6 @@ struct Fixture {
     }
 }
 
-@Suite struct ChromeBundleIdTests {
-    @Test func readsTheConfiguredBundleIdElseChrome() throws {
-        let f = try Fixture(); defer { f.cleanUp() }
-        #expect(ScoutConfig.chromeBundleId(configURL: f.configURL) == "com.google.Chrome") // no config
-        try f.writeConfig()
-        #expect(ScoutConfig.chromeBundleId(configURL: f.configURL) == "com.google.Chrome") // key absent
-        try f.writeConfig(#"{"nodePath":"\#(f.node.path)","scoutRoot":"\#(f.root.path)","chromeBundleId":"com.google.Chrome.canary"}"#)
-        #expect(ScoutConfig.chromeBundleId(configURL: f.configURL) == "com.google.Chrome.canary")
-        for bad in [#""""#, #""com.google Chrome""#, #""a/b""#, "5"] {
-            try f.writeConfig(#"{"nodePath":"\#(f.node.path)","scoutRoot":"\#(f.root.path)","chromeBundleId":\#(bad)}"#)
-            #expect(ScoutConfig.chromeBundleId(configURL: f.configURL) == "com.google.Chrome", "\(bad)")
-        }
-    }
-
-    @Test func aBadBundleIdDoesNotHideTheSidecarSettings() throws {
-        let f = try Fixture(); defer { f.cleanUp() }
-        try f.writeConfig(#"{"nodePath":"\#(f.node.path)","scoutRoot":"\#(f.root.path)","chromeBundleId":5}"#)
-        if case .setupNeeded = SidecarLaunch.resolve(configURL: f.configURL) { Issue.record("setup needed") }
-    }
-}
-
 @Suite struct SidecarLaunchTests {
     private func setupNeeded(_ launch: SidecarLaunch) -> Bool {
         if case .setupNeeded = launch { return true }

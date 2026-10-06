@@ -18,10 +18,10 @@ import { MAX_FRAME_TO_CHROME, MAX_PANEL_FRAME_BYTES } from "./frame.js";
 
 // Bridge protocol 3 fixtures (packages/contracts/fixtures/bridge/), the frames the browser side
 // panel builds against: `to-core.*` must parse as a BridgeFrame, `to-chrome.*` as a
-// ToChromeFrame, and `refused.*` as neither. The Swift app's panel fixtures are checked wrapped
-// in bridge frames too, so the side panel and the app read the same frames.
+// ToChromeFrame, and `refused.*` as neither. The panel fixtures (fixtures/panel/) are checked
+// wrapped in bridge frames too.
 const BRIDGE_DIR = fileURLToPath(new URL("../fixtures/bridge/", import.meta.url));
-const SWIFT_DIR = fileURLToPath(new URL("../../../native/Scout/Tests/Fixtures/", import.meta.url));
+const PANEL_DIR = fileURLToPath(new URL("../fixtures/panel/", import.meta.url));
 
 type Fixture = { file: string; value: unknown };
 const load = (dir: string, prefix: string): Fixture[] =>
@@ -143,12 +143,12 @@ describe("bridge fixtures", () => {
     }
   });
 
-  it("every Swift panel frame fixture is a panel frame, and every Swift command fixture is relayed or refused by its class", () => {
-    for (const { file, value } of load(SWIFT_DIR, "frame.")) {
+  it("every panel frame fixture is a panel frame, and every panel command fixture is relayed or refused by its class", () => {
+    for (const { file, value } of load(PANEL_DIR, "frame.")) {
       expect(PanelStateSchema.safeParse(value).success, file).toBe(true);
       expect(ToChromeFrameSchema.safeParse({ type: "panel", state: value }).success, file).toBe(true);
     }
-    for (const { file, value } of load(SWIFT_DIR, "command.")) {
+    for (const { file, value } of load(PANEL_DIR, "command.")) {
       const type = (value as { type: string }).type;
       const stdioOnly = (STDIO_ONLY_COMMANDS as readonly string[]).includes(type);
       expect(BridgeFrameSchema.safeParse({ type: "command", command: value }).success, file).toBe(!stdioOnly);

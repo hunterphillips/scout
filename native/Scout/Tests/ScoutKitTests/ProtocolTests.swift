@@ -16,70 +16,15 @@ import Testing
             #"{"type":"state","status":"working","visitEpoch":4,"detail":"ranking"}"# + "\n",
         ])
         #expect(states == [
-            .state(status: .idle, visitEpoch: nil, detail: nil),
-            .state(status: .working, visitEpoch: 4, detail: "ranking"),
+            .state(StateFrame(status: .idle)),
+            .state(StateFrame(status: .working, visitEpoch: 4, detail: "ranking")),
         ])
         #expect(ignored == 0)
-    }
-
-    static let resultsHead = #"{"type":"results","coreInstanceId":"core-1","visitEpoch":2,"origin":"https://docs.stripe.com","jobId":"j1","#
-
-    @Test func decodesEveryResultsVariant() {
-        let item = #"{"candidateId":"c1","title":"Webhooks","reason":"matches","hostname":"docs.stripe.com"}"#
-        let head = Self.resultsHead
-        let (states, ignored) = parse([
-            head + #""status":"ok","items":["# + item + "]}\n",
-            head + #""status":"empty"}"# + "\n",
-            head + #""status":"unavailable","reason":"busy"}"# + "\n",
-            head + #""status":"error","reason":"timeout"}"# + "\n",
-            head + #""status":"cancelled","reason":"visit_changed"}"# + "\n",
-        ])
-        let frame = { (outcome: ResultsOutcome) in
-            PanelState.results(ResultsFrame(coreInstanceId: "core-1", visitEpoch: 2, origin: "https://docs.stripe.com", jobId: "j1", outcome: outcome))
-        }
-        #expect(states == [
-            frame(.ok([ResultItem(candidateId: "c1", title: "Webhooks", reason: "matches", hostname: "docs.stripe.com")])),
-            frame(.empty),
-            frame(.unavailable(.busy)),
-            frame(.error(.timeout)),
-            frame(.cancelled(.visitChanged)),
-        ])
-        #expect(ignored == 0)
-    }
-
-    @Test func dropsResultsFramesOutsideTheContract() {
-        let head = Self.resultsHead
-        let item = #"{"candidateId":"c1","title":"t","reason":"r","hostname":"docs.stripe.com"}"#
-        let bad = [
-            head + #""status":"ok","items":[]}"#,                                                         // no items
-            head + #""status":"ok","items":["# + [item, item].joined(separator: ",") + "]}",               // duplicate ids
-            head + #""status":"ok","items":["# + Array(repeating: item, count: 4).joined(separator: ",") + "]}",
-            head + #""status":"ok","items":[{"candidateId":"c1","title":"t","reason":"r","hostname":"h","href":"https://x"}]}"#,
-            head + #""status":"ok","href":"https://x","items":["# + item + "]}",                          // extra key
-            head + #""status":"ok","items":[{"candidateId":"x1","title":"t","reason":"r","hostname":"h"}]}"#,
-            head + #""status":"ok","items":[{"candidateId":"c1","title":"","reason":"r","hostname":"h"}]}"#,
-            head + #""status":"ok","items":[{"candidateId":"c1","title":"t","reason":"\#(String(repeating: "r", count: 141))","hostname":"h"}]}"#,
-            head + #""status":"empty","items":[]}"#,
-            head + #""status":"unavailable","reason":"service down"}"#,
-            head + #""status":"error","reason":"busy"}"#,
-            head + #""status":"cancelled"}"#,
-            head + #""status":"nothing"}"#,
-            #"{"type":"results","visitEpoch":2,"origin":"https://docs.stripe.com","jobId":"j1","status":"empty"}"#,
-            #"{"type":"results","coreInstanceId":"core-1","visitEpoch":2,"origin":"https://docs.stripe.com/x","jobId":"j1","status":"empty"}"#,
-            #"{"type":"results","coreInstanceId":"core-1","visitEpoch":-1,"origin":"https://docs.stripe.com","jobId":"j1","status":"empty"}"#,
-            #"{"type":"results","coreInstanceId":"core-1","visitEpoch":2,"origin":"https://docs.stripe.com","jobId":"j 1","status":"empty"}"#,
-            #"{"type":"state","status":"idle","visitEpoch":2,"jobId":"j1"}"#,                            // jobId only on working
-        ]
-        for line in bad {
-            #expect(PanelState.decode(line: Data(line.utf8)) == nil, "\(line)")
-        }
-        #expect(PanelState.decode(line: Data(#"{"type":"state","status":"working","visitEpoch":2,"jobId":"j1"}"#.utf8))
-            == .state(status: .working, visitEpoch: 2, detail: nil, permitted: nil, jobId: "j1"))
     }
 
     @Test func joinsLinesSplitAcrossChunks() {
         let (states, _) = parse([#"{"type":"sta"#, #"te","status":"#, "\"paused\"}\n"])
-        #expect(states == [.state(status: .paused, visitEpoch: nil, detail: nil)])
+        #expect(states == [.state(StateFrame(status: .paused))])
     }
 
     @Test func holdsPartialLineUntilNewline() {
@@ -92,7 +37,7 @@ import Testing
 
     @Test func acceptsCRLFAndSkipsBlankLines() {
         let (states, ignored) = parse(["\n  \n" + #"{"type":"state","status":"disconnected"}"# + "\r\n"])
-        #expect(states == [.state(status: .disconnected, visitEpoch: nil, detail: nil)])
+        #expect(states == [.state(StateFrame(status: .disconnected))])
         #expect(ignored == 0)
     }
 
@@ -103,15 +48,13 @@ import Testing
             #"{"type":"hello"}"# + "\n",                                           // unknown type
             #"{"type":"state","status":"sleeping"}"# + "\n",                       // unknown status
             #"{"type":"state"}"# + "\n",                                           // missing status
-            #"{"type":"results","status":"ok","items":[]}"# + "\n",                // missing identity
-            Self.resultsHead + #""status":"ok"}"# + "\n",                         // missing items
-            Self.resultsHead + #""status":"error"}"# + "\n",                      // missing reason
-            #"{"type":"results","visitEpoch":"1","status":"empty","items":[]}"# + "\n", // wrong type
-            Self.resultsHead + #""status":"ok","items":[{"title":"x"}]}"# + "\n",
+            #"{"type":"state","status":"idle","jobId":"j1"}"# + "\n",             // jobId only on working
+            #"{"type":"state","status":"working","jobId":"j 1"}"# + "\n",         // jobId not a token
+            #"{"type":"grant","agentBrowserContext":true}"# + "\n",               // not a state frame
             #"{"type":"state","status":"idle"}"# + "\n",
         ])
-        #expect(states == [.state(status: .idle, visitEpoch: nil, detail: nil)])
-        #expect(ignored == 10)
+        #expect(states == [.state(StateFrame(status: .idle))])
+        #expect(ignored == 8)
     }
 
     @Test func dropsOversizedLineThroughItsNewline() {
@@ -121,13 +64,23 @@ import Testing
         // The rest of the oversized line is discarded too, then parsing resumes.
         _ = parser.append(Data(repeating: 0x61, count: 1000))
         let next = parser.append(Data(("aaa\n" + #"{"type":"state","status":"idle"}"# + "\n").utf8))
-        #expect(next == [.state(status: .idle, visitEpoch: nil, detail: nil)])
+        #expect(next == [.state(StateFrame(status: .idle))])
         #expect(parser.ignoredLineCount == 1)
     }
 
-    /// A grant frame padded to exactly `bytes` bytes, newline excluded.
-    private func grantLine(bytes: Int) -> Data {
-        let head = Data(#"{"type":"grant","agentBrowserContext":true,"pad":""#.utf8), tail = Data("\"}".utf8)
+    static let padHead = #"{"type":"state","status":"working","detail":""#
+
+    /// The length of each decoded frame's `detail`, the padding.
+    private func detailLengths(_ states: [PanelState]) -> [Int?] {
+        states.map { state in
+            guard case let .state(frame) = state else { return nil }
+            return frame.detail?.utf8.count
+        }
+    }
+
+    /// A state frame padded to exactly `bytes` bytes, newline excluded.
+    private func paddedLine(bytes: Int) -> Data {
+        let head = Data(Self.padHead.utf8), tail = Data("\"}".utf8)
         return head + Data(repeating: 0x61, count: bytes - head.count - tail.count) + tail
     }
 
@@ -142,22 +95,23 @@ import Testing
     }
 
     @Test func lineJustUnderTheLimitDecodesAndJustOverIsDropped() {
-        let under = grantLine(bytes: JSONLParser.maxLineBytes - 1) + Data([0x0A])
-        let over = grantLine(bytes: JSONLParser.maxLineBytes + 1) + Data([0x0A])
+        let under = paddedLine(bytes: JSONLParser.maxLineBytes - 1) + Data([0x0A])
+        let over = paddedLine(bytes: JSONLParser.maxLineBytes + 1) + Data([0x0A])
         let next = Data((#"{"type":"state","status":"idle"}"# + "\n").utf8)
         for chunk in [65_536, under.count + over.count + next.count] {
             var parser = JSONLParser()
-            #expect(feed(&parser, under, chunk: chunk) == [.grant(agentBrowserContext: true)], "chunk \(chunk)")
+            let padding = JSONLParser.maxLineBytes - 1 - Self.padHead.utf8.count - 2
+            #expect(detailLengths(feed(&parser, under, chunk: chunk)) == [padding], "chunk \(chunk)")
             #expect(parser.ignoredLineCount == 0)
             // Just over: dropped and counted once whether it arrives whole or in pieces; the next line parses.
-            #expect(feed(&parser, over + next, chunk: chunk) == [.state(status: .idle, visitEpoch: nil, detail: nil)], "chunk \(chunk)")
+            #expect(feed(&parser, over + next, chunk: chunk) == [.state(StateFrame(status: .idle))], "chunk \(chunk)")
             #expect(parser.ignoredLineCount == 1, "chunk \(chunk)")
         }
     }
 
     @Test func largeFrameSplitIntoSmallChunksParsesOnce() throws {
         var parser = JSONLParser()
-        let line = Data(#"{"type":"grant","agentBrowserContext":true,"pad":""#.utf8)
+        let line = Data(Self.padHead.utf8)
             + Data(repeating: 0x61, count: 300_000) + Data("\"}\n".utf8)
         var states: [PanelState] = []
         var i = 0
@@ -165,7 +119,7 @@ import Testing
             states += parser.append(line[i..<min(i + 4096, line.count)])
             i += 4096
         }
-        #expect(states == [.grant(agentBrowserContext: true)])
+        #expect(detailLengths(states) == [300_000])
         #expect(parser.ignoredLineCount == 0)
     }
 

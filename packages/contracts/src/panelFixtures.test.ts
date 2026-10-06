@@ -2,11 +2,13 @@ import { readdirSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import type { z } from "zod";
-import { HOST_ORIGIN_MAX_CHARS, NATIVE_COMMAND_MAX_BYTES, NativeCommandSchema, PanelStateSchema } from "./index.js";
+import { NATIVE_COMMAND_MAX_BYTES, NativeCommandSchema, PanelStateSchema } from "./index.js";
 
-// The Swift app's test fixtures must stay valid under this contract. Every file in the
-// directory is checked, so a new fixture is covered without editing this test.
-const FIXTURES_DIR = fileURLToPath(new URL("../../../native/Scout/Tests/Fixtures/", import.meta.url));
+// The panel fixtures: one hand-written JSON file per frame or command, valid under this
+// contract. Every file in the directory is checked, so a new fixture is covered without editing
+// this test. The Mac app's tests read a subset of them from their own fixtures directory.
+const FIXTURES_DIR = fileURLToPath(new URL("../fixtures/panel/", import.meta.url));
+const SWIFT_FIXTURES_DIR = fileURLToPath(new URL("../../../native/Scout/Tests/Fixtures/", import.meta.url));
 const SWIFT_PROTOCOL = fileURLToPath(new URL("../../../native/Scout/Sources/ScoutKit/Protocol.swift", import.meta.url));
 
 type Fixture = { file: string; value: unknown };
@@ -50,7 +52,7 @@ function uncovered(schema: z.ZodType, fixtures: Fixture[]): string[] {
     .map(({ name }) => name);
 }
 
-describe("Swift panel fixtures", () => {
+describe("panel fixtures", () => {
   it("every fixture is a frame or a command", () => {
     expect(fixtureFiles.filter((f) => !f.startsWith("frame.") && !f.startsWith("command."))).toEqual([]);
     expect(frames.length).toBeGreaterThan(0);
@@ -69,11 +71,18 @@ describe("Swift panel fixtures", () => {
     expect(Buffer.byteLength(line, "utf8")).toBeLessThan(NATIVE_COMMAND_MAX_BYTES);
   });
 
-  it("the app's command limits are the contract's", () => {
+  it("the app's command limit is the contract's", () => {
     const swift = readFileSync(SWIFT_PROTOCOL, "utf8");
-    const limit = (name: string): number => Number(new RegExp(`static let ${name} = (\\d+)`).exec(swift)?.[1]);
-    expect(limit("commandMaxBytes")).toBe(NATIVE_COMMAND_MAX_BYTES);
-    expect(limit("originMaxBytes")).toBe(HOST_ORIGIN_MAX_CHARS);
+    expect(Number(/static let commandMaxBytes = (\d+)/.exec(swift)?.[1])).toBe(NATIVE_COMMAND_MAX_BYTES);
+  });
+
+  it("every Mac app fixture is a byte-identical copy of a panel fixture", () => {
+    const swiftFiles = readdirSync(SWIFT_FIXTURES_DIR).filter((f) => f.endsWith(".json"));
+    expect(swiftFiles.length).toBeGreaterThan(0);
+    for (const file of swiftFiles) {
+      expect(fixtureFiles, file).toContain(file);
+      expect(readFileSync(SWIFT_FIXTURES_DIR + file).equals(readFileSync(FIXTURES_DIR + file)), file).toBe(true);
+    }
   });
 
   it("every PanelState member has a fixture", () => {
