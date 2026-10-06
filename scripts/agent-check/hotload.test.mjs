@@ -178,14 +178,14 @@ describe("hotload: acceptance runs", () => {
     expect(sessions(w)).toHaveLength(2);
     expect(r.report.inferenceRequests.map((i) => i.purpose)).toEqual(["list_skills", "use_skill", "use_skill_after_restart"]);
     expect(r.report.cleanup.ok).toBe(true);
-  });
+  }, 30_000); // two fake sessions; over 5 s on a slow Linux runner
 
   it("--two-session: skill_never_loads when the fresh session fails too", async () => {
     const w = makeWorld("hotload-never");
     const r = await w.run(["--case", "hotload", "--authorize-real-root", "--two-session", "--max-inference", "3", "--acknowledge-budget"]);
     expect(r.report).toMatchObject({ outcome: "skill_never_loads", afterRestart: "skill_not_invoked" });
     expect(r.report.cleanup.ok).toBe(true);
-  });
+  }, 30_000); // two fake sessions; over 5 s on a slow Linux runner
 
   it.each([
     ["mcp-ignore", "absent"],
