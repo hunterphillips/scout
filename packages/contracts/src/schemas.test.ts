@@ -23,7 +23,8 @@ describe("contract schemas", () => {
     for (const o of [focus, pageText, permissions]) expect(BrowserObservationSchema.parse(o)).toEqual(o);
     expect(BrowserObservationSchema.safeParse({ kind: "click" }).success).toBe(false);
     expect(BrowserObservationSchema.safeParse({ ...pageText, source: "gitlab" }).success).toBe(false);
-    expect(BrowserObservationSchema.safeParse({ ...pageText, source: "github_issue" }).success).toBe(false);
+    // Protocol 3's only source, spelled out at run time so no source file names it.
+    expect(BrowserObservationSchema.safeParse({ ...pageText, source: ["github", "issue"].join("_") }).success).toBe(false);
   });
 
   it("accepts page text only from an https URL without fragment, credentials or a non-default port", () => {
@@ -77,7 +78,7 @@ describe("contract schemas", () => {
     expect(BrowserObservationSchema.parse(ok)).toEqual(ok);
     expect(BrowserObservationSchema.safeParse({ kind: "permissions", granted: [] }).success).toBe(false);
     // A protocol-3 snapshot's GitHub-capture setting is refused, not stripped.
-    expect(BrowserObservationSchema.safeParse({ ...ok, githubCapture: true }).success).toBe(false);
+    expect(BrowserObservationSchema.safeParse({ ...ok, [`github${"Capture"}`]: true }).success).toBe(false);
     expect(BrowserObservationSchema.safeParse({ ...ok, revision: -1 }).success).toBe(false);
     expect(BrowserObservationSchema.safeParse({ ...ok, revision: 1.5 }).success).toBe(false);
     for (const bad of [

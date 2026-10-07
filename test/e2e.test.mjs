@@ -19,7 +19,7 @@ const BUILT = existsSync(CORE) && existsSync(HOST);
 if (!BUILT) console.warn("e2e: skipped: packages/scout-core/dist/main.js or packages/native-host/dist/host.js is missing; run `npm run build`");
 
 const EXT_ID = "a".repeat(32);
-const ISSUE = "https://github.com/o/r/issues/1";
+const ISSUE = "https://linear.app/acme/issue/ENG-1/checkout-fails";
 const TITLE = "E2E-SECRET-TITLE";
 const BODY = "E2E-SECRET-BODY";
 const LE = endianness() === "LE";
@@ -117,7 +117,7 @@ describe.skipIf(!BUILT)("host <-> core end to end", () => {
         tabId: 7,
         documentId: "D1",
         url: ISSUE,
-        source: "github_issue",
+        source: "page",
         title: TITLE,
         text: BODY,
         truncated: false,
@@ -145,9 +145,9 @@ describe.skipIf(!BUILT)("host <-> core end to end", () => {
     expect(firstPolicy).toBeLessThan(toChrome.findIndex((f) => f.type === "ready"));
     expect(toChrome[firstPolicy]).toEqual({ type: "capture_policy", revision: 0, paused: false, captureEnabled: false });
 
-    // 3. The extension answers with a snapshot (GitHub granted, capture on), then focus; only then does capture turn on.
+    // 3. The extension answers with a snapshot (Linear granted), then focus; only then does capture turn on.
     expect(toChrome.filter((f) => f.type === "capture_policy")).toHaveLength(1);
-    host.stdin.write(frame({ kind: "permissions", revision: 1, at, granted: ["https://github.com/*"], githubCapture: true }));
+    host.stdin.write(frame({ kind: "permissions", revision: 1, at, granted: ["https://linear.app/*"] }));
     host.stdin.write(
       frame({ kind: "focus", seq: 3, at, browserFocused: true, windowId: 1, tabId: 7, url: ISSUE, title: TITLE, incognito: false, permissionsRevision: 1 }),
     );
@@ -163,7 +163,7 @@ describe.skipIf(!BUILT)("host <-> core end to end", () => {
         tabId: 7,
         documentId: "D1",
         url: ISSUE,
-        source: "github_issue",
+        source: "page",
         title: TITLE,
         text: BODY,
         truncated: false,
@@ -173,7 +173,7 @@ describe.skipIf(!BUILT)("host <-> core end to end", () => {
     );
     await until(() => toChrome.some((f) => f.type === "ack"), "ack for the page_text");
     expect(toChrome.filter((f) => f.type === "ack")).toEqual([{ type: "ack", seq: pageTextSeq }]);
-    // Leave the GitHub visit at once, so its dwell never settles into a real discovery pass.
+    // Leave the Linear visit at once, so its dwell never settles into a real discovery pass.
     core.stdin.write(`${JSON.stringify({ type: "frontmost", bundleId: "com.apple.Terminal", at: Date.now() })}\n`);
 
     expect(lstatSync(runDir).mode & 0o777).toBe(0o700);
@@ -199,7 +199,7 @@ describe.skipIf(!BUILT)("host <-> core end to end", () => {
       ["host stderr", hostErr],
       ["diagnostics", diag],
     ]) {
-      for (const secret of [TITLE, BODY, "github.com", "/issues/"]) {
+      for (const secret of [TITLE, BODY, "linear.app", "/issue/"]) {
         expect(text.includes(secret), `${name} contains ${secret}`).toBe(false);
       }
     }
@@ -234,7 +234,7 @@ describe.skipIf(!BUILT)("host <-> core end to end", () => {
     await new Promise((r) => sock.once("connect", r));
     sock.write(frame({ type: "hello", protocol: 1 }));
     await closed;
-    expect(frames).toEqual([{ type: "upgrade_required", protocol: 3 }]);
+    expect(frames).toEqual([{ type: "upgrade_required", protocol: 4 }]);
 
     core.stdin.end();
     expect(await exitOf(core)).toBe(0);
@@ -324,7 +324,7 @@ describe.skipIf(!BUILT)("host <-> core end to end", () => {
       }
     });
     host.stderr.resume();
-    // A 1.5 s dwell: the GitHub visit below is left well before it settles. Hermetic: DNS is stubbed.
+    // A 1.5 s dwell: the Linear visit below is left well before it settles. Hermetic: DNS is stubbed.
     const dns = dnsStub(home);
     const core = spawn(process.execPath, ["--import", dns.importArg, CORE, "--stdio"], { env: { ...env, SCOUT_DWELL_MS: "1500" }, cwd: ROOT, stdio: ["pipe", "pipe", "pipe"] });
     children.push(core);
@@ -337,11 +337,11 @@ describe.skipIf(!BUILT)("host <-> core end to end", () => {
     await until(() => toChrome.some((f) => f.type === "ready"), "ready from the host");
 
     const at = Date.now();
-    host.stdin.write(frame({ kind: "permissions", revision: 1, at, granted: ["https://github.com/*", `${SITE}/*`], githubCapture: true }));
+    host.stdin.write(frame({ kind: "permissions", revision: 1, at, granted: ["https://linear.app/*", `${SITE}/*`] }));
     host.stdin.write(frame({ kind: "focus", seq: 1, at, browserFocused: true, windowId: 1, tabId: 7, url: ISSUE, title: TITLE, incognito: false, permissionsRevision: 1 }));
     await until(() => toChrome.some((f) => f.type === "capture_policy" && f.captureEnabled), "the enabling capture_policy");
     host.stdin.write(
-      frame({ kind: "page_text", seq: 2, at, tabId: 7, documentId: "D1", url: ISSUE, source: "github_issue", title: TITLE, text: BODY, truncated: false, policyRevision: 1 }),
+      frame({ kind: "page_text", seq: 2, at, tabId: 7, documentId: "D1", url: ISSUE, source: "page", title: TITLE, text: BODY, truncated: false, policyRevision: 1 }),
     );
     await until(() => toChrome.some((f) => f.type === "ack"), "ack for the page_text");
 
@@ -365,7 +365,7 @@ describe.skipIf(!BUILT)("host <-> core end to end", () => {
     // The fake CLI read the issue through the prompt and Scout's tools through agent.sock with its job token.
     const fakeLines = readFileSync(join(home, "fake.log"), "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
     expect(fakeLines.filter((l) => l.violations !== undefined).every((l) => l.violations.length === 0)).toBe(true);
-    expect(fakeLines.find((l) => l.prompt !== undefined).prompt).toContain(`issue: ${TITLE}`);
+    expect(fakeLines.find((l) => l.prompt !== undefined).prompt).toContain(`page: ${TITLE}`);
     expect(readFileSync(join(home, "notes.log"), "utf8")).toContain('"tool":"lookup"');
 
     // 2. Another page, the agent answers empty, the optional tool's schema changed (unavailable): empty, the limitation in diagnostics.
@@ -391,8 +391,8 @@ describe.skipIf(!BUILT)("host <-> core end to end", () => {
     expect(finished[0].optionalToolFailed).toBeUndefined();
     expect(finished[1].optionalToolFailed).toBe(true);
     expect(events.filter((e) => e.event === "agent_preflight").map((e) => e.verdict)).toEqual(["ready"]);
-    // The GitHub visit was left before its dwell: no discovery pass ever went to github.com.
-    expect(events.some((e) => e.event === "discovery_start" && e.origin === "https://github.com")).toBe(false);
+    // The Linear visit was left before its dwell: no discovery pass ever went to linear.app.
+    expect(events.some((e) => e.event === "discovery_start" && e.origin === "https://linear.app")).toBe(false);
     // The second job started while the first visit's pass was still unwinding its probe; that pass never ingested.
     const secondStart = events.findIndex((e) => e.event === "job_started" && e.epoch === finished[1].epoch);
     const firstDiscarded = events.findIndex((e) => e.event === "discovery_discarded" && e.origin === SITE && e.reason === "visit_changed");
@@ -406,7 +406,7 @@ describe.skipIf(!BUILT)("host <-> core end to end", () => {
     // run metadata is redacted status, timing and counts only. The fixture's candidate
     // titles, the issue's title and body, both picks' reasons, and every candidate href.
     expect(first[results].items[1].reason).toBe("Fits the open billing work");
-    const fixtureText = [TITLE, BODY, ...candidates.map((c) => c.title), "Fits the open billing work", "lookup:metered", "Matches", ...candidates.map((c) => c.sourceUrl), "/docs/", "/issues/"];
+    const fixtureText = [TITLE, BODY, ...candidates.map((c) => c.title), "Fits the open billing work", "lookup:metered", "Matches", ...candidates.map((c) => c.sourceUrl), "/docs/", "/issue/"];
     for (const [name, text] of [
       ["core stderr", coreErr],
       ["diagnostics", diag],

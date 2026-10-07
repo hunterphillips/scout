@@ -65,7 +65,7 @@ describe("activity store", () => {
   it("refuses a URL canonicalPageUrl refuses, or another source, without a change", () => {
     const { store, obs } = setup();
     expect(store.accept(obs({ url: "http://linear.app/acme/issue/ENG-1" }), "c1")).toEqual({ accepted: false, duplicate: false, revision: 0 });
-    expect(store.accept(obs({ source: "github_issue" as "page" }), "c1")).toEqual({ accepted: false, duplicate: false, revision: 0 });
+    expect(store.accept(obs({ source: "gitlab_issue" as "page" }), "c1")).toEqual({ accepted: false, duplicate: false, revision: 0 });
     expect(store.entries()).toEqual([]);
   });
 

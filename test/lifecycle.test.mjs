@@ -146,7 +146,7 @@ async function startWithRunningJob(children) {
   core.stdin.write(`${JSON.stringify({ type: "frontmost", bundleId: "com.google.Chrome", at: Date.now() })}\n`);
   await until(() => toChrome.some((f) => f.type === "ready"), "ready from the host");
   const at = Date.now();
-  host.stdin.write(frame({ kind: "permissions", revision: 1, at, granted: [`${SITE}/*`], githubCapture: false }));
+  host.stdin.write(frame({ kind: "permissions", revision: 1, at, granted: [`${SITE}/*`] }));
   host.stdin.write(frame({ kind: "focus", seq: 1, at, browserFocused: true, windowId: 1, tabId: 8, url: `${SITE}/docs/billing`, title: "Billing", incognito: false, permissionsRevision: 1 }));
 
   const fake = () => readLines(join(home, "fake.log"));
