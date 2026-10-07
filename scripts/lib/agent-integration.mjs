@@ -32,10 +32,11 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { isExecutableFile, defaultAgentFallbacks, resolveAgentBinary } from "./executables.mjs";
 import { mcpAddUser, mcpGet, ownsRegistration, removeOwnedRegistration } from "./claude-mcp.mjs";
+import { piMcpAdd, piMcpGet, ownsPiRegistration, removeOwnedPiRegistration } from "./pi-mcp.mjs";
 import { codexMcpAdd, codexMcpGet, ownsCodexRegistration, removeOwnedCodexRegistration } from "./codex-mcp.mjs";
 import { AGENT_IDS, INTEGRATION_SERVER_NAME, agentOf, allowedPath, integrationSkillPath, parseRegistrationCommand, upsertEntry } from "./installed.mjs";
 import { checkSkillsRoot, countRuntimeWrappers, inspectSkill, readExportsManifest, removeSkill, skillDir, skillTemplate, writeSkill } from "./integration-skill.mjs";
-import { codexHomeFor, isRealScoutHome, skillsRootFor } from "./paths.mjs";
+import { codexHomeFor, piAgentDirFor, isRealScoutHome, skillsRootFor } from "./paths.mjs";
 import { exists } from "./files.mjs";
 
 export const INTEGRATION_KINDS = ["mcp-registration", "skill"];
@@ -45,17 +46,18 @@ export const isIntegrationEntry = (f) => INTEGRATION_KINDS.includes(f?.kind);
 export const AGENTS = Object.freeze({
   "claude-code": Object.freeze({ id: "claude-code", label: "Claude Code", bin: "claude", binEnv: "SCOUT_CLAUDE_BIN" }),
   codex: Object.freeze({ id: "codex", label: "Codex", bin: "codex", binEnv: "SCOUT_CODEX_BIN" }),
+  pi: Object.freeze({ id: "pi", label: "Pi", bin: "pi", binEnv: "SCOUT_PI_BIN" }),
 });
 export { AGENT_IDS };
 
 /** Env overrides for test installs only: refused with the real ~/.scout. */
-export const TEST_OVERRIDES = ["SCOUT_SKILLS_ROOT", "SCOUT_CLAUDE_BIN", "SCOUT_CODEX_BIN", "SCOUT_CODEX_HOME"];
+export const TEST_OVERRIDES = ["SCOUT_SKILLS_ROOT", "SCOUT_CLAUDE_BIN", "SCOUT_CODEX_BIN", "SCOUT_CODEX_HOME", "SCOUT_PI_BIN", "SCOUT_PI_AGENT_DIR"];
 
 /** Lines setup prints so the user knows what the connection reaches. */
 export function integrationExplanation(agent = "claude-code") {
   const label = AGENTS[agent].label;
   return [
-    agent === "codex"
+    agent === "pi" ? "The `scout` MCP connection is registered in your Pi agent directory: it is available in all your Pi sessions." : agent === "codex"
       ? "The `scout` MCP connection is registered in your Codex configuration: it is available in all of your Codex sessions, in every project."
       : "The `scout` MCP connection is registered at user scope: it is available in all of your Claude Code sessions, in every project.",
     "It exposes only the website files you approved for your agent in Scout (llms.txt, AGENTS.md, skills), read on demand.",
@@ -99,7 +101,7 @@ export function findAgentBinary(agent, env, fallbacks = {}, realHome) {
     return isExecutableFile(override) ? { path: override } : { error: `${a.binEnv} is not an absolute path to an executable: ${override}` };
   }
   if (!isRealScoutHome(env, realHome)) return { error: `the Scout home is not the real ~/.scout, so ${a.binEnv} must name the ${a.bin} to run` };
-  const given = agent === "codex" ? fallbacks.codexFallbacks : fallbacks.claudeFallbacks;
+  const given = agent === "codex" ? fallbacks.codexFallbacks : agent === "pi" ? fallbacks.piFallbacks : fallbacks.claudeFallbacks;
   const path = resolveAgentBinary(a.bin, { pathVar: env.PATH ?? "", fallbacks: given ?? defaultAgentFallbacks(a.bin, env) });
   return path ? { path } : { error: `${a.bin} not found on PATH, ~/.local/bin, or /opt/homebrew/bin` };
 }
@@ -144,7 +146,7 @@ export function hasRecordedIntegration(record, agent) {
  * is write | keep.
  */
 export function planIntegration({ agent = "claude-code", ...o }) {
-  return agent === "codex" ? planCodexIntegration(o) : planClaudeIntegration(o);
+  return agent === "pi" ? planPiIntegration(o) : agent === "codex" ? planCodexIntegration(o) : planClaudeIntegration(o);
 }
 
 function planClaudeIntegration({ env, L, nodePath, record, claudeFallbacks, mcpTimeoutMs, realHome }) {
@@ -281,6 +283,46 @@ function planCodexIntegration({ env, L, nodePath, record, codexFallbacks, mcpTim
   return { agent: "codex", codexHome, skillsRoot, skillsRootExists: root.exists, codexPath: codex.path, expected, commandText, registration, skill, template, warnings };
 }
 
+function integrationPiDir(env, realHome) {
+  const refusal = overrideRefusal(env, realHome);
+  if (refusal) return { error: refusal };
+  if (!isRealScoutHome(env, realHome) && !env.SCOUT_PI_AGENT_DIR) return { error: "the Scout home is not the real ~/.scout, so SCOUT_PI_AGENT_DIR must name the Pi agent directory" };
+  return { path: piAgentDirFor(env) };
+}
+
+function planPiIntegration({ env, L, nodePath, record, piFallbacks, mcpTimeoutMs, realHome }) {
+  if (!isRealScoutHome(env, realHome) && (!env.SCOUT_PI_AGENT_DIR || !env.SCOUT_PI_BIN)) throw new Error("--agent-integration for Pi with a test home needs both SCOUT_PI_AGENT_DIR and SCOUT_PI_BIN");
+  const refusal = overrideRefusal(env, realHome);
+  if (refusal) throw new Error(`agent integration: ${refusal}`);
+  const pi = findAgentBinary("pi", env, { piFallbacks }, realHome);
+  if (pi.error) throw new Error(`agent integration: ${pi.error}`);
+  const commandText = `${nodePath} ${L.mcpMain}`;
+  const expected = parseRegistrationCommand(commandText);
+  if (!expected) throw new Error("agent integration: the node path and scout-mcp entrypoint must be absolute and contain no spaces");
+  if (!exists(L.mcpMain)) throw new Error(`agent integration: scout-mcp is not built: ${L.mcpMain}`);
+  const agentDir = piAgentDirFor(env);
+  let home;
+  try { home = lstatSync(agentDir); } catch { throw new Error(`agent integration: the Pi agent directory ${agentDir} does not exist`); }
+  if (home.isSymbolicLink() || !home.isDirectory() || home.uid !== process.getuid()) throw new Error(`agent integration: the Pi agent directory ${agentDir} is not a real directory owned by you`);
+  const recorded = recordedIntegration(record, "pi");
+  if (recorded.registration?.agentDir && recorded.registration.agentDir !== agentDir) throw new Error(`agent integration: already installed for Pi at ${recorded.registration.agentDir}`);
+  const skillsRoot = join(agentDir, "skills");
+  const root = checkSkillsRoot(skillsRoot);
+  const template = skillTemplate();
+  const get = piMcpGet(agentDir);
+  let registration;
+  if (get.exists === "unknown") throw new Error("agent integration: Pi mcp.json is unreadable or invalid; nothing was changed");
+  if (get.exists === false) registration = { action: "add" };
+  else if (ownsPiRegistration(get, expected)) registration = { action: "keep" };
+  else {
+    const previous = recorded.registration && parseRegistrationCommand(recorded.registration.path);
+    if (previous && ownsPiRegistration(get, previous)) registration = { action: "replace", previous };
+    else throw new Error("agent integration: Pi already has an MCP server named scout that is foreign; nothing was changed");
+  }
+  const skill = skillAction(skillDir(skillsRoot), template, recorded.skill);
+  return { agent: "pi", agentDir, skillsRoot, skillsRootExists: root.exists, piPath: pi.path, expected, commandText, registration, skill, template, warnings: [] };
+}
+
 /** A foreign Codex entry, described without its command or args. */
 function describeForeignCodex(get) {
   const digest = createHash("sha256").update(`${get.command ?? ""} ${(get.args ?? []).join(" ")}`, "utf8").digest("hex").slice(0, 12);
@@ -289,6 +331,12 @@ function describeForeignCodex(get) {
 
 /** Dry-run lines for a plan. */
 export function describeIntegration(p) {
+  if (p.agent === "pi") return [
+    p.skillsRootExists ? `would keep skills root ${p.skillsRoot}` : `would create skills root ${p.skillsRoot} (0700)`,
+    p.skill.action === "keep" ? `would keep ${integrationSkillPath(p.skillsRoot)}` : `would write ${integrationSkillPath(p.skillsRoot)} (0600)`,
+    p.registration.action === "keep" ? `would keep Pi MCP server "scout"` : `would register with Pi (${p.agentDir}): ${p.piPath} mcp add scout --exposure direct -- ${p.commandText}`,
+    "would record the two entries in installed.json",
+  ];
   if (p.agent === "codex") {
     const add = `${p.codexPath} mcp add ${INTEGRATION_SERVER_NAME} -- ${p.commandText}`;
     const reg = {
@@ -326,7 +374,7 @@ export function describeIntegration(p) {
  * failure with the record already saved.
  */
 export function applyIntegration(p, record, o) {
-  return p.agent === "codex" ? applyCodexIntegration(p, record, o) : applyClaudeIntegration(p, record, o);
+  return p.agent === "pi" ? applyPiIntegration(p, record, o) : p.agent === "codex" ? applyCodexIntegration(p, record, o) : applyClaudeIntegration(p, record, o);
 }
 
 function reportKeptSkill(path, out) {
@@ -337,6 +385,27 @@ function reportKeptSkill(path, out) {
     // reported without a mode
   }
   out(`kept  ${path}${m ? ` (${m})` : ""}`);
+}
+
+function applyPiIntegration(p, record, { env, save, out, mcpTimeoutMs }) {
+  const opts = { env, cwd: tmpdir(), agentDir: p.agentDir, ...(mcpTimeoutMs ? { timeoutMs: mcpTimeoutMs } : {}) };
+  const path = integrationSkillPath(p.skillsRoot);
+  record = upsertEntry(record, { path, kind: "skill", agent: "pi", sha256: p.template.sha256 });
+  save(record);
+  if (p.skill.action === "write") {
+    const { rootCreated } = writeSkill(p.skillsRoot, p.template.text);
+    if (rootCreated) out(`created skills root ${p.skillsRoot} (0700)`);
+    out(`wrote ${path} (0600)`);
+  } else reportKeptSkill(path, out);
+  const entry = { path: p.commandText, kind: "mcp-registration", agent: "pi", name: INTEGRATION_SERVER_NAME, agentDir: p.agentDir };
+  record = upsertEntry(record, entry);
+  save(record);
+  if (p.registration.action === "keep") { out('kept  Pi MCP server "scout"'); return record; }
+  // Pi's add replaces in place, so ownership was checked while planning.
+  const add = piMcpAdd(p.piPath, INTEGRATION_SERVER_NAME, p.expected, opts);
+  if (!add.ok || !ownsPiRegistration(piMcpGet(p.agentDir), p.expected)) throw new Error('`pi mcp add` failed or did not leave the expected server');
+  out('registered Pi MCP server "scout"');
+  return record;
 }
 
 function applyCodexIntegration(p, record, { env, save, out, mcpTimeoutMs }) {
@@ -422,7 +491,7 @@ function applyClaudeIntegration(p, record, { env, save, out, mcpTimeoutMs }) {
  * entry is gone, skillsRoot) dropped, and `left` counts parts left in place. With dryRun
  * nothing changes (the `get` still runs; it is read-only).
  */
-export function removeIntegration(record, { env, L, dryRun, claudeFallbacks, codexFallbacks, mcpTimeoutMs, realHome }) {
+export function removeIntegration(record, { env, L, dryRun, claudeFallbacks, codexFallbacks, piFallbacks, mcpTimeoutMs, realHome }) {
   const lines = [];
   let left = 0;
   const would = dryRun ? "would " : "";
@@ -495,6 +564,8 @@ export function removeIntegration(record, { env, L, dryRun, claudeFallbacks, cod
     }
   }
 
+  const piPart = removePiIntegration(record, { env, L, dryRun, piFallbacks, mcpTimeoutMs, realHome });
+  lines.push(...piPart.lines); left += piPart.left; for (const f of piPart.drop) drop.add(f);
   const codexPart = removeCodexIntegration(record, { env, L, dryRun, codexFallbacks, mcpTimeoutMs, realHome });
   lines.push(...codexPart.lines);
   left += codexPart.left;
@@ -620,6 +691,41 @@ function removeCodexIntegration(record, { env, L, dryRun, codexFallbacks, mcpTim
   return { lines, left, drop };
 }
 
+function removePiIntegration(record, { env, L, dryRun, piFallbacks, mcpTimeoutMs, realHome }) {
+  const lines = [], drop = [];
+  let left = 0;
+  const { registration, skill } = recordedIntegration(record, "pi");
+  if (!registration && !skill) return { lines, drop, left };
+  const home = integrationPiDir(env, realHome);
+  if (registration) {
+    const expected = registration.name === INTEGRATION_SERVER_NAME && allowedPath("mcp-registration", registration.path, L, record, registration) ? parseRegistrationCommand(registration.path) : null;
+    const pi = findAgentBinary("pi", env, { piFallbacks }, realHome);
+    if (!expected || home.error || pi.error || registration.agentDir !== home.path) { lines.push('SKIP Pi MCP server "scout" (record or environment mismatch; not touching)'); left++; }
+    else if (dryRun) {
+      const get = piMcpGet(home.path);
+      if (get.exists === false) lines.push('skip Pi MCP server "scout" (already absent)');
+      else if (ownsPiRegistration(get, expected)) lines.push('would remove Pi MCP server "scout"');
+      else { lines.push('SKIP Pi MCP server "scout" (changed or unreadable; not touching)'); left++; }
+    } else {
+      const r = removeOwnedPiRegistration(pi.path, INTEGRATION_SERVER_NAME, expected, { env, cwd: tmpdir(), agentDir: home.path, ...(mcpTimeoutMs ? { timeoutMs: mcpTimeoutMs } : {}) });
+      if (r.state === "removed" || r.state === "absent") { lines.push(`${r.state === "removed" ? "removed" : "skip"} Pi MCP server "scout"`); drop.push(registration); }
+      else { lines.push(`SKIP Pi MCP server "scout" (${r.state}; not touching)`); left++; }
+    }
+  }
+  if (skill) {
+    const root = dirname(dirname(skill.path));
+    if (!allowedPath("skill", skill.path, L, record, skill) || typeof skill.sha256 !== "string" || home.error || root !== join(home.path, "skills")) { lines.push(`SKIP ${skill.path} (not this Pi skill path; not touching)`); left++; }
+    else {
+      let state;
+      try { checkSkillsRoot(root); state = dryRun ? dryRunSkillState(skillDir(root), skill.sha256) : removeSkill(root, skill.sha256); }
+      catch (e) { state = e.message; }
+      if (["removed", "would_remove", "absent"].includes(state)) { lines.push(`${dryRun ? "would remove" : state === "absent" ? "skip" : "removed"} ${skillDir(root)}`); drop.push(skill); }
+      else { lines.push(`SKIP ${skillDir(root)} (${state}; not touching)`); left++; }
+    }
+  }
+  return { lines, drop, left };
+}
+
 function dryRunSkillState(dir, expected) {
   const seen = inspectSkill(dir);
   if (seen.state === "absent") return "absent";
@@ -632,19 +738,46 @@ function dryRunSkillState(dir, expected) {
  * Read-only (runs `claude mcp get`, which that CLI also uses to health-check the server, and
  * `codex mcp get --json`, which does not start it).
  */
-export function checkIntegration(record, { env, L, claudeFallbacks, codexFallbacks, mcpTimeoutMs, realHome }) {
+export function checkIntegration(record, { env, L, claudeFallbacks, codexFallbacks, piFallbacks, mcpTimeoutMs, realHome }) {
   const out = [];
   const add = (status, label, detail = "") => out.push({ status, label, detail });
   const claudeInstalled = hasRecordedIntegration(record, "claude-code");
   const codexInstalled = hasRecordedIntegration(record, "codex");
-  if (!claudeInstalled && !codexInstalled) {
+  const piInstalled = hasRecordedIntegration(record, "pi");
+  if (!claudeInstalled && !codexInstalled && !piInstalled) {
     add("OK", "agent integration", "not installed (optional: npm run setup -- --agent-integration)");
     return out;
   }
   const refusal = overrideRefusal(env, realHome);
   if (refusal) add("FAIL", "agent integration test overrides are unset", refusal);
   if (claudeInstalled) out.push(...checkClaudeIntegration(record, { env, L, claudeFallbacks, mcpTimeoutMs, realHome }));
+  if (piInstalled) out.push(...checkPiIntegration(record, { env, L, piFallbacks, realHome }));
   if (codexInstalled) out.push(...checkCodexIntegration(record, { env, L, codexFallbacks, mcpTimeoutMs, realHome }));
+  return out;
+}
+
+function checkPiIntegration(record, { env, L, piFallbacks, realHome }) {
+  const out = [];
+  const add = (status, label, detail = "") => out.push({ status, label, detail });
+  const { registration, skill } = recordedIntegration(record, "pi");
+  const home = integrationPiDir(env, realHome);
+  if (!skill) add("FAIL", "Pi integration skill", "not recorded");
+  else if (!allowedPath("skill", skill.path, L, record, skill) || home.error || dirname(dirname(skill.path)) !== join(home.path, "skills")) add("FAIL", "Pi integration skill", "recorded path or agent directory differs");
+  else {
+    const seen = inspectSkill(dirname(skill.path));
+    add(seen.state === "file" && seen.sha256 === skill.sha256 ? "OK" : "FAIL", "Pi integration skill is exactly the installed one", skill.path);
+  }
+  if (!registration) add("FAIL", "Pi MCP registration", "not recorded");
+  else {
+    const expected = registration.name === INTEGRATION_SERVER_NAME ? parseRegistrationCommand(registration.path) : null;
+    const pi = findAgentBinary("pi", env, { piFallbacks }, realHome);
+    if (!expected) add("FAIL", "Pi MCP registration", "recorded entry is invalid");
+    else if (home.error || pi.error || registration.agentDir !== home.path) add("WARN", "Pi MCP registration not checked", home.error ?? pi.error ?? "agent directory differs");
+    else {
+      const get = piMcpGet(home.path);
+      add(get.exists === "unknown" ? "WARN" : ownsPiRegistration(get, expected) ? "OK" : "FAIL", "Pi MCP server scout is configured and is this install’s", get.exists === "unknown" ? "mcp.json unreadable" : get.exists === false ? "absent" : ownsPiRegistration(get, expected) ? registration.path : "foreign server");
+    }
+  }
   return out;
 }
 

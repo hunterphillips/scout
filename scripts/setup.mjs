@@ -249,7 +249,7 @@ function agentProfileStep({ L, record, agent, agentPath }) {
     return { exists: true, adapter, note: `kept ${L.agentProfile} as it is (${recorded ? "changed since setup wrote it" : "not written by setup"}); Scout's jobs use the agent and model it names` };
   }
   if (!agentPath) return { exists: false };
-  const { text, summary } = agent === "codex" ? codexProfileText(L, agentPath) : claudeProfileText(L, agentPath);
+  const { text, summary } = agent === "codex" ? codexProfileText(L, agentPath) : agent === "pi" ? piProfileText(L, agentPath) : claudeProfileText(L, agentPath);
   return {
     exists: false,
     adapter: agent,
@@ -285,6 +285,12 @@ function codexProfileText(L, codexPath) {
     text: JSON.stringify({ schemaVersion: 1, adapter, codexPath, model, reasoningEffort }, null, 2) + "\n",
     summary: `codexPath=${codexPath} model=${model} reasoningEffort=${reasoningEffort}`,
   };
+}
+
+/** The Pi profile: no model pin, so Pi keeps the user's selection. */
+function piProfileText(L, piPath) {
+  const [adapter, thinking] = builtConstants(L, ["agents", "pi", "profile.js"], ["PI_ADAPTER_ID", "DEFAULT_PI_THINKING"]);
+  return { text: JSON.stringify({ schemaVersion: 1, adapter, piPath, thinking }, null, 2) + "\n", summary: `piPath=${piPath} thinking=${thinking}` };
 }
 
 /** The login LaunchAgent step. Throws a refusal (missing bundle, override rules, foreign file). */

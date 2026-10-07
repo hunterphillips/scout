@@ -60,7 +60,7 @@ const tryRead = (fn) => {
  * Every section: [{ title, status: "ok"|"warn"|"fail", summary, checks: [{ status: "OK"|"WARN"|"FAIL", label, detail }] }].
  * Writes nothing. `claudeVersion(path)` / `codexVersion(path)` replace running `<path> --version` (tests).
  */
-export function runReport(env = process.env, { claudeFallbacks, codexFallbacks, mcpTimeoutMs, realHome, claudeVersion = runClaudeVersion, codexVersion = runCodexVersion } = {}) {
+export function runReport(env = process.env, { claudeFallbacks, codexFallbacks, piFallbacks, mcpTimeoutMs, realHome, claudeVersion = runClaudeVersion, codexVersion = runCodexVersion, piVersion = runPiVersion } = {}) {
   const sections = new Map(SECTIONS.map((t) => [t, { title: t, summary: "", checks: [] }]));
   let current;
   const section = (title, summary) => {
@@ -208,7 +208,7 @@ export function runReport(env = process.env, { claudeFallbacks, codexFallbacks, 
   current.summary = `${originsOk ? `host ${HOST_NAME} allows chrome-extension://${extensionId}/` : "host manifest not usable"}; bridge protocol ${protocol ?? "unknown"}`;
 
   // ---- agent integration
-  const integration = record ? checkIntegration(record, { env, L, claudeFallbacks, codexFallbacks, mcpTimeoutMs, realHome }) : [];
+  const integration = record ? checkIntegration(record, { env, L, claudeFallbacks, codexFallbacks, piFallbacks, mcpTimeoutMs, realHome }) : [];
   section("agent integration", integration.length === 1 && /not installed/.test(integration[0].detail) ? "not installed (optional)" : record ? "installed" : "no install record");
   current.checks.push(...integration);
   if (record && current.summary === "installed") current.summary = integration.every((c) => c.status === "OK") ? "installed; registration and skill are this install's" : "installed; see below";
@@ -219,12 +219,15 @@ export function runReport(env = process.env, { claudeFallbacks, codexFallbacks, 
   const recordedProfile = record?.files.find((f) => f.kind === "agent-profile");
   let claudePath = null;
   let codexLine = null;
+  let piLine = null;
   // Claude Code and Codex have checks here; another adapter gets none.
   const isCodex = profile.value?.adapter === "codex";
-  const otherAdapter = profile.value && !isCodex && profile.value.adapter !== "claude-code" ? String(profile.value.adapter) : null;
+  const isPi = profile.value?.adapter === "pi";
+  const otherAdapter = profile.value && !isCodex && !isPi && profile.value.adapter !== "claude-code" ? String(profile.value.adapter) : null;
   if (profile.value) {
     if (otherAdapter !== null) add("WARN", "agent profile", `adapter ${otherAdapter}: no checks in doctor`);
     else if (isCodex) codexLine = codexChecks(profile.value, { L, env, add, check, codexVersion });
+    else if (isPi) piLine = piChecks(profile.value, { L, env, scout, add, check, piVersion });
     else {
       claudePath = typeof profile.value.claudePath === "string" && isAbsolute(profile.value.claudePath) ? profile.value.claudePath : null;
       check(isExecutableFile(claudePath), "agent profile names an executable claude", `${L.agentProfile}: ${String(profile.value.claudePath)}`);
@@ -244,10 +247,10 @@ export function runReport(env = process.env, { claudeFallbacks, codexFallbacks, 
     else if (verified && version !== verified) add("WARN", "claude version matches the verified one (advisory)", `${version}; Scout's flag set was verified with ${verified}. Jobs still run; a new version triggers one readiness check`);
     else add("OK", "claude version matches the verified one (advisory)", `${version}${verified ? "" : " (verified version unknown: scout-core not built)"}`);
   } else if (!profile.value) add("WARN", "claude", "not found on PATH, ~/.local/bin, or /opt/homebrew/bin");
-  current.summary = codexLine ?? (claudePath ? `${claudePath}${version ? ` ${version}` : ""}${verified ? ` (verified ${verified})` : ""}` : otherAdapter !== null ? `adapter ${otherAdapter}` : "no claude");
+  current.summary = piLine ?? codexLine ?? (claudePath ? `${claudePath}${version ? ` ${version}` : ""}${verified ? ` (verified ${verified})` : ""}` : otherAdapter !== null ? `adapter ${otherAdapter}` : "no claude");
 
   // ---- agent
-  const pre = lastPreflight(L.diagnosticsLog);
+  const pre = lastPreflight(L.diagnosticsLog, profile.value?.adapter === "pi" ? { adapter: "pi" } : {});
   const preDetail = [pre?.adapter ? (AGENTS[pre.adapter]?.label ?? pre.adapter) : null, pre?.cliVersion ? `CLI ${pre.cliVersion}` : null].filter(Boolean).join(", ");
   section("agent", pre ? `last preflight: ${pre.verdict}${preDetail ? ` (${preDetail})` : ""}` : "not yet checked");
   if (!pre) add("WARN", "agent readiness", "not yet checked: the core runs it before the first job; doctor never runs one");
@@ -302,6 +305,33 @@ function codexChecks(profile, { L, env, add, check, codexVersion }) {
     else check(t.isFile() && t.uid === process.getuid() && (t.mode & 0o777) === 0o600, label, `${link} -> ${target} (${t.isFile() ? oct(t.mode) : "not a file"} uid=${t.uid})`);
   }
   return codexPath ? `${codexPath}${version ? ` ${version}` : ""}${verified ? ` (verified ${verified})` : ""}` : "no codex";
+}
+
+function piChecks(profile, { L, env, scout, add, check, piVersion }) {
+  const piPath = typeof profile.piPath === "string" && isAbsolute(profile.piPath) ? profile.piPath : null;
+  check(isExecutableFile(piPath), "agent profile names an executable pi", `${L.agentProfile}: ${String(profile.piPath)}`);
+  const verified = builtConstant(join(L.scoutRoot, "packages", "scout-core", "dist", "agents", "pi", "piJob.js"), "VERIFIED_PI_VERSION");
+  let version = null;
+  if (piPath && isExecutableFile(piPath)) {
+    version = piVersion(piPath, env);
+    if (!version) add("WARN", "pi --version", `${piPath} printed no version`);
+    else if (verified && version !== verified) add("WARN", "pi version matches the verified one (advisory)", `${version}; Scout's flag set was verified with ${verified}. Jobs still run`);
+    else add("OK", "pi version matches the verified one (advisory)", `${version}${verified ? "" : " (verified version unknown: scout-core not built)"}`);
+  }
+  const node = scout?.nodePath;
+  if (isExecutableFile(node)) {
+    const r = spawnSync(node, ["--version"], { env: { ...env }, cwd: tmpdir(), encoding: "utf8", timeout: CLI_VERSION_TIMEOUT_MS, killSignal: "SIGKILL", stdio: ["ignore", "pipe", "pipe"] });
+    const match = /^v(\d+)\.(\d+)\.(\d+)$/.exec((r.stdout ?? "").trim());
+    if (!match) add("WARN", "core node version for Pi", "version unknown");
+    else if (+match[1] < 22 || (+match[1] === 22 && (+match[2] < 19))) add("WARN", "core node version for Pi", `${match[0]}; Pi needs Node 22.19 or newer`);
+    else add("OK", "core node version for Pi", match[0]);
+  }
+  return piPath ? `${piPath}${version ? ` ${version}` : ""}${verified ? ` (verified ${verified})` : ""}` : "no pi";
+}
+
+export function runPiVersion(piPath, env = process.env) {
+  const r = spawnSync(piPath, ["--version"], { env: { ...env }, cwd: tmpdir(), encoding: "utf8", timeout: CLI_VERSION_TIMEOUT_MS, killSignal: "SIGKILL", stdio: ["ignore", "pipe", "pipe"] });
+  return /^(\d+\.\d+\.\d+)$/.exec((r.stdout ?? "").trim())?.[1] ?? null;
 }
 
 /** `<codex> --version` ("codex-cli 0.155.1") → "0.155.1", or null. Read-only; no model call. */

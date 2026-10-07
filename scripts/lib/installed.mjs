@@ -39,7 +39,7 @@ export const KINDS = ["config", "wrapper", "nmh-manifest", "key", "extension-man
 const SINGLETON_KINDS = ["mcp-registration", "skill", "agent-profile", "launch-agent", "app-bundle"];
 
 /** The agents an integration can be installed for. */
-export const AGENT_IDS = ["claude-code", "codex"];
+export const AGENT_IDS = ["claude-code", "codex", "pi"];
 /** Kinds recorded once per agent. */
 export const AGENT_KINDS = ["mcp-registration", "skill"];
 
@@ -49,6 +49,7 @@ export function agentOf(entry) {
   return entry.agent === undefined ? "claude-code" : entry.agent;
 }
 
+export const PI_SKILL_SUFFIX = "/skills/scout-integration/SKILL.md";
 export const CODEX_SKILL_SUFFIX = "/skills/scout-integration/SKILL.md";
 
 export const INTEGRATION_SERVER_NAME = "scout";
@@ -125,7 +126,7 @@ export function allowedPath(kind, path, L, record, entry = { kind }) {
   if (typeof path !== "string" || !isAbsolute(path) || resolve(path) !== path) return false;
   switch (kind) {
     case "skill":
-      if (agent === "codex") return path.endsWith(CODEX_SKILL_SUFFIX) && path.length > CODEX_SKILL_SUFFIX.length;
+      if (agent === "codex" || agent === "pi") return path.endsWith(CODEX_SKILL_SUFFIX) && path.length > CODEX_SKILL_SUFFIX.length;
       return isCleanAbsolute(record?.skillsRoot) && path === integrationSkillPath(record.skillsRoot);
     case "key":
       return path === L.keyPem;

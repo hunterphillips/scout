@@ -97,6 +97,13 @@ export function codexHomeFor(env = process.env) {
   return resolve(join(env.HOME || homedir(), ".codex"));
 }
 
+/** Pi reads user MCP servers and skills from this agent directory. */
+export function piAgentDirFor(env = process.env) {
+  if (env.SCOUT_PI_AGENT_DIR) return resolve(env.SCOUT_PI_AGENT_DIR);
+  if (env.PI_CODING_AGENT_DIR && isAbsolute(env.PI_CODING_AGENT_DIR)) return resolve(env.PI_CODING_AGENT_DIR);
+  return resolve(join(env.HOME || homedir(), ".pi", "agent"));
+}
+
 /** Where Codex reads user skills: `<Codex home>/skills`. */
 export function codexSkillsRootFor(env = process.env) {
   return join(codexHomeFor(env), "skills");
