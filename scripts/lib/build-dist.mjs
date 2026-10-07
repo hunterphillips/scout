@@ -8,7 +8,7 @@
 // Like tsc, outputs whose sources were deleted are left in place.
 
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join, relative } from "node:path";
 
@@ -39,6 +39,12 @@ export function buildDist(pkgDir, tsconfig = "tsconfig.build.json") {
   const staging = mkdtempSync(join(pkgDir, ".dist-staging-"));
   try {
     execFileSync(process.execPath, [tsc, "-p", join(pkgDir, tsconfig), "--outDir", staging], { stdio: "inherit" });
+    if (pkgDir.endsWith("scout-core") && existsSync(join(pkgDir, "src", "agents", "pi", "answerExtension.mjs"))) {
+      const extension = join(pkgDir, "src", "agents", "pi", "answerExtension.mjs");
+      const target = join(staging, "agents", "pi", "answerExtension.mjs");
+      mkdirSync(dirname(target), { recursive: true });
+      writeFileSync(target, readFileSync(extension));
+    }
     const replaced = [];
     for (const src of files(staging)) {
       const rel = relative(staging, src);

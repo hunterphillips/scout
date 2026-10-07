@@ -11,6 +11,7 @@ import { createFixtureBackend } from "../../packages/scout-mcp/dist/fixture.js";
 import { serveFixture } from "../../packages/scout-mcp/dist/test-support/fixtureSocket.js";
 import { DEFAULT_CLAUDE_CODE_MODEL } from "../../packages/scout-core/dist/agents/claudeCode/profile.js";
 import { DEFAULT_CODEX_MODEL } from "../../packages/scout-core/dist/agents/codex/profile.js";
+import { DEFAULT_PI_THINKING } from "../../packages/scout-core/dist/agents/pi/profile.js";
 import { schemaHash } from "../../packages/scout-core/dist/agents/toolProfile.js";
 
 export const SCOUT_MCP_MAIN = join(REPO_ROOT, "packages", "scout-mcp", "dist", "main.js");
@@ -18,7 +19,7 @@ export const SCOUT_MCP_MAIN = join(REPO_ROOT, "packages", "scout-mcp", "dist", "
 export const FAKE_BACKEND = join(REPO_ROOT, "packages", "scout-core", "src", "agents", "testing", "fake-backend.mjs");
 export const CHECK_MODEL = DEFAULT_CLAUDE_CODE_MODEL;
 /** The model a check's profile names, per adapter. */
-export const checkModel = (adapter = "claude-code") => (adapter === "codex" ? DEFAULT_CODEX_MODEL : CHECK_MODEL);
+export const checkModel = (adapter = "claude-code") => (adapter === "codex" ? DEFAULT_CODEX_MODEL : adapter === "pi" ? undefined : CHECK_MODEL);
 /** Reserved for documentation (RFC 6761), so nothing real is ever named. */
 export const SKILL_SITE = "https://scout-proof.example";
 export const JOB_SITE = "https://docs.example.com";
@@ -194,7 +195,8 @@ export function selectedToolProfile(root) {
 }
 
 /** The agent profile a check writes into its throwaway home, for the adapter it checks. */
-export function checkProfile(adapter, agentPath, tools) {
-  const base = adapter === "codex" ? { schemaVersion: 1, adapter, codexPath: agentPath, model: checkModel(adapter) } : { schemaVersion: 1, adapter: "claude-code", claudePath: agentPath, model: CHECK_MODEL };
+/** `piModel` (`provider/id`) pins a Pi check to one model; without it Pi uses the user's default. */
+export function checkProfile(adapter, agentPath, tools, piModel) {
+  const base = adapter === "codex" ? { schemaVersion: 1, adapter, codexPath: agentPath, model: checkModel(adapter) } : adapter === "pi" ? { schemaVersion: 1, adapter, piPath: agentPath, thinking: DEFAULT_PI_THINKING, ...(piModel ? { model: piModel } : {}) } : { schemaVersion: 1, adapter: "claude-code", claudePath: agentPath, model: CHECK_MODEL };
   return { ...base, ...(tools ? { tools } : {}) };
 }

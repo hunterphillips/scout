@@ -267,6 +267,22 @@ describe("job wiring: process ownership and the agent profile", () => {
     expect(JSON.parse(readFileSync(join(home, "agent-profile.json"), "utf8"))).toEqual(written);
   });
 
+  it("an edit from Codex to Pi swaps the live adapter", async () => {
+    fresh();
+    const codex: AgentProfile = { schemaVersion: 1, adapter: "codex", codexPath: join(home, "codex"), model: "gpt-6-sol" };
+    writeProfile(home, codex);
+    const timers = manualTimers();
+    let changed: ((filename: string | null) => void) | undefined;
+    const w = build({ env: { HOME: home, PATH: "/usr/bin:/bin" }, timers, watch: (_dir, listener) => { changed = listener; return { close() {} }; } });
+    expect(w.adapter?.id).toBe("codex");
+    const pi: AgentProfile = { schemaVersion: 1, adapter: "pi", piPath: join(home, "pi"), thinking: "low" };
+    writeProfile(home, pi);
+    changed?.("agent-profile.json");
+    timers.advance(250);
+    expect(w.adapter?.id).toBe("pi");
+    expect(w.adapter?.profileFingerprint).toBe(profileFingerprint(pi));
+  });
+
   it("switchAgent refuses while another process holds the profile lock", () => {
     fresh();
     const other = acquireStoreLock(home, { now: () => Date.now(), file: AGENT_PROFILE_LOCK_FILE });

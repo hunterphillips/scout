@@ -18,6 +18,9 @@ import { createPreflightFacade, type PreflightFacade } from "./claudeCode/prefli
 import { createCodexJobAdapter, type CodexJobDeps } from "./codex/codexJob.js";
 import { CODEX_LABEL, createDefaultCodexProfile, findExecutable as findCodexExecutable } from "./codex/profile.js";
 import { createCodexReadinessFacade, type CodexReadinessFacade } from "./codex/readinessWorker.js";
+import { createPiJobAdapter, type PiJobDeps } from "./pi/piJob.js";
+import { PI_LABEL, createDefaultPiProfile, findExecutable as findPiExecutable } from "./pi/profile.js";
+import { createPiReadinessFacade, type PiReadinessFacade } from "./pi/readinessWorker.js";
 import type { ProcessTracker } from "./processTree.js";
 import type { AgentProfile } from "./profile.js";
 
@@ -31,6 +34,7 @@ class AdapterReadinessChecks implements ReadinessChecks {
   #closed = false;
   #claudeCode: PreflightFacade | undefined;
   #codex: CodexReadinessFacade | undefined;
+  #pi: PiReadinessFacade | undefined;
 
   claudeCode(): PreflightFacade {
     if (this.#claudeCode === undefined) {
@@ -48,10 +52,19 @@ class AdapterReadinessChecks implements ReadinessChecks {
     return this.#codex;
   }
 
+  pi(): PiReadinessFacade {
+    if (this.#pi === undefined) {
+      this.#pi = createPiReadinessFacade();
+      if (this.#closed) this.#pi.cancelAll();
+    }
+    return this.#pi;
+  }
+
   cancelAll(): void {
     this.#closed = true;
     this.#claudeCode?.cancelAll();
     this.#codex?.cancelAll();
+    this.#pi?.cancelAll();
   }
 }
 
@@ -81,6 +94,7 @@ type SeamsOf<D> = Partial<Omit<D, "home" | "profile" | "parentEnv">>;
 export interface AdapterSeams {
   "claude-code"?: SeamsOf<ClaudeJobDeps>;
   codex?: SeamsOf<CodexJobDeps>;
+  pi?: SeamsOf<PiJobDeps>;
 }
 
 export function createJobAdapter(profile: AgentProfile, deps: AdapterFactoryDeps): AgentJobAdapter {
@@ -91,6 +105,8 @@ export function createJobAdapter(profile: AgentProfile, deps: AdapterFactoryDeps
       return createClaudeJobAdapter({ ...rest, profile, ...(checks ? { preflightAsync: checks.claudeCode() } : {}), ...seams?.["claude-code"] });
     case "codex":
       return createCodexJobAdapter({ ...rest, profile, ...(checks ? { readinessAsync: checks.codex() } : {}), ...seams?.codex });
+    case "pi":
+      return createPiJobAdapter({ ...rest, profile, ...(checks ? { readinessAsync: checks.pi() } : {}), ...seams?.pi });
   }
 }
 
@@ -109,6 +125,8 @@ export function createDefaultProfileFor(id: AgentProfile["adapter"], parentEnv: 
       return createDefaultClaudeCodeProfile(parentEnv, search);
     case "codex":
       return createDefaultCodexProfile(parentEnv, search);
+    case "pi":
+      return createDefaultPiProfile(parentEnv, search);
   }
 }
 
@@ -119,6 +137,8 @@ export function findAdapterExecutable(id: AgentProfile["adapter"], parentEnv: En
       return findClaudeExecutable(parentEnv, search);
     case "codex":
       return findCodexExecutable(parentEnv, search);
+    case "pi":
+      return findPiExecutable(parentEnv, search);
   }
 }
 
@@ -129,6 +149,8 @@ export function adapterLabel(id: AgentProfile["adapter"]): string {
       return CLAUDE_CODE_LABEL;
     case "codex":
       return CODEX_LABEL;
+    case "pi":
+      return PI_LABEL;
   }
 }
 
@@ -139,5 +161,7 @@ export function profileExecutable(profile: AgentProfile): string {
       return profile.claudePath;
     case "codex":
       return profile.codexPath;
+    case "pi":
+      return profile.piPath;
   }
 }
