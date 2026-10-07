@@ -598,6 +598,29 @@ describe("job scheduler: the current page is not context", () => {
     expect(h.named("job_replaced")).toHaveLength(1);
   });
 
+  it("a capture of the current page does not supersede even when the visible activity moved for another reason", () => {
+    const h = harness();
+    h.world.grant = false;
+    h.settle();
+    // The browser-context grant turned on mid-job (no cancel), then the current page is captured.
+    h.world.grant = true;
+    h.world.grantRevision = 1;
+    h.scheduler.onGrantChanged(true);
+    h.world.activity = [CURRENT, ISSUE];
+    h.scheduler.onActivityAccepted(2);
+    expect(h.agent.calls[0]!.options.signal?.aborted).toBe(false);
+  });
+
+  it("a grant lost for an origin the snapshot's activity did not come from leaves the job running", () => {
+    const h = harness();
+    h.world.permitted = new Set([ORIGIN, "https://linear.app", "https://example.com"]);
+    h.settle();
+    h.world.permitted = new Set([ORIGIN, "https://linear.app"]);
+    h.world.permissionsRevision = 8;
+    h.scheduler.onPermissionsChanged();
+    expect(h.agent.calls[0]!.options.signal?.aborted).toBe(false);
+  });
+
   it("an origin the snapshot's activity came from losing its grant revokes the job", () => {
     const h = harness();
     h.settle();

@@ -315,7 +315,8 @@ export function createCoordinator(options: CoordinatorOptions): Coordinator {
     if (!permissions.received) return "no_permissions_snapshot";
     if (permissions.origins.size === 0) return "capture_disabled";
     const url = canonicalPageUrl(obs.url);
-    if (url === null || !permissions.isPermitted(new URL(url).origin)) return "origin_not_permitted";
+    if (url === null) return "not_a_page";
+    if (!permissions.isPermitted(new URL(url).origin)) return "origin_not_permitted";
     // Captured under an older policy (or by an extension that does not say): never accepted.
     if (obs.policyRevision === undefined || obs.policyRevision !== lastPolicy?.revision) return "policy_revision";
     if (frontmostBundleId !== chromeBundleId) return "chrome-not-frontmost";

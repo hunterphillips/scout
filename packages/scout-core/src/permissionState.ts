@@ -5,9 +5,9 @@
 // Rules:
 // - State belongs to one connection. The coordinator clears it when a new sensor attaches
 //   and when the live one disconnects, so grants never carry over to a reconnect.
-// - Before the first snapshot on a connection nothing is permitted. Focus is still accepted then (it updates Chrome focus), but it cannot form a
-//   visit, and page text is refused. An old extension whose snapshot fails validation
-//   therefore never gets past this point.
+// - Before the first snapshot on a connection nothing is permitted. Focus is still accepted
+//   then (it updates Chrome focus), but it cannot form a visit, and page text is refused.
+//   An old extension whose snapshot fails validation therefore never gets past this point.
 // - A snapshot whose revision is lower than the current one is dropped
 //   (`stale_permissions_revision`); an equal or higher one replaces the state.
 // - A focus stamped with a `permissionsRevision` lower than the current revision was sent

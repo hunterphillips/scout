@@ -561,7 +561,9 @@ export function createJobScheduler(options: JobSchedulerOptions): JobScheduler {
       if (job === null || job.cancelled !== null) return;
       // Only activity the job could see makes its answer stale.
       if (!options.browserContextGranted() || !view.captureAllowed()) return;
-      // A capture of the destination page itself never supersedes the job it belongs to.
+      // A capture of the destination page itself never supersedes the job it belongs to. An
+      // accepted page is the store's newest entry; the hash covers anything else unchanged.
+      if (options.activity()[0]?.url === canonicalPageUrl(job.visit.url)) return;
       if (activityHash(visibleActivity(job.visit)) === job.activityHash) return;
       relevantChange("superseded");
     },
