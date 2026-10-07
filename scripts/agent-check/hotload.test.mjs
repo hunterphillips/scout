@@ -132,7 +132,7 @@ describe("hotload: acceptance runs", () => {
     expect(proofDirs(w)).toEqual([]);
     expect(w.registry()).toEqual({});
     expect(rep.cli.version).toBe("2.1.286");
-    expect(rep.preflight.verdict).toBe("subscription");
+    expect(rep.preflight.verdict).toBe("ready");
     expect(rep.argv).toEqual(expect.arrayContaining(["--input-format", "--max-turns", "8", "Skill,ToolSearch"]));
     expect(rep.argv).not.toContain("--strict-mcp-config");
     expect(rep.sessionLimits).toEqual({
@@ -265,14 +265,12 @@ describe("hotload: acceptance runs", () => {
     expect(r.text).toContain("tools not listed in init; ToolSearch offered");
   });
 
-  it("stops before registering or launching when the preflight is not subscription", async () => {
+  it("runs the session with an API-key login", async () => {
     const w = makeWorld("auth-api-key");
     const r = await w.run(["--case", "hotload", "--authorize-real-root"]);
-    expect(r.code).toBe(1);
-    expect(r.report).toMatchObject({ outcome: "preflight_failed", inferenceRequests: [] });
-    expect(r.report.preflight.verdict).toBe("ambiguous");
-    expect(w.lines().filter((l) => l.subcommand || l.session)).toEqual([]);
-    expect(existsSync(w.registryFile)).toBe(false);
+    expect(r.code, r.text).toBe(0);
+    expect(r.report.preflight.verdict).toBe("ready");
+    expect(r.report.outcome).toBe("hotload_pass");
   });
 
   it("records the env filtering, not env values", async () => {
@@ -644,11 +642,11 @@ describe("hotload: --two-session preflight", () => {
   it("runs the preflight again before the fresh session and opens none if it fails", async () => {
     const w = makeWorld("hotload-static");
     const r = await w.run(["--case", "hotload", "--authorize-real-root", "--two-session", "--max-inference", "3", "--acknowledge-budget"], {
-      hooks: { afterTurn: (n) => void (n === 2 && w.setMode("auth-api-key")) },
+      hooks: { afterTurn: (n) => void (n === 2 && w.setMode("auth-logged-out")) },
     });
     expect(r.code).toBe(1);
     expect(r.report.failures).toContain("preflight_failed_before_restart");
-    expect(r.report.preflight).toMatchObject({ verdict: "subscription", beforeRestart: { verdict: "ambiguous" } });
+    expect(r.report.preflight).toMatchObject({ verdict: "ready", beforeRestart: { verdict: "unavailable" } });
     expect(r.report.afterRestart).toBe("preflight_failed");
     expect(r.report.sessions).toHaveLength(1);
     expect(sessions(w)).toHaveLength(1);
@@ -659,7 +657,7 @@ describe("hotload: --two-session preflight", () => {
   it("records a passing preflight before restart", async () => {
     const w = makeWorld("hotload-static");
     const r = await w.run(["--case", "hotload", "--authorize-real-root", "--two-session", "--max-inference", "3", "--acknowledge-budget"]);
-    expect(r.report.preflight.beforeRestart).toMatchObject({ verdict: "subscription" });
+    expect(r.report.preflight.beforeRestart).toMatchObject({ verdict: "ready" });
   }, 30_000); // two fake sessions; over 5 s on a slow Linux runner
 });
 

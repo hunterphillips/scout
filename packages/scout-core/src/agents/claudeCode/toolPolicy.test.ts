@@ -7,7 +7,7 @@ import { buildJobSurface, SCOUT_TOOL_NAMES } from "./jobSurface.js";
 import { fakeBackend, selection } from "../testing/fakeBackend.js";
 import { defaultManagedPaths } from "./claudeJob.js";
 import { BRIDGE_JOB_MAX_BYTES, BridgeJobSchema } from "../contextToolBridge.js";
-import { BRIDGE_SERVER_NAME, checkManagedPolicy, managedSettingsConflict, planJobTools, type JobManagedPaths, type ToolPlanOptions } from "./toolPolicy.js";
+import { BRIDGE_SERVER_NAME, checkManagedPolicy, managedPathsFor, managedSettingsConflict, planJobTools, type JobManagedPaths, type ToolPlanOptions } from "./toolPolicy.js";
 import { MAX_ARG_CHARS, MAX_ARGS, MAX_CONNECTIONS, MAX_DESCRIPTION_CHARS, MAX_SELECTIONS, ToolsProfileSchema, type ToolsProfile } from "../toolProfile.js";
 
 const SECRET = "SENTINEL-PLAN-SECRET-9a0b";
@@ -130,6 +130,14 @@ describe("planJobTools", () => {
 });
 
 describe("checkManagedPolicy", () => {
+  it("derives managed settings locations per platform", () => {
+    const mac = managedPathsFor("darwin", "/Users/u/.claude", "u");
+    expect(mac.files).toContain("/Library/Application Support/ClaudeCode/managed-settings.json");
+    expect(mac.opaque).toContain("/Library/Managed Preferences/u/com.anthropic.claudecode.plist");
+    expect(managedPathsFor("linux", "/home/u/.claude", "u").files).toContain("/etc/claude-code/managed-settings.json");
+    expect(managedPathsFor("win32", "C:/x", "u").unsupported).toBe(true);
+  });
+
   function managed(files: Record<string, unknown>, extra: Partial<JobManagedPaths> = {}): JobManagedPaths {
     const d = dir();
     const paths: string[] = [];

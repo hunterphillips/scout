@@ -452,7 +452,7 @@ describe("panel view", () => {
     const m = running();
     m.apply(results(1, { status: "error", reason: "preflight_failed" }));
     const { root } = view(m);
-    expect(root.querySelector("section.results")!.textContent).toBe("The subscription check failed.");
+    expect(root.querySelector("section.results")!.textContent).toBe("Your agent is not available.");
     expect(root.querySelector("#results-heading")).toBeNull();
   });
 

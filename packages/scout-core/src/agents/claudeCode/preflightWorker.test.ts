@@ -82,7 +82,7 @@ describe("runPreflightInChild", () => {
     const input = sandbox(30);
     // 2 s: under load the child's own start and its spawn of the slow CLI must fit inside the bound.
     const report = await runPreflightInChild(input, { maxMs: 2_000 });
-    expect(report).toEqual({ verdict: "ambiguous", reasons: ["internal: preflight child timed out"] });
+    expect(report).toEqual({ verdict: "unavailable", reasons: ["internal: preflight child timed out"] });
     expect(pidsIn(input)).toHaveLength(2);
     await until(() => !pidsIn(input).some(alive), 2_000);
   }, 20_000);
@@ -97,15 +97,15 @@ describe("runPreflightInChild", () => {
     ac.abort();
     const report = await run;
     expect(Date.now() - at).toBeLessThan(200);
-    expect(report).toEqual({ verdict: "ambiguous", reasons: ["internal: preflight cancelled"] });
+    expect(report).toEqual({ verdict: "unavailable", reasons: ["internal: preflight cancelled"] });
     await until(() => !pidsIn(input).some(alive), 2_000);
     // Already aborted: no child at all.
-    expect(await runPreflightInChild(sandbox(0), { signal: ac.signal })).toEqual({ verdict: "ambiguous", reasons: ["internal: preflight cancelled"] });
+    expect(await runPreflightInChild(sandbox(0), { signal: ac.signal })).toEqual({ verdict: "unavailable", reasons: ["internal: preflight cancelled"] });
   }, 20_000);
 
   it("a missing entrypoint is ambiguous, never a throw", async () => {
     const report = await runPreflightInChild(sandbox(0), { entrypoint: "/nonexistent/child.js" });
-    expect(report.verdict).toBe("ambiguous");
+    expect(report.verdict).toBe("unavailable");
   });
 });
 
@@ -122,11 +122,11 @@ describe("createPreflightFacade", () => {
   }
 
   it("caches per environment fingerprint and shares one run between concurrent calls", async () => {
-    const { run, calls } = counted([{ verdict: "subscription", reasons: [], cliVersion: "2.1.286" }]);
+    const { run, calls } = counted([{ verdict: "ready", reasons: [], cliVersion: "2.1.286" }]);
     const facade = createPreflightFacade({ run });
     const [a, b] = await Promise.all([facade(input), facade(input)]);
     expect(a).toEqual(b);
-    expect(await facade(input)).toMatchObject({ verdict: "subscription" });
+    expect(await facade(input)).toMatchObject({ verdict: "ready" });
     expect(calls).toHaveLength(1);
     // Another environment is another key.
     await facade({ ...input, parentEnv: { ...input.parentEnv, ANTHROPIC_BASE_URL: "http://127.0.0.1:1" } });
@@ -136,8 +136,8 @@ describe("createPreflightFacade", () => {
 
   it("re-runs when a job saw another CLI version, then caches the new one", async () => {
     const { run, calls } = counted([
-      { verdict: "subscription", reasons: [], cliVersion: "2.1.286" },
-      { verdict: "subscription", reasons: [], cliVersion: "2.1.300" },
+      { verdict: "ready", reasons: [], cliVersion: "2.1.286" },
+      { verdict: "ready", reasons: [], cliVersion: "2.1.300" },
     ]);
     const facade = createPreflightFacade({ run });
     await facade(input);
@@ -155,11 +155,11 @@ describe("createPreflightFacade", () => {
       run: async () => {
         n += 1;
         if (n === 2) throw new Error("boom /secret/path");
-        return { verdict: "ambiguous", reasons: ["cli: claude not reachable"] };
+        return { verdict: "unavailable", reasons: ["cli: claude not reachable"] };
       },
     });
     await facade(input);
-    expect(await facade(input)).toEqual({ verdict: "ambiguous", reasons: ["internal: preflight failed unexpectedly"] });
+    expect(await facade(input)).toEqual({ verdict: "unavailable", reasons: ["internal: preflight failed unexpectedly"] });
     expect(n).toBe(2);
   });
 
@@ -169,14 +169,14 @@ describe("createPreflightFacade", () => {
       run: (_i, signal) =>
         new Promise((resolve) => {
           signals.push(signal);
-          signal.addEventListener("abort", () => resolve({ verdict: "subscription", reasons: [], cliVersion: "2.1.286" }));
+          signal.addEventListener("abort", () => resolve({ verdict: "ready", reasons: [], cliVersion: "2.1.286" }));
         }),
     });
     const pending = facade(input);
     facade.cancelAll();
     expect(signals[0]!.aborted).toBe(true);
     await pending;
-    expect(await facade(input)).toEqual({ verdict: "ambiguous", reasons: ["internal: preflight cancelled"] });
+    expect(await facade(input)).toEqual({ verdict: "unavailable", reasons: ["internal: preflight cancelled"] });
     expect(facade.runs).toBe(1);
   });
 

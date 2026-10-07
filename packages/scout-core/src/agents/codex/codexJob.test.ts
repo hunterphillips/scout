@@ -230,7 +230,7 @@ describe("codex job: happy path", () => {
 
     // Diagnostics: scalar lines tagged with the adapter, nothing the filter had to drop, no content.
     const lines = diagLines(e);
-    expect(lines.filter((l) => l.event === "agent_preflight")).toEqual([expect.objectContaining({ adapter: "codex", verdict: "subscription", reasons: 0, cliVersion: "0.155.1" })]);
+    expect(lines.filter((l) => l.event === "agent_preflight")).toEqual([expect.objectContaining({ adapter: "codex", verdict: "ready", reasons: 0, cliVersion: "0.155.1" })]);
     const jobs = lines.filter((l) => l.event === "agent_job");
     expect(jobs).toHaveLength(1);
     expect(jobs[0]).toMatchObject({ adapter: "codex", status: "ok", termination: "completed", origin: FIXTURE_ORIGIN, picks: 2, cliVersion: "0.155.1", model: DEFAULT_CODEX_MODEL, turns: 1, usageIn: 35000, usageOut: 170 });
@@ -395,22 +395,21 @@ describe("codex job: cancellation", () => {
 // ---------- gates before launch ----------
 
 describe("codex job: gates before launch", () => {
-  it.each<["api-key" | "none"]>([["api-key"], ["none"]])("a %s login: readiness ambiguous, preflight_failed, never spawns", async (login) => {
+  it.each<["none"]>([["none"]])("a %s login: readiness ambiguous, preflight_failed, never spawns", async (login) => {
     const e = await setup({ login });
     const out = await e.adapter.run(request(e), { toolSurface: surface(e) });
     expect(out.result).toMatchObject({ status: "error", reason: "preflight_failed" });
     expect(out.details.detail).toBe("unverified");
-    expect(e.adapter.readiness).toMatchObject({ ok: false, verdict: "ambiguous", reasons: ["not_chatgpt"], version: "0.155.1" });
+    expect(e.adapter.readiness).toMatchObject({ ok: false, verdict: "unavailable", reasons: ["not_logged_in"], version: "0.155.1" });
     expect(e.spawnCalls).toBe(0);
     expect(execLines(e)).toEqual([]);
   });
 
-  it.each(API_KEY_ENV)("%s in the core's env: preflight_failed, never spawns, the key logged nowhere", async (key) => {
-    const e = await setup({ env: { [key]: "SENTINEL-CODEX-KEY" } });
+  it("an API-key login runs through the private Codex home", async () => {
+    const e = await setup({ login: "api-key", env: { OPENAI_API_KEY: "SENTINEL-CODEX-KEY" } });
     const out = await e.adapter.run(request(e), { toolSurface: surface(e) });
-    expect(out.result).toMatchObject({ status: "error", reason: "preflight_failed" });
-    expect(e.adapter.readiness.reasons).toEqual(["env_api_key"]);
-    expect(e.spawnCalls).toBe(0);
+    expect(out.result.status).toBe("ok");
+    expect(e.adapter.readiness.verdict).toBe("ready");
     expect(readFileSync(e.diagPath, "utf8")).not.toContain("SENTINEL");
   });
 

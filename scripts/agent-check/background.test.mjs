@@ -37,13 +37,14 @@ describe("background: dry run and refusals", () => {
     expect(w.lines()).toEqual([]);
   });
 
-  it("launches no job when the preflight is not subscription", async () => {
+  it("runs a job with an API-key login", async () => {
     const w = makeWorld("auth-api-key");
     const r = await w.run(["--case", "baseline"]);
-    expect(r.code).toBe(1);
-    expect(r.report).toMatchObject({ outcome: "preflight_failed", inferenceRequests: [] });
-    expect(jobLaunches(w)).toEqual([]);
+    expect(r.code, r.text).toBe(0);
+    expect(r.report).toMatchObject({ outcome: "ok", preflight: { verdict: "ready" } });
+    expect(jobLaunches(w)).toHaveLength(1);
   });
+
 });
 
 describe("background: cases", () => {
@@ -54,7 +55,7 @@ describe("background: cases", () => {
     expect(r.code, r.text).toBe(0);
     const rep = r.report;
     expect(rep).toMatchObject({ case: "baseline", pass: true, outcome: "ok", failures: [] });
-    expect(rep.preflight).toMatchObject({ verdict: "subscription", cliVersion: "2.1.286" });
+    expect(rep.preflight).toMatchObject({ verdict: "ready", cliVersion: "2.1.286" });
     expect(rep.result.items.map((i) => i.id)).toEqual(["c1", "c2"]);
     expect(rep.details.toolUses).toEqual(["mcp__scout__current_site", "mcp__scout__recent_activity"]);
     expect(rep.details).toMatchObject({ termination: "completed", model: "claude-sonnet-5-5", cliVersion: "2.1.286" });
@@ -142,13 +143,13 @@ describe("background --adapter codex", () => {
     expect([...w.lines(), ...c.lines()]).toEqual([]);
   });
 
-  it("launches no job when the login is not ChatGPT", async () => {
+  it("runs a Codex job with an API-key login", async () => {
     const w = makeWorld("ok", { adapter: "codex" });
     w.setLogin("api-key");
     const r = await w.run(["--case", "baseline"]);
-    expect(r.code).toBe(1);
-    expect(r.report).toMatchObject({ adapter: "codex", outcome: "preflight_failed", inferenceRequests: [], preflight: { verdict: "ambiguous", reasons: ["not_chatgpt"] } });
-    expect(codexLaunches(w)).toEqual([]);
+    expect(r.code, r.text).toBe(0);
+    expect(r.report).toMatchObject({ adapter: "codex", outcome: "ok", preflight: { verdict: "ready" } });
+    expect(codexLaunches(w)).toHaveLength(1);
   });
 
   it("baseline: ok with picks through Scout's tools, one request, clean up", async () => {
@@ -158,7 +159,7 @@ describe("background --adapter codex", () => {
     expect(r.code, r.text).toBe(0);
     const rep = r.report;
     expect(rep).toMatchObject({ case: "baseline", adapter: "codex", pass: true, outcome: "ok", failures: [] });
-    expect(rep.preflight).toMatchObject({ verdict: "subscription", cliVersion: "0.155.1" });
+    expect(rep.preflight).toMatchObject({ verdict: "ready", cliVersion: "0.155.1" });
     expect(rep.result.items.map((i) => i.id)).toEqual(["c1", "c2"]);
     expect(rep.details).toMatchObject({ termination: "completed", model: "gpt-6-sol", cliVersion: "0.155.1", toolUses: ["mcp__scout__current_site"] });
     expect(rep.init).toEqual({ seen: true, event: "thread.started" });

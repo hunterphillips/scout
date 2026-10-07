@@ -2,7 +2,7 @@ import { chmodSync, existsSync, mkdirSync, readdirSync, statSync, symlinkSync } 
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { createLaunchProfile, filterChildEnv, FORWARD_KEYS, LaunchProfileError, PROFILE_ID, runDirectPreflight } from "./launchProfile.js";
-import { cleanupSandboxes, fakeSpawnSync, gatewayParentEnv, makeSandbox, sentinelsIn, SUBSCRIPTION_STATUS, type Sandbox } from "./testing/preflightSandbox.js";
+import { cleanupSandboxes, fakeSpawnSync, gatewayParentEnv, makeSandbox, sentinelsIn, LOGGED_IN_STATUS, type Sandbox } from "./testing/preflightSandbox.js";
 
 afterEach(() => cleanupSandboxes());
 
@@ -115,14 +115,14 @@ describe("launch profile: job dir, claude path, model", () => {
 describe("runDirectPreflight", () => {
   function direct(sb: Sandbox, fake = fakeSpawnSync()) {
     const { jobId: _j, ...o } = opts(sb);
-    const report = runDirectPreflight({ ...o, managedPaths: sb.managedPaths, projectStopAt: sb.root, username: "someone", spawnSync: fake.spawnSync });
+    const report = runDirectPreflight({ ...o, spawnSync: fake.spawnSync });
     return { report, calls: fake.calls };
   }
 
   it("passes a synthetic Max login through the gateway-shaped parent env, reports the CLI version, removes its dir", () => {
     const sb = makeSandbox();
     const r = direct(sb);
-    expect(r.report).toEqual({ verdict: "subscription", reasons: [], inference: "none", cliVersion: "2.1.286" });
+    expect(r.report).toEqual({ verdict: "ready", reasons: [], inference: "none", cliVersion: "2.1.286" });
     expect(r.calls).toHaveLength(4);
     for (const c of r.calls) {
       expect(c.command).toBe(sb.claudePath);
@@ -132,33 +132,17 @@ describe("runDirectPreflight", () => {
     expect(readdirSync(sb.jobsRoot)).toEqual([]);
   });
 
-  it.each([
-    ["api key in user settings", (sb: Sandbox) => sb.writeUserSettings({ env: { ANTHROPIC_API_KEY: "SENTINEL-API-KEY-7f3a" } }), /ANTHROPIC_API_KEY/],
-    ["apiKeyHelper", (sb: Sandbox) => sb.writeUserSettings({ apiKeyHelper: "SENTINEL-HELPER-CMD-44d0" }), /apiKeyHelper/],
-    ["gateway base URL", (sb: Sandbox) => sb.writeUserSettings({ env: { ANTHROPIC_BASE_URL: "https://sentinel-gateway.example.invalid" } }), /non-anthropic-remote/],
-    ["managed API key", (sb: Sandbox) => sb.writeFile("managed/managed-settings.json", JSON.stringify({ env: { ANTHROPIC_API_KEY: "SENTINEL-API-KEY-7f3a" } })), /managed settings/],
-  ])("%s blocks; claude never runs; nothing leaks", (_l, arrange, reason) => {
+  it("accepts an API key login through the pinned CLI", () => {
     const sb = makeSandbox();
-    arrange(sb);
-    const r = direct(sb);
-    expect(r.report.verdict).toBe("ambiguous");
-    expect(r.report.reasons.join("\n")).toMatch(reason);
-    expect(r.calls).toEqual([]);
-    expect(sentinelsIn(JSON.stringify(r.report))).toEqual([]);
-    expect(readdirSync(sb.jobsRoot)).toEqual([]);
-  });
-
-  it("a non-subscription login is ambiguous", () => {
-    const sb = makeSandbox();
-    const r = direct(sb, fakeSpawnSync({ status: { ...SUBSCRIPTION_STATUS, authMethod: "console" } }));
-    expect(r.report.verdict).toBe("ambiguous");
+    const r = direct(sb, fakeSpawnSync({ status: { ...LOGGED_IN_STATUS, authMethod: "api_key" } }));
+    expect(r.report.verdict).toBe("ready");
   });
 
   it("never throws; a profile that cannot be created is ambiguous with its fixed code", () => {
     const sb = makeSandbox();
     const { jobId: _j, ...o } = opts(sb, { claudePath: "relative" });
     const r = runDirectPreflight(o);
-    expect(r.verdict).toBe("ambiguous");
+    expect(r.verdict).toBe("unavailable");
     expect(r.reasons).toEqual(["profile: claude path is not an absolute executable file"]);
     expect(r.cliVersion).toBeUndefined();
     expect(PROFILE_ID).toMatch(/^scout-job-/);

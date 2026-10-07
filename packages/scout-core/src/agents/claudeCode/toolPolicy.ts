@@ -29,7 +29,7 @@
 // (`unsupported_configuration`).
 //
 // checkManagedPolicy reads the managed settings Claude Code applies on top of every other
-// source (same locations as the billing preflight, managedPathsFor in authPreflight.ts;
+// source (managedPathsFor below;
 // macOS: /Library/Application Support/ClaudeCode/managed-settings.json, its
 // managed-settings.d/*.json drop-ins, the MDM plists under /Library/Managed Preferences, and
 // the server-managed cache `remote-settings.json` in the CLI config dir). A job does not run
@@ -72,13 +72,44 @@
 import { readdirSync, statSync } from "node:fs";
 import { createRequire } from "node:module";
 import { join } from "node:path";
-import { isExecutableFile, type ManagedPaths } from "./authPreflight.js";
+import { isExecutableFile } from "./authPreflight.js";
 import { isMissing, readPrivateFile } from "../privateFile.js";
 import { BRIDGE_DEFAULT_LIMITS, BRIDGE_JOB_MAX_BYTES, type BridgeJob } from "../contextToolBridge.js";
 import { mcpToolName, SCOUT_SERVER_NAME, SCOUT_TOOL_NAMES, scoutServerSpec, type JobServerSpec, type JobSurfaceSpec, type ScoutServerOptions } from "./jobSurface.js";
 import { resolveEnvBindings, type Connection, type EnvBinding, type ToolsProfile } from "../toolProfile.js";
 
 export const BRIDGE_SERVER_NAME = "scout_bridge";
+
+export interface ManagedPaths {
+  files: string[];
+  dropInDirs: string[];
+  opaque: string[];
+  unsupported?: boolean;
+}
+
+/** Managed-settings locations for the installed Claude CLI. */
+export function managedPathsFor(platform: string, configDir: string, user: string): ManagedPaths {
+  const remote = join(configDir, "remote-settings.json");
+  if (platform === "darwin") {
+    const base = "/Library/Application Support/ClaudeCode";
+    return {
+      files: [join(base, "managed-settings.json"), remote],
+      dropInDirs: [join(base, "managed-settings.d")],
+      opaque: [
+        "/Library/Managed Preferences/com.anthropic.claudecode.plist",
+        join("/Library/Managed Preferences", user, "com.anthropic.claudecode.plist"),
+      ],
+    };
+  }
+  if (platform === "linux") {
+    return {
+      files: ["/etc/claude-code/managed-settings.json", remote],
+      dropInDirs: ["/etc/claude-code/managed-settings.d"],
+      opaque: [],
+    };
+  }
+  return { files: [remote], dropInDirs: [], opaque: [], unsupported: true };
+}
 
 /** The built bridge entrypoint (`dist/agents/bridgeMain.js`), resolved through the package export. */
 export function defaultBridgeEntrypoint(): string {
@@ -260,7 +291,7 @@ export function managedSettingsConflict(s: Record<string, unknown>): ManagedPoli
 }
 
 /**
- * Managed-settings locations for a job: the billing preflight's (ManagedPaths) plus
+ * Managed-settings locations for a job: the readiness path's (ManagedPaths) plus
  * `mcpFiles`, the managed MCP configs whose presence refuses; `userUnknown` when the OS user
  * (which keys per-user MDM policy) could not be determined.
  */

@@ -26,7 +26,7 @@ import { AgentRequestIdSchema } from "@scout/contracts";
 import { isExecutableFile, runPreflight, type Env, type PreflightDeps, type PreflightReport, type Verdict } from "./authPreflight.js";
 import { MODEL_RE } from "../profile.js";
 
-export const PROFILE_ID = "scout-job-claude-subscription/v1";
+export const PROFILE_ID = "scout-job-claude/v2";
 
 /** Unchanged from the legacy profile (parity-tested). */
 export const FORWARD_KEYS: readonly string[] = Object.freeze(["HOME", "USER", "LOGNAME", "PATH", "SHELL", "LANG", "LC_ALL", "LC_CTYPE", "TMPDIR"]);
@@ -62,7 +62,7 @@ export function filterChildEnv(parentEnv: Env): Readonly<Record<string, string>>
     if (typeof v === "string") env[k] = v;
   }
   if (parentEnv.CLAUDE_CONFIG_DIR !== undefined) {
-    // The user's existing login may live there; a relative one is ambiguous.
+    // The user's existing login may live there; a relative one is invalid.
     if (typeof parentEnv.CLAUDE_CONFIG_DIR !== "string" || !isAbsolute(parentEnv.CLAUDE_CONFIG_DIR)) {
       throw new LaunchProfileError("profile: CLAUDE_CONFIG_DIR is set but not absolute");
     }
@@ -200,9 +200,9 @@ export function createLaunchProfile(opts: LaunchProfileOptions): LaunchProfile {
 }
 
 /** Test seams passed through to runPreflight. */
-export type ProfilePreflightSeams = Pick<PreflightDeps, "managedPaths" | "projectStopAt" | "username" | "fs" | "timeoutMs" | "platform" | "spawnSync">;
+export type ProfilePreflightSeams = Pick<PreflightDeps, "timeoutMs" | "spawnSync">;
 
-/** Run the billing preflight against exactly this profile's child env, cwd and claude binary. */
+/** Run the readiness check against exactly this profile's child env, cwd and claude binary. */
 export function runProfilePreflight(
   profile: LaunchProfile,
   opts: { parentEnv?: Env; preflight?: (deps: PreflightDeps) => PreflightReport } & ProfilePreflightSeams = {},
@@ -219,7 +219,7 @@ export function runProfilePreflight(
 
 export interface DirectPreflightReport {
   verdict: Verdict;
-  /** Fixed reason codes; settings reasons name local files, so redact before logging. */
+  /** Fixed reason codes; redact before logging. */
   reasons: string[];
   inference: "none";
   /** The version `claude --version` reported, when the CLI was reached. */
@@ -235,7 +235,7 @@ export type DirectPreflightOptions = Omit<LaunchProfileOptions, "jobId"> &
 
 /**
  * Build a fresh launch profile in its own job dir, run the preflight against that exact
- * child, remove the dir, and report. `subscription` only when the profile was created, the
+ * child, remove the dir, and report. `ready` only when the profile was created, the
  * preflight found no reason, and the dir was removed. Never throws.
  *
  * Blocking: the preflight runs `claude` through spawnSync up to four times at up to 20 s
@@ -245,7 +245,7 @@ export function runDirectPreflight(opts: DirectPreflightOptions): DirectPrefligh
   try {
     return directPreflight(opts);
   } catch {
-    return { verdict: "ambiguous", reasons: ["internal: direct preflight failed unexpectedly"], inference: "none" };
+    return { verdict: "unavailable", reasons: ["internal: direct preflight failed unexpectedly"], inference: "none" };
   }
 }
 
@@ -264,7 +264,7 @@ function directPreflight(opts: DirectPreflightOptions): DirectPreflightReport {
     profile = createLaunchProfile(profileOpts);
   } catch (e) {
     const reason = e instanceof LaunchProfileError ? e.code : "internal: launch profile failed unexpectedly";
-    return { verdict: "ambiguous", reasons: [reason], inference: "none" };
+    return { verdict: "unavailable", reasons: [reason], inference: "none" };
   }
 
   const reasons: string[] = [];
@@ -282,7 +282,7 @@ function directPreflight(opts: DirectPreflightOptions): DirectPreflightReport {
     }
   }
   if (existsSync(profile.cwd)) reasons.push("profile: job dir was not removed");
-  const report: DirectPreflightReport = { verdict: reasons.length === 0 ? "subscription" : "ambiguous", reasons, inference: "none" };
+  const report: DirectPreflightReport = { verdict: reasons.length === 0 ? "ready" : "unavailable", reasons, inference: "none" };
   const version = pre?.cli.version;
   if (version !== undefined && version !== "unknown") report.cliVersion = version;
   return report;

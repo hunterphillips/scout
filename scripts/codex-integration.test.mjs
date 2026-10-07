@@ -466,10 +466,10 @@ describe("doctor with a Codex profile", () => {
     expect(codexLog().some((a) => a[0] === "login")).toBe(false);
   });
 
-  it("billing names the agent of the last logged check; suggestions speak of the agent's quota", () => {
+  it("the agent section names the agent of the last logged check; suggestions speak of the agent's quota", () => {
     mkdirSync(L.logsDir, { recursive: true });
-    writeFileSync(L.diagnosticsLog, JSON.stringify({ t: 5, event: "agent_preflight", adapter: "codex", verdict: "subscription", reasons: 0, cliVersion: "0.155.1" }) + "\n");
-    expect(report().billing).toMatchObject({ status: "ok", summary: "last preflight: subscription (Codex, CLI 0.155.1)" });
+    writeFileSync(L.diagnosticsLog, JSON.stringify({ t: 5, event: "agent_preflight", adapter: "codex", verdict: "ready", reasons: 0, cliVersion: "0.155.1" }) + "\n");
+    expect(report().agent).toMatchObject({ status: "ok", summary: "last preflight: ready (Codex, CLI 0.155.1)" });
     writeFileSync(L.scoutConfig, JSON.stringify({ ...json(L.scoutConfig), destinations: ["docs.stripe.com"] }));
     expect(report().suggestions.checks[0].detail).toMatch(/spends your agent's quota/);
     expect(JSON.stringify(report())).not.toMatch(/Claude quota/);

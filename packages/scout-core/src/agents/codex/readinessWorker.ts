@@ -12,7 +12,7 @@
 // fingerprint (sorted parent env, codexPath, model, SCOUT_HOME); `knownVersion`, when given and
 // different from the cached version, re-runs it. Concurrent calls for the same key share one
 // run. A child that fails, exits without a report, or overruns is killed and reported
-// `ambiguous` with a fixed reason. A report without a version, or from an aborted run, is
+// `unavailable` with a fixed reason. A report without a version, or from an aborted run, is
 // never cached. `cancelAll()` kills every running child and refuses further runs.
 
 import { type ChildProcess, fork } from "node:child_process";
@@ -28,12 +28,12 @@ export function defaultReadinessChildEntrypoint(): string {
   return createRequire(import.meta.url).resolve("@scout/scout-core/agents/codex-readiness-child");
 }
 
-const failed = (reason: string): CodexReadinessReport => ({ verdict: "ambiguous", reasons: [reason] });
+const failed = (reason: string): CodexReadinessReport => ({ verdict: "unavailable", reasons: [reason] });
 
 export interface ReadinessChildOptions {
   entrypoint?: string;
   maxMs?: number;
-  /** Aborting kills the child at once; the run resolves `ambiguous`. */
+  /** Aborting kills the child at once; the run resolves `unavailable`. */
   signal?: AbortSignal;
 }
 
@@ -104,11 +104,11 @@ export function runReadinessInChild(input: CodexReadinessInput, options: Readine
   });
 }
 
-/** The child's message as a report; anything malformed is `ambiguous`. */
+/** The child's message as a report; anything malformed is `unavailable`. */
 function toReport(msg: unknown): CodexReadinessReport {
   if (msg === null || typeof msg !== "object") return failed("internal: readiness child sent no report");
   const m = msg as Record<string, unknown>;
-  if (m.verdict !== "subscription" && m.verdict !== "ambiguous") return failed("internal: readiness child sent no report");
+  if (m.verdict !== "ready" && m.verdict !== "unavailable") return failed("internal: readiness child sent no report");
   if (!Array.isArray(m.reasons) || !m.reasons.every((r) => typeof r === "string")) return failed("internal: readiness child sent no report");
   const report: CodexReadinessReport = { verdict: m.verdict, reasons: m.reasons as string[] };
   if (typeof m.version === "string") report.version = m.version;
@@ -133,7 +133,7 @@ export interface CodexReadinessFacadeOptions {
 
 export type CodexReadinessFacade = AsyncCodexReadinessFn & {
   readonly runs: number;
-  /** Kill every running check (each resolves `ambiguous`) and refuse further runs. */
+  /** Kill every running check (each resolves `unavailable`) and refuse further runs. */
   cancelAll(): void;
 };
 

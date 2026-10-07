@@ -16,7 +16,7 @@ process.once("message", (msg: unknown) => {
     const report = runCodexReadinessFor({ home: input.home, parentEnv: input.parentEnv, codexPath: input.codexPath, model: input.model });
     out = { verdict: report.verdict, reasons: report.reasons, ...(report.version !== undefined ? { version: report.version } : {}) };
   } catch {
-    out = { verdict: "ambiguous", reasons: ["internal: readiness failed unexpectedly"] };
+    out = { verdict: "unavailable", reasons: ["internal: readiness failed unexpectedly"] };
   }
   process.send?.(out, () => process.disconnect?.());
 });

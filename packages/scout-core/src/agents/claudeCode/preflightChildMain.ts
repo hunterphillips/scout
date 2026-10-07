@@ -24,7 +24,7 @@ process.once("message", (msg: unknown) => {
     });
     out = { verdict: report.verdict, reasons: report.reasons, ...(report.cliVersion !== undefined ? { cliVersion: report.cliVersion } : {}) };
   } catch {
-    out = { verdict: "ambiguous", reasons: ["internal: preflight failed unexpectedly"] };
+    out = { verdict: "unavailable", reasons: ["internal: preflight failed unexpectedly"] };
   }
   process.send?.(out, () => process.disconnect?.());
 });

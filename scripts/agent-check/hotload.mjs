@@ -227,7 +227,7 @@ export async function runHotload(o, deps) {
       label === "preliminary"
         ? `  MCP server: --mcp-config <throwaway>/mcp.json -> ${process.execPath} ${SCOUT_MCP_MAIN} --socket <throwaway>/a.sock --token-file <throwaway>/agent-token`
         : `  register: ${o.claudePath} mcp add --scope user ${name} -- ${process.execPath} ${SCOUT_MCP_MAIN} --socket <throwaway>/a.sock --token-file <throwaway>/agent-token`,
-      `  preflight: billing preflight for the session's exact env, cwd (<throwaway>/s/session) and binary`,
+      `  preflight: readiness check for the session's exact env, cwd (<throwaway>/s/session) and binary`,
       `  session: ${o.claudePath} ${sessionArgs({ model: CHECK_MODEL, name, preliminary: label === "preliminary", mcpConfigFile: "<throwaway>/mcp.json" }).map(shellish).join(" ")}`,
       "  stand-in: one headless multi-turn `claude -p` stream-json process stands in for an interactive session (not an interactive session)",
       `  loads: every user-scope MCP server and plugin (counted, not named); limits: --tools ${sessionLimits.tools}, hooks disabled, --setting-sources ${sessionLimits.settingSources}, dontAsk with --allowedTools ${sessionLimits.allowedTools.join(",")}, --max-turns ${MAX_TURNS}`,
@@ -333,7 +333,7 @@ export async function runHotload(o, deps) {
     mcpCommand = { command: process.execPath, args: [SCOUT_MCP_MAIN, "--socket", fixture.socketPath, "--token-file", fixture.tokenFile] };
 
     // Preflight first: nothing is registered or launched for inference unless it passes.
-    const pf = runProfilePreflight(profile, { parentEnv: o.env, ...(deps.preflightSeams ?? {}) });
+    const pf = runProfilePreflight(profile, { parentEnv: o.env });
     preflight = {
       verdict: pf.verdict,
       reasons: pf.reasons,
@@ -343,7 +343,7 @@ export async function runHotload(o, deps) {
     cliVersion = pf.cli?.version;
     userAllowRules = userAllowRuleCounts(profile.env);
     checkAbort();
-    if (pf.verdict !== "subscription") {
+    if (pf.verdict !== "ready") {
       outcome = "preflight_failed";
       failures.push("preflight");
       return;
@@ -401,10 +401,10 @@ export async function runHotload(o, deps) {
     const restart = async () => {
       await closeSession(handles.length - 1);
       checkAbort();
-      const again = runProfilePreflight(profile, { parentEnv: o.env, ...(deps.preflightSeams ?? {}) });
+      const again = runProfilePreflight(profile, { parentEnv: o.env });
       preflight.beforeRestart = { verdict: again.verdict, reasons: again.reasons };
       checkAbort();
-      if (again.verdict !== "subscription") {
+      if (again.verdict !== "ready") {
         failures.push("preflight_failed_before_restart");
         afterRestart = "preflight_failed";
         return false;

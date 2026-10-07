@@ -9,9 +9,9 @@
 //   cancel         aborts the job a few seconds after its init event; expects `cancelled`, no
 //                  process left from the job's tree, no open fixture connection, job dir gone
 //
-// The adapter's readiness check runs first (Claude Code: the direct billing preflight; Codex:
+// The adapter's readiness check runs first (Claude Code: the readiness check; Codex:
 // `codex --version` and `codex login status`); nothing launches unless it reports
-// `subscription`. The job's argv and first event (Claude's init, Codex's `thread.started`) are
+// `ready`. The job's argv and first event (Claude's init, Codex's `thread.started`) are
 // captured through the adapter's spawn seam for the report.
 
 import { spawn as nodeSpawn } from "node:child_process";
@@ -86,7 +86,7 @@ export async function runBackground(caseName, o, deps) {
       `  agent profile: ${join(o.home, "agent-profile.json")}${caseName === "selected-tool" ? " (plus one selected synthetic tool: lookup on fake-backend.mjs, literal env only)" : ""}`,
       codex
         ? `  readiness: codex --version and codex login status (ChatGPT login only) before any launch; private Codex home ${join(o.home, "run", "codex-home")}`
-        : "  preflight: direct billing preflight (claude --version, auth status) before any launch",
+        : "  preflight: readiness check (claude --version, auth status) before any launch",
       `  job: ${o.agentPath} ${short(jobArgv)}${codex && caseName === "selected-tool" ? " (plus the scout_bridge server)" : ""}`,
       "  fixture: synthetic Scout core on <throwaway>/a.sock (current site docs.example.com, one synthetic GitHub issue)",
       caseName === "cancel" ? `  cancel: abort ${(deps.cancelAfterInitMs ?? BACKGROUND_DEFAULTS.cancelAfterInitMs) / 1000} s after the init event, then check processes, connections and the job dir` : "  expects: ok with at least one pick",
@@ -183,7 +183,7 @@ export async function runBackground(caseName, o, deps) {
       seams: {
         "claude-code": {
           ...common,
-          preflight: (opts) => runDirectPreflight({ ...opts, ...seams }),
+          preflight: (opts) => runDirectPreflight(opts),
           ...(seams.managedPaths ? { managedPaths: seams.managedPaths } : {}),
         },
         codex: common,
@@ -191,7 +191,7 @@ export async function runBackground(caseName, o, deps) {
     });
     const pf = await adapter.refreshReadiness();
     preflight = { verdict: pf.verdict, reasons: [...pf.reasons], cliVersion: pf.version };
-    if (pf.verdict !== "subscription") {
+    if (pf.verdict !== "ready") {
       outcome = "preflight_failed";
       failures.push("preflight");
     } else if (!ac.signal.aborted) {

@@ -3,7 +3,7 @@
 //
 //   --version                 `<version> (Claude Code)`
 //   auth --help | auth status --help | auth status --json
-//                             a subscription login (mode `auth-api-key`: an API-key login)
+//                             a claude.ai login (mode `auth-api-key`: an API-key login; `auth-logged-out`: not logged in)
 //   mcp add --scope user <name> -- <command> [args...] | mcp get <name> | mcp remove --scope user <name>
 //                             user-scope registrations in `<config>/.claude.json`, where
 //                             <config> is CLAUDE_CONFIG_DIR, else HOME (as the real CLI);
@@ -85,6 +85,7 @@ function auth(argv, mode) {
   if (key === "auth status --json") {
     const status = { loggedIn: true, authMethod: "claude.ai", apiProvider: "firstParty", email: "fake@example.invalid", subscriptionType: "max" };
     if (mode === "auth-api-key") status.authMethod = "api_key";
+    if (mode === "auth-logged-out") status.loggedIn = false;
     return out(JSON.stringify(status));
   }
   process.exitCode = 1;

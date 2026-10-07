@@ -104,7 +104,7 @@ describe("codex readiness: login states and version", () => {
   it("a ChatGPT login is subscription, with the CLI version; only the two allowlisted invocations ran, with the job's env", () => {
     const b = box();
     const s = scripted();
-    expect(run(b, s)).toEqual({ verdict: "subscription", reasons: [], version: "0.155.1" });
+    expect(run(b, s)).toEqual({ verdict: "ready", reasons: [], version: "0.155.1" });
     expect(s.calls.map((c) => c.args)).toEqual(READINESS_INVOCATIONS.map((a) => [...a]));
     for (const c of s.calls) {
       expect(c.command).toBe(b.codexPath);
@@ -117,14 +117,14 @@ describe("codex readiness: login states and version", () => {
     expect(readdirSync(join(b.scoutHome, "run", "jobs"))).toEqual([]);
   });
 
-  it.each<["api-key" | "none"]>([["api-key"], ["none"]])("a %s login is ambiguous: not_chatgpt", (login) => {
+  it.each<["none"]>([["none"]])("a %s login is ambiguous: not_chatgpt", (login) => {
     const b = box();
-    expect(run(b, scripted({ login }))).toEqual({ verdict: "ambiguous", reasons: ["not_chatgpt"], version: "0.155.1" });
+    expect(run(b, scripted({ login }))).toEqual({ verdict: "unavailable", reasons: ["not_logged_in"], version: "0.155.1" });
   });
 
   it("a login check that times out is not_chatgpt", () => {
     const b = box();
-    expect(run(b, scripted({ loginTimeout: true })).reasons).toEqual(["not_chatgpt"]);
+    expect(run(b, scripted({ loginTimeout: true })).reasons).toEqual(["not_logged_in"]);
   });
 
   it.each<[string | null, number, string | undefined]>([
@@ -137,24 +137,23 @@ describe("codex readiness: login states and version", () => {
     const b = box();
     const r = run(b, scripted({ version, versionExit }));
     expect(r.version).toBe(expected);
-    if (expected === undefined) expect(r).toEqual({ verdict: "ambiguous", reasons: ["version_unknown"] });
-    else expect(r.verdict).toBe("subscription");
+    if (expected === undefined) expect(r).toEqual({ verdict: "unavailable", reasons: ["version_unknown"] });
+    else expect(r.verdict).toBe("ready");
   });
 
-  it.each(["CODEX_API_KEY", "CODEX_ACCESS_TOKEN", "OPENAI_API_KEY"])("%s in the core's env is ambiguous (env_api_key) and never reaches the child", (key) => {
+  it.each(["CODEX_API_KEY", "CODEX_ACCESS_TOKEN", "OPENAI_API_KEY"])("%s stays out of the child env without blocking readiness", (key) => {
     const b = box();
-    const s = scripted();
-    const r = run(b, s, { ...b.env, [key]: "sk-SENTINEL-KEY" });
-    expect(r).toMatchObject({ verdict: "ambiguous", reasons: ["env_api_key"] });
-    for (const c of s.calls) expect(Object.keys(c.env)).not.toContain(key);
-    expect(JSON.stringify(r)).not.toContain("SENTINEL");
+    const scriptedCli = scripted({ login: "api-key" });
+    const report = run(b, scriptedCli, { ...b.env, [key]: "sk-SENTINEL-KEY" });
+    expect(report.verdict).toBe("ready");
+    for (const call of scriptedCli.calls) expect(Object.keys(call.env)).not.toContain(key);
   });
 
   it("a codex path that is not executable is binary_not_executable and invokes nothing", () => {
     const b = box();
     chmodSync(b.codexPath, 0o644);
     const s = scripted();
-    expect(run(b, s)).toEqual({ verdict: "ambiguous", reasons: ["binary_not_executable"] });
+    expect(run(b, s)).toEqual({ verdict: "unavailable", reasons: ["binary_not_executable"] });
     const gone = scripted();
     rmSync(b.codexPath);
     expect(run(b, gone).reasons).toEqual(["binary_not_executable"]);
@@ -168,7 +167,7 @@ describe("codex readiness: login states and version", () => {
       `#!/bin/sh\ncase "$1" in\n  --version) echo "codex-cli 0.155.1" ;;\n  login) echo "Logged in using ChatGPT" >&2 ;;\n  *) echo unexpected >&2; exit 9 ;;\nesac\n`,
       { mode: 0o755 },
     );
-    expect(runCodexReadinessFor({ home: b.scoutHome, parentEnv: b.env, codexPath: b.codexPath, model: "gpt-6-sol" })).toEqual({ verdict: "subscription", reasons: [], version: "0.155.1" });
+    expect(runCodexReadinessFor({ home: b.scoutHome, parentEnv: b.env, codexPath: b.codexPath, model: "gpt-6-sol" })).toEqual({ verdict: "ready", reasons: [], version: "0.155.1" });
   });
 });
 
@@ -180,13 +179,13 @@ describe("codex readiness: an npm or nvm install under launchd's PATH", () => {
     // The premise: with the parent's PATH alone, `env` cannot find node.
     const bare = spawnSync(codexPath, ["--version"], { env: { PATH: parentPath }, encoding: "utf8" });
     expect(bare.status).toBe(127);
-    expect(runCodexReadinessFor({ home: b.scoutHome, parentEnv, codexPath, model: "gpt-6-sol" })).toEqual({ verdict: "subscription", reasons: [], version: "0.155.1" });
+    expect(runCodexReadinessFor({ home: b.scoutHome, parentEnv, codexPath, model: "gpt-6-sol" })).toEqual({ verdict: "ready", reasons: [], version: "0.155.1" });
   });
 
   it("both invocations get PATH with the codex directory first", () => {
     const b = box();
     const s = scripted();
-    expect(run(b, s).verdict).toBe("subscription");
+    expect(run(b, s).verdict).toBe("ready");
     for (const c of s.calls) expect(c.env.PATH).toBe(`${b.base}:/usr/bin:/bin`);
   });
 });
@@ -218,12 +217,12 @@ describe("codex readiness: the private home's auth link", () => {
     writeFileSync(link, "{}", { mode: 0o600 });
     expect(ensureCodexHome(b.scoutHome, b.env)).toEqual({ ok: false, reason: "auth_link_invalid" });
     expect(lstatSync(link).isFile()).toBe(true);
-    expect(runCodexReadinessFor({ home: b.scoutHome, parentEnv: b.env, codexPath: b.codexPath, model: "m" }, { spawnSync: scripted().spawnSync })).toEqual({ verdict: "ambiguous", reasons: ["auth_link_invalid"] });
+    expect(runCodexReadinessFor({ home: b.scoutHome, parentEnv: b.env, codexPath: b.codexPath, model: "m" }, { spawnSync: scripted().spawnSync })).toEqual({ verdict: "unavailable", reasons: ["auth_link_invalid"] });
   });
 
   it("no HOME and no CODEX_HOME: codex_home_unusable", () => {
     const b = box();
-    expect(runCodexReadinessFor({ home: b.scoutHome, parentEnv: { PATH: "/bin" }, codexPath: b.codexPath, model: "m" })).toEqual({ verdict: "ambiguous", reasons: ["codex_home_unusable"] });
+    expect(runCodexReadinessFor({ home: b.scoutHome, parentEnv: { PATH: "/bin" }, codexPath: b.codexPath, model: "m" })).toEqual({ verdict: "unavailable", reasons: ["codex_home_unusable"] });
   });
 
   it.each<[string, (b: Box) => void]>([
@@ -240,7 +239,7 @@ describe("codex readiness: the private home's auth link", () => {
     const b = box();
     spoil(b);
     const r = run(b, scripted());
-    expect(r.verdict).toBe("ambiguous");
+    expect(r.verdict).toBe("unavailable");
     expect(r.reasons).toEqual(["auth_link_invalid"]);
   });
 
@@ -254,7 +253,7 @@ describe("codex readiness: the private home's auth link", () => {
     unlinkSync(link);
     symlinkSync(elsewhere, link);
     expect(runCodexReadiness({ codexPath: b.codexPath, parentEnv: b.env, codexHome: home.codexHome, userAuthPath: home.userAuthPath, spawnSync: scripted().spawnSync }).reasons).toEqual(["auth_link_invalid"]);
-    expect(run(b, scripted()).verdict).toBe("subscription");
+    expect(run(b, scripted()).verdict).toBe("ready");
   });
 });
 
@@ -263,7 +262,7 @@ describe("codex readiness facade", () => {
 
   it("caches a versioned report per input; one run per key in flight; another key runs again", async () => {
     let runs = 0;
-    const facade = createCodexReadinessFacade({ run: async () => (runs++, { verdict: "subscription", reasons: [], version: "0.155.1" }) });
+    const facade = createCodexReadinessFacade({ run: async () => (runs++, { verdict: "ready", reasons: [], version: "0.155.1" }) });
     const [a, b] = await Promise.all([facade(input), facade(input)]);
     expect(a).toBe(b);
     expect(await facade(input)).toBe(a);
@@ -278,7 +277,7 @@ describe("codex readiness facade", () => {
 
   it("a report without a version is never cached", async () => {
     let runs = 0;
-    const facade = createCodexReadinessFacade({ run: async () => (runs++, { verdict: "ambiguous", reasons: ["version_unknown"] }) });
+    const facade = createCodexReadinessFacade({ run: async () => (runs++, { verdict: "unavailable", reasons: ["version_unknown"] }) });
     await facade(input);
     await facade(input);
     expect(runs).toBe(2);
@@ -287,12 +286,12 @@ describe("codex readiness facade", () => {
   it("cancelAll aborts a running check (ambiguous, not cached) and refuses later ones", async () => {
     const facade = createCodexReadinessFacade({
       run: (_i, signal) =>
-        new Promise((resolve) => signal.addEventListener("abort", () => resolve({ verdict: "ambiguous", reasons: ["internal: readiness cancelled"], version: "0.155.1" }))),
+        new Promise((resolve) => signal.addEventListener("abort", () => resolve({ verdict: "unavailable", reasons: ["internal: readiness cancelled"], version: "0.155.1" }))),
     });
     const p = facade(input);
     facade.cancelAll();
-    expect(await p).toMatchObject({ verdict: "ambiguous" });
-    expect(await facade(input)).toEqual({ verdict: "ambiguous", reasons: ["internal: readiness cancelled"] });
+    expect(await p).toMatchObject({ verdict: "unavailable" });
+    expect(await facade(input)).toEqual({ verdict: "unavailable", reasons: ["internal: readiness cancelled"] });
     expect(facade.runs).toBe(1);
   });
 
@@ -300,6 +299,6 @@ describe("codex readiness facade", () => {
     const b = box();
     writeFileSync(b.codexPath, `#!/bin/sh\ncase "$1" in\n  --version) echo "codex-cli 0.155.1" ;;\n  login) echo "Not logged in" >&2; exit 1 ;;\nesac\n`, { mode: 0o755 });
     const facade = createCodexReadinessFacade();
-    expect(await facade({ home: b.scoutHome, parentEnv: b.env, codexPath: b.codexPath, model: "gpt-6-sol" })).toEqual({ verdict: "ambiguous", reasons: ["not_chatgpt"], version: "0.155.1" });
+    expect(await facade({ home: b.scoutHome, parentEnv: b.env, codexPath: b.codexPath, model: "gpt-6-sol" })).toEqual({ verdict: "unavailable", reasons: ["not_logged_in"], version: "0.155.1" });
   });
 });

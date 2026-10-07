@@ -153,7 +153,7 @@ async function makeHome(prefix, { browserContext = true, destinations = [HOSTNAM
   writeFileSync(claudePath, `#!/bin/sh\nFAKE_MODE="$(cat '${home}/fake-mode')" FAKE_VERSION=2.1.286 FAKE_LOG='${home}/fake.log' exec '${process.execPath}' '${FAKE_CLAUDE}' "$@"\n`);
   const notesPath = join(home, "bin", "notes");
   writeFileSync(notesPath, `#!/bin/sh\nexec '${process.execPath}' '${FAKE_BACKEND}' --mode "$(cat '${home}/backend-mode')" --log '${home}/notes.log'\n`);
-  // The same fake CLI whose `auth status` reports an API-key login (the billing preflight's refusal).
+  // The same fake CLI whose `auth status` reports an API-key login (a ready agent like any other).
   const apiKeyPath = join(home, "bin", "claude-apikey");
   writeFileSync(apiKeyPath, `#!/bin/sh\nFAKE_MODE=auth-api-key FAKE_VERSION=2.1.286 FAKE_LOG='${home}/fake.log' exec '${process.execPath}' '${FAKE_CLAUDE}' "$@"\n`);
   chmodSync(claudePath, 0o755);
@@ -413,18 +413,16 @@ describe.skipIf(!BUILT)("recommendation jobs e2e: B10 outcomes and B11 click aut
     shown.set("auth", "unavailable/agent_unavailable");
   }, 60_000);
 
-  it("B10 auth denial at the billing preflight (an API-key login): error preflight_failed, the CLI never launched for the job", async () => {
-    // A profile naming a CLI whose `auth status` reports an API-key login: a new environment, a new preflight.
+  it("B10 an API-key login runs the job", async () => {
     const preflights = () => b.diagEvents().filter((e) => e.event === "agent_preflight");
     const n = preflights().length;
     saveProfile(home, profileJson(home, { claude: "claude-apikey" }));
-    await until(() => preflights().slice(n).some((e) => e.verdict !== "subscription"), "the API-key preflight verdict", 20_000);
-    const launches = b.fake().filter((l) => Array.isArray(l.argv)).length;
-    const { result, fin } = await runCase("ok");
-    expect(result).toMatchObject({ status: "error", reason: "preflight_failed" });
-    expect(fin).toMatchObject({ status: "error", reason: "preflight_failed" });
-    expect(b.fake().filter((l) => Array.isArray(l.argv)).length).toBe(launches);
-    shown.set("preflight_denied", "error/preflight_failed");
+    await until(() => preflights().slice(n).some((e) => e.verdict === "ready"), "the API-key readiness verdict", 20_000);
+    // As in B10 success: verification never answers, so the picks stay on their source URLs.
+    const { result, fin } = await runCase("ok", { dns: "hang" });
+    expect(result.status).toBe("ok");
+    expect(fin).toMatchObject({ status: "ok", termination: "completed" });
+    shown.set("api_key_login", "ok");
   }, 60_000);
 
   it("B10 required-tool failure: every call to a required tool errored → error tool_unavailable", async () => {
@@ -512,7 +510,7 @@ describe.skipIf(!BUILT)("recommendation jobs e2e: B10 outcomes and B11 click aut
       failed_targets: "error/agent_failed",
       quota: "unavailable/agent_unavailable",
       auth: "unavailable/agent_unavailable",
-      preflight_denied: "error/preflight_failed",
+      api_key_login: "ok",
       required_tool: "error/tool_unavailable",
       timeout: "error/timeout",
     });

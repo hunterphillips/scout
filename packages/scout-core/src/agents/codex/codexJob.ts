@@ -22,7 +22,7 @@
 // terminates (group SIGTERM, SIGKILL after the grace) and reaps the tree; mapOutcome.ts turns the
 // finished run into an outcome. The run gates are Claude's, in the same order: request, closed,
 // busy, deadline, readiness (wait for a check in flight within the deadline; start one when
-// none ran yet or the last could not read the CLI version), `subscription` only, profile
+// none ran yet or the last could not read the CLI version), `ready` only, profile
 // fingerprint, tool surface, signal, the launch floor.
 //
 // Readiness (readiness.ts): `codex login status` must say ChatGPT, no API key variable may be
@@ -68,9 +68,9 @@ export function buildCodexPrompt(request: string, maxTurns = JOB_MAX_TURNS): str
 
 export type CodexReadinessFn = (input: CodexReadinessInput) => CodexReadinessReport;
 
-/** The readiness verdict: `ok` only for `subscription`; `version` is the CLI version it saw. */
+/** The readiness verdict: `ok` only for `ready`; `version` is the CLI version it saw. */
 export interface CodexReadiness extends AgentReadiness {
-  readonly verdict: "subscription" | "ambiguous" | "unchecked";
+  readonly verdict: "ready" | "unavailable" | "unchecked";
 }
 
 export interface CodexJobDeps {
@@ -133,16 +133,16 @@ export function createCodexJobAdapter(deps: CodexJobDeps): CodexJobAdapter {
   let current: { stop: JobStop; done: Promise<unknown> } | undefined;
   let closed = false;
   let refreshing: Promise<CodexReadiness> | undefined;
-  /** The last check could not read the CLI version and was not subscription: the next job re-runs it. */
+  /** The last check could not read the CLI version and was not ready: the next job re-runs it. */
   let retryReadiness = false;
 
   const input = (): CodexReadinessInput => ({ home: deps.home, parentEnv: deps.parentEnv, codexPath: profile.codexPath, model: profile.model });
 
   function settle(r: CodexReadinessReport | undefined): CodexReadiness {
-    const verdict = r?.verdict === "subscription" ? "subscription" : "ambiguous";
+    const verdict = r?.verdict === "ready" ? "ready" : "unavailable";
     const reasons = r === undefined ? ["internal: readiness failed unexpectedly"] : r.reasons.map((x) => (READINESS_REASON_RE.test(x) ? x : "internal: unrecognized reason"));
     readiness = Object.freeze({
-      ok: verdict === "subscription",
+      ok: verdict === "ready",
       verdict,
       reasons: Object.freeze(reasons),
       ...(r?.version !== undefined ? { version: r.version } : {}),

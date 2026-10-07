@@ -17,7 +17,7 @@
 //   CLI                 the agent profile's CLI (claude or codex) and its `--version` against the
 //                       version Scout's flag set was verified with (advisory); for Codex also
 //                       the private Codex home's auth.json link
-//   billing             the core's last logged billing check verdict, for whichever agent, or
+//   agent               the core's last logged readiness verdict, for whichever agent, or
 //                       "not yet checked"; doctor never runs one (no `codex login status`
 //                       either) and never spends quota
 //   suggestions         config.json `destinations`; empty means off
@@ -46,7 +46,7 @@ import { coreLockHolder, inspectPrivate, lastPreflight } from "./lib/core-state.
 const oct = (m) => (m & 0o777).toString(8).padStart(4, "0");
 const CLI_VERSION_TIMEOUT_MS = 10_000;
 
-export const SECTIONS = ["install record", "Mac app", "core", "Chrome relay", "agent integration", "CLI", "billing", "suggestions"];
+export const SECTIONS = ["install record", "Mac app", "core", "Chrome relay", "agent integration", "CLI", "agent", "suggestions"];
 
 const tryRead = (fn) => {
   try {
@@ -241,17 +241,17 @@ export function runReport(env = process.env, { claudeFallbacks, codexFallbacks, 
   if (claudePath && isExecutableFile(claudePath)) {
     version = claudeVersion(claudePath, env);
     if (!version) add("WARN", "claude --version", `${claudePath} printed no version`);
-    else if (verified && version !== verified) add("WARN", "claude version matches the verified one (advisory)", `${version}; Scout's flag set was verified with ${verified}. Jobs still run; a new version triggers one re-check of billing`);
+    else if (verified && version !== verified) add("WARN", "claude version matches the verified one (advisory)", `${version}; Scout's flag set was verified with ${verified}. Jobs still run; a new version triggers one readiness check`);
     else add("OK", "claude version matches the verified one (advisory)", `${version}${verified ? "" : " (verified version unknown: scout-core not built)"}`);
   } else if (!profile.value) add("WARN", "claude", "not found on PATH, ~/.local/bin, or /opt/homebrew/bin");
   current.summary = codexLine ?? (claudePath ? `${claudePath}${version ? ` ${version}` : ""}${verified ? ` (verified ${verified})` : ""}` : otherAdapter !== null ? `adapter ${otherAdapter}` : "no claude");
 
-  // ---- billing
+  // ---- agent
   const pre = lastPreflight(L.diagnosticsLog);
   const preDetail = [pre?.adapter ? (AGENTS[pre.adapter]?.label ?? pre.adapter) : null, pre?.cliVersion ? `CLI ${pre.cliVersion}` : null].filter(Boolean).join(", ");
-  section("billing", pre ? `last preflight: ${pre.verdict}${preDetail ? ` (${preDetail})` : ""}` : "not yet checked");
-  if (!pre) add("WARN", "billing preflight", "not yet checked: the core runs it before the first job; doctor never runs one");
-  else add(pre.verdict === "subscription" ? "OK" : "WARN", "billing preflight", `${pre.verdict} at ${new Date(pre.t).toISOString()}${pre.verdict === "subscription" ? "" : ": jobs run only on a subscription verdict"}`);
+  section("agent", pre ? `last preflight: ${pre.verdict}${preDetail ? ` (${preDetail})` : ""}` : "not yet checked");
+  if (!pre) add("WARN", "agent readiness", "not yet checked: the core runs it before the first job; doctor never runs one");
+  else add(pre.verdict === "ready" ? "OK" : "WARN", "agent readiness", `${pre.verdict} at ${new Date(pre.t).toISOString()}${pre.verdict === "ready" ? "" : ": agent must be available"}`);
 
   // ---- suggestions
   const destinations = Array.isArray(scout?.destinations) ? scout.destinations : [];

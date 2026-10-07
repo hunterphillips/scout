@@ -88,7 +88,7 @@ describe("ResultsModel (ResultsModelTests.swift)", () => {
 
   it("a failure's caption is its reason alone; the agent is never named", () => {
     expect(resultsSlot({ kind: "unavailable", reason: "agent_unavailable" })).toEqual({ kind: "caption", text: "Your agent is not available." });
-    expect(resultsSlot({ kind: "error", reason: "preflight_failed" })).toEqual({ kind: "caption", text: "The subscription check failed." });
+    expect(resultsSlot({ kind: "error", reason: "preflight_failed" })).toEqual({ kind: "caption", text: "Your agent is not available." });
   });
 
   it("compactLineShowsTheResultsState (the panel header)", () => {
