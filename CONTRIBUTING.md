@@ -69,5 +69,5 @@ under `scripts/lib/` next to `claude-mcp.mjs`, `codex-mcp.mjs` and `pi-mcp.mjs`,
 
 ## Landing changes
 
-Copy-only changes (docs, UI text) go straight to `main`. Code changes go through a pull
-request and must pass CI.
+Changes land on `main`; no pull request or CI wait is required. CI runs on every push to
+`main`, so fix a red run right away.
