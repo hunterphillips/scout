@@ -140,6 +140,22 @@ the current one; `set_agent` writes that adapter's default profile under the cor
 profile lock, keeping any selected tools. The profile watcher then swaps the adapter, the
 same path a hand edit of the file takes.
 
+## Shutdown
+
+Every trigger (stdin EOF, `shutdown`, SIGTERM/SIGINT/SIGHUP) runs one sequence: stop
+accepting, kill the readiness child, abort running jobs (SIGTERM, SIGKILL after 2 s, then
+tracked descendants), then close parsers, sockets and the store. After a 5 s deadline the
+core releases its locks, token and sockets synchronously and kills tracked survivors. Each
+job dir holds a `tree.json` of its processes, so the next start can sweep leftovers.
+
+## Diagnostics
+
+The core appends events to `~/.scout/logs/diagnostics.jsonl`. Fields are scalars only:
+counts, epochs, codes and origins, never page text, titles, full URLs, prompts or tokens.
+The main events are `catalog_discover`, `catalog_cache`, `job_started`, `job_finished`,
+`job_cancelled`, `agent_preflight` and `agent_job` (both with `adapter`),
+`agent_profile_switched`, `jobs_swept` and `capability_decision`.
+
 ## Limits
 
 | Area | Limit |

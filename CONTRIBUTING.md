@@ -30,8 +30,8 @@ To run one package's tests:
 Tests that touch install paths need a throwaway `SCOUT_HOME` and every override set:
 `CHROME_NMH_DIR`, `LAUNCH_AGENTS_DIR`, `SCOUT_APPLICATIONS_DIR`, `SCOUT_SKILLS_ROOT`,
 `SCOUT_CLAUDE_BIN`, `SCOUT_CODEX_BIN`, `SCOUT_CODEX_HOME`, `SCOUT_PI_BIN`,
-`SCOUT_PI_AGENT_DIR`. Setup refuses these overrides
-against the real `~/.scout`.
+`SCOUT_PI_AGENT_DIR`. Setup refuses these overrides against the real `~/.scout`. Tests that
+form real visits also set `SCOUT_DWELL_MS` high, so nothing settles into real fetches.
 
 ## The fake agent CLIs
 

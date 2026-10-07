@@ -2,28 +2,29 @@
 // Scout setup: install the extension key, the Scout config, the agent profile, the native host
 // wrapper, and the Chrome native-messaging manifest. Every file written is recorded in
 // <SCOUT_HOME>/installed.json so uninstall.mjs can remove exactly those.
-// --agent <claude-code|codex> picks the agent Scout's jobs run through when setup writes the
-// agent profile. Without it: Claude Code when `claude` is found, else Codex when `codex` is
-// found, else no profile (a warning names both).
+// --agent <claude-code|codex|pi> picks the agent Scout's jobs run through when setup writes the
+// agent profile. Without it: the first of `claude`, `codex` and `pi` found, else no profile
+// (a warning names them).
 // --agent-integration also registers the `scout` MCP server with that agent's CLI (`claude mcp
-// add` at user scope, or `codex mcp add`) and installs the static scout-integration skill
+// add` at user scope, `codex mcp add` or `pi mcp add`) and installs the static scout-integration skill
 // (lib/agent-integration.mjs). The agent is --agent when given, else the profile's adapter,
 // else Claude Code. Without the flag, setup never touches an agent's configuration.
 // --login-launch [--app <Scout.app>] writes the login LaunchAgent; it starts the installed
 // ~/Applications/Scout.app (`npm run bundle-app -- --install`) unless --app names another bundle.
 // Setup registers nothing for the side panel: the extension bundle carries it.
-// <SCOUT_HOME>/agent-profile.json is written only when absent, with the absolute claude or
-// codex path resolved here, so jobs launched from a Finder-started app never look it up on
+// <SCOUT_HOME>/agent-profile.json is written only when absent, with the absolute CLI path
+// resolved here, so jobs launched from a Finder-started app never look it up on
 // PATH; an existing profile is never rewritten. The Codex profile's adapter id, model and
-// reasoning effort come from the built scout-core (dist/agents/codex/profile.js).
+// reasoning effort, and Pi's thinking level, come from the built scout-core
+// (dist/agents/<adapter>/profile.js).
 //
-// Usage: node scripts/setup.mjs [--dry-run] [--scout-root <dir>] [--agent <claude-code|codex>]
+// Usage: node scripts/setup.mjs [--dry-run] [--scout-root <dir>] [--agent <claude-code|codex|pi>]
 //                               [--agent-integration] [--login-launch [--app <Scout.app>]]
 // Env overrides: SCOUT_HOME, CHROME_NMH_DIR, SCOUT_SKILLS_ROOT, SCOUT_CLAUDE_BIN,
-// SCOUT_CODEX_BIN, SCOUT_CODEX_HOME, LAUNCH_AGENTS_DIR, SCOUT_APPLICATIONS_DIR (see
-// lib/paths.mjs). All but SCOUT_HOME are for test installs: refused with the real ~/.scout,
-// required with a test home where they apply (without SCOUT_CLAUDE_BIN or SCOUT_CODEX_BIN a
-// test install finds no agent and writes no agent profile).
+// SCOUT_CODEX_BIN, SCOUT_CODEX_HOME, SCOUT_PI_BIN, SCOUT_PI_AGENT_DIR, LAUNCH_AGENTS_DIR,
+// SCOUT_APPLICATIONS_DIR (see lib/paths.mjs). All but SCOUT_HOME are for test installs:
+// refused with the real ~/.scout, required with a test home where they apply (without an
+// agent's *_BIN override a test install finds no agent and writes no agent profile).
 // When the Scout home is not the real ~/.scout (SCOUT_HOME or HOME overridden),
 // --scout-root is required so a test install cannot re-key the real built extension.
 // Never touches ~/.rook or any process.
