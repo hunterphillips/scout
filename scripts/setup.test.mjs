@@ -211,7 +211,7 @@ describe("setup", () => {
     const L = layout({ env: fx.env, scoutRoot: fx.scoutRoot });
     expect(existsSync(L.agentProfile)).toBe(false);
     expect(json(L.installed).files.some((f) => f.kind === "agent-profile")).toBe(false);
-    expect(r.text()).toMatch(/no agent profile is written \(the Scout home is not the real ~\/\.scout, so SCOUT_CLAUDE_BIN must name the claude to run; the Scout home is not the real ~\/\.scout, so SCOUT_CODEX_BIN must name the codex to run\)/);
+    expect(r.text()).toMatch(/no agent profile is written \(the Scout home is not the real ~\/\.scout, so SCOUT_CLAUDE_BIN must name the claude to run; the Scout home is not the real ~\/\.scout, so SCOUT_CODEX_BIN must name the codex to run; the Scout home is not the real ~\/\.scout, so SCOUT_PI_BIN must name the pi to run\)/);
   });
 
   it("CHROME_NMH_DIR is required with a test home and refused with the real one", () => {

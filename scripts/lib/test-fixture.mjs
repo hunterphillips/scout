@@ -9,6 +9,7 @@ import { REPO_ROOT } from "./paths.mjs";
 /** The scripted CLI the agent checks use; its `mcp` subcommands copy CLI 2.1.286's messages and `get` layout. */
 const FAKE_CLAUDE = join(REPO_ROOT, "packages", "scout-core", "src", "agents", "claudeCode", "testing", "fake-claude.mjs");
 /** The scripted Codex CLI; its `mcp` subcommands copy CLI 0.155.1's messages and JSON. */
+const FAKE_PI = join(REPO_ROOT, "packages", "scout-core", "src", "agents", "pi", "testing", "fake-pi.mjs");
 const FAKE_CODEX = join(REPO_ROOT, "packages", "scout-core", "src", "agents", "codex", "testing", "fake-codex.mjs");
 
 export const FAKE_MANIFEST = {
@@ -38,6 +39,9 @@ export function makeFixture({ withClaude = true, rootPrefix = "scout setup test 
     join(scoutRoot, "packages/scout-core/dist/agents/codex/profile.js"),
     'export const CODEX_ADAPTER_ID = "codex";\nexport const DEFAULT_CODEX_MODEL = "gpt-6-sol";\nexport const DEFAULT_CODEX_REASONING_EFFORT = "low";\n',
   );
+  mkdirSync(join(scoutRoot, "packages/scout-core/dist/agents/pi"), { recursive: true });
+  writeFileSync(join(scoutRoot, "packages/scout-core/dist/agents/pi/profile.js"), 'export const PI_ADAPTER_ID = "pi";\nexport const DEFAULT_PI_THINKING = "low";\n');
+  writeFileSync(join(scoutRoot, "packages/scout-core/dist/agents/pi/piJob.js"), 'export const VERIFIED_PI_VERSION = "1.0.4";\n');
   writeFileSync(join(scoutRoot, "packages/browser-extension/dist/manifest.json"), JSON.stringify(FAKE_MANIFEST, null, 2) + "\n");
   writeFileSync(join(scoutRoot, "packages/native-host/dist/host.js"), "// fake host\n");
   writeFileSync(join(scoutRoot, "packages/scout-core/dist/main.js"), "// fake core\n");
@@ -164,4 +168,18 @@ export async function exportRealWrappers(scoutHome, skillsRoot, skills = ["pay"]
   await exporter.sync(store.snapshot());
   await store.close();
   return names;
+}
+
+/** A fake Pi CLI whose MCP subcommands use the test agent directory. */
+export function makeFakePi(dir) {
+  mkdirSync(dir, { recursive: true });
+  const path = join(dir, "pi");
+  const log = join(dir, "calls.jsonl");
+  writeFileSync(path, `#!/bin/sh\nFAKE_LOG='${log}' exec '${process.execPath}' '${FAKE_PI}' "$@"\n`);
+  chmodSync(path, 0o755);
+  const entries = () => {
+    try { return readFileSync(log, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line)); }
+    catch { return []; }
+  };
+  return { path, entries, calls: () => entries().map((entry) => entry.argv).filter(Boolean) };
 }

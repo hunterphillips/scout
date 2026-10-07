@@ -12,7 +12,7 @@
 // ignore-term, late-output, flood. hang waits for a stop; ignore-term ignores
 // SIGTERM; late-output writes after agent_settled; flood exceeds the stdout cap.
 
-import { appendFileSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
@@ -59,7 +59,17 @@ if (argv[0] === "--list-models") {
 }
 
 if (argv[0] === "mcp") {
-  log({ sub: true, argv, envKeys });
+  const skills = [];
+  try {
+    for (const dir of readdirSync(join(agentDir, "skills"))) {
+      const text = readFileSync(join(agentDir, "skills", dir, "SKILL.md"), "utf8");
+      const name = /^---\nname: ([^\n]+)\ndescription: ([^\n]+)/.exec(text)?.[1];
+      if (name) skills.push(name);
+    }
+  } catch {
+    // No user skills yet.
+  }
+  log({ sub: true, argv, envKeys, skills });
   const path = join(agentDir, "mcp.json");
   let data = { mcpServers: {} };
   try {
@@ -74,6 +84,7 @@ if (argv[0] === "mcp") {
     writeFileSync(path, JSON.stringify(data));
   } else if (argv[1] === "add") {
     const separator = argv.indexOf("--");
+    if (!argv.includes("--exposure") || argv[argv.indexOf("--exposure") + 1] !== "direct" || separator < 0) process.exit(2);
     data.mcpServers[argv[2]] = {
       command: argv[separator + 1],
       args: argv.slice(separator + 2),
