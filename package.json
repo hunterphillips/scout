@@ -29,7 +29,8 @@
     "setup": "node scripts/setup.mjs",
     "doctor": "node scripts/doctor.mjs",
     "uninstall": "node scripts/uninstall.mjs",
-    "bundle-app": "node scripts/bundle-app.mjs"
+    "bundle-app": "node scripts/bundle-app.mjs",
+    "reload": "node scripts/reload.mjs"
   },
   "devDependencies": {
     "@puppeteer/browsers": "^3.2.3",

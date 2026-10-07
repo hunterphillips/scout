@@ -330,7 +330,9 @@ Run from the repo root:
 - `npm run setup [--dry-run] [--scout-root <dir>] [--agent <claude-code|codex|pi>] [--agent-integration] [--login-launch [--app <Scout.app>]]`,
   `npm run doctor [-- --verbose]`, `npm run uninstall [--yes] [--include-key] [--dry-run]`
 - `npm run bundle-app -- [--out <dir>] [--dry-run] [--binary <path>] [--install]` (a
-  windowless `Scout.app`; `--install` → `~/Applications/Scout.app`); `npm run test:swift`;
+  windowless `Scout.app`; `--install` → `~/Applications/Scout.app`); `npm run reload [--
+  --no-build]` (macOS: build, quit and reopen the installed app, wait for the core);
+  `npm run test:swift`;
   the side-panel e2e is opt-in locally:
   `SCOUT_E2E_CHROME=1 SCOUT_E2E_BROWSERS=<dir>`; `SCOUT_BUNDLE_SWIFT=1` opts the
   real bundle build into the scripts tests

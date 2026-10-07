@@ -77,7 +77,8 @@ run out of `~/.scout`.
    `npm run build`.
 4. `npm run bundle-app -- --install` builds `Scout.app` and copies it to
    `~/Applications`. Open it from there; it appears in the menu bar only. To start it at
-   login, run `npm run setup -- --login-launch`.
+   login, run `npm run setup -- --login-launch`. After a code change, `npm run reload`
+   rebuilds and restarts it (`-- --no-build` only restarts).
 5. Click the Scout toolbar button to open the side panel. In **Sites**, press **Allow**
    next to a site or type a host. Scout asks Chrome for that one site only. Clicking the
    button again closes the panel.
