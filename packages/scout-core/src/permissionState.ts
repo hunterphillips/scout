@@ -1,12 +1,11 @@
 // What the live bridge connection says Chrome lets Scout see: the exact origins the user
-// granted and the popup's GitHub-capture setting. One snapshot at a time, replaced
+// granted (granting an origin also allows reading its pages). One snapshot at a time, replaced
 // wholesale by each valid `permissions` observation; there is no other grant stream.
 //
 // Rules:
 // - State belongs to one connection. The coordinator clears it when a new sensor attaches
 //   and when the live one disconnects, so grants never carry over to a reconnect.
-// - Before the first snapshot on a connection nothing is permitted and GitHub capture is
-//   off. Focus is still accepted then (it updates Chrome focus), but it cannot form a
+// - Before the first snapshot on a connection nothing is permitted. Focus is still accepted then (it updates Chrome focus), but it cannot form a
 //   visit, and page text is refused. An old extension whose snapshot fails validation
 //   therefore never gets past this point.
 // - A snapshot whose revision is lower than the current one is dropped
@@ -23,8 +22,6 @@
 import type { FocusObservation, PermissionsObservation } from "@scout/contracts";
 import type { Diagnostics } from "./diagnostics.js";
 
-export const GITHUB_ORIGIN = "https://github.com";
-
 export interface PermissionState {
   /** Replace the state with `snapshot`, or drop it if older. True when applied. */
   applySnapshot(snapshot: PermissionsObservation): boolean;
@@ -38,16 +35,17 @@ export interface PermissionState {
   readonly received: boolean;
   /** The current snapshot's revision, or null before the first one. */
   readonly revision: number | null;
-  /** The popup's GitHub-capture setting from the current snapshot; false before one. */
-  readonly githubCapture: boolean;
+  /** The current snapshot's permitted origins (`https://host`); empty before one. */
+  readonly origins: ReadonlySet<string>;
 }
 
 interface Snapshot {
   revision: number;
   at: number;
   granted: ReadonlySet<string>;
-  githubCapture: boolean;
 }
+
+const NO_ORIGINS: ReadonlySet<string> = new Set();
 
 export function createPermissionState(options: { diagnostics?: Diagnostics } = {}): PermissionState {
   const { diagnostics } = options;
@@ -60,8 +58,8 @@ export function createPermissionState(options: { diagnostics?: Diagnostics } = {
     get revision() {
       return current?.revision ?? null;
     },
-    get githubCapture() {
-      return current?.githubCapture ?? false;
+    get origins() {
+      return current?.granted ?? NO_ORIGINS;
     },
     applySnapshot(snapshot) {
       if (current !== null && snapshot.revision < current.revision) {
@@ -72,13 +70,8 @@ export function createPermissionState(options: { diagnostics?: Diagnostics } = {
         revision: snapshot.revision,
         at: snapshot.at,
         granted: new Set(snapshot.granted.map(patternToOrigin)),
-        githubCapture: snapshot.githubCapture,
       };
-      diagnostics?.event("permissions", {
-        revision: snapshot.revision,
-        granted: current.granted.size,
-        githubCapture: snapshot.githubCapture,
-      });
+      diagnostics?.event("permissions", { revision: snapshot.revision, granted: current.granted.size });
       return true;
     },
     acceptsFocus(focus) {

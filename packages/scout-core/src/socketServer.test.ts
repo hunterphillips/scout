@@ -283,7 +283,7 @@ describe("socketServer", () => {
     expect(events).toContainEqual({ name: "bridge_rejected", fields: { conn: 1, code: "invalid-json" } });
   });
 
-  it.each([1, 2, 4])("answers a protocol-%i hello with upgrade_required, then closes", async (protocol) => {
+  it.each([1, 2, 3, 5])("answers a protocol-%i hello with upgrade_required, then closes", async (protocol) => {
     const clients: SocketClient[] = [];
     const { server: s, events } = await start((cl) => clients.push(cl));
     const c = await rawClient(s.socketPath);
@@ -300,7 +300,7 @@ describe("socketServer", () => {
     expect(events).toContainEqual({ name: "bridge_rejected", fields: { conn: 1, code: "upgrade_required", protocol } });
   });
 
-  it("a protocol-3 hello reaches onClient", async () => {
+  it("a protocol-4 hello reaches onClient", async () => {
     const clients: SocketClient[] = [];
     const { server: s } = await start((cl) => clients.push(cl));
     const c = await rawClient(s.socketPath);
@@ -356,8 +356,8 @@ describe("socketServer", () => {
       at: 1,
       tabId: 3,
       documentId: "d",
-      url: "https://github.com/o/r/issues/1",
-      source: "github_issue",
+      url: "https://linear.app/acme/issue/ENG-1",
+      source: "page",
       title: "t",
       text,
       truncated: false,

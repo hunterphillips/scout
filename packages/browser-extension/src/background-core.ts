@@ -167,7 +167,6 @@ export function createBackground(ch: typeof chrome, deps: BackgroundDeps = {}): 
       revision,
       at: clock.now(),
       granted: [...state.granted],
-      githubCapture: githubCaptureOn(state),
     });
     if (!ok) return;
     state.permissionsRevision = revision;

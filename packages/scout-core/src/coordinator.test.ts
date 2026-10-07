@@ -26,8 +26,8 @@ import type { SocketClient } from "./socketServer.js";
 const STDIO: PanelSink = { id: "stdio", kind: "stdio", send: () => {} };
 
 const STRIPE = "https://docs.stripe.com/payments/checkout";
-const ISSUE = "https://github.com/o/r/issues/1";
-const DEFAULT_GRANTS = ["https://docs.stripe.com/*", "https://www.peakdesign.com/*", "https://github.com/*"];
+const ISSUE = "https://linear.app/acme/issue/ENG-42/checkout-fails";
+const DEFAULT_GRANTS = ["https://docs.stripe.com/*", "https://www.peakdesign.com/*", "https://linear.app/*"];
 
 /** One-shot timers on a manual clock. */
 function fakeTimers() {
@@ -194,7 +194,7 @@ function setup(extra: Partial<CoordinatorOptions> = {}) {
     tabId: 20,
     documentId: "doc-issue",
     url: ISSUE,
-    source: "github_issue",
+    source: "page",
     title: "An issue",
     text: "Issue body",
     truncated: false,
@@ -210,9 +210,9 @@ function setup(extra: Partial<CoordinatorOptions> = {}) {
     return c;
   };
   /** A permissions snapshot with the next revision. */
-  const grant = (c: ReturnType<typeof attach>, granted: string[] = DEFAULT_GRANTS, githubCapture = true) =>
-    c.observe({ kind: "permissions", revision: ++permissionsRevision, at: clock.t, granted, githubCapture });
-  /** Attach a sensor and send the usual snapshot (Stripe, Peak Design, GitHub; GitHub capture on). */
+  const grant = (c: ReturnType<typeof attach>, granted: string[] = DEFAULT_GRANTS) =>
+    c.observe({ kind: "permissions", revision: ++permissionsRevision, at: clock.t, granted });
+  /** Attach a sensor and send the usual snapshot (Stripe, Peak Design, Linear). */
   const connect = (id = 1) => {
     const c = attach(id);
     grant(c);
@@ -355,7 +355,7 @@ describe("coordinator", () => {
     expect(coordinator.activity.revision).toBe(1);
     expect(acks(c)).toEqual([{ type: "ack", seq: obs.seq }]);
     expect(events.find((e) => e.name === "activity_accepted")?.fields).toEqual({ bytes: 10, truncated: false, duplicate: false });
-    expect(coordinator.activity.entries()).toMatchObject([{ url: ISSUE, title: "An issue", text: "Issue body", source: "github_issue" }]);
+    expect(coordinator.activity.entries()).toMatchObject([{ url: ISSUE, title: "An issue", text: "Issue body", source: "page" }]);
   });
 
   it("new visits carry the bumped contextRevision", () => {
@@ -416,13 +416,13 @@ describe("coordinator", () => {
     expect(coordinator.activity.revision).toBe(1);
   });
 
-  it("page_text whose URL is not the focused tab's issue is dropped as url-mismatch", () => {
+  it("page_text whose URL is not the focused tab's page is dropped as url-mismatch", () => {
     const { coordinator, events, focus, pageText, chrome, connect, acks } = setup();
     const c = connect();
     chrome();
-    c.observe(focus({ tabId: 20, url: "https://github.com/o/r/issues/2", documentId: "doc-issue" }));
+    c.observe(focus({ tabId: 20, url: "https://linear.app/acme/issue/ENG-43", documentId: "doc-issue" }));
     c.observe(pageText());
-    c.observe(focus({ tabId: 20, url: "https://github.com/o/r/pulls", documentId: "doc-issue" }));
+    c.observe(focus({ tabId: 20, url: `${ISSUE}?view=comments`, documentId: "doc-issue" }));
     c.observe(pageText());
     expect(acks(c)).toEqual([]);
     expect(coordinator.activity.revision).toBe(0);
@@ -432,11 +432,11 @@ describe("coordinator", () => {
     ]);
   });
 
-  it("the URL gate ignores query, fragment, trailing slash, and owner/repo case", () => {
+  it("the URL gate ignores the fragment and the host's case", () => {
     const { coordinator, focus, pageText, chrome, connect, acks } = setup();
     const c = connect();
     chrome();
-    c.observe(focus({ tabId: 20, url: "https://github.com/O/R/issues/1/?tab=x#issuecomment-5", documentId: "doc-issue" }));
+    c.observe(focus({ tabId: 20, url: `${ISSUE.replace("linear.app", "Linear.App")}#comment-5`, documentId: "doc-issue" }));
     const obs = pageText();
     c.observe(obs);
     expect(acks(c)).toEqual([{ type: "ack", seq: obs.seq }]);
@@ -537,20 +537,20 @@ describe("coordinator capture policy and permissions", () => {
     expect(c.sent).toEqual([{ type: "capture_policy", revision: 0, paused: true, captureEnabled: false }]);
   });
 
-  it("enables capture only for a snapshot with the GitHub toggle and the GitHub grant, and only on change", () => {
+  it("enables capture only for a snapshot that grants at least one origin, and only on change", () => {
     const { attach, grant, policies } = setup();
     const c = attach();
-    grant(c, ["https://docs.stripe.com/*"], true);
-    grant(c, ["https://github.com/*"], false);
+    grant(c, []);
     expect(policies(c)).toHaveLength(1);
-    grant(c, ["https://github.com/*"], true);
+    grant(c, ["https://docs.stripe.com/*"]);
     expect(policies(c)).toEqual([
       { type: "capture_policy", revision: 0, paused: false, captureEnabled: false },
       { type: "capture_policy", revision: 1, paused: false, captureEnabled: true },
     ]);
-    grant(c, ["https://github.com/*", "https://docs.stripe.com/*"], true);
+    grant(c, ["https://linear.app/*", "https://docs.stripe.com/*"]);
+    grant(c, ["https://linear.app/*"]);
     expect(policies(c)).toHaveLength(2);
-    grant(c, ["https://docs.stripe.com/*"], true);
+    grant(c, []);
     expect(policies(c).at(-1)).toEqual({ type: "capture_policy", revision: 2, paused: false, captureEnabled: false });
   });
 
@@ -594,20 +594,20 @@ describe("coordinator capture policy and permissions", () => {
     expect(events.filter((e) => e.name === "page_text_dropped").map((e) => e.fields.reason)).toEqual(["no_permissions_snapshot"]);
   });
 
-  it("page_text is refused when the snapshot turns GitHub capture off or lacks the GitHub grant", () => {
+  it("page_text is refused when the snapshot grants no origin, or not the page's own", () => {
     const { coordinator, events, focus, pageText, chrome, attach, grant, acks } = setup();
     const c = attach();
     chrome();
-    grant(c, ["https://github.com/*"], false);
+    grant(c, []);
     c.observe(focus({ tabId: 20, url: ISSUE, documentId: "doc-issue" }));
     c.observe(pageText());
-    grant(c, ["https://docs.stripe.com/*"], true);
+    grant(c, ["https://docs.stripe.com/*"]);
     c.observe(pageText());
     expect(acks(c)).toEqual([]);
     expect(coordinator.activity.revision).toBe(0);
     expect(events.filter((e) => e.name === "page_text_dropped").map((e) => e.fields.reason)).toEqual([
       "capture_disabled",
-      "capture_disabled",
+      "origin_not_permitted",
     ]);
   });
 
@@ -629,7 +629,7 @@ describe("coordinator capture policy and permissions", () => {
     c.observe(focus());
     expect(coordinator.tracker.current()).not.toBeNull();
     advance(DWELL_MS - 1);
-    grant(c, ["https://github.com/*"]);
+    grant(c, ["https://linear.app/*"]);
     expect(coordinator.tracker.current()).toBeNull();
     advance(DWELL_MS);
     expect(events.filter((e) => e.name === "dwell_cancelled").map((e) => e.fields.reason)).toEqual(["permission_lost"]);
@@ -640,7 +640,7 @@ describe("coordinator capture policy and permissions", () => {
     const { coordinator, events, focus, chrome, attach } = setup();
     const c = attach();
     chrome();
-    c.observe({ kind: "permissions", revision: 10, at: 1, granted: ["https://docs.stripe.com/*"], githubCapture: false });
+    c.observe({ kind: "permissions", revision: 10, at: 1, granted: ["https://docs.stripe.com/*"] });
     c.observe(focus({ permissionsRevision: 9 }));
     expect(coordinator.tracker.current()).toBeNull();
     expect(events.at(-1)).toMatchObject({ name: "focus_dropped", fields: { reason: "stale_permissions_revision" } });
@@ -652,12 +652,12 @@ describe("coordinator capture policy and permissions", () => {
     const { coordinator, events, focus, chrome, attach } = setup();
     const c = attach();
     chrome();
-    c.observe({ kind: "permissions", revision: 10, at: 1, granted: ["https://docs.stripe.com/*"], githubCapture: false });
+    c.observe({ kind: "permissions", revision: 10, at: 1, granted: ["https://docs.stripe.com/*"] });
     // Snapshot 11 revoked Stripe but was lost on the way; the focus sent under it must not use grant 10.
     c.observe(focus({ permissionsRevision: 11 }));
     expect(coordinator.tracker.current()).toBeNull();
     expect(events.at(-1)).toMatchObject({ name: "focus_dropped", fields: { reason: "permissions_ahead" } });
-    c.observe({ kind: "permissions", revision: 11, at: 1, granted: ["https://docs.stripe.com/*"], githubCapture: false });
+    c.observe({ kind: "permissions", revision: 11, at: 1, granted: ["https://docs.stripe.com/*"] });
     expect(coordinator.tracker.current()).toBeNull();
     c.observe(focus({ permissionsRevision: 11 }));
     expect(coordinator.tracker.current()).toMatchObject({ origin: "https://docs.stripe.com" });
@@ -667,9 +667,9 @@ describe("coordinator capture policy and permissions", () => {
     const { coordinator, focus, chrome, attach } = setup();
     const c = attach();
     chrome();
-    c.observe({ kind: "permissions", revision: 10, at: 1, granted: ["https://docs.stripe.com/*"], githubCapture: false });
+    c.observe({ kind: "permissions", revision: 10, at: 1, granted: ["https://docs.stripe.com/*"] });
     c.observe(focus());
-    c.observe({ kind: "permissions", revision: 9, at: 1, granted: [], githubCapture: false });
+    c.observe({ kind: "permissions", revision: 9, at: 1, granted: [] });
     expect(coordinator.tracker.current()).not.toBeNull();
   });
 
@@ -695,10 +695,10 @@ describe("coordinator capture policy and permissions", () => {
   it("a disconnect forgets the grants", () => {
     const { coordinator, connect } = setup();
     const c = connect();
-    expect(coordinator.permissions.isPermitted("https://github.com")).toBe(true);
+    expect(coordinator.permissions.isPermitted("https://linear.app")).toBe(true);
     c.disconnect();
     expect(coordinator.permissions.received).toBe(false);
-    expect(coordinator.permissions.isPermitted("https://github.com")).toBe(false);
+    expect(coordinator.permissions.isPermitted("https://linear.app")).toBe(false);
   });
 });
 
@@ -734,7 +734,7 @@ describe("coordinator dwell and discovery", () => {
     ["navigation", (s) => s.c.observe(s.focus({ url: "https://docs.stripe.com/billing" })), "visit_changed"],
     ["the visit ending (an unpermitted page)", (s) => s.c.observe(s.focus({ tabId: 11, url: "https://example.com/" })), "visit_ended"],
     ["another app in front", (s) => s.coordinator.handleNativeCommand({ type: "frontmost", bundleId: "com.apple.Terminal", at: 1 }, STDIO), "visit_suspended"],
-    ["permission loss", (s) => s.grant(s.c, ["https://github.com/*"]), "permission_lost"],
+    ["permission loss", (s) => s.grant(s.c, ["https://linear.app/*"]), "permission_lost"],
     ["disconnect", (s) => s.c.disconnect(), "disconnected"],
     ["shutdown", (s) => s.coordinator.stop(), "stopped"],
   ])("%s cancels the dwell", (_name, act, reason) => {
@@ -807,7 +807,7 @@ describe("coordinator dwell and discovery", () => {
 
   it.each<[string, (s: ReturnType<typeof visiting>) => void, string]>([
     ["the visit changes", (s) => s.c.observe(s.focus({ url: "https://docs.stripe.com/billing" })), "visit_changed"],
-    ["the origin loses its grant", (s) => s.grant(s.c, ["https://github.com/*"]), "permission_lost"],
+    ["the origin loses its grant", (s) => s.grant(s.c, ["https://linear.app/*"]), "permission_lost"],
     ["Scout is paused", (s) => s.coordinator.handleNativeCommand({ type: "pause" }, STDIO), "paused"],
     ["the coordinator stops", (s) => s.coordinator.stop(), "stopped"],
     ["the connection closes", (s) => s.c.disconnect(), "disconnected"],
@@ -858,7 +858,7 @@ describe("coordinator dwell and discovery", () => {
 
   it.each<[string, (s: ReturnType<typeof setup>, c: ReturnType<ReturnType<typeof setup>["connect"]>) => void, string]>([
     ["pause", (s) => s.coordinator.handleNativeCommand({ type: "pause" }, STDIO), "paused"],
-    ["permission loss", (s, c) => s.grant(c, ["https://github.com/*"]), "permission_lost"],
+    ["permission loss", (s, c) => s.grant(c, ["https://linear.app/*"]), "permission_lost"],
     ["disconnect", (_s, c) => c.disconnect(), "disconnected"],
     ["a new sensor", (s) => void s.connect(2), "disconnected"],
     ["stop", (s) => s.coordinator.stop(), "stopped"],
@@ -953,17 +953,17 @@ describe("coordinator dwell and discovery", () => {
     s.advance(DWELL_MS);
     s.c.observe(s.focus({ url: "https://www.peakdesign.com/a" }));
     s.advance(DWELL_MS);
-    s.c.observe(s.focus({ url: "https://github.com/o/r" }));
+    s.c.observe(s.focus({ url: "https://linear.app/o/r" }));
     s.advance(DWELL_MS);
-    expect(s.passes.map((p) => p.origin)).toEqual(["https://docs.stripe.com", "https://www.peakdesign.com", "https://github.com"]);
+    expect(s.passes.map((p) => p.origin)).toEqual(["https://docs.stripe.com", "https://www.peakdesign.com", "https://linear.app"]);
     expect(s.sessions.map((x) => [x.origin, x.cancels])).toEqual([
       ["https://docs.stripe.com", 1],
       ["https://www.peakdesign.com", 1],
-      ["https://github.com", 0],
+      ["https://linear.app", 0],
     ]);
     for (const p of s.passes) p.discover.resolve(discoveryFor(p.origin));
     await flush();
-    expect(s.ingests.map((i) => i.origin)).toEqual(["https://github.com"]);
+    expect(s.ingests.map((i) => i.origin)).toEqual(["https://linear.app"]);
     expect(s.events.filter((e) => e.name === "discovery_discarded").map((e) => [e.fields.origin, e.fields.reason])).toEqual([
       ["https://docs.stripe.com", "visit_changed"],
       ["https://www.peakdesign.com", "visit_changed"],
@@ -1061,7 +1061,7 @@ describe("coordinator panel wiring", () => {
     c.observe(s.focus());
     expect(s.changes()).toBeGreaterThan(afterConnect);
     const beforeLoss = s.changes();
-    s.grant(c, ["https://github.com/*"]);
+    s.grant(c, ["https://linear.app/*"]);
     expect(s.changes()).toBeGreaterThan(beforeLoss);
     const beforeDisconnect = s.changes();
     c.disconnect();
@@ -1102,6 +1102,7 @@ describe("coordinator: page_text into the activity store", () => {
         return real.revision;
       },
       clear: () => real.clear(),
+      removeOrigin: (origin) => real.removeOrigin(origin),
       prune: () => real.prune(),
     };
     return store;
@@ -1133,8 +1134,8 @@ describe("coordinator: page_text into the activity store", () => {
     c.observe(missing);
     // Capture off then on again: the policy moves on, and text stamped with the old revision is refused.
     const stale = pageText();
-    grant(c, ["https://github.com/*"], false);
-    grant(c, ["https://github.com/*"], true);
+    grant(c, []);
+    grant(c, ["https://linear.app/*"]);
     c.observe(stale);
     expect(acks(c)).toEqual([]);
     expect(coordinator.activity.revision).toBe(0);
@@ -1161,7 +1162,7 @@ describe("coordinator: page_text into the activity store", () => {
     expect(coordinator.activity.entries()).toHaveLength(1);
   });
 
-  it("logs no text, title or issue URL", () => {
+  it("logs no text, title or page URL", () => {
     const { events, focus, pageText, chrome, connect } = setup();
     const c = connect();
     chrome();
@@ -1170,60 +1171,63 @@ describe("coordinator: page_text into the activity store", () => {
     const logged = JSON.stringify(events);
     expect(logged).not.toContain("Issue body");
     expect(logged).not.toContain("An issue");
-    expect(logged).not.toContain("issues/1");
+    expect(logged).not.toContain("ENG-42");
   });
 
-  /** A connected sensor with one issue in the store. */
+  /** A connected sensor with two pages in the store: the Linear issue, then a Stripe page. */
   function withIssue(extra: Partial<CoordinatorOptions> = {}) {
     const s = setup(extra);
     const c = s.connect();
     s.chrome();
     c.observe(s.focus({ tabId: 20, url: ISSUE, documentId: "doc-issue" }));
     c.observe(s.pageText());
-    expect(s.coordinator.activity.entries()).toHaveLength(1);
+    c.observe(s.focus());
+    c.observe(s.pageText({ tabId: 10, documentId: "doc-a", url: STRIPE }));
+    expect(s.coordinator.activity.entries().map((e) => e.origin)).toEqual(["https://docs.stripe.com", "https://linear.app"]);
     return { ...s, c };
   }
+  const origins = (coordinator: { activity: ActivityStore }) => coordinator.activity.entries().map((e) => e.origin);
   const cleared = (events: Array<{ name: string; fields: Record<string, unknown> }>) =>
     events.filter((e) => e.name === "activity_cleared").map((e) => e.fields.reason);
 
-  it("clears captured text when GitHub capture is turned off", () => {
+  it("removes a site's pages when its grant is lost, and keeps the others'", () => {
     const { coordinator, events, grant, c } = withIssue();
-    grant(c, DEFAULT_GRANTS, false);
-    expect(coordinator.activity.entries()).toEqual([]);
-    expect(cleared(events)).toEqual(["capture_off"]);
+    grant(c, ["https://docs.stripe.com/*", "https://www.peakdesign.com/*"]);
+    expect(origins(coordinator)).toEqual(["https://docs.stripe.com"]);
+    expect(events.filter((e) => e.name === "activity_cleared").map((e) => e.fields)).toEqual([{ reason: "grant_lost", origins: 1 }]);
   });
 
-  it("clears captured text when the GitHub grant is lost", () => {
+  it("clears every page when the snapshot grants no site", () => {
     const { coordinator, events, grant, c } = withIssue();
-    grant(c, ["https://docs.stripe.com/*"], true);
+    grant(c, []);
     expect(coordinator.activity.entries()).toEqual([]);
-    expect(cleared(events)).toEqual(["grant_lost"]);
+    expect(cleared(events)).toEqual(["no_sites"]);
   });
 
-  it("keeps captured text on a snapshot that still allows capture, on pause, and on disconnect", () => {
+  it("keeps captured text on a snapshot that still grants its sites, on pause, and on disconnect", () => {
     const { coordinator, events, grant, c, attach } = withIssue();
-    grant(c, ["https://github.com/*"], true);
+    grant(c, ["https://linear.app/*", "https://docs.stripe.com/*"]);
     coordinator.handleNativeCommand({ type: "pause" }, STDIO);
     coordinator.handleNativeCommand({ type: "resume" }, STDIO);
     c.disconnect();
-    expect(coordinator.activity.entries()).toHaveLength(1);
-    grant(attach(2), DEFAULT_GRANTS, true);
-    expect(coordinator.activity.entries()).toHaveLength(1);
+    expect(coordinator.activity.entries()).toHaveLength(2);
+    grant(attach(2), DEFAULT_GRANTS);
+    expect(coordinator.activity.entries()).toHaveLength(2);
     expect(cleared(events)).toEqual([]);
   });
 
-  it("clears captured text when the reconnect snapshot arrives with capture already off", () => {
+  it("removes a site's pages when the reconnect snapshot arrives without its grant", () => {
     const { coordinator, events, grant, c, attach } = withIssue();
     c.disconnect();
-    expect(coordinator.activity.entries()).toHaveLength(1);
-    grant(attach(2), DEFAULT_GRANTS, false);
-    expect(coordinator.activity.entries()).toEqual([]);
-    expect(cleared(events)).toEqual(["capture_off"]);
+    expect(coordinator.activity.entries()).toHaveLength(2);
+    grant(attach(2), ["https://linear.app/*"]);
+    expect(origins(coordinator)).toEqual(["https://linear.app"]);
+    expect(cleared(events)).toEqual(["grant_lost"]);
   });
 
-  it("reports nothing when capture is off and the store is already empty", () => {
+  it("reports nothing when no site is granted and the store is already empty", () => {
     const { events, grant, connect } = setup();
-    grant(connect(), DEFAULT_GRANTS, false);
+    grant(connect(), []);
     expect(cleared(events)).toEqual([]);
   });
 
@@ -1298,7 +1302,7 @@ describe("coordinator results", () => {
   it("losing the origin's grant clears the result", () => {
     const s = withResults();
     s.publish();
-    s.grant(s.c, ["https://github.com/*"]);
+    s.grant(s.c, ["https://linear.app/*"]);
     expect(s.results.current()).toBeNull();
     expect(s.panel.at(-1)).toMatchObject({ type: "state", status: "idle", permitted: false });
   });
@@ -1474,7 +1478,7 @@ describe("coordinator: recommendation job hooks", () => {
     const before = s.coordinator.activity.revision;
     s.clock.t += ACTIVITY_TTL_MS + 1;
     expect(s.coordinator.activity.revision).toBeGreaterThan(before);
-    s.grant(s.c, DEFAULT_GRANTS, false);
+    s.grant(s.c, []);
     expect(s.calls.filter((c) => c[0] === "onActivityAccepted")).toHaveLength(1);
   });
 

@@ -159,7 +159,7 @@ function coreUnderLoad() {
   });
   const s = sensor();
   coordinator.attachClient(s.client);
-  s.observe({ kind: "permissions", revision: 1, at: Date.now(), granted: [`${ORIGIN}/*`], githubCapture: false });
+  s.observe({ kind: "permissions", revision: 1, at: Date.now(), granted: [`${ORIGIN}/*`] });
   coordinator.handleNativeCommand({ type: "frontmost", bundleId: "com.google.Chrome", at: Date.now() }, STDIO);
   let seq = 0;
   const focus = (tabId: number, path: string) =>

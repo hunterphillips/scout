@@ -81,7 +81,7 @@ export async function startFixtureCore(dir: string, seed: FixtureSeed = {}): Pro
     token: FIXTURE_TOKEN,
     browserContextGranted: true,
     currentSite: { origin: FIXTURE_ORIGIN, url: `${FIXTURE_ORIGIN}/billing`, title: "Billing docs", visitEpoch: 7 },
-    activity: [{ origin: "https://github.com", url: "https://github.com/o/r/issues/1", observedAt: 1, title: "Issue 1", text: "metered billing", textTruncated: false }],
+    activity: [{ origin: "https://linear.app", url: "https://linear.app/acme/issue/ENG-1", observedAt: 1, title: "Issue 1", text: "metered billing", textTruncated: false }],
     ...seed,
   });
   const socketPath = join(dir, "agent.sock");

@@ -160,7 +160,7 @@ let pageSeq = 0;
 /** Accept one GitHub issue observation into the live activity store. */
 function observe(n: number, text = `Body ${n}`) {
   return activity.accept(
-    { kind: "page_text", seq: ++pageSeq, at: now, tabId: 1, documentId: "d", url: `https://github.com/o/r/issues/${n}`, source: "github_issue", title: `Issue ${n}`, text, truncated: false, policyRevision: 0 },
+    { kind: "page_text", seq: ++pageSeq, at: now, tabId: 1, documentId: "d", url: `https://linear.app/acme/issue/ENG-${n}`, source: "page", title: `Issue ${n}`, text, truncated: false, policyRevision: 0 },
     "conn",
   );
 }
@@ -648,8 +648,8 @@ describe("recent_activity (interactive)", () => {
     view = { ...view, paused: false };
     expect(ok(conn, "recent_activity", {})).toEqual({
       entries: [
-        { origin: "https://github.com", url: "https://github.com/o/r/issues/2", observedAt: now, title: "Issue 2", text: "Body 2", textTruncated: false },
-        { origin: "https://github.com", url: "https://github.com/o/r/issues/1", observedAt: now - 1, title: "Issue 1", text: "Body 1", textTruncated: false },
+        { origin: "https://linear.app", url: "https://linear.app/acme/issue/ENG-2", observedAt: now, title: "Issue 2", text: "Body 2", textTruncated: false },
+        { origin: "https://linear.app", url: "https://linear.app/acme/issue/ENG-1", observedAt: now - 1, title: "Issue 1", text: "Body 1", textTruncated: false },
       ],
     });
   });

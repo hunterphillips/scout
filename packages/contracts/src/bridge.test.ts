@@ -16,7 +16,7 @@ import {
 } from "./index.js";
 import { MAX_FRAME_TO_CHROME, MAX_PANEL_FRAME_BYTES } from "./frame.js";
 
-// Bridge protocol 3 fixtures (packages/contracts/fixtures/bridge/), the frames the browser side
+// Bridge protocol 4 fixtures (packages/contracts/fixtures/bridge/), the frames the browser side
 // panel builds against: `to-core.*` must parse as a BridgeFrame, `to-chrome.*` as a
 // ToChromeFrame, and `refused.*` as neither. The panel fixtures (fixtures/panel/) are checked
 // wrapped in bridge frames too.
@@ -56,11 +56,11 @@ const uncovered = (schema: z.ZodType, values: unknown[]): string[] =>
 
 const bytes = (v: unknown): number => Buffer.byteLength(JSON.stringify(v), "utf8");
 
-describe("bridge protocol 3", () => {
-  it("is protocol 3, and a protocol-2 hello is not a bridge frame (the core answers it upgrade_required)", () => {
-    expect(BRIDGE_PROTOCOL).toBe(3);
-    expect(HelloSchema.parse({ type: "hello", protocol: 3 })).toEqual({ type: "hello", protocol: 3 });
-    expect(BridgeFrameSchema.safeParse({ type: "hello", protocol: 2 }).success).toBe(false);
+describe("bridge protocol 4", () => {
+  it("is protocol 4, and a protocol-3 hello is not a bridge frame (the core answers it upgrade_required)", () => {
+    expect(BRIDGE_PROTOCOL).toBe(4);
+    expect(HelloSchema.parse({ type: "hello", protocol: 4 })).toEqual({ type: "hello", protocol: 4 });
+    expect(BridgeFrameSchema.safeParse({ type: "hello", protocol: 3 }).success).toBe(false);
   });
 
   it("classifies every native command as relayed or stdio-only, never both", () => {

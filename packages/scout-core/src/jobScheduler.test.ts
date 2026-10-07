@@ -31,10 +31,10 @@ const catalog = (candidates: Candidate[] = CANDIDATES, version = "cat-v1"): Cata
 });
 
 const ISSUE: StoredActivity = {
-  origin: "https://github.com",
-  url: "https://github.com/o/r/issues/1",
+  origin: "https://linear.app",
+  url: "https://linear.app/acme/issue/ENG-1",
   observedAt: 1,
-  source: "github_issue",
+  source: "page",
   title: "Metered billing",
   text: "We need usage-based billing",
   textTruncated: false,
@@ -114,7 +114,7 @@ function harness(overrides: Partial<JobSchedulerOptions> & { coreInstanceId?: st
     visit: { origin: ORIGIN, url: `${ORIGIN}/billing`, epoch: 3, at: 0, tabId: 1, contextRevision: 0 } as unknown as ActiveVisit | null,
     paused: false,
     permissionsRevision: 7 as number | null,
-    permitted: new Set([ORIGIN, "https://github.com"]),
+    permitted: new Set([ORIGIN, "https://linear.app"]),
     capture: true,
     grant: true,
     grantRevision: 0,
@@ -296,7 +296,7 @@ describe("job scheduler: one job, its order, and its answer", () => {
     expect(h.agent.calls[0]!.options.deadline).toBe(h.clock.t + 16_000);
   });
 
-  it("the snapshot carries activity only with the browser-context grant on and GitHub capture allowed", () => {
+  it("the snapshot carries activity only with the browser-context grant on and page capture allowed", () => {
     for (const [grant, capture, expected] of [
       [true, true, 1],
       [false, true, 0],
@@ -564,6 +564,50 @@ describe("job scheduler: live destinations", () => {
   });
 });
 
+describe("job scheduler: the current page is not context", () => {
+  const CURRENT: StoredActivity = { ...ISSUE, origin: ORIGIN, url: `${ORIGIN}/billing`, title: "Billing", revision: 2 };
+  const SAME_SITE: StoredActivity = { ...ISSUE, origin: ORIGIN, url: `${ORIGIN}/billing/metered`, title: "Metered", revision: 3 };
+
+  it("the snapshot excludes the current page and includes another page on the destination origin", () => {
+    const h = harness();
+    h.world.activity = [SAME_SITE, { ...CURRENT, url: `${ORIGIN}/billing` }, ISSUE];
+    h.settle();
+    expect(h.agent.calls[0]!.options.activity?.map((a) => a.title)).toEqual([SAME_SITE.title, ISSUE.title]);
+    expect(h.named("job_started")[0]).toMatchObject({ activity: 2 });
+  });
+
+  it("accepting the current page's text during a job does nothing; another page supersedes once", async () => {
+    const h = harness();
+    h.settle();
+    const first = h.agent.calls[0]!;
+    h.world.activity = [CURRENT, ISSUE];
+    h.scheduler.onActivityAccepted(2);
+    h.world.activity = [{ ...CURRENT, text: "edited" }, ISSUE];
+    h.scheduler.onActivityAccepted(3);
+    expect(first.options.signal?.aborted).toBe(false);
+    expect(h.named("job_replaced")).toEqual([]);
+    h.world.activity = [SAME_SITE, CURRENT, ISSUE];
+    h.scheduler.onActivityAccepted(4);
+    expect(first.options.signal?.reason).toBe("superseded");
+    await flush();
+    expect(h.agent.calls).toHaveLength(2);
+    expect(h.agent.calls[1]!.options.activity?.map((a) => a.title)).toEqual([SAME_SITE.title, ISSUE.title]);
+    h.world.activity = [{ ...ISSUE, url: "https://linear.app/acme/issue/ENG-2" }, SAME_SITE, CURRENT, ISSUE];
+    h.scheduler.onActivityAccepted(5);
+    expect(h.agent.calls[1]!.options.signal?.aborted).toBe(false);
+    expect(h.named("job_replaced")).toHaveLength(1);
+  });
+
+  it("an origin the snapshot's activity came from losing its grant revokes the job", () => {
+    const h = harness();
+    h.settle();
+    h.world.permitted = new Set([ORIGIN]);
+    h.world.permissionsRevision = 8;
+    h.scheduler.onPermissionsChanged();
+    expect(h.agent.calls[0]!.options.signal?.reason).toBe("revoked");
+  });
+});
+
 describe("job scheduler: replacement", () => {
   it("an activity accept the job could see cancels it (superseded) and starts ONE replacement with a fresh snapshot; a second accept is ignored", async () => {
     const h = harness();
@@ -595,6 +639,7 @@ describe("job scheduler: replacement", () => {
     const h = harness();
     h.world.grant = false;
     h.settle();
+    h.world.activity = [{ ...ISSUE, title: "Newer issue" }, ISSUE];
     h.scheduler.onActivityAccepted(2);
     expect(h.agent.calls[0]!.options.signal?.aborted).toBe(false);
   });
@@ -670,6 +715,7 @@ describe("job scheduler: more cancellation paths", () => {
   it("a replacement cancelled by a visit change publishes nothing and starts no third job", async () => {
     const h = harness();
     h.settle();
+    h.world.activity = [{ ...ISSUE, title: "Newer issue" }, ISSUE];
     h.scheduler.onActivityAccepted(2);
     await flush();
     const replacement = h.agent.calls[1]!;
@@ -710,6 +756,7 @@ describe("job scheduler: more cancellation paths", () => {
   it("pause, resume, and a second settle of the same visit start a fresh budget and a fresh replacement allowance", async () => {
     const h = harness();
     h.settle(h.clock.t - 10_000);
+    h.world.activity = [{ ...ISSUE, title: "Newer issue" }, ISSUE];
     h.scheduler.onActivityAccepted(2);
     await flush();
     expect(h.scheduler.running).toMatchObject({ jobId: "job2", replacementUsed: true });
@@ -726,6 +773,7 @@ describe("job scheduler: more cancellation paths", () => {
     expect(h.agent.calls[2]!.request.deadlineMs).toBe(30_000 - VERIFY_RESERVE_MS);
     expect(h.scheduler.running).toMatchObject({ jobId: "job3", replacementUsed: false });
     // The replacement allowance is back.
+    h.world.activity = [{ ...ISSUE, title: "Newest issue" }, ISSUE];
     h.scheduler.onActivityAccepted(3);
     await flush();
     expect(h.agent.calls).toHaveLength(4);

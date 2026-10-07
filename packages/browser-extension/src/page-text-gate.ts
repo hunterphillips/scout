@@ -168,7 +168,7 @@ export function createPageTextGate(deps: GateDeps): PageTextGate {
   }
 
   /** Why a page_text message is dropped, or the route and sender it may be forwarded under. */
-  async function checkPageText(msg: PageTextMessage, sender: Sender): Promise<{ reason: string } | { route: IssueRoute; sender: ContentSender }> {
+  async function checkPageText(msg: PageTextMessage, sender: Sender): Promise<{ reason: string } | { route: IssueRoute; sender: ContentSender; url: string }> {
     if (!senderOk(sender)) return { reason: "sender" };
     const a = approvals.get(sender.tab.id);
     if (!a) return { reason: "no-approval" };
@@ -185,7 +185,8 @@ export function createPageTextGate(deps: GateDeps): PageTextGate {
     if (!fg) return { reason: "not-foreground" };
     const current = tabRoute(fg);
     if (!current || current.key !== msgRoute.key) return { reason: "url-changed" };
-    return { route: current, sender };
+    // The page's own URL, fragment dropped: the core compares it with the focused tab's.
+    return { route: current, sender, url: fg.url!.split("#")[0]! };
   }
 
   async function onPageText(msg: PageTextMessage, sender: Sender): Promise<{ ok: boolean; reason?: string }> {
@@ -205,8 +206,8 @@ export function createPageTextGate(deps: GateDeps): PageTextGate {
       at: clock.now(),
       tabId: c.sender.tab.id,
       documentId: c.sender.documentId,
-      url: c.route.canonicalUrl,
-      source: "github_issue",
+      url: c.url,
+      source: "page",
       title: msg.title,
       text: msg.text,
       truncated: msg.truncated,

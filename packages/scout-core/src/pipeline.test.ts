@@ -23,7 +23,7 @@ const snapshot: JobSnapshot = {
   jobId: "job-1",
   origin: ORIGIN,
   visitEpoch: 9,
-  activity: [{ origin: "https://github.com", url: "https://github.com/o/r/issues/2", observedAt: 1, title: "Issue", text: "Body", textTruncated: false }],
+  activity: [{ origin: "https://linear.app", url: "https://linear.app/acme/issue/ENG-2", observedAt: 1, title: "Issue", text: "Body", textTruncated: false }],
   candidates: snapshotCandidates(CANDIDATES),
   catalogHash: "cat-1",
   approved: [],

@@ -30,7 +30,7 @@ describe("manifest-level wiring", () => {
     await clock.advance(0);
     const [perm, focus] = lastPort(f).posted;
     expect(kinds(lastPort(f).posted)).toEqual(["permissions", "focus"]);
-    expect(perm).toEqual({ kind: "permissions", revision: expect.any(Number), at: clock.now(), granted: [GITHUB_PATTERN, STRIPE], githubCapture: true });
+    expect(perm).toEqual({ kind: "permissions", revision: expect.any(Number), at: clock.now(), granted: [GITHUB_PATTERN, STRIPE] });
     expect(BrowserObservationSchema.safeParse(perm).success).toBe(true);
     expect(focus).toMatchObject({ kind: "focus", tabId: 10, url: "https://github.com/acme/widgets/issues/1", permissionsRevision: perm!["revision"] });
     expect(bg.snapshot().policy).toEqual({ revision: 1, captureEnabled: false, paused: false });
@@ -38,7 +38,7 @@ describe("manifest-level wiring", () => {
 
   it("the snapshot lists only exact https origins, dropping wildcard, all-sites and http grants", async () => {
     const { f } = await setup({ granted: [GITHUB_PATTERN, "https://*/*", "https://*.example.com/*", "http://plain.example/*", "<all_urls>", STRIPE] });
-    expect(observations(f, "permissions")[0]).toMatchObject({ granted: [GITHUB_PATTERN, STRIPE], githubCapture: false });
+    expect(observations(f, "permissions")[0]).toMatchObject({ granted: [GITHUB_PATTERN, STRIPE] });
   });
 
   it("a grant change sends a new snapshot with a higher revision, then a focus carrying it", async () => {
@@ -76,7 +76,7 @@ describe("manifest-level wiring", () => {
     f._.state.granted = [GITHUB_PATTERN];
     await Promise.all(f.permissions.onAdded.emit({ origins: [GITHUB_PATTERN] } as never));
     expect(f._.registered).toEqual([]); // a grant alone does not turn capture on
-    expect(observations(f, "permissions").at(-1)).toMatchObject({ granted: [GITHUB_PATTERN], githubCapture: false });
+    expect(observations(f, "permissions").at(-1)).toMatchObject({ granted: [GITHUB_PATTERN] });
 
     const s = (await bg.panelRequest({ type: "github-capture", enabled: true })) as StatusSnapshot;
     expect(s.githubCapture).toBe(true);
@@ -85,11 +85,11 @@ describe("manifest-level wiring", () => {
       expect.objectContaining({ id: CONTENT_SCRIPT_ID, matches: ["https://github.com/*"], js: ["content/github-issue.js"], runAt: "document_idle", allFrames: false }),
     ]);
     await clock.advance(0);
-    expect(observations(f, "permissions").at(-1)).toMatchObject({ githubCapture: true });
+    expect(observations(f, "permissions").at(-1)).not.toHaveProperty("githubCapture");
 
     await bg.panelRequest({ type: "github-capture", enabled: false });
     expect(f._.registered).toEqual([]);
-    expect(observations(f, "permissions").at(-1)).toMatchObject({ githubCapture: false });
+    expect(observations(f, "permissions").at(-1)).not.toHaveProperty("githubCapture");
   });
 
   it("the toggle cannot turn on without the GitHub grant, or from a content script; losing the grant turns it off", async () => {
@@ -137,7 +137,7 @@ describe("granted list: the one source of truth", () => {
     expect(await f.permissions.contains({ origins: [GITHUB_PATTERN] })).toBe(true); // what Chrome itself would answer
     expect(await approve(bg, f)).toEqual({ approved: false, reason: "permission" });
     expect(f._.registered).toEqual([]);
-    expect(observations(f, "permissions").at(-1)).toMatchObject({ granted: [], githubCapture: false });
+    expect(observations(f, "permissions").at(-1)).toMatchObject({ granted: [] });
     const s = bg.snapshot();
     expect(s).toMatchObject({ granted: [], githubCapture: false, broadGrantIgnored: true });
     expect(f._.store["githubCapture"]).toBe(false); // toggle forced off
@@ -156,7 +156,7 @@ describe("granted list: the one source of truth", () => {
     await clock.advance(0);
     expect(f._.registered).toEqual([]);
     expect(bg.snapshot()).toMatchObject({ granted: [], githubCapture: false, broadGrantIgnored: true });
-    expect(observations(f, "permissions").at(-1)).toMatchObject({ granted: [], githubCapture: false });
+    expect(observations(f, "permissions").at(-1)).toMatchObject({ granted: [] });
   });
 
   it("a snapshot sent while a revoke's getAll is pending omits the revoked origin, and so does the focus after it", async () => {
@@ -199,7 +199,7 @@ describe("granted list: the one source of truth", () => {
     };
     await Promise.all(f.permissions.onAdded.emit({ origins: [STRIPE] } as never));
     await clock.advance(0);
-    expect(observations(f, "permissions").at(-1)).toMatchObject({ granted: [], githubCapture: false });
+    expect(observations(f, "permissions").at(-1)).toMatchObject({ granted: [] });
     expect(bg.snapshot()).toMatchObject({ granted: [], githubCapture: false });
     expect(f._.registered).toEqual([]);
     expect(await approve(bg, f)).toEqual({ approved: false, reason: "permission" });
@@ -239,7 +239,7 @@ describe("granted list: the one source of truth", () => {
     await clock.advance(0);
     expect(bg.snapshot()).toMatchObject({ granted: [GITHUB_PATTERN], githubCapture: false });
     expect(f._.registered).toEqual([]);
-    expect(observations(f, "permissions").at(-1)).toMatchObject({ granted: [GITHUB_PATTERN], githubCapture: false });
+    expect(observations(f, "permissions").at(-1)).toMatchObject({ granted: [GITHUB_PATTERN] });
     expect(await approve(bg, f)).toEqual({ approved: false, reason: "permission" });
   });
 });
@@ -384,7 +384,7 @@ describe("pause", () => {
     expect(commandsPosted(f)).toEqual([{ type: "pause" }, { type: "resume" }]);
     expect(observations(f)).toHaveLength(n); // still paused until the core says otherwise
     corePolicy(f, false);
-    expect(observations(f).at(n)).toMatchObject({ kind: "permissions", granted: [GITHUB_PATTERN], githubCapture: true });
+    expect(observations(f).at(n)).toMatchObject({ kind: "permissions", granted: [GITHUB_PATTERN] });
     await clock.advance(0);
     expect(observations(f).at(n + 1)).toMatchObject({ kind: "focus", permissionsRevision: observations(f).at(n)!["revision"] });
   });

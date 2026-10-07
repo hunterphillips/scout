@@ -8,19 +8,19 @@
 // states are sent once, and idle-to-idle visit changes (unpermitted page to unpermitted
 // page) send nothing.
 //
-// Bridge protocol 3, per connection: on attach the core first sends a capture-disabled
+// Bridge protocol 4, per connection: on attach the core first sends a capture-disabled
 // `capture_policy` (revision 0), which the relay delivers before `ready`. Grants come only
 // from the live connection's permissions snapshot (permissionState.ts). Each later policy
 // has the next revision and is sent only when `paused` or `captureEnabled` changes;
-// `captureEnabled` is the snapshot's GitHub-capture setting AND the GitHub grant AND not
-// paused. A policy can only restrict: the extension still needs Chrome's grant and its
-// own toggle.
+// `captureEnabled` is "not paused AND the snapshot grants at least one origin". A policy can
+// only restrict: the extension still needs Chrome's grant for the page's site.
 //
 // page_text is accepted into the activity store (activity/store.ts) only when not paused, a
-// snapshot has arrived on this connection, that snapshot enables GitHub capture and grants
-// GitHub, the text was captured under the policy revision last sent on this connection,
-// Chrome is frontmost with a focused, non-incognito window, and the text comes from the
-// focused tab's issue. The document check applies only when the focus carries a
+// snapshot has arrived on this connection and grants at least one origin, that snapshot
+// grants the text's own origin (`origin_not_permitted`), the text was captured under the
+// policy revision last sent on this connection, Chrome is frontmost with a focused,
+// non-incognito window, and the text comes from the focused tab's page (canonicalPageUrl of
+// both URLs). The document check applies only when the focus carries a
 // `documentId`; the extension's focus observations do not carry one today, so the
 // same-document check is the extension's. The ack goes out only after the store returned:
 // for text it took, and for a repeat it already holds (a re-send after a reconnect).
@@ -74,7 +74,7 @@ import {
   type PageTextObservation,
   type PanelState,
 } from "@scout/contracts";
-import { type ActivityStore, canonicalIssueUrl, createActivityStore } from "./activity/store.js";
+import { type ActivityStore, canonicalPageUrl, createActivityStore } from "./activity/store.js";
 import type { AgentView } from "./agentApi/handlers.js";
 import type { JobScheduler } from "./jobScheduler.js";
 import type { PanelChannel } from "./panelChannel.js";
@@ -85,7 +85,7 @@ import type { Clock, Timers } from "./clock.js";
 import type { Diagnostics } from "./diagnostics.js";
 import { createDiscoveryRunner, type DiscoveryCapabilities } from "./discoveryRunner.js";
 import { createDwellScheduler, type DwellScheduler } from "./dwell.js";
-import { createPermissionState, GITHUB_ORIGIN, type PermissionState } from "./permissionState.js";
+import { createPermissionState, type PermissionState } from "./permissionState.js";
 import type { SocketClient } from "./socketServer.js";
 import { CHROME_BUNDLE_ID, createVisitTracker, type VisitChange, type VisitPresence, type VisitTracker, WINDOW_ID_NONE } from "./visitTracker.js";
 
@@ -155,7 +155,7 @@ export interface Coordinator {
   agentView(): AgentView & { recommendationsEnabled: boolean };
   /** Send the current panel state again, even if it is the last one sent. */
   resendState(): void;
-  /** GitHub capture is allowed right now: not paused, capture on, GitHub granted. */
+  /** Page capture is allowed right now: not paused, and at least one origin granted. */
   captureAllowed(): boolean;
   /**
    * The visit results belong to: the tracker's current visit, also while another app is in
@@ -223,7 +223,7 @@ export function createCoordinator(options: CoordinatorOptions): Coordinator {
 
   const routing = createCommandRouting({ ...(options.sinks ? { sinks: options.sinks } : {}), emitPanel: options.emitPanel, diagnostics });
 
-  const captureEnabled = (): boolean => !paused && permissions.githubCapture && permissions.isPermitted(GITHUB_ORIGIN);
+  const captureEnabled = (): boolean => !paused && permissions.origins.size > 0;
 
   /** Send the live client a new policy if pause or capture changed since the last one (always on a fresh connection). */
   const syncPolicy = (): void => {
@@ -313,7 +313,9 @@ export function createCoordinator(options: CoordinatorOptions): Coordinator {
   const gatePageText = (obs: PageTextObservation): string | null => {
     if (paused) return "paused";
     if (!permissions.received) return "no_permissions_snapshot";
-    if (!permissions.githubCapture || !permissions.isPermitted(GITHUB_ORIGIN)) return "capture_disabled";
+    if (permissions.origins.size === 0) return "capture_disabled";
+    const url = canonicalPageUrl(obs.url);
+    if (url === null || !permissions.isPermitted(new URL(url).origin)) return "origin_not_permitted";
     // Captured under an older policy (or by an extension that does not say): never accepted.
     if (obs.policyRevision === undefined || obs.policyRevision !== lastPolicy?.revision) return "policy_revision";
     if (frontmostBundleId !== chromeBundleId) return "chrome-not-frontmost";
@@ -323,23 +325,27 @@ export function createCoordinator(options: CoordinatorOptions): Coordinator {
     if (f.tabId !== obs.tabId) return "not-focused-tab";
     // The focused tab has navigated to another document since this text was captured.
     if (f.documentId !== undefined && f.documentId !== obs.documentId) return "not-focused-document";
-    // The focused tab is on another issue (e.g. a same-document navigation).
-    if (f.url !== undefined) {
-      const focused = canonicalIssueUrl(f.url);
-      if (focused === null || focused !== canonicalIssueUrl(obs.url)) return "url-mismatch";
-    }
+    // The focused tab is on another page (e.g. a same-document navigation).
+    if (f.url !== undefined && canonicalPageUrl(f.url) !== url) return "url-mismatch";
     return null;
   };
 
   const applyPermissions = (obs: Extract<BrowserObservation, { kind: "permissions" }>): void => {
     const before = tracker.current();
     if (!permissions.applySnapshot(obs)) return;
-    // No consent to capture: no captured issue text is kept, even if the consent went while
-    // Chrome was disconnected (pause and disconnect alone keep it).
-    if (!permissions.githubCapture || !permissions.isPermitted(GITHUB_ORIGIN)) {
+    // No consent for a site: none of its page text is kept, even if the grant went while
+    // Chrome was disconnected (pause and disconnect alone keep it). Grants do not outlive a
+    // connection, so the sites to drop are read off the stored pages, not the last snapshot.
+    if (permissions.origins.size === 0) {
       const revision = activity.revision;
       activity.clear();
-      if (activity.revision !== revision) diagnostics.event("activity_cleared", { reason: permissions.githubCapture ? "grant_lost" : "capture_off" });
+      if (activity.revision !== revision) diagnostics.event("activity_cleared", { reason: "no_sites" });
+    } else {
+      let removed = 0;
+      for (const origin of new Set(activity.entries().map((e) => e.origin))) {
+        if (!permissions.isPermitted(origin) && activity.removeOrigin(origin)) removed++;
+      }
+      if (removed > 0) diagnostics.event("activity_cleared", { reason: "grant_lost", origins: removed });
     }
     if (before !== null && !permissions.isPermitted(before.origin)) {
       clearResults("permission_lost");
@@ -369,7 +375,7 @@ export function createCoordinator(options: CoordinatorOptions): Coordinator {
         }
         const result = activity.accept(obs, client.id);
         if (!result.accepted && !result.duplicate) {
-          diagnostics.event("page_text_dropped", { reason: "not_an_issue" });
+          diagnostics.event("page_text_dropped", { reason: "not_a_page" });
           return;
         }
         diagnostics.event("activity_accepted", {
@@ -563,4 +569,4 @@ export function createCoordinator(options: CoordinatorOptions): Coordinator {
   return coordinator;
 }
 
-export { canonicalIssueUrl };
+export { canonicalPageUrl };

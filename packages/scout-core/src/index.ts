@@ -19,7 +19,7 @@ export {
 export {
   ACTIVITY_MAX_ENTRIES,
   ACTIVITY_TTL_MS,
-  canonicalIssueUrl,
+  canonicalPageUrl,
   createActivityStore,
   type ActivityAcceptResult,
   type ActivityStore,
@@ -50,7 +50,7 @@ export {
   type DwellScheduler,
   type DwellSchedulerOptions,
 } from "./dwell.js";
-export { createPermissionState, GITHUB_ORIGIN, patternToOrigin, type PermissionState } from "./permissionState.js";
+export { createPermissionState, patternToOrigin, type PermissionState } from "./permissionState.js";
 export {
   createSocketServer,
   ensurePrivateRunDir,

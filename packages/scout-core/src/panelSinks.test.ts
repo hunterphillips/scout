@@ -1,4 +1,4 @@
-import type { BrowserObservation, PanelState, RelayCommand, ToChromeFrame } from "@scout/contracts";
+import { BRIDGE_PROTOCOL, type BrowserObservation, type PanelState, type RelayCommand, type ToChromeFrame } from "@scout/contracts";
 import { describe, expect, it } from "vitest";
 import { emptyState } from "./capabilities/decisions.js";
 import { createCoordinator } from "./coordinator.js";
@@ -370,7 +370,7 @@ describe("the core's panel sinks", () => {
     const c = fakeClient(1);
     w.coordinator.attachClient(c.client);
     const appAfterAttach = w.app.frames.length;
-    c.observe({ kind: "permissions", revision: 1, at: 1, granted: ["https://docs.stripe.com/*"], githubCapture: false });
+    c.observe({ kind: "permissions", revision: 1, at: 1, granted: ["https://docs.stripe.com/*"] });
     c.observe({ kind: "focus", seq: 1, at: 1, browserFocused: true, windowId: 1, tabId: 3, url: "https://docs.stripe.com/x", permissionsRevision: 1 });
     // Only the repaint's grant and audit went to it alone; everything else it got, the app got too.
     const sharedTypes = (frames: PanelState[]) => frames.filter((f) => f.type !== "grant" && f.type !== "audit").map((f) => JSON.stringify(f));
@@ -434,7 +434,7 @@ describe("the core's panel sinks over a real socket", () => {
       const sock = connect({ path: server.socketPath });
       sock.on("error", () => {});
       await new Promise((r) => sock.once("connect", r));
-      sock.write(encodeFrame({ type: "hello", protocol: 3 }));
+      sock.write(encodeFrame({ type: "hello", protocol: BRIDGE_PROTOCOL }));
       sock.write(encodeFrame({ type: "command", command: { type: "refresh_capabilities", commandId: "late-1" } }));
       const until = async (cond: () => boolean) => {
         const start = Date.now();

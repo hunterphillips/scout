@@ -22,10 +22,12 @@ import {
  * Protocol 2: the core answers hello with a capture-disabled capture_policy, and the
  * extension's permissions snapshot carries a revision and the GitHub-capture setting.
  * Protocol 3 carries the side panel over the relay: the extension may send panel commands
- * (`command`) and the core sends it panel frames (`panel`). Mixed versions fail closed with
- * upgrade_required.
+ * (`command`) and the core sends it panel frames (`panel`). Protocol 4 makes page capture
+ * generic: page_text comes from any page on an allowed site (`source: "page"`), and the
+ * permissions snapshot drops the GitHub-capture setting (a granted origin is capturable).
+ * Mixed versions fail closed with upgrade_required.
  */
-export const BRIDGE_PROTOCOL = 3;
+export const BRIDGE_PROTOCOL = 4;
 
 /** Native host -> core, first frame on each socket connection. */
 export const HelloSchema = z.object({

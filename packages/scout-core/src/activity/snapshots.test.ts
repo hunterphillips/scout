@@ -49,7 +49,7 @@ async function approved(path: string, text: string) {
 }
 
 const ACTIVITY: ActivityEntry[] = [
-  { origin: "https://github.com", url: "https://github.com/o/r/issues/1", observedAt: 5, title: "Issue", text: "Body", textTruncated: false },
+  { origin: "https://linear.app", url: "https://linear.app/acme/issue/ENG-1", observedAt: 5, title: "Issue", text: "Body", textTruncated: false },
 ];
 const CANDIDATES: Candidate[] = [
   { id: "c0", sourceUrl: `${SITE}/a.md`, humanHref: `${SITE}/a`, title: "A", labelQuality: "published", provenance: "llms.txt" },
@@ -238,6 +238,6 @@ describe("snapshot registry", () => {
     expect(auth.verify(b.token)).toBeNull();
     expect(events.filter((e) => e.name === "job_token_revoked").map((e) => e.fields)).toEqual([{ reason: "expired" }, { reason: "paused", count: 1 }]);
     // Diagnostics stay scalar: no text, titles or URLs.
-    expect(JSON.stringify(events)).not.toMatch(/github|Issue|Body|https?:/);
+    expect(JSON.stringify(events)).not.toMatch(/linear|Issue|Body|https?:/);
   });
 });
