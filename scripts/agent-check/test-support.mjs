@@ -15,6 +15,7 @@ import { runAgentCheck } from "./run.mjs";
 
 const FAKE = join(REPO_ROOT, "packages", "scout-core", "src", "agents", "claudeCode", "testing", "fake-claude.mjs");
 const FAKE_CODEX = join(REPO_ROOT, "packages", "scout-core", "src", "agents", "codex", "testing", "fake-codex.mjs");
+const FAKE_PI = join(REPO_ROOT, "packages", "scout-core", "src", "agents", "pi", "testing", "fake-pi.mjs");
 const HARNESS = join(REPO_ROOT, "scripts", "agent-check", "abort-harness.mjs");
 const FAST = { settleMs: 50, turnTimeoutMs: 20_000, killGraceMs: 500, cancelAfterInitMs: 300, registryRecheckMs: 50 };
 export const SENTINELS = ["SENTINEL-API-KEY-7f3a", "sentinel-gateway.example.invalid"];
@@ -46,9 +47,14 @@ export function makeWorld(mode = "hotload-watch", { configDir = false, adapter =
   const codex = join(bin, "codex");
   writeFileSync(codex, `#!/bin/sh\nFAKE_MODE="$(cat '${modeFile}')" FAKE_LOGIN="$(cat '${loginFile}')" FAKE_LOG='${log}' exec '${process.execPath}' '${FAKE_CODEX}' "$@"\n`);
   chmodSync(codex, 0o755);
+  const pi = join(bin, "pi");
+  writeFileSync(pi, `#!/bin/sh\nFAKE_MODE="$(cat '${modeFile}')" FAKE_LOGIN="$(cat '${loginFile}')" FAKE_LOG='${log}' exec '${process.execPath}' '${FAKE_PI}' "$@"\n`);
+  chmodSync(pi, 0o755);
   mkdirSync(join(home, ".codex"), { mode: 0o700 });
   writeFileSync(join(home, ".codex", "auth.json"), JSON.stringify({ auth_mode: "chatgpt", tokens: { access_token: "placeholder" } }), { mode: 0o600 });
-  const agentArgs = adapter === "codex" ? ["--adapter", "codex", "--codex", codex] : ["--claude", claude];
+  mkdirSync(join(home, ".pi", "agent"), { recursive: true, mode: 0o700 });
+  writeFileSync(join(home, ".pi", "agent", "auth.json"), JSON.stringify({ openai: { type: "oauth", access: "placeholder" } }), { mode: 0o600 });
+  const agentArgs = adapter === "codex" ? ["--adapter", "codex", "--codex", codex] : adapter === "pi" ? ["--adapter", "pi", "--pi", pi] : ["--claude", claude];
   const env = {
     HOME: home,
     PATH: `${bin}:/usr/bin:/bin`,
@@ -79,6 +85,7 @@ export function makeWorld(mode = "hotload-watch", { configDir = false, adapter =
     scoutHome,
     claude,
     codex,
+    pi,
     env,
     registryFile,
     setMode: (m) => writeFileSync(modeFile, m),

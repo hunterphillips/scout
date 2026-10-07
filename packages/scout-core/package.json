@@ -26,6 +26,10 @@
       "types": "./dist/agents/codex/readinessChildMain.d.ts",
       "default": "./dist/agents/codex/readinessChildMain.js"
     },
+    "./agents/pi-readiness-child": {
+      "types": "./dist/agents/pi/readinessChildMain.d.ts",
+      "default": "./dist/agents/pi/readinessChildMain.js"
+    },
     "./catalog/parse-worker": {
       "types": "./dist/catalog/parseWorkerMain.d.ts",
       "default": "./dist/catalog/parseWorkerMain.js"
@@ -35,7 +39,7 @@
     "dist"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.build.json",
+    "build": "tsc -p tsconfig.build.json && cp src/agents/pi/answerExtension.mjs dist/agents/pi/answerExtension.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
     "test:node": "vitest run --exclude '**/*.mac.test.*'",

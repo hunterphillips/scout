@@ -88,6 +88,15 @@ export function pathWithCliDir(cliPath: string, parentPath: string | undefined):
   return `${dir}${delimiter}${parentPath}`;
 }
 
+/** Prepend distinct absolute directories in order to a forwarded PATH. */
+export function pathWithDirs(dirs: readonly string[], parentPath: string | undefined): string {
+  const out: string[] = [];
+  for (const dir of [...dirs, ...(parentPath ?? "").split(delimiter)]) {
+    if (dir && !out.includes(dir)) out.push(dir);
+  }
+  return out.join(delimiter);
+}
+
 /** `env` with PATH replaced by `pathWithCliDir(cliPath, env.PATH)`; a new frozen object. */
 export function withCliDirOnPath(env: Readonly<Record<string, string>>, cliPath: string): Readonly<Record<string, string>> {
   return Object.freeze({ ...env, PATH: pathWithCliDir(cliPath, env.PATH) });

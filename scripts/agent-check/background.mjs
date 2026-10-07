@@ -21,6 +21,7 @@ import { join } from "node:path";
 import { buildJobArgv } from "../../packages/scout-core/dist/agents/claudeCode/claudeJob.js";
 import { runDirectPreflight } from "../../packages/scout-core/dist/agents/claudeCode/launchProfile.js";
 import { buildCodexArgv } from "../../packages/scout-core/dist/agents/codex/launch.js";
+import { buildPiArgv } from "../../packages/scout-core/dist/agents/pi/launch.js";
 import { OwnedTree, psSnapshot } from "../../packages/scout-core/dist/agents/processTree.js";
 import { loadAgentProfile, writeAgentProfile } from "../../packages/scout-core/dist/agents/profile.js";
 import { createJobAdapter } from "../../packages/scout-core/dist/agents/registry.js";
@@ -51,7 +52,7 @@ async function waitFor(pred, ms) {
 
 /**
  * @param {string} caseName  one of BACKGROUND_CASES
- * @param {object} o  home, env, adapter (`claude-code` or `codex`), agentPath, maxInference, dryRun
+ * @param {object} o  home, env, adapter (`claude-code`, `codex` or `pi`), agentPath, maxInference, dryRun
  * @param {object} deps  out, err, and test seams: cancelAfterInitMs, preflightSeams
  *   ({ managedPaths }), killGraceMs, hooks.onStart
  */
@@ -65,11 +66,14 @@ export async function runBackground(caseName, o, deps) {
   const jobDir = join(o.home, "run", "jobs", requestId);
   const adapterId = o.adapter ?? "claude-code";
   const codex = adapterId === "codex";
+  const pi = adapterId === "pi";
   const model = checkModel(adapterId);
 
   if (o.dryRun) {
     const short = (args) => args.map((a) => shellish(a.length > 60 ? `${a.slice(0, 57)}...` : a)).join(" ");
-    const jobArgv = codex
+    const jobArgv = pi
+      ? buildPiArgv({ profile: checkProfile(adapterId, o.agentPath, undefined, o.piModel), surface: { expected: [{ name: "scout", tools: ["mcp__scout__current_site", "mcp__scout__recent_activity", "mcp__scout__site_links", "mcp__scout__list_resources", "mcp__scout__read_resource"] }] } })
+      : codex
       ? buildCodexArgv({
           cwd: join(o.home, "run", "agent-cwd"),
           model,
@@ -81,10 +85,10 @@ export async function runBackground(caseName, o, deps) {
     const lines = [
       `verify:agent ${caseName} --dry-run: nothing is written or launched.`,
       `  adapter: ${adapterId}`,
-      `  ${codex ? "codex" : "claude"}: ${o.agentPath}`,
-      `  model: ${model}`,
+      `  ${pi ? "pi" : codex ? "codex" : "claude"}: ${o.agentPath}`,
+      `  model: ${pi ? (o.piModel ?? "user's Pi default") : model}`,
       `  agent profile: ${join(o.home, "agent-profile.json")}${caseName === "selected-tool" ? " (plus one selected synthetic tool: lookup on fake-backend.mjs, literal env only)" : ""}`,
-      codex
+      pi ? "  readiness: pi --version and pi --list-models before any launch" : codex
         ? `  readiness: codex --version and codex login status (ChatGPT login only) before any launch; private Codex home ${join(o.home, "run", "codex-home")}`
         : "  preflight: readiness check (claude --version, auth status) before any launch",
       `  job: ${o.agentPath} ${short(jobArgv)}${codex && caseName === "selected-tool" ? " (plus the scout_bridge server)" : ""}`,
@@ -148,7 +152,7 @@ export async function runBackground(caseName, o, deps) {
         buf = buf.slice(i + 1);
         try {
           const ev = JSON.parse(line);
-          if ((ev?.type === "system" && ev.subtype === "init") || ev?.type === "thread.started") onInit(ev);
+          if ((ev?.type === "system" && ev.subtype === "init") || ev?.type === "thread.started" || ev?.type === "session") onInit(ev);
         } catch {
           // not an event
         }
@@ -173,7 +177,7 @@ export async function runBackground(caseName, o, deps) {
     secrets.push(fixture.token);
     await deps.hooks?.onStart?.({ token: fixture.token, root: throwaway.root });
     if (caseName === "selected-tool") selected = selectedToolProfile(throwaway.root);
-    writeAgentProfile(o.home, checkProfile(adapterId, o.agentPath, selected?.tools));
+    writeAgentProfile(o.home, checkProfile(adapterId, o.agentPath, selected?.tools, o.piModel));
     const profile = loadAgentProfile(o.home);
     const seams = deps.preflightSeams ?? {};
     const common = { spawn, ...(deps.killGraceMs ? { killGraceMs: deps.killGraceMs } : {}) };
@@ -187,6 +191,7 @@ export async function runBackground(caseName, o, deps) {
           ...(seams.managedPaths ? { managedPaths: seams.managedPaths } : {}),
         },
         codex: common,
+        pi: common,
       },
     });
     const pf = await adapter.refreshReadiness();
@@ -264,7 +269,7 @@ export async function runBackground(caseName, o, deps) {
     cli: { path: o.agentPath, version: preflight.cliVersion },
     preflight,
     argv,
-    init: codex ? { seen: init !== undefined, event: "thread.started" } : summarizeInit(init, { server: (n) => n === "scout" || n === "scout_bridge", tool: () => true, skill: () => false }),
+    init: pi ? { seen: init !== undefined, event: "session" } : codex ? { seen: init !== undefined, event: "thread.started" } : summarizeInit(init, { server: (n) => n === "scout" || n === "scout_bridge", tool: () => true, skill: () => false }),
     result: r && {
       status: r.status,
       ...(r.reason ? { reason: r.reason } : {}),
