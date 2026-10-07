@@ -396,5 +396,3 @@ robots/llms/sitemap counters), `catalog_cache` (source, stale, ageMs),
   throwaway profile so real Chrome is untouched (`scripts/manual-check/README.md`), and
   uninstall afterwards. The Mac app reads only the real `~/.scout`, so its checks are the
   maintainer's.
-- Changes land on `main`; no PR or CI wait is required. CI runs on every push to `main`;
-  fix a red run right away.

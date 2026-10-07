@@ -66,8 +66,3 @@ any particular agent. A new adapter needs:
 If the agent needs install-time wiring (an MCP registration or exported skills), add it
 under `scripts/lib/` next to `claude-mcp.mjs`, `codex-mcp.mjs` and `pi-mcp.mjs`, and under
 `packages/scout-core/src/integrations/<name>/` for anything the running core does.
-
-## Landing changes
-
-Changes land on `main`; no pull request or CI wait is required. CI runs on every push to
-`main`, so fix a red run right away.
