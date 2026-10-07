@@ -56,7 +56,7 @@ import { DEFAULT_CODEX_REASONING_EFFORT, type CodexProfile } from "./profile.js"
 
 export const CODEX_HOME_DIR = "codex-home";
 export const AUTH_FILE = "auth.json";
-/** Never forwarded; any of them in the parent env makes readiness `ambiguous` (`env_api_key`). */
+/** Never forwarded into a job or readiness process. */
 export const API_KEY_ENV: readonly string[] = Object.freeze(["CODEX_API_KEY", "CODEX_ACCESS_TOKEN", "OPENAI_API_KEY"]);
 export const MCP_STARTUP_TIMEOUT_SEC = 10;
 

@@ -390,7 +390,7 @@ describe.skipIf(!BUILT)("host <-> core end to end", () => {
     expect(finished.map((e) => e.status)).toEqual(["ok", "empty"]);
     expect(finished[0].optionalToolFailed).toBeUndefined();
     expect(finished[1].optionalToolFailed).toBe(true);
-    expect(events.filter((e) => e.event === "agent_preflight").map((e) => e.verdict)).toEqual(["subscription"]);
+    expect(events.filter((e) => e.event === "agent_preflight").map((e) => e.verdict)).toEqual(["ready"]);
     // The GitHub visit was left before its dwell: no discovery pass ever went to github.com.
     expect(events.some((e) => e.event === "discovery_start" && e.origin === "https://github.com")).toBe(false);
     // The second job started while the first visit's pass was still unwinding its probe; that pass never ingested.

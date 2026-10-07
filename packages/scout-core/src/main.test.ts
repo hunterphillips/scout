@@ -481,7 +481,7 @@ describe("main --stdio", () => {
     const events = diagnosticsLog();
     // Only the leftover was swept, and before the preflight began.
     expect(events.filter((e) => e.event === "jobs_swept")).toEqual([expect.objectContaining({ count: 1, killed: 0 })]);
-    expect(events.find((e) => e.event === "agent_preflight")).toMatchObject({ verdict: "subscription" });
+    expect(events.find((e) => e.event === "agent_preflight")).toMatchObject({ verdict: "ready" });
     expect(events.some((e) => e.event === "jobs_sweep_failed")).toBe(false);
     expect(existsSync(leftover)).toBe(false);
     c.child.stdin.end();

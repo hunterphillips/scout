@@ -1,4 +1,4 @@
-// The billing preflight off the core's event loop. `runDirectPreflight` blocks (spawnSync, up
+// The readiness check off the core's event loop. `runDirectPreflight` blocks (spawnSync, up
 // to four `claude` calls at up to 20 s each), so the core never calls it directly: each run
 // happens in a fresh child process (`child_process.fork` of preflightChildMain.ts) that gets
 // the input over IPC, calls it, and sends the report back. The main thread keeps handling
@@ -13,12 +13,12 @@
 // fingerprint, CLI version): the same profile input reuses the last report unless a job saw
 // another CLI version (`knownCliVersion`), which re-runs it. Concurrent calls for the same
 // key share one run. A child that fails, exits without a report, or overruns
-// PREFLIGHT_CHILD_MAX_MS is killed and reported `ambiguous` (never `subscription`), with a
-// fixed reason only. `cancelAll()` kills every running child (each resolves `ambiguous`) and
+// PREFLIGHT_CHILD_MAX_MS is killed and reported `unavailable` (never `ready`), with a
+// fixed reason only. `cancelAll()` kills every running child (each resolves `unavailable`) and
 // refuses further runs: the core calls it first thing on shutdown.
 // A report without a CLI version (the CLI could not be read, the child failed or was killed)
 // is never cached: the adapter arms one retry for it (claudeJob.ts), and the next job's call
-// here runs fresh instead of leaving `ambiguous` in place until the core restarts.
+// here runs fresh instead of leaving `unavailable` in place until the core restarts.
 
 import { type ChildProcess, fork } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -40,12 +40,12 @@ export function defaultPreflightChildEntrypoint(): string {
   return createRequire(import.meta.url).resolve("@scout/scout-core/agents/preflight-child");
 }
 
-const failed = (reason: string): PreflightReportLike => ({ verdict: "ambiguous", reasons: [reason] });
+const failed = (reason: string): PreflightReportLike => ({ verdict: "unavailable", reasons: [reason] });
 
 export interface PreflightChildOptions {
   entrypoint?: string;
   maxMs?: number;
-  /** Aborting kills the child at once; the run resolves `ambiguous`. */
+  /** Aborting kills the child at once; the run resolves `unavailable`. */
   signal?: AbortSignal;
 }
 
@@ -116,11 +116,11 @@ export function runPreflightInChild(input: PreflightInput, options: PreflightChi
   });
 }
 
-/** The child's message as a report; anything malformed is `ambiguous`. */
+/** The child's message as a report; anything malformed is `unavailable`. */
 function toReport(msg: unknown): PreflightReportLike {
   if (msg === null || typeof msg !== "object") return failed("internal: preflight child sent no report");
   const m = msg as Record<string, unknown>;
-  if (m.verdict !== "subscription" && m.verdict !== "ambiguous") return failed("internal: preflight child sent no report");
+  if (m.verdict !== "ready" && m.verdict !== "unavailable") return failed("internal: preflight child sent no report");
   if (!Array.isArray(m.reasons) || !m.reasons.every((r) => typeof r === "string")) return failed("internal: preflight child sent no report");
   const report: PreflightReportLike = { verdict: m.verdict, reasons: m.reasons as string[] };
   if (typeof m.cliVersion === "string") report.cliVersion = m.cliVersion;
@@ -144,7 +144,7 @@ export interface PreflightFacadeOptions {
 /** The facade: the adapter's async preflight, plus what the core needs at shutdown. */
 export type PreflightFacade = AsyncPreflightFn & {
   readonly runs: number;
-  /** Kill every running preflight (each resolves `ambiguous`) and refuse further runs. */
+  /** Kill every running preflight (each resolves `unavailable`) and refuse further runs. */
   cancelAll(): void;
 };
 

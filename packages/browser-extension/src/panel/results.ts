@@ -74,7 +74,7 @@ const ERROR_TEXT: Record<ErrorReason, string> = {
   timeout: "It took too long.",
   invalid_output: "The answer was not usable.",
   tool_unavailable: "A required tool was unavailable.",
-  preflight_failed: "The subscription check failed.",
+  preflight_failed: "Your agent is not available.",
   unsupported_configuration: "This setup is not supported.",
   agent_failed: "The agent failed.",
 };

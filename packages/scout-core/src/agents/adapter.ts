@@ -89,7 +89,7 @@ export interface JobDetails {
   instructionMarker?: "reached" | "missing";
   /**
    * The init reported another CLI version than the preflight saw. Advisory: the adapter re-ran
-   * the billing preflight, and the answer counted only if that verdict was `subscription`.
+   * the readiness check, and the answer counted only if that verdict was `ready`.
    */
   cliVersionChanged?: true;
   /** How many tool calls the CLI's permission mode denied (the result event's `permission_denials`). */
@@ -117,7 +117,7 @@ export interface JobOutcome {
 export interface AgentReadiness {
   /** Inference may run. */
   readonly ok: boolean;
-  /** Adapter-defined code, e.g. `subscription` or `unchecked`. */
+  /** Adapter-defined code, e.g. `ready` or `unchecked`. */
   readonly verdict: string;
   /** Fixed reason codes, without local paths. */
   readonly reasons: readonly string[];

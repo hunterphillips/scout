@@ -1,39 +1,36 @@
-// Whether Codex jobs may run inference: the user's Codex login is a ChatGPT plan, reached
-// only through Scout's private Codex home, with no API key in play. Runs NO model calls.
+// Whether Codex jobs can run: the CLI answers and is logged in by any method, reached only
+// through Scout's private Codex home. Runs NO model calls.
 //
 // Exactly two invocations, both through spawnSync (20 s, SIGKILL) with the job's child env
 // (launch.ts codexChildEnv, whose PATH starts with the codex binary's directory so an npm or
 // nvm install finds its `node` under launchd's minimal PATH) and a throwaway
 // CODEX_SQLITE_HOME that is removed afterwards:
 //   - `codex --version`: stdout `codex-cli <x.y.z>` (`version_unknown` otherwise);
-//   - `codex login status`: "Logged in using ChatGPT" and exit 0 (`not_chatgpt` otherwise,
-//     which covers "Logged in using an API key" and "Not logged in", exit 1). Codex prints it
-//     on stderr.
+//   - `codex login status`: "Logged in …" and exit 0, whether through ChatGPT or an API key
+//     (`not_logged_in` otherwise; "Not logged in" exits 1). Codex prints it on stderr.
 // Checked without running anything:
-//   - `env_api_key`: CODEX_API_KEY, CODEX_ACCESS_TOKEN or OPENAI_API_KEY is set in the core's
-//     env. They are never forwarded, but a user who set one expects API billing: refuse;
 //   - `auth_link_invalid`: the private home's `auth.json` is not Scout's symlink to the user's
 //     `auth.json`, or that target is not a regular file, mode 0600, owned by this user;
 //   - `codex_home_unusable`: the private Codex home could not be prepared (no absolute HOME
 //     or CODEX_HOME, or `run/codex-home` is not a private directory);
 //   - `binary_not_executable`: the profile's codexPath is not an executable file (then
 //     nothing is invoked).
-// The verdict is `subscription` only when no reason was found. Never throws.
+// The verdict is `ready` only when no reason was found. Never throws.
 
 import { spawnSync as nodeSpawnSync } from "node:child_process";
 import { lstatSync, mkdtempSync, readlinkSync, rmSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { isExecutableFile, type Env } from "../executables.js";
 import { ensureJobsRoot } from "../claudeCode/launchProfile.js";
-import { API_KEY_ENV, AUTH_FILE, codexChildEnv, ensureCodexHome } from "./launch.js";
+import { AUTH_FILE, codexChildEnv, ensureCodexHome } from "./launch.js";
 
 export const READINESS_TIMEOUT_MS = 20_000;
 const VERSION_RE = /^codex-cli (\d+\.\d+\.\d+)\b/;
 
-export type CodexReadinessReason = "env_api_key" | "auth_link_invalid" | "codex_home_unusable" | "version_unknown" | "not_chatgpt" | "binary_not_executable";
+export type CodexReadinessReason = "auth_link_invalid" | "codex_home_unusable" | "version_unknown" | "not_logged_in" | "binary_not_executable";
 
 export interface CodexReadinessReport {
-  verdict: "subscription" | "ambiguous";
+  verdict: "ready" | "unavailable";
   reasons: string[];
   /** `x.y.z` from `codex --version`, when it answered. */
   version?: string;
@@ -89,17 +86,16 @@ export function runCodexReadiness(o: CodexReadinessOptions): CodexReadinessRepor
   try {
     return readiness(o);
   } catch {
-    return { verdict: "ambiguous", reasons: ["internal: readiness failed unexpectedly"] };
+    return { verdict: "unavailable", reasons: ["internal: readiness failed unexpectedly"] };
   }
 }
 
 function readiness(o: CodexReadinessOptions): CodexReadinessReport {
   const reasons: CodexReadinessReason[] = [];
-  if (API_KEY_ENV.some((k) => o.parentEnv[k] !== undefined)) reasons.push("env_api_key");
   if (!authLinkValid(o.codexHome, o.userAuthPath)) reasons.push("auth_link_invalid");
   if (!isExecutableFile(o.codexPath)) {
     reasons.push("binary_not_executable");
-    return { verdict: "ambiguous", reasons };
+    return { verdict: "unavailable", reasons };
   }
   const spawn = o.spawnSync ?? defaultSpawnSync;
   const timeout = o.timeoutMs ?? READINESS_TIMEOUT_MS;
@@ -117,11 +113,11 @@ function readiness(o: CodexReadinessOptions): CodexReadinessReport {
 
     const login = call(READINESS_INVOCATIONS[1]!);
     const text = `${login.stderr ?? ""}\n${login.stdout ?? ""}`;
-    if (login.error || login.status !== 0 || !/^Logged in using ChatGPT\b/m.test(text)) reasons.push("not_chatgpt");
+    if (login.error || login.status !== 0 || !/^Logged in\b/m.test(text)) reasons.push("not_logged_in");
   } finally {
     rmSync(stateDir, { recursive: true, force: true });
   }
-  const report: CodexReadinessReport = { verdict: reasons.length === 0 ? "subscription" : "ambiguous", reasons };
+  const report: CodexReadinessReport = { verdict: reasons.length === 0 ? "ready" : "unavailable", reasons };
   if (version !== undefined) report.version = version;
   return report;
 }
@@ -141,11 +137,10 @@ export function runCodexReadinessFor(input: CodexReadinessInput, seams: Pick<Cod
     const home = ensureCodexHome(input.home, input.parentEnv);
     if (!home.ok) {
       const reasons: string[] = [home.reason];
-      if (API_KEY_ENV.some((k) => input.parentEnv[k] !== undefined)) reasons.unshift("env_api_key");
-      return { verdict: "ambiguous", reasons };
+      return { verdict: "unavailable", reasons };
     }
     return runCodexReadiness({ codexPath: input.codexPath, parentEnv: input.parentEnv, codexHome: home.codexHome, userAuthPath: home.userAuthPath, ...seams });
   } catch {
-    return { verdict: "ambiguous", reasons: ["internal: readiness failed unexpectedly"] };
+    return { verdict: "unavailable", reasons: ["internal: readiness failed unexpectedly"] };
   }
 }

@@ -1,11 +1,10 @@
 // Check a job's streamed `system/init` event against what the job was launched with.
 //
 // The init event describes what the CLI loaded: MCP servers and their status, the tool
-// list, permission mode, model, CLI version and auth route. It is an additional reason to
-// stop, never the primary enforcement (that is the launch flags plus the exact allowed-tool
-// list), and it proves neither billing nor that inference has not begun: the preflight
-// proves the route beforehand, and the stream is still watched for auth/quota failures
-// afterwards.
+// list, permission mode, model and CLI version. It is an additional reason to stop, never
+// the primary enforcement (that is the launch flags plus the exact allowed-tool list).
+// How the CLI authenticates is the user's business; the stream is still watched for
+// auth/quota failures afterwards.
 //
 // Outcomes map onto HostJobResult reasons:
 //   - unsupported_configuration: an unexpected server or tool (a built-in tool means
@@ -16,13 +15,11 @@
 //     failed, or the server connected without it, e.g. the bridge dropped it for a changed
 //     schema) is reported unavailable by its full name and the job goes on; the tools of a
 //     partially loaded optional server that did load stay usable and are reported available.
-//   - preflight_failed: an auth route other than the subscription login (apiKeySource not
-//     `none`, or a non-first-party apiProvider).
 //
-// Another CLI version than the preflight saw (the CLI auto-updated) is advisory, not a
-// failure: the result says `cliVersionChanged` and the adapter re-runs the billing preflight
-// before the job's answer counts (claudeJob.ts). VERIFIED_CLI_VERSION is a record of what
-// the flag set was checked against, not an allowlist.
+// Another CLI version than the readiness check saw (the CLI auto-updated) is advisory, not a
+// failure: the result says `cliVersionChanged` and the adapter re-runs readiness before the
+// job's answer counts (claudeJob.ts). VERIFIED_CLI_VERSION is a record of what the flag set
+// was checked against, not an allowlist.
 
 import { STRUCTURED_OUTPUT_TOOL, type ExpectedServer } from "./jobSurface.js";
 
@@ -39,7 +36,6 @@ export type InitFailureDetail =
   | "extra_tool"
   | "permission_mode"
   | "model_mismatch"
-  | "auth_route"
   | "required_server_unavailable"
   | "required_tool_missing";
 
@@ -53,13 +49,13 @@ export type InitCheckResult =
       /** The init reported another CLI version than the preflight saw (or none). Advisory. */
       cliVersionChanged?: true;
     }
-  | { ok: false; reason: "unsupported_configuration" | "tool_unavailable" | "preflight_failed"; detail: InitFailureDetail };
+  | { ok: false; reason: "unsupported_configuration" | "tool_unavailable"; detail: InitFailureDetail };
 
 type Rec = Record<string, unknown>;
 const isRec = (v: unknown): v is Rec => v !== null && typeof v === "object" && !Array.isArray(v);
 
 export function checkInit(init: Rec, expected: ExpectedInit): InitCheckResult {
-  const fail = (reason: "unsupported_configuration" | "tool_unavailable" | "preflight_failed", detail: InitFailureDetail): InitCheckResult => ({
+  const fail = (reason: "unsupported_configuration" | "tool_unavailable", detail: InitFailureDetail): InitCheckResult => ({
     ok: false,
     reason,
     detail,
@@ -69,9 +65,6 @@ export function checkInit(init: Rec, expected: ExpectedInit): InitCheckResult {
   if (!Array.isArray(tools) || !tools.every((t) => typeof t === "string") || !Array.isArray(servers)) return fail("unsupported_configuration", "malformed_init");
   if (!servers.every((s) => isRec(s) && typeof s.name === "string" && typeof s.status === "string")) return fail("unsupported_configuration", "malformed_init");
   if (typeof init.model !== "string" || typeof init.permissionMode !== "string") return fail("unsupported_configuration", "malformed_init");
-
-  // The auth route first: a wrong route makes everything else moot.
-  if (init.apiKeySource !== "none" || (init.apiProvider !== undefined && init.apiProvider !== "firstParty")) return fail("preflight_failed", "auth_route");
 
   const loaded = new Map((servers as { name: string; status: string }[]).map((s) => [s.name, s.status]));
   const byName = new Map(expected.servers.map((s) => [s.name, s]));

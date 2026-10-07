@@ -3,7 +3,7 @@
 //
 // Separately authorized live compatibility checks against the installed Claude CLI, or, for
 // the background cases with `--adapter codex`, the installed Codex CLI. Each real run makes
-// model calls on the user's subscription (after a successful billing or login check);
+// model calls after a successful readiness check;
 // --dry-run prints the plan and changes and launches nothing. See README.md.
 
 import { resolve } from "node:path";

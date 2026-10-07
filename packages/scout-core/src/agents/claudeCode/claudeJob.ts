@@ -38,25 +38,25 @@
 // still tracked by ps and signalled on its own, and with `processTracker` the core's shutdown
 // waits for any the reap left behind.
 //
-// Billing gate (the adapter's readiness): refreshPreflight() runs the direct preflight (blocking;
+// Readiness gate: refreshPreflight() runs the direct preflight (blocking;
 // the dev CLI and the compatibility checks use it) and refreshReadiness() runs it through `preflightAsync`
 // (the core passes preflightWorker.ts's child-process facade, so its event loop never blocks);
 // either caches the verdict with the CLI version it saw. An adapter is bound to one profile
 // (an edited profile means a new adapter and a new preflight). A job waits for a refresh in
-// flight (within its deadline), then runs only when the verdict is `subscription` and the
+// flight (within its deadline), then runs only when the verdict is `ready` and the
 // request names this profile's fingerprint, and its init event must report the same model.
 // A job that finds no verdict yet (the core starts the preflight eagerly only when some host
 // is recommendation-enabled) starts one and waits for it. A verdict that does not arrive within
 // the job's deadline is `preflight_failed` (detail `preflight_pending`): the job never ran, so
-// it did not time out; billing was never verified.
+// it did not time out; readiness was never verified.
 //
 // CLI auto-update policy: VERIFIED_CLI_VERSION records what the flag set was checked
 // against; it is not an allowlist. An init reporting another CLI version than the preflight
 // saw is advisory (`cliVersionChanged` in job details, `cli_version_changed` in diagnostics):
 // the adapter starts one async re-preflight at once, and the job's answer counts only if that
-// verdict is `subscription` (otherwise `preflight_failed`, detail `cli_version_changed`);
-// later jobs wait for it. The init's auth-route check still stops any job outright.
-// A preflight that could not read the CLI version and is not `subscription` (an unreachable or
+// verdict is `ready` (otherwise `preflight_failed`, detail `cli_version_changed`);
+// later jobs wait for it.
+// A preflight that could not read the CLI version and is not `ready` (an unreachable or
 // broken CLI, a failed or killed preflight child) is not sticky: it arms one retry, and the next job starts a
 // fresh async preflight and waits for it (the facade never caches a report without a
 // version). Each such result arms one more retry, so a broken CLI costs one preflight per job,
@@ -78,7 +78,7 @@ import { AgentTokenSchema, JOB_AGENT_OUTPUT_JSON_SCHEMA, JobRequestSchema, type 
 import { systemClock, type Clock } from "../../clock.js";
 import type { Diagnostics } from "../../diagnostics.js";
 import { hashRequestId, MIN_LAUNCH_MS, toCancelReason, type AgentJobAdapter, type AgentReadiness, type JobDetails, type JobOutcome, type JobRunOptions, type JobTermination } from "../adapter.js";
-import { managedPathsFor, type Env, type ManagedPaths, type Verdict } from "./authPreflight.js";
+import { type Env, type Verdict } from "./authPreflight.js";
 import type { BridgeJob } from "../contextToolBridge.js";
 import { withCliDirOnPath } from "../executables.js";
 import { startChild, type SnapshotFn, type SpawnFn, type SupervisedChild } from "../childSupervisor.js";
@@ -94,7 +94,7 @@ import { buildJobInstructions, buildJobPrompt } from "../prompt.js";
 import { writeTreeRecord, type ProcessTracker } from "../processTree.js";
 import { createStreamMonitor } from "./streamMonitor.js";
 import { ensureAgentCwd } from "../../localSocketFiles.js";
-import { checkManagedPolicy, defaultBridgeEntrypoint, managedMcpFilesFor, planJobTools, type JobManagedPaths, type ManagedPolicyResult, type ToolPlanOptions } from "./toolPolicy.js";
+import { checkManagedPolicy, defaultBridgeEntrypoint, managedMcpFilesFor, managedPathsFor, planJobTools, type JobManagedPaths, type ManagedPaths, type ManagedPolicyResult, type ToolPlanOptions } from "./toolPolicy.js";
 
 export type { SpawnFn, SnapshotFn } from "../childSupervisor.js";
 
@@ -190,7 +190,7 @@ export type AsyncPreflightFn = (
   knownCliVersion?: string,
 ) => Promise<{ verdict: Verdict; reasons: readonly string[]; cliVersion?: string }>;
 
-/** The billing preflight's verdict as readiness: `ok` only for `subscription`; `version` is the CLI version it saw. */
+/** The readiness check's verdict as readiness: `ok` only for `ready`; `version` is the CLI version it saw. */
 export interface PreflightReadiness extends AgentReadiness {
   readonly verdict: Verdict | "unchecked";
 }
@@ -324,7 +324,7 @@ export function createClaudeJobAdapter(deps: ClaudeJobDeps): ClaudeJobAdapter {
 
   /** In flight from refreshReadiness; jobs wait for it. */
   let refreshing: Promise<PreflightReadiness> | undefined;
-  /** The last verdict could not read the CLI version and was not subscription: the next job re-runs the preflight. */
+  /** The last verdict could not read the CLI version and was not ready: the next job re-runs the preflight. */
   let retryPreflight = false;
 
   const preflightInput = (): PreflightInput => {
@@ -335,10 +335,10 @@ export function createClaudeJobAdapter(deps: ClaudeJobDeps): ClaudeJobAdapter {
 
   /** Cache a preflight report (or a failure to get one) as the adapter's verdict. */
   function settlePreflight(r: { verdict: Verdict; reasons: readonly string[]; cliVersion?: string } | undefined): PreflightReadiness {
-    const verdict = r?.verdict === "subscription" ? "subscription" : "ambiguous";
+    const verdict = r?.verdict === "ready" ? "ready" : "unavailable";
     const reasons = r === undefined ? ["internal: preflight failed unexpectedly"] : r.reasons.map(redactReason);
     preflight = Object.freeze({
-      ok: verdict === "subscription",
+      ok: verdict === "ready",
       verdict,
       reasons: Object.freeze(reasons),
       ...(r?.cliVersion !== undefined ? { version: r.cliVersion } : {}),
@@ -475,7 +475,7 @@ export function createClaudeJobAdapter(deps: ClaudeJobDeps): ClaudeJobAdapter {
 
   /**
    * The job's CLI reported another version than the preflight saw: its answer counts only once
-   * the re-preflight it started (on init) says `subscription`, within the job's deadline.
+   * the re-preflight it started (on init) says `ready`, within the job's deadline.
    */
   async function recheckAfterCliChange(out: Out, deadlineAt: number, clock: Clock, signal: AbortSignal | undefined): Promise<Out> {
     const settled = await waitBounded(refreshing ?? Promise.resolve(preflight), deadlineAt, clock, signal);

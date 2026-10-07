@@ -245,6 +245,7 @@ async function startAndHang(extra = {}) {
 
 switch (mode) {
   case "ok":
+  case "auth-api-key":
     await answer(() => {
       const first = item(ids[0]);
       const marker = probe ? visibleMarker() : undefined;

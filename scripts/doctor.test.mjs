@@ -119,35 +119,35 @@ describe("doctor report", () => {
     expect(cli.checks.some((c) => /claude/.test(c.label))).toBe(false);
   });
 
-  it("billing: reports the core's last logged verdict, else not yet checked, and never runs a preflight", () => {
-    expect(report().billing).toMatchObject({ status: "warn", summary: "not yet checked" });
+  it("agent: reports the core's last logged verdict, else not yet checked, and never runs a preflight", () => {
+    expect(report().agent).toMatchObject({ status: "warn", summary: "not yet checked" });
     mkdirSync(L.logsDir, { recursive: true });
     const log = [
-      { t: 1, event: "agent_preflight", verdict: "ambiguous", reasons: 1 },
+      { t: 1, event: "agent_preflight", verdict: "unavailable", reasons: 1 },
       { t: 2, event: "visit_change" },
-      { t: 1_800_000_000_000, event: "agent_preflight", verdict: "subscription", reasons: 0, cliVersion: "2.1.286" },
+      { t: 1_800_000_000_000, event: "agent_preflight", verdict: "ready", reasons: 0, cliVersion: "2.1.286" },
     ];
     writeFileSync(L.diagnosticsLog, log.map((l) => JSON.stringify(l)).join("\n") + "\n{torn");
-    expect(report().billing).toMatchObject({ status: "ok", summary: "last preflight: subscription (CLI 2.1.286)" });
+    expect(report().agent).toMatchObject({ status: "ok", summary: "last preflight: ready (CLI 2.1.286)" });
     writeFileSync(L.diagnosticsLog, JSON.stringify({ t: 3, event: "agent_preflight", verdict: "api_key", reasons: 1 }) + "\n");
-    expect(report().billing.status).toBe("warn");
+    expect(report().agent.status).toBe("warn");
     expect(readFileSync(argvLog, "utf8")).not.toMatch(/auth|-p|--print/);
   });
 
-  it("billing ignores a preflight event without a finite time, and a log that is not a regular file", () => {
+  it("agent ignores a preflight event without a finite time, and a log that is not a regular file", () => {
     mkdirSync(L.logsDir, { recursive: true });
-    writeFileSync(L.diagnosticsLog, JSON.stringify({ event: "agent_preflight", verdict: "subscription" }) + "\n");
-    expect(report().billing).toMatchObject({ status: "warn", summary: "not yet checked" });
+    writeFileSync(L.diagnosticsLog, JSON.stringify({ event: "agent_preflight", verdict: "ready" }) + "\n");
+    expect(report().agent).toMatchObject({ status: "warn", summary: "not yet checked" });
     rmSync(L.diagnosticsLog);
     mkdirSync(L.diagnosticsLog);
     expect(lastPreflight(L.diagnosticsLog)).toBeNull();
   });
 
-  it("billing reads only the log's tail", () => {
+  it("agent reads only the log's tail", () => {
     mkdirSync(L.logsDir, { recursive: true });
-    const early = JSON.stringify({ t: 1, event: "agent_preflight", verdict: "subscription", reasons: 0 }) + "\n";
+    const early = JSON.stringify({ t: 1, event: "agent_preflight", verdict: "ready", reasons: 0 }) + "\n";
     writeFileSync(L.diagnosticsLog, early + `${JSON.stringify({ t: 2, event: "visit_change" })}\n`.repeat(100));
-    expect(lastPreflight(L.diagnosticsLog)).toMatchObject({ verdict: "subscription" });
+    expect(lastPreflight(L.diagnosticsLog)).toMatchObject({ verdict: "ready" });
     expect(lastPreflight(L.diagnosticsLog, { maxBytes: 1024 })).toBeNull();
   });
 

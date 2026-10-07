@@ -91,7 +91,7 @@ export function createStreamMonitor(o: StreamMonitorOptions): StreamMonitor {
       details.timings.initMs = o.clock.now() - o.startedAt;
       const check = checkInit(ev, expected);
       if (!check.ok) {
-        const termination: JobTermination = check.reason === "tool_unavailable" ? "tool_unavailable" : check.reason === "preflight_failed" ? "preflight_failed" : "unsupported_configuration";
+        const termination: JobTermination = check.reason === "tool_unavailable" ? "tool_unavailable" : "unsupported_configuration";
         return stop.halt({ result: { status: "error", reason: check.reason }, termination, detail: check.detail });
       }
       details.model = check.model;

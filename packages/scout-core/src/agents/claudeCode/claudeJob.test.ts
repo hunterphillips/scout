@@ -88,7 +88,7 @@ async function setup(opts: { mode?: string; version?: string; preflightVersion?:
     home: scoutHome,
     profile,
     parentEnv: gatewayParentEnv(userHome),
-    preflight: () => ({ verdict: "subscription", reasons: [], cliVersion: opts.preflightVersion ?? VERIFIED_CLI_VERSION }),
+    preflight: () => ({ verdict: "ready", reasons: [], cliVersion: opts.preflightVersion ?? VERIFIED_CLI_VERSION }),
     diagnostics: createDiagnostics({ path: diagPath, clock: systemClock, warn: (m) => diagWarnings.push(m) }),
     killGraceMs: 500,
     minLaunchMs: 0,
@@ -322,7 +322,6 @@ describe("claude job: the init event and the stream stop a misconfigured job", (
     ["extra-server", "unsupported_configuration", "extra_server"],
     ["missing-scout", "tool_unavailable", "required_server_unavailable"],
     ["wrong-model", "unsupported_configuration", "model_mismatch"],
-    ["bad-billing", "preflight_failed", "auth_route"],
     ["no-init", "unsupported_configuration", undefined],
     ["garbage-init", "unsupported_configuration", "malformed_init"],
     ["extra-tool-use", "unsupported_configuration", "unexpected_tool_use"],
@@ -336,7 +335,7 @@ describe("claude job: the init event and the stream stop a misconfigured job", (
     expect(jobsLeft(e)).toEqual([]);
   });
 
-  it("a CLI version other than the one the preflight saw is advisory: one async re-preflight, the answer counts once it says subscription", async () => {
+  it("a CLI version other than the one the preflight saw is advisory: one async re-preflight, the answer counts once it says ready", async () => {
     const seen: (string | undefined)[] = [];
     const e = await setup({
       mode: "ok",
@@ -345,7 +344,7 @@ describe("claude job: the init event and the stream stop a misconfigured job", (
         preflightAsync: async (_o, known) => {
           seen.push(known);
           await new Promise((r) => setTimeout(r, 50));
-          return { verdict: "subscription", reasons: [], cliVersion: "2.1.299" };
+          return { verdict: "ready", reasons: [], cliVersion: "2.1.299" };
         },
       },
     });
@@ -354,7 +353,7 @@ describe("claude job: the init event and the stream stop a misconfigured job", (
     expect(out.details.cliVersionChanged).toBe(true);
     expect(out.details.cliVersion).toBe("2.1.299");
     expect(seen).toEqual(["2.1.299"]);
-    expect(e.adapter.readiness).toMatchObject({ verdict: "subscription", version: "2.1.299" });
+    expect(e.adapter.readiness).toMatchObject({ verdict: "ready", version: "2.1.299" });
     const lines = diagLines(e);
     expect(lines.some((l) => l.event === "cli_version_changed" && l.cliVersion === "2.1.299")).toBe(true);
     expect(lines.find((l) => l.event === "agent_job")).toMatchObject({ cliVersionChanged: true });
@@ -365,11 +364,11 @@ describe("claude job: the init event and the stream stop a misconfigured job", (
     expect(seen).toHaveLength(1);
   });
 
-  it("a CLI update whose re-preflight is not subscription: preflight_failed, detail cli_version_changed", async () => {
+  it("a CLI update whose re-preflight is not ready: preflight_failed, detail cli_version_changed", async () => {
     const e = await setup({
       mode: "ok",
       version: "2.1.299",
-      deps: { preflightAsync: async () => ({ verdict: "ambiguous", reasons: ["auth: api key login"], cliVersion: "2.1.299" }) },
+      deps: { preflightAsync: async () => ({ verdict: "unavailable", reasons: ["cli: not logged in"], cliVersion: "2.1.299" }) },
     });
     const out = await e.adapter.run(request(e), { toolSurface: surface(e) });
     expect(out.result).toMatchObject({ status: "error", reason: "preflight_failed" });
@@ -381,12 +380,12 @@ describe("claude job: the init event and the stream stop a misconfigured job", (
     expect(e.spawnCalls).toBe(spawnsBefore);
   });
 
-  it("a preflight that could not read the CLI version is not sticky: the job waiting on it is preflight_failed, the next job re-runs it and a subscription verdict lets it run", async () => {
+  it("a preflight that could not read the CLI version is not sticky: the job waiting on it is preflight_failed, the next job re-runs it and a ready verdict lets it run", async () => {
     let release!: () => void;
     const gate = new Promise<void>((r) => (release = r));
     const reports: PreflightReportLike[] = [
-      { verdict: "ambiguous", reasons: ["cli: version unreadable"] },
-      { verdict: "subscription", reasons: [], cliVersion: VERIFIED_CLI_VERSION },
+      { verdict: "unavailable", reasons: ["cli: version unreadable"] },
+      { verdict: "ready", reasons: [], cliVersion: VERIFIED_CLI_VERSION },
     ];
     let runs = 0;
     // The real facade (it never caches a report without a version) over a scripted run.
@@ -405,7 +404,7 @@ describe("claude job: the init event and the stream stop a misconfigured job", (
     const first = await firstJob;
     expect(first.result).toMatchObject({ status: "error", reason: "preflight_failed" });
     expect(first.details.detail).toBe("unverified");
-    expect(e.adapter.readiness).toMatchObject({ ok: false, verdict: "ambiguous" });
+    expect(e.adapter.readiness).toMatchObject({ ok: false, verdict: "unavailable" });
     expect(e.adapter.readiness.version).toBeUndefined();
     expect(e.spawnCalls).toBe(0);
     expect(runs).toBe(1);
@@ -413,9 +412,9 @@ describe("claude job: the init event and the stream stop a misconfigured job", (
     const second = await e.adapter.run(request(e, { requestId: "job-2" }), { toolSurface: surface(e) });
     expect(second.result).toMatchObject({ status: "ok" });
     expect(runs).toBe(2);
-    expect(e.adapter.readiness).toMatchObject({ ok: true, verdict: "subscription", version: VERIFIED_CLI_VERSION });
+    expect(e.adapter.readiness).toMatchObject({ ok: true, verdict: "ready", version: VERIFIED_CLI_VERSION });
     expect(diagLines(e).filter((l) => l.event === "agent_preflight_retry")).toHaveLength(1);
-    // A cached subscription verdict: no further runs.
+    // A cached ready verdict: no further runs.
     expect((await e.adapter.run(request(e, { requestId: "job-3" }), { toolSurface: surface(e) })).result).toMatchObject({ status: "ok" });
     expect(runs).toBe(2);
   });
@@ -427,7 +426,7 @@ describe("claude job: the init event and the stream stop a misconfigured job", (
       deps: {
         preflightAsync: async () => {
           await gate;
-          return { verdict: "subscription", reasons: [], cliVersion: VERIFIED_CLI_VERSION };
+          return { verdict: "ready", reasons: [], cliVersion: VERIFIED_CLI_VERSION };
         },
       },
     });
@@ -697,7 +696,7 @@ describe("claude job: gates before launch", () => {
       preflightAsync: async () => {
         runs += 1;
         await new Promise((r) => setTimeout(r, 20));
-        return { verdict: "ambiguous", reasons: ["auth: api key login"], cliVersion: VERIFIED_CLI_VERSION };
+        return { verdict: "unavailable", reasons: ["cli: not logged in"], cliVersion: VERIFIED_CLI_VERSION };
       },
       spawn: () => {
         throw new Error("must not spawn");
@@ -708,7 +707,7 @@ describe("claude job: gates before launch", () => {
     expect(out.result).toMatchObject({ status: "error", reason: "preflight_failed" });
     expect(out.details.detail).toBe("unverified");
     expect(runs).toBe(1);
-    expect(fresh.readiness).toMatchObject({ ok: false, verdict: "ambiguous" });
+    expect(fresh.readiness).toMatchObject({ ok: false, verdict: "unavailable" });
     // A verdict exists now (with a version): the next job reuses it.
     await fresh.run(request(e, { requestId: "job-2" }), { toolSurface: surface(e) });
     expect(runs).toBe(1);
@@ -721,7 +720,7 @@ describe("claude job: gates before launch", () => {
         preflightAsync: (_o) => {
           runs += 1;
           // The first verdict could not read the version (arming a retry); the retry hangs.
-          return runs === 1 ? Promise.resolve({ verdict: "ambiguous", reasons: ["cli: claude not reachable"] }) : new Promise(() => {});
+          return runs === 1 ? Promise.resolve({ verdict: "unavailable", reasons: ["cli: claude not reachable"] }) : new Promise(() => {});
         },
       },
     });
@@ -745,33 +744,6 @@ describe("claude job: gates before launch", () => {
     expect(e.spawnCalls).toBe(1);
   });
 
-  it("a bad billing route in user settings: preflight ambiguous, preflight_failed, never spawns, no secrets logged", async () => {
-    const sb = makeSandbox();
-    sb.writeUserSettings({ apiKeyHelper: "SENTINEL-HELPER-CMD-44d0", env: { ANTHROPIC_API_KEY: "SENTINEL-API-KEY-7f3a" } });
-    const fake = fakeSpawnSync();
-    const e = await setup();
-    let spawned = 0;
-    const adapter = createClaudeJobAdapter({
-      home: sb.scoutHome,
-      profile: { schemaVersion: 1, adapter: "claude-code", claudePath: sb.claudePath, model: DEFAULT_CLAUDE_CODE_MODEL },
-      parentEnv: gatewayParentEnv(sb.home),
-      preflight: (o) => runDirectPreflight({ ...o, managedPaths: sb.managedPaths, projectStopAt: sb.root, username: "someone", spawnSync: fake.spawnSync }),
-      spawn: () => {
-        spawned++;
-        throw new Error("must not spawn");
-      },
-      minLaunchMs: 0,
-    });
-    const state = adapter.refreshPreflight();
-    expect(state.verdict).toBe("ambiguous");
-    expect(state.reasons).toContain("user settings: apiKeyHelper present");
-    expect(JSON.stringify(state)).not.toContain(sb.root);
-    expect(sentinelsIn(JSON.stringify(state))).toEqual([]);
-    expect(fake.calls).toEqual([]); // claude never ran: settings already decided it
-    const out = await adapter.run({ ...request(e), profileFingerprint: adapter.profileFingerprint }, { toolSurface: surface(e) });
-    expect(out.result).toMatchObject({ status: "error", reason: "preflight_failed" });
-    expect(spawned).toBe(0);
-  });
 
   it("a request for another profile is unsupported_configuration", async () => {
     const e = await setup();

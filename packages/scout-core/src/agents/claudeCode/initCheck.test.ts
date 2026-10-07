@@ -66,6 +66,10 @@ describe("checkInit", () => {
     expect(checkInit(init, expected(partial(true, ["mcp__bridge__lookup"])))).toEqual({ ok: false, reason: "tool_unavailable", detail: "required_server_unavailable" });
   });
 
+  it.each([{ apiKeySource: "ANTHROPIC_API_KEY" }, { apiProvider: "bedrock" }])("allows a logged-in auth route", (patch) => {
+    expect(checkInit(good(patch), expected()).ok).toBe(true);
+  });
+
   it.each<[string, Record<string, unknown>, Partial<ExpectedInit>, string, string]>([
     ["an extra server", { mcp_servers: [{ name: "scout", status: "connected" }, { name: "other", status: "connected" }] }, {}, "unsupported_configuration", "extra_server"],
     ["a duplicated server", { mcp_servers: [{ name: "scout", status: "connected" }, { name: "scout", status: "connected" }] }, {}, "unsupported_configuration", "extra_server"],
@@ -73,8 +77,6 @@ describe("checkInit", () => {
     ["the Skill tool", { tools: [...scoutTools, "Skill"] }, {}, "unsupported_configuration", "extra_tool"],
     ["permission mode default", { permissionMode: "default" }, {}, "unsupported_configuration", "permission_mode"],
     ["another model", { model: "claude-opus-other" }, {}, "unsupported_configuration", "model_mismatch"],
-    ["an API key route", { apiKeySource: "ANTHROPIC_API_KEY" }, {}, "preflight_failed", "auth_route"],
-    ["a Bedrock provider", { apiProvider: "bedrock" }, {}, "preflight_failed", "auth_route"],
     ["the required server failed", { mcp_servers: [{ name: "scout", status: "failed" }, { name: "bridge", status: "connected" }], tools: [...bridgeTools] }, {}, "tool_unavailable", "required_server_unavailable"],
     ["the required server absent", { mcp_servers: [{ name: "bridge", status: "connected" }], tools: [...bridgeTools] }, {}, "tool_unavailable", "required_server_unavailable"],
     ["a required tool missing", { tools: [...scoutTools.slice(1), ...bridgeTools] }, {}, "tool_unavailable", "required_tool_missing"],
