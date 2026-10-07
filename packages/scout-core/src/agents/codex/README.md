@@ -4,7 +4,7 @@ This folder runs Scout's recommendation jobs through the Codex CLI: one `codex e
 
 Jobs run with `CODEX_HOME` set to Scout's private home, `SCOUT_HOME/run/codex-home`. It holds only Codex's caches and `auth.json`, a symlink to the user's own `~/.codex/auth.json`, so a token refresh reaches the user's file. Each job's SQLite state lives in its job dir and is removed with it.
 
-A job runs only when `codex login status` reports a ChatGPT login, no `CODEX_API_KEY`, `CODEX_ACCESS_TOKEN` or `OPENAI_API_KEY` is set, and the auth link is intact (`readiness.ts`).
+A job runs only when `codex login status` reports a login and the auth link is intact (`readiness.ts`). The child env never carries `CODEX_API_KEY`, `CODEX_ACCESS_TOKEN` or `OPENAI_API_KEY`, so the login in `auth.json` is the one jobs use.
 
 Codex sends the output schema as an OpenAI strict schema, so `outputSchema.ts` requires both fields and has no length or pattern limits. The empty answer comes back as `{"status":"empty","items":[]}` and is normalized before the usual validation.
 

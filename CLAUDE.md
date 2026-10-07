@@ -147,7 +147,7 @@ and limits; `CONTRIBUTING.md` has the platform matrix.
     `createDefaultProfileFor`, `adapterLabel`, `profileExecutable`: exhaustive switches on
     `profile.adapter`; `AdapterFactoryDeps.seams` carries per-adapter test seams),
     `profile.ts` (`AgentProfileSchema`, a discriminated union on `adapter`, today
-    `claude-code | codex`; the core holds `agent-profile.lock` for its lifetime) with
+    `claude-code | codex | pi`; the core holds `agent-profile.lock` for its lifetime) with
     `profileBase.ts` (what every adapter's profile shares) and `executables.ts` (PATH
     lookup without a shell, then each adapter's usual install locations from its
     `profile.ts`, nvm as a bounded directory listing), `profileSwitch.ts` (the `set_agent`
@@ -167,9 +167,10 @@ and limits; `CONTRIBUTING.md` has the platform matrix.
     files in a 0700 `SCOUT_HOME/run/jobs/<id>/` named by argv only; the CLI's cwd is the
     single `SCOUT_HOME/run/agent-cwd`; strict MCP config, exact `--allowedTools`, hooks
     off, no persistence. Default model `claude-sonnet-5-5`, required in the profile and
-    never inherited. The billing preflight (`authPreflight.ts`) runs in a detached forked
-    child (SIGKILL on cancel/timeout/shutdown; verdicts cached per env fingerprint + CLI
-    version); a job proceeds only on `subscription`. CLI version drift triggers one async
+    never inherited. The readiness preflight (`authPreflight.ts`: the binary runs and
+    `claude auth status --json` reports `loggedIn`) runs in a detached forked child
+    (SIGKILL on cancel/timeout/shutdown; verdicts `ready | unavailable`, cached per env
+    fingerprint + CLI version); a job proceeds only on `ready`. CLI version drift triggers one async
     re-preflight. A required non-Scout tool stops a job only when every call to it errored.
     Files: `claudeJob.ts`, `profile.ts` (the union member, `DEFAULT_CLAUDE_CODE_MODEL`,
     `CLAUDE_CODE_LABEL`, the install locations), `authPreflight.ts`, `preflightWorker.ts`,
@@ -189,16 +190,37 @@ and limits; `CONTRIBUTING.md` has the platform matrix.
     Codex's caches plus `auth.json`, a symlink to the user's `~/.codex/auth.json` or
     `$CODEX_HOME/auth.json`; anything else at that path is `auth_link_invalid` and never
     removed) and a per-job `CODEX_SQLITE_HOME=<jobDir>/state`; the child env is
-    `FORWARD_KEYS` plus those two, with PATH led by the CLI's own directory (both adapters,
+    `FORWARD_KEYS` plus those two, with PATH led by the CLI's own directory (every adapter,
     `executables.ts` `pathWithCliDir`, for npm/nvm `#!/usr/bin/env node` installs), never `CODEX_API_KEY`, `CODEX_ACCESS_TOKEN` or
     `OPENAI_API_KEY`. `readiness.ts` (in a forked child like Claude's preflight) runs only
-    `codex --version` and `codex login status`: `subscription` needs "Logged in using
-    ChatGPT", no API-key env, a valid auth link and an executable `codexPath`. Default
+    `codex --version` and `codex login status`: `ready` needs any "Logged in" status, a
+    valid auth link and an executable `codexPath`. Default
     model `gpt-6-sol`, `model_reasoning_effort="low"`. `eventMonitor.ts` reads the JSONL
     events and halts on any tool outside the surface; `mapOutcome.ts` shares
     `outcomeFromOutput`. Argv verified against Codex CLI 0.155.1. `testing/` holds the
     fake `codex` (`fake-codex.mjs` with a strict TOML check of every `-c` value and a
     forbidden-flag list, `fake-codex-mcp.mjs` for `mcp add|get|remove`, `fakeCodex.ts`).
+  - `agents/pi/`: the Pi adapter. One `pi --mode json --no-session -na -ns -nc -np
+    --no-themes` per job, the prompt on stdin, `--tools` the exact surface plus
+    `scout_answer`, `--thinking` from the profile (default `low`), `--model` only when the
+    profile names `provider/id` (otherwise the user's Pi picks). `launch.ts` and
+    `userAgentDir.ts` build a per-job `PI_CODING_AGENT_DIR` in the job dir: `auth.json` (and
+    `models.json` when present) symlinked to the user's (`$PI_CODING_AGENT_DIR` or
+    `~/.pi/agent`), a 0600 `settings.json` with only `deviceId`, `defaultProvider`,
+    `defaultModel`, `enabledModels` and `quietStartup`, and a 0600 `mcp.json` with Scout's
+    servers at `exposure: "direct"`. The child env is `FORWARD_KEYS` plus PATH (CLI dir,
+    then the core's node dir, `pathWithDirs`), that dir, `PI_SKIP_VERSION_CHECK=1`,
+    `PI_TELEMETRY=0` and `SCOUT_PI_ANSWER_SCHEMA`. `answerExtension.mjs` (dependency-free,
+    copied into `dist/`) registers `scout_answer` with the job's JSON Schema as its
+    parameters and `terminate: true`; its details carry the answer and the count of
+    `mcp__scout__*` tools loaded (zero means the Scout server failed silently).
+    `readiness.ts` (forked child) runs only `pi --version` and `pi --list-models [model]` in
+    a throwaway agent dir; reasons `cli_missing`, `auth_link_invalid`, `node_too_old`,
+    `version_unknown`, `not_logged_in`, `model_not_found`. `eventMonitor.ts` reads the events
+    (turn cap 16, built-in or codemode tools halt, `agent_end {willRetry}` is not terminal);
+    `mapOutcome.ts` decides from the stream, since JSON mode exits 0 after a model error.
+    Argv verified against Pi 1.0.4 (`VERIFIED_PI_VERSION`). `testing/` holds the fake `pi`
+    (`fake-pi.mjs`: `--mode json`, `--version`, `--list-models`, `mcp add|remove|list`).
   - `integrations/claudeCode/`: `skillExporter.ts`, `skillWrapper.ts`, `skillIdentity.ts`
     (managed wrapper names `scout-<kind>-<16 hex>`, tagged ownership hash), `index.ts`
     (`openExporter`). Exports approved resources as managed skill wrappers (`SKILL.md`,
@@ -259,32 +281,34 @@ and limits; `CONTRIBUTING.md` has the platform matrix.
   `ScoutApp`.
 - `scripts/setup.mjs`, `uninstall.mjs`, `doctor.mjs`, `bundle-app.mjs` with `scripts/lib/`:
   the install. Setup refuses a non-default Scout home without `--scout-root`; it writes
-  `agent-profile.json` when absent (`--agent claude-code|codex`, else Claude Code when
-  `claude` is found, else Codex when `codex` is; an absolute CLI path and the defaults
+  `agent-profile.json` when absent (`--agent claude-code|codex|pi`, else the first of
+  `claude`, `codex`, `pi` found; an absolute CLI path and the defaults
   read from `dist/agents/<adapter>/profile.js`, recorded with hash, never rewritten).
   `installed.json` lists every written path by kind (`agent-profile`, `launch-agent`,
   `app-bundle`, `skill`, `mcp-registration`, …) plus `skillsRoot` (Claude Code's; Scout
   exports site skills to Claude Code only); `skill` and `mcp-registration` entries record
-  `agent` (absent means Claude Code) and are singletons per agent, and a Codex
-  registration records the Codex home it went into. An entry of an unknown kind is
+  `agent` (absent means Claude Code) and are singletons per agent, a Codex
+  registration records the Codex home it went into, a Pi one the Pi agent dir. An entry of an unknown kind is
   reported and skipped. `setup --login-launch [--app]` writes a hash-recorded LaunchAgent.
   `setup --agent-integration` targets `--agent`, else the profile's adapter, else Claude
-  Code: it registers the MCP adapter through `claude mcp add` at user scope or `codex mcp
-  add` (never by editing JSON or `config.toml`; `codex mcp add` overwrites silently, so
-  setup runs `get` first) and installs the static `scout-integration` skill under the
+  Code: it registers the MCP adapter through `claude mcp add` at user scope, `codex mcp
+  add` or `pi mcp add --exposure direct` (never by editing JSON or `config.toml`; the
+  Codex and Pi adds overwrite silently, so setup checks first: `codex mcp get`, or a
+  read-only parse of the Pi agent dir's `mcp.json`, since Pi has no `get`) and installs the static `scout-integration` skill under the
   agent's skills root; a foreign `scout` registration, or a Codex entry with its own env or
   cwd, refuses and is reported without its command line
-  (`lib/{claude-mcp,codex-mcp,agent-integration,integration-skill}.mjs`). Uninstall
+  (`lib/{claude-mcp,codex-mcp,pi-mcp,agent-integration,integration-skill}.mjs`). Uninstall
   refuses while `capabilities/store.lock` is held by a live pid, runs `cli.js capability
   unexport-all` first (removes only hash-matching wrappers), then exact-hash removals,
-  `codex mcp remove` only after a `get` match, `launchctl bootout` on the real home only,
+  `codex mcp remove` / `pi mcp remove` only after an ownership match, `launchctl bootout` on the real home only,
   and removes `run/codex-home` (the auth link, never its target). Doctor reports eight
   sections (install record, Mac app, core, Chrome relay + `BRIDGE_PROTOCOL`, agent
-  integration, CLI advisory with a Codex branch for the path, version and auth link, billing
-  from the last `agent_preflight` of either adapter, never a fresh preflight, suggestions)
+  integration, CLI advisory with Codex and Pi branches for the path, version, auth link
+  and (Pi) the core's node >= 22.19, agent readiness from the last `agent_preflight` of
+  the profile's adapter, never a fresh preflight, suggestions)
   and exits 1 only on a fail. `scripts/agent-check/` holds the agent compatibility checks
-  (read its README before any live run; `--adapter codex [--codex <path>]` runs them
-  through the Codex adapter; `codex-probe.mjs` is the one-off CLI probe).
+  (read its README before any live run; `--adapter codex [--codex <path>]` or `--adapter
+  pi [--pi <path>] [--pi-model <provider/id>]` runs them through that adapter; `codex-probe.mjs` is the one-off CLI probe).
   `scripts/manual-check/` is the agent-driven browser harness (Chrome for Testing +
   throwaway profile).
 - `test/e2e.test.mjs`: real host against the real core over a temp `SCOUT_HOME`.
@@ -303,7 +327,7 @@ Run from the repo root:
 - One package: `npx vitest run --root packages/<name>`
 - `npm run test:e2e` (after a build); `npm run test:all` builds then runs both;
   `npm run test:agent-contract`
-- `npm run setup [--dry-run] [--scout-root <dir>] [--agent <claude-code|codex>] [--agent-integration] [--login-launch [--app <Scout.app>]]`,
+- `npm run setup [--dry-run] [--scout-root <dir>] [--agent <claude-code|codex|pi>] [--agent-integration] [--login-launch [--app <Scout.app>]]`,
   `npm run doctor [-- --verbose]`, `npm run uninstall [--yes] [--include-key] [--dry-run]`
 - `npm run bundle-app -- [--out <dir>] [--dry-run] [--binary <path>] [--install]` (a
   windowless `Scout.app`; `--install` → `~/Applications/Scout.app`); `npm run test:swift`;
@@ -317,12 +341,12 @@ Run from the repo root:
   `node packages/scout-core/dist/cli.js catalog <origin> [--refresh] [--json]` and
   `… verify <url>...` (≤10 URLs, one origin). `--help` exits 0; misuse exits 1.
 - `npm run verify:agent -- --case <hotload|baseline|selected-tool|cancel> --home <dir>
-  [--adapter codex [--codex <path>]]`: live agent checks; every non-dry run spends the
-  maintainer's quota.
+  [--adapter codex [--codex <path>] | --adapter pi [--pi <path>] [--pi-model <p/id>]]`:
+  live agent checks; every non-dry run spends the maintainer's quota or money.
 
 Env overrides for tests only: `SCOUT_HOME`, `CHROME_NMH_DIR`, `LAUNCH_AGENTS_DIR`,
 `SCOUT_APPLICATIONS_DIR`, `SCOUT_SKILLS_ROOT`, `SCOUT_CLAUDE_BIN`, `SCOUT_CODEX_BIN`,
-`SCOUT_CODEX_HOME` (the seven after `SCOUT_HOME` are required on a test home where they
+`SCOUT_CODEX_HOME`, `SCOUT_PI_BIN`, `SCOUT_PI_AGENT_DIR` (the nine after `SCOUT_HOME` are required on a test home where they
 apply and refused on the real one), `SCOUT_DWELL_MS`
 (the core's dwell; tests that form real visits set it high so nothing settles into real
 fetches). The Swift app reads only `~/.scout`.
@@ -333,30 +357,31 @@ fetches). The Swift app reads only `~/.scout`.
 robots/llms/sitemap counters), `catalog_cache` (source, stale, ageMs),
 `catalog_cache_invalid` (code), `catalog_cache_write_failed` (code),
 `catalog_cache_skipped`. Jobs: `job_started`, `job_finished` (incl. `droppedPicks`),
-`job_cancelled` (code), `agent_preflight` (`adapter`), `agent_job` (Codex's carries
+`job_cancelled` (code), `agent_preflight` (`adapter`), `agent_job` (Codex's and Pi's carry
 `adapter`), `jobs_swept`. Profile: `agent_profile_changed`, `agent_profile_switched` (`adapter`),
 `agent_profile_switch_failed` (code). Capabilities: `capability_decision`. All carry
 `origin` and scalars only.
 
 ## Rules
 
-- **Scout is agent-agnostic.** Claude Code and Codex are the two job adapters; Claude Code
+- **Scout is agent-agnostic.** Claude Code, Codex and Pi are the three job adapters; Claude Code
   has the only skill-export integration. Agent-specific code stays in `agents/<adapter>/`,
   `integrations/<adapter>/` and the integration scripts; nothing else may assume one
   agent.
 - **No unapproved spend.** Make no model call that costs money the maintainer hasn't
   approved.
-- **Auth gate.** No model inference runs unless the preflight for the environment that
-  will make the call exits 0 (`subscription`). Never change user or workspace settings or
-  a gateway to get past a gate.
+- **Readiness gate.** No job runs unless the adapter's readiness check for the
+  environment that will make the call says `ready` (CLI present and logged in). How the
+  user's agent bills is the user's choice; Scout never gates on it. Never change user or
+  workspace settings or a gateway to get past a gate.
 - **No personal-source access.** No personal source is enabled. Browser context for the
   user's agent is a separate opt-in the user flips in the side panel's Settings; agents
   never flip it and never edit the user's `~/.scout/config.json`. Tests use hypothetical
   fixtures in temp homes.
 - **Real model calls are the maintainer's quota.** Only a suggestion-enabled visit with
-  the real `claude` or `codex` makes one, on the maintainer's Claude or ChatGPT plan.
-  Agents use the fake CLIs in `agents/claudeCode/testing/` and `agents/codex/testing/`
-  (via `SCOUT_CLAUDE_BIN` / `SCOUT_CODEX_BIN`) and a throwaway `SCOUT_HOME`. Real runs
+  the real `claude`, `codex` or `pi` makes one, on the maintainer's plan or keys. Agents
+  use the fake CLIs in `agents/<adapter>/testing/` (via `SCOUT_CLAUDE_BIN` /
+  `SCOUT_CODEX_BIN` / `SCOUT_PI_BIN`) and a throwaway `SCOUT_HOME`. Real runs
   need the maintainer's separate authorization, one or two per check.
 - **Gates stop the work.** If a check fails, stop and report the evidence to the
   maintainer. Don't reshape the plan to get past it.

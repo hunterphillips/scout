@@ -65,11 +65,11 @@ run out of `~/.scout`.
 2. `npm run setup` writes `~/.scout/config.json`, the native-host wrapper in
    `~/.scout/bin`, Chrome's native-messaging manifest, and the job profile
    (`agent-profile.json`, which names the agent binary and model the jobs use). Jobs run
-   through Claude Code or Codex: `--agent claude-code` or `--agent codex` picks one;
-   without the flag, setup uses Claude Code if `claude` is installed, else Codex if
-   `codex` is. Everything it writes is listed in `~/.scout/installed.json`. `--dry-run`
+   through Claude Code, Codex or Pi: `--agent claude-code`, `--agent codex` or
+   `--agent pi` picks one; without the flag, setup uses the first of `claude`, `codex`
+   and `pi` it finds. Everything it writes is listed in `~/.scout/installed.json`. `--dry-run`
    shows the paths first. `--agent-integration` also registers the `scout` MCP connection
-   with that agent (`claude mcp add` at user scope, or `codex mcp add`) and installs the
+   with that agent (`claude mcp add` at user scope, `codex mcp add` or `pi mcp add`) and installs the
    `scout-integration` skill where the agent reads skills. Setup refuses if a foreign
    `scout` registration exists.
 3. In Chrome, open `chrome://extensions`, turn on Developer mode, and load
@@ -103,7 +103,7 @@ something is wrong, a short line says so. A link opens in a new tab only when yo
 job for the page it opened, and when you return to a page within 15 minutes its links come
 back without a new job. **Activity**
 lists problems first, then your agent's reads. **Settings** has Pause, the **Agent** row
-(every installed agent Scout finds, **Claude Code** or **Codex**; picking one applies at
+(every installed agent Scout finds, **Claude Code**, **Codex** or **Pi**; picking one applies at
 once, with no restart), issue text on github.com, the switch that lets your agent read the
 current site, and Diagnostics. With
 the panel closed, the toolbar badge counts new links (blue) or files to review (amber), and
@@ -133,9 +133,14 @@ registration and the skill, for whichever agent they were installed with.
 Codex jobs run with a private Codex home under `~/.scout/run/codex-home`, so none of
 your Codex config, rules, history or sessions reach a job. Its only link to your own
 Codex setup is `auth.json`, a symlink to `~/.codex/auth.json`, so your ChatGPT login is
-used and a token refresh lands in your file. Codex runs only on a ChatGPT login; an API
-key in the environment stops jobs. Doctor checks the link; uninstall removes the private
-home (the link only, never the file it points to).
+used and a token refresh lands in your file. Doctor checks the link; uninstall removes
+the private home (the link only, never the file it points to).
+
+Pi jobs run with a private Pi agent directory per job. It links to your `auth.json` and
+`models.json` and copies only your model selection from `settings.json`, so a job uses
+the provider and model your Pi would pick, and none of your extensions, skills, prompts
+or sessions. Jobs get no API keys from your environment, so log in with `pi` (`/login`)
+or put the key in `auth.json`.
 
 ## Chrome for Testing
 
