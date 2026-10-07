@@ -245,19 +245,28 @@ describe("job wiring: process ownership and the agent profile", () => {
     }
     writeProfile(home, profile(home, 4));
     let changed = 0;
-    const w = build({ env: { PATH: bin }, onProfileChanged: () => void changed++ });
+    // The watcher's seams stand in for fs.watch and its debounce, as in the next test.
+    const timers = manualTimers();
+    let fileChanged: ((filename: string | null) => void) | undefined;
+    const watch = (_dir: string, listener: (filename: string | null) => void) => {
+      fileChanged = listener;
+      return { close() {} };
+    };
+    const w = build({ env: { PATH: bin }, timers, watch, onProfileChanged: () => void changed++ });
     expect(w.adapter!.id).toBe("claude-code");
 
     expect(w.switchAgent("codex")).toEqual({ ok: true, written: true });
     expect(events.find((e) => e.name === "agent_profile_switched")?.fields).toEqual({ adapter: "codex" });
-    await until(() => w.adapter?.id === "codex");
+    fileChanged?.("agent-profile.json");
+    timers.advance(250);
+    expect(w.adapter?.id).toBe("codex");
     expect(changed).toBe(1);
     const written = JSON.parse(readFileSync(join(home, "agent-profile.json"), "utf8")) as AgentProfile;
     expect(written).toEqual({ schemaVersion: 1, adapter: "codex", codexPath: join(bin, "codex"), model: "gpt-6-sol", tools: { revision: 4, connections: [], selections: [] } });
 
     // Choosing the current adapter again writes nothing.
     expect(w.switchAgent("codex")).toEqual({ ok: true, written: false });
-    await new Promise((r) => setTimeout(r, 600));
+    timers.advance(600);
     expect(changed).toBe(1);
     expect(w.switchAgent("other-agent")).toEqual({ ok: false, code: "invalid" });
 

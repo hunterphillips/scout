@@ -79,31 +79,22 @@ const ERROR_TEXT: Record<ErrorReason, string> = {
   agent_failed: "The agent failed.",
 };
 
-/** A few words for the header; null when there is nothing to say. */
+/**
+ * The results part of Settings → Diagnostics "Now", in the Page view's words (without the final
+ * period); null when the Page view shows nothing or the status line already says it.
+ */
 export function displaySummary(d: ResultsDisplay): string | null {
-  switch (d.kind) {
-    case "none":
-    case "link_down":
-    case "connecting":
-      return null; // the status line already says it
-    case "paused":
-      return "Paused";
-    case "disconnected":
-      return "Chrome not connected";
+  if (d.kind === "none" || d.kind === "link_down" || d.kind === "connecting") return null;
+  const slot = resultsSlot(d);
+  switch (slot.kind) {
+    case "quiet":
+      return null;
     case "working":
       return "Looking for links…";
-    case "ready":
-      return d.items.length === 1 ? "1 link" : `${d.items.length} links`;
-    case "empty":
-      return "Nothing relevant";
-    case "unavailable":
-      return "Links unavailable";
-    case "timeout":
-      return "Timed out";
-    case "error":
-      return "Links failed";
-    case "cancelled":
-      return "Stopped";
+    case "links":
+      return slot.items.length === 1 ? "1 link" : `${slot.items.length} links`;
+    case "caption":
+      return slot.text.replace(/\.$/, "");
   }
 }
 

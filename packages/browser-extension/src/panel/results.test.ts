@@ -95,9 +95,9 @@ describe("ResultsModel (ResultsModelTests.swift)", () => {
     const m = ready();
     expect(m.headerLine).toBe("Idle · docs.example.com · 2 links");
     m.apply(results(1, { status: "empty" }, { job: "job-2" }));
-    expect(m.headerLine).toBe("Idle · docs.example.com · Nothing relevant");
+    expect(m.headerLine).toBe("Idle · docs.example.com · No suggestions for this page");
     m.apply(results(1, { status: "error", reason: "timeout" }, { job: "job-3" }));
-    expect(m.headerLine).toBe("Idle · docs.example.com · Timed out");
+    expect(m.headerLine).toBe("Idle · docs.example.com · Scout ran out of time looking for links on this visit");
     m.apply(state("paused"));
     expect(m.headerLine).toBe("Paused");
   });
