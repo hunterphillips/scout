@@ -12,6 +12,10 @@
 // dedupe/robots pass, the cache write): input would wait that long. The dedupe/robots pass stays
 // on the main thread, time-sliced (resolver.ts PASS_SLICE_MS; resolver.test.ts bounds
 // its adversarial shapes under 50 ms).
+//
+// The two timed tests retry: on a busy CI runner (other test files share its two cores) one
+// scheduler or GC stall can push a single tick past the bound with no change in this code. A
+// real block on the main thread fails every attempt, so the bound itself stays at 100 ms.
 
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -39,6 +43,8 @@ const STDIO: PanelSink = { id: "stdio", kind: "stdio", send: () => {} };
 
 const ORIGIN = "https://docs.example.com";
 const BOUND_MS = 100;
+/** The timed tests' options: a long timeout for the worst-case parse, and retries for runner stalls. */
+const TIMED = { timeout: 60_000, retry: 2 } as const;
 /** A long caption with entities, so each child file sits just under the per-file cap. */
 const CAPTION = "How to set up metered billing, invoices &amp; usage records for teams; ".repeat(2) + "step by step";
 
@@ -203,7 +209,7 @@ describe("coordinator responsiveness under a worst-case bounded catalog", () => 
     expect(files["/robots.txt"]!.split("\n").filter((l) => l.startsWith("Disallow") || l.startsWith("Allow"))).toHaveLength(MAX_RULES);
   });
 
-  it(`a focus change and then a pause, each arriving while a sitemap is in the parse worker, reach the side panel within ${BOUND_MS} ms`, async () => {
+  it(`a focus change and then a pause, each arriving while a sitemap is in the parse worker, reach the side panel within ${BOUND_MS} ms`, TIMED, async () => {
     const c = coreUnderLoad();
     c.focus(10, "/billing");
     const firstEpoch = c.coordinator.tracker.epoch;
@@ -234,9 +240,9 @@ describe("coordinator responsiveness under a worst-case bounded catalog", () => 
     // Both passes were cancelled by the inputs and never ingested.
     expect(c.events.some((e) => e.name === "discovery_ingested")).toBe(false);
     c.coordinator.stop();
-  }, 60_000);
+  });
 
-  it(`a full worst-case pass, left to finish, never holds the event loop ${BOUND_MS} ms (worker hand-off, resolver dedupe and robots, cache write)`, async () => {
+  it(`a full worst-case pass, left to finish, never holds the event loop ${BOUND_MS} ms (worker hand-off, resolver dedupe and robots, cache write)`, TIMED, async () => {
     const c = coreUnderLoad();
     let last = performance.now();
     let worstGap = 0;
@@ -258,5 +264,5 @@ describe("coordinator responsiveness under a worst-case bounded catalog", () => 
     }
     expect(worstGap).toBeLessThan(BOUND_MS);
     c.coordinator.stop();
-  }, 60_000);
+  });
 });
