@@ -6,9 +6,9 @@
 // filtering applied (forwarded key names, dropped key count), what the init event loaded
 // (Scout's servers and tools by name and status; everything else as counts), the model,
 // the outcome class, structured output (the picks, each with its candidate's title and
-// URL), timings, usage counts, cleanup evidence, and each inference request made. What never goes in: tokens, env values, full
-// prompts, model text, the user's other skill/server/tool names, and absolute paths under $HOME (shown
-// as `~`). redactReport() enforces the last two on the finished object as well, and
+// URL), timings, usage counts, cleanup evidence, and each inference request made. What
+// never goes in: tokens, env values, full prompts, model text, the user's other
+// skill/server/tool names, and absolute paths under $HOME (shown as `~`). redactReport() enforces the last two on the finished object as well, and
 // writeReport() refuses to write if a secret survives.
 
 import { chmodSync, mkdirSync, realpathSync, writeFileSync } from "node:fs";
