@@ -3,7 +3,7 @@
 // Everything here is made up; no browsing, personal source or real site is involved.
 
 import { randomBytes } from "node:crypto";
-import { chmodSync, lstatSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import { REPO_ROOT } from "../lib/paths.mjs";
@@ -108,15 +108,84 @@ export const JOB_CANDIDATES = Object.freeze([
   { id: "c6", title: "Press kit", labelQuality: "slug" },
 ]);
 
-/** The fixture core for a background job: a current site and recent activity that point at c1. */
-export async function startJobFixture(root) {
+const MAX_CASE_CANDIDATES = 500;
+const MAX_CASE_ACTIVITY = 10;
+const LABEL_QUALITIES = ["published", "image_title", "slug"];
+
+function readJsonFile(file, flag) {
+  try {
+    return JSON.parse(readFileSync(file, "utf8"));
+  } catch {
+    throw new Error(`${flag} must name a readable JSON file`);
+  }
+}
+
+/**
+ * A real case for the baseline check, in place of the synthetic one.
+ *
+ * `candidatesFile`: a Scout catalog cache file (`~/.scout/cache/catalog/<host>-<hash>.json`) or
+ * its `catalog` object: `{ origin, version, candidates: [{ id, sourceUrl, title, description?,
+ * labelQuality }] }`, at most 500 candidates. `activityFile`: a JSON array of at most 10 pages,
+ * `{ url, title, text? }`, newest first. Either may be omitted; the synthetic one is used then.
+ */
+export function loadCaseInputs({ candidatesFile, activityFile } = {}) {
+  const inputs = {};
+  if (candidatesFile) {
+    const raw = readJsonFile(candidatesFile, "--candidates");
+    const cat = raw?.catalog ?? raw;
+    let origin;
+    try {
+      origin = new URL(cat?.origin).origin;
+    } catch {
+      throw new Error("--candidates: the catalog has no https origin");
+    }
+    if (!origin.startsWith("https://")) throw new Error("--candidates: the catalog has no https origin");
+    const list = cat.candidates;
+    if (!Array.isArray(list) || list.length < 1 || list.length > MAX_CASE_CANDIDATES) throw new Error(`--candidates: needs 1-${MAX_CASE_CANDIDATES} candidates`);
+    const candidates = list.map((c) => {
+      if (typeof c?.id !== "string" || !/^c[0-9a-z]+$/.test(c.id) || typeof c.title !== "string" || typeof c.sourceUrl !== "string" || !LABEL_QUALITIES.includes(c.labelQuality)) {
+        throw new Error("--candidates: each candidate needs id, sourceUrl, title and labelQuality");
+      }
+      return { id: c.id, sourceUrl: c.sourceUrl, title: c.title, ...(typeof c.description === "string" ? { description: c.description } : {}), labelQuality: c.labelQuality };
+    });
+    inputs.site = { origin, catalogVersion: typeof cat.version === "string" && cat.version ? cat.version : "case-catalog", candidates };
+  }
+  if (activityFile) {
+    const list = readJsonFile(activityFile, "--activity");
+    if (!Array.isArray(list) || list.length < 1 || list.length > MAX_CASE_ACTIVITY) throw new Error(`--activity: needs a list of 1-${MAX_CASE_ACTIVITY} pages`);
+    const now = Date.now();
+    inputs.activity = list.map((a, i) => {
+      let url;
+      try {
+        url = new URL(a?.url);
+      } catch {
+        throw new Error("--activity: each page needs an https url and a title");
+      }
+      if (url.protocol !== "https:" || typeof a.title !== "string") throw new Error("--activity: each page needs an https url and a title");
+      return { origin: url.origin, url: url.href, observedAt: now - (i + 1) * 60_000, title: a.title, ...(typeof a.text === "string" ? { text: a.text } : {}), textTruncated: a.textTruncated === true };
+    });
+  }
+  return inputs;
+}
+
+/**
+ * The fixture core for a background job: a current site and recent activity that point at c1,
+ * or, with `inputs` from loadCaseInputs, the case's site (its root page and its links) and pages.
+ */
+export async function startJobFixture(root, inputs = {}) {
   const token = newToken();
+  const site = inputs.site;
   const served = await serve(root, {
     coreInstanceId: "core-check",
     token,
     browserContextGranted: true,
-    currentSite: { origin: JOB_SITE, url: `${JOB_SITE}/billing`, title: "Billing documentation", visitEpoch: 7 },
-    activity: [
+    currentSite: site
+      ? { origin: site.origin, url: `${site.origin}/`, title: new URL(site.origin).host, visitEpoch: 7 }
+      : { origin: JOB_SITE, url: `${JOB_SITE}/billing`, title: "Billing documentation", visitEpoch: 7 },
+    ...(site
+      ? { siteLinks: { origin: site.origin, catalogVersion: site.catalogVersion, links: site.candidates.map((c) => ({ id: c.id, href: c.sourceUrl, title: c.title, ...(c.description ? { description: c.description } : {}) })) } }
+      : {}),
+    activity: inputs.activity ?? [
       {
         origin: "https://linear.app",
         url: "https://linear.app/example-org/issue/API-42/usage-based-billing",
@@ -136,20 +205,20 @@ export async function startJobFixture(root) {
   };
 }
 
-/** A background job request over JOB_CANDIDATES for the given profile. */
-export function jobRequest({ requestId, coreInstanceId, profileFingerprint }) {
+/** A background job request over JOB_CANDIDATES, or the case's site, for the given profile. */
+export function jobRequest({ requestId, coreInstanceId, profileFingerprint, site }) {
   return {
     requestId,
     coreInstanceId,
     visitEpoch: 7,
-    origin: JOB_SITE,
+    origin: site?.origin ?? JOB_SITE,
     catalogHash: "check-catalog-1",
     browserSnapshot: { id: "snap-check", revision: 1 },
     approvalRevision: 0,
     grantRevision: 0,
     profileFingerprint,
     deadlineMs: 30_000,
-    candidates: JOB_CANDIDATES.map((c) => ({ ...c })),
+    candidates: site ? site.candidates.map(({ sourceUrl: _url, ...c }) => c) : JOB_CANDIDATES.map((c) => ({ ...c })),
     maxPicks: 3,
   };
 }
