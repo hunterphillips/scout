@@ -23,6 +23,7 @@
 // Diagnostics disclosure (which ends with the "Sent to Scout" counters). Escape collapses the review card, then returns to Page (panel-app.ts).
 
 import type { CapabilityOffer, LibraryEntry } from "@scout/contracts";
+import { GITHUB_PATTERN } from "../hosts.js";
 import type { StatusSnapshot } from "../messages.js";
 import { hostOf } from "./capabilities.js";
 import { ACK_CODE_TEXT, type PanelModel, type PanelSection, type Problem, SECTIONS } from "./model.js";
@@ -90,8 +91,6 @@ export function statusText(s: StatusSnapshot): string {
 export function hostLabel(pattern: string): string {
   return pattern.replace(/^https:\/\//, "").replace(/\/\*$/, "");
 }
-
-const GITHUB_PATTERN = "https://github.com/*";
 
 /** GitHub issue text is captured exactly while github.com is allowed. */
 const githubAllowed = (s: StatusSnapshot): boolean => s.granted.includes(GITHUB_PATTERN);
