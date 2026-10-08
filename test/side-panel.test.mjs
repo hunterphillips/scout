@@ -157,7 +157,7 @@ describe.skipIf(SKIP !== null)(SKIP ? `Scout's side panel in Chrome for Testing 
     execFileSync("openssl", ["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", join(home, "k.pem"), "-out", join(home, "c.pem"), "-days", "1", "-subj", `/CN=${HOSTNAME}`, "-addext", `subjectAltName=DNS:${HOSTNAME}`], { stdio: "ignore" });
     server = createServer({ key: readFileSync(join(home, "k.pem")), cert: readFileSync(join(home, "c.pem")) }, (req, res) => {
       res.setHeader("content-type", "text/html; charset=utf-8");
-      res.end(`<!doctype html><title>Docs ${req.url}</title><h1>${req.url}</h1>`);
+      res.end(`<!doctype html><title>Docs ${req.url}</title><nav>Docs home</nav><main><h1>${req.url}</h1><p>Invoices go out on the first of each month; usage is billed in arrears.</p></main>`);
     });
     await new Promise((r) => server.listen(0, "127.0.0.1", r));
     const port = server.address().port;
@@ -264,6 +264,14 @@ describe.skipIf(SKIP !== null)(SKIP ? `Scout's side panel in Chrome for Testing 
     steps.panelWidth = width;
     expect(width[1]).toBeLessThanOrEqual(width[0]); // no horizontal scroll at the panel's width
 
+    // The allowed site's page was read: after it settled and stayed visible 3 s, one page reached Scout.
+    await click("nav-settings");
+    const sentLine = () => panel.evaluate(() => document.getElementById("sent-line")?.textContent ?? "");
+    await until(async () => / · pages 1 · /.test(await sentLine()), "Sent to show one page", 20_000);
+    steps.pageText = await sentLine();
+    await click("nav-page");
+    await until(() => panel.evaluate(() => document.querySelector('[data-key^="open-"]') !== null), "the results again");
+
     // 4. Click: open_link → ack → a new tab on exactly the ack's target, next to the site's tab.
     const target = candidates.find((c) => c.id === first.candidateId).sourceUrl;
     const siteTab = await sw.evaluate(() => chrome.tabs.query({ active: true, lastFocusedWindow: true }).then(([t]) => ({ id: t.id, index: t.index })));
@@ -324,6 +332,6 @@ describe.skipIf(SKIP !== null)(SKIP ? `Scout's side panel in Chrome for Testing 
     browser = undefined;
     core.stdin.end();
     expect(await coreExit).toBe(0);
-    for (const secret of ["Docs billing", `${SITE}/docs`]) expect(coreErr.includes(secret), `core stderr contains ${secret}`).toBe(false);
+    for (const secret of ["Docs billing", "Invoices go out", `${SITE}/docs`]) expect(coreErr.includes(secret), `core stderr contains ${secret}`).toBe(false);
   }, 120_000);
 });

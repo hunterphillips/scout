@@ -157,7 +157,7 @@ function takeJob(overrides: Partial<TakeSnapshotInput> = {}) {
 }
 
 let pageSeq = 0;
-/** Accept one GitHub issue observation into the live activity store. */
+/** Accept one tracker-issue page observation into the live activity store. */
 function observe(n: number, text = `Body ${n}`) {
   return activity.accept(
     { kind: "page_text", seq: ++pageSeq, at: now, tabId: 1, documentId: "d", url: `https://linear.app/acme/issue/ENG-${n}`, source: "page", title: `Issue ${n}`, text, truncated: false, policyRevision: 0 },
