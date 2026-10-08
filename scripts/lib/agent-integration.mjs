@@ -61,7 +61,7 @@ export function integrationExplanation(agent = "claude-code") {
       ? "The `scout` MCP connection is registered in your Codex configuration: it is available in all of your Codex sessions, in every project."
       : "The `scout` MCP connection is registered at user scope: it is available in all of your Claude Code sessions, in every project.",
     "It exposes only the website files you approved for your agent in Scout (llms.txt, AGENTS.md, skills), read on demand.",
-    "Browser context (the current site and recent GitHub issues) is a separate opt-in, off by default: turn it on in the Scout side panel's Settings (\"Let your agent read the current site and recent GitHub issues\").",
+    "Browser context (the current site and the pages you read recently on allowed sites) is a separate opt-in, off by default: turn it on in the Scout side panel's Settings (\"Let your agent see the current site and pages you read on allowed sites\").",
     "With Scout quit, the connection stays registered and its tools answer that Scout is not running.",
     `Start a new ${label} session to load it: running sessions do not reload MCP servers or skills.`,
     "Remove it with `npm run uninstall -- --agent-integration`.",

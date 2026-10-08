@@ -1,11 +1,11 @@
 import { BrowserObservationSchema } from "@scout/contracts";
 import { describe, expect, it } from "vitest";
-import { CONTENT_SCRIPT_FILE, CONTENT_SCRIPT_ID, createBackground, GITHUB_PATTERN, HOST_NAME } from "./background-core.js";
+import { CONTENT_SCRIPT_FILE, CONTENT_SCRIPT_ID, createBackground, HOST_NAME } from "./background-core.js";
 import { FOCUS_DEBOUNCE_MS } from "./focus-observer.js";
 import type { StatusSnapshot } from "./messages.js";
 import { BROAD_GRANT_TEXT, statusRows } from "./panel/view.js";
 import { activate, asChrome, DISABLED_POLICY, fakeClock, flush, makeChrome, sender } from "./test-fakes.js";
-import { approve, commandsPosted, corePolicy, dropPort, lastPort, observations, pageText, setup } from "./test-harness.js";
+import { approve, commandsPosted, corePolicy, dropPort, lastPort, observations, pageText, setup, TRACKER_PATTERN } from "./test-harness.js";
 
 const STRIPE = "https://docs.stripe.com/*";
 const EXAMPLE = "https://example.com/*";
@@ -19,7 +19,7 @@ describe("manifest-level wiring", () => {
   });
 
   it("posts nothing until the core's policy, then a permissions snapshot, then a focus stamped with its revision", async () => {
-    const { f, clock, bg } = await setup({ granted: [GITHUB_PATTERN, STRIPE], host: "silent", autoEnable: false });
+    const { f, clock, bg } = await setup({ granted: [TRACKER_PATTERN, STRIPE], host: "silent", autoEnable: false });
     f.tabs.onActivated.emit({ tabId: 10, windowId: 1 } as never);
     await clock.advance(1000);
     expect(lastPort(f).posted).toEqual([]);
@@ -30,26 +30,26 @@ describe("manifest-level wiring", () => {
     await clock.advance(0);
     const [perm, focus] = lastPort(f).posted;
     expect(kinds(lastPort(f).posted)).toEqual(["permissions", "focus"]);
-    expect(perm).toEqual({ kind: "permissions", revision: expect.any(Number), at: clock.now(), granted: [GITHUB_PATTERN, STRIPE] });
+    expect(perm).toEqual({ kind: "permissions", revision: expect.any(Number), at: clock.now(), granted: [TRACKER_PATTERN, STRIPE] });
     expect(BrowserObservationSchema.safeParse(perm).success).toBe(true);
-    expect(focus).toMatchObject({ kind: "focus", tabId: 10, url: "https://github.com/acme/widgets/issues/1", permissionsRevision: perm!["revision"] });
+    expect(focus).toMatchObject({ kind: "focus", tabId: 10, url: "https://tracker.example/acme/widgets/issues/1", permissionsRevision: perm!["revision"] });
     expect(bg.snapshot().policy).toEqual({ revision: 1, captureEnabled: false, paused: false });
   });
 
   it("the snapshot lists only exact https origins, dropping wildcard, all-sites and http grants", async () => {
-    const { f } = await setup({ granted: [GITHUB_PATTERN, "https://*/*", "https://*.example.com/*", "http://plain.example/*", "<all_urls>", STRIPE] });
-    expect(observations(f, "permissions")[0]).toMatchObject({ granted: [GITHUB_PATTERN, STRIPE] });
+    const { f } = await setup({ granted: [TRACKER_PATTERN, "https://*/*", "https://*.example.com/*", "http://plain.example/*", "<all_urls>", STRIPE] });
+    expect(observations(f, "permissions")[0]).toMatchObject({ granted: [TRACKER_PATTERN, STRIPE] });
   });
 
   it("a grant change sends a new snapshot with a higher revision, then a focus carrying it", async () => {
     const { f, clock } = await setup();
     const first = observations(f, "permissions")[0]!;
-    f._.state.granted = [GITHUB_PATTERN, STRIPE];
+    f._.state.granted = [TRACKER_PATTERN, STRIPE];
     await Promise.all(f.permissions.onAdded.emit({ origins: [STRIPE] } as never));
     await clock.advance(0);
     const next = observations(f, "permissions").at(-1)!;
     expect(next["revision"] as number).toBeGreaterThan(first["revision"] as number);
-    expect(next["granted"]).toEqual([GITHUB_PATTERN, STRIPE]);
+    expect(next["granted"]).toEqual([TRACKER_PATTERN, STRIPE]);
     const posted = lastPort(f).posted;
     const at = posted.indexOf(next);
     expect(posted[at + 1]).toMatchObject({ kind: "focus", permissionsRevision: next["revision"] });
@@ -65,46 +65,63 @@ describe("manifest-level wiring", () => {
     expect(obs).toMatchObject({ browserFocused: true, tabId: 12, windowId: 1, incognito: false, permissionsRevision: expect.any(Number) });
     for (const k of ["url", "title", "documentId"]) expect(k in obs).toBe(false);
 
-    f._.state.granted = [GITHUB_PATTERN, EXAMPLE]; // "Allow Scout on this site"
+    f._.state.granted = [TRACKER_PATTERN, EXAMPLE]; // "Allow Scout on this site"
     await Promise.all(f.permissions.onAdded.emit({ origins: [EXAMPLE] } as never));
     await clock.advance(0);
     expect(observations(f, "focus").at(-1)).toMatchObject({ tabId: 12, url: "https://example.com/", title: "Example" });
   });
 
-  it("the GitHub grant alone registers the content script; losing it unregisters, re-granting registers again", async () => {
+  it("a grant registers the content script for exactly that pattern; losing it unregisters, re-granting registers again", async () => {
     const { f, clock, bg } = await setup({ granted: [] });
     expect(f._.registered).toEqual([]);
-    f._.state.granted = [GITHUB_PATTERN];
-    await Promise.all(f.permissions.onAdded.emit({ origins: [GITHUB_PATTERN] } as never));
+    f._.state.granted = [TRACKER_PATTERN];
+    await Promise.all(f.permissions.onAdded.emit({ origins: [TRACKER_PATTERN] } as never));
     expect(f._.registered).toEqual([
-      expect.objectContaining({ id: CONTENT_SCRIPT_ID, matches: ["https://github.com/*"], js: ["content/github-issue.js"], runAt: "document_idle", allFrames: false }),
+      expect.objectContaining({ id: CONTENT_SCRIPT_ID, matches: ["https://tracker.example/*"], js: ["content/page.js"], runAt: "document_idle", allFrames: false }),
     ]);
     await clock.advance(0);
-    expect(observations(f, "permissions").at(-1)).toEqual({ kind: "permissions", revision: expect.any(Number), at: expect.any(Number), granted: [GITHUB_PATTERN] });
+    expect(observations(f, "permissions").at(-1)).toEqual({ kind: "permissions", revision: expect.any(Number), at: expect.any(Number), granted: [TRACKER_PATTERN] });
     expect((await approve(bg, f)).approved).toBe(true);
 
     f._.state.granted = [];
-    await Promise.all(f.permissions.onRemoved.emit({ origins: [GITHUB_PATTERN] } as never));
+    await Promise.all(f.permissions.onRemoved.emit({ origins: [TRACKER_PATTERN] } as never));
     await clock.advance(0);
     expect(f._.registered).toEqual([]);
     expect((await approve(bg, f)).approved).toBe(false);
-    f._.state.granted = [GITHUB_PATTERN];
-    await Promise.all(f.permissions.onAdded.emit({ origins: [GITHUB_PATTERN] } as never));
+    f._.state.granted = [TRACKER_PATTERN];
+    await Promise.all(f.permissions.onAdded.emit({ origins: [TRACKER_PATTERN] } as never));
     expect(f._.registered).toHaveLength(1);
   });
 
-  it("the panel has no GitHub switch: the old request is ignored, and a content script cannot send it", async () => {
-    const { f, bg } = await setup();
-    expect(await bg.panelRequest({ type: "github-capture", enabled: false } as never)).toBeNull();
-    expect(await bg.handleMessage({ type: "github-capture", enabled: false }, sender(f))).toEqual({ ok: false });
-    expect(f._.registered).toHaveLength(1);
-    expect(bg.snapshot()).not.toHaveProperty("githubCapture");
+  it("registers for exactly the granted patterns; removing one re-registers with the rest (updateContentScripts, else unregister and register)", async () => {
+    for (const updateScripts of [true, false]) {
+      const { f, clock } = await setup({ granted: [TRACKER_PATTERN, STRIPE, "https://*/*"], updateScripts });
+      expect(f._.registered).toEqual([expect.objectContaining({ id: CONTENT_SCRIPT_ID, matches: [TRACKER_PATTERN, STRIPE] })]);
+      f._.state.granted = [STRIPE];
+      await Promise.all(f.permissions.onRemoved.emit({ origins: [TRACKER_PATTERN] } as never));
+      await clock.advance(0);
+      expect(f._.registered).toEqual([expect.objectContaining({ id: CONTENT_SCRIPT_ID, matches: [STRIPE], js: [CONTENT_SCRIPT_FILE] })]);
+      expect(f._.updateCalls, `updateScripts ${updateScripts}`).toHaveLength(updateScripts ? 1 : 0);
+    }
   });
 
-  it("injects into open GitHub tabs on the grant and on install, never on a plain worker wake", async () => {
-    const { f } = await setup(); // GitHub already granted: this is a wake, not a grant
+  it("a failed script update fails closed: no sites, script unregistered, an empty snapshot", async () => {
+    const { f, clock, bg } = await setup({ granted: [TRACKER_PATTERN, STRIPE] });
+    f.scripting.updateContentScripts = async () => {
+      throw new Error("update failed");
+    };
+    f._.state.granted = [STRIPE];
+    await Promise.all(f.permissions.onRemoved.emit({ origins: [TRACKER_PATTERN] } as never));
+    await clock.advance(0);
+    expect(f._.registered).toEqual([]);
+    expect(bg.snapshot()).toMatchObject({ granted: [] });
+    expect(observations(f, "permissions").at(-1)).toMatchObject({ granted: [] });
+  });
+
+  it("injects into open tabs on granted sites on the grant and on install, never on a plain worker wake", async () => {
+    const { f } = await setup(); // the tracker already granted: this is a wake, not a grant
     expect(f._.executeCalls).toEqual([]);
-    await Promise.all(f.permissions.onAdded.emit({ origins: [GITHUB_PATTERN] } as never));
+    await Promise.all(f.permissions.onAdded.emit({ origins: [TRACKER_PATTERN] } as never));
     const injected = [10, 11].map((tabId) => ({ target: { tabId, frameIds: [0] }, files: [CONTENT_SCRIPT_FILE] }));
     expect(f._.executeCalls).toEqual(injected);
     f._.executeCalls.length = 0;
@@ -116,31 +133,31 @@ describe("manifest-level wiring", () => {
     const { f, clock } = await setup();
     const before = Math.max(...observations(f).flatMap((o) => (typeof o["seq"] === "number" ? [o["seq"]] : [])));
     const rev = observations(f, "permissions").at(-1)!["revision"] as number;
-    const again = await setup({ granted: [GITHUB_PATTERN] }, clock.now() + 30_000);
+    const again = await setup({ granted: [TRACKER_PATTERN] }, clock.now() + 30_000);
     expect(observations(again.f, "focus")[0]!["seq"] as number).toBeGreaterThan(before);
     expect(observations(again.f, "permissions")[0]!["revision"] as number).toBeGreaterThan(rev);
   });
 });
 
 describe("granted list: the one source of truth", () => {
-  it("https://*/* alone is no GitHub grant: approval denied with 'permission', no content script", async () => {
+  it("https://*/* alone is no grant: approval denied, no content script", async () => {
     const { f, bg } = await setup({ granted: ["https://*/*"] });
-    expect(await f.permissions.contains({ origins: [GITHUB_PATTERN] })).toBe(true); // what Chrome itself would answer
-    expect(await approve(bg, f)).toEqual({ approved: false, reason: "permission" });
+    expect(await f.permissions.contains({ origins: [TRACKER_PATTERN] })).toBe(true); // what Chrome itself would answer
+    expect(await approve(bg, f)).toEqual({ approved: false, reason: "sender" });
     expect(f._.registered).toEqual([]);
     expect(observations(f, "permissions").at(-1)).toMatchObject({ granted: [] });
     const s = bg.snapshot();
     expect(s).toMatchObject({ granted: [], broadGrantIgnored: true });
     expect(statusRows(s)).toContainEqual(["Site access", BROAD_GRANT_TEXT]);
-    expect(statusRows(s)).toContainEqual(["Issue text", "off"]);
+    expect(statusRows(s)).toContainEqual(["Page text", "off"]);
   });
 
-  it("losing the exact GitHub grant to a broad one unregisters the script; no all-sites row without a broad grant", async () => {
+  it("losing the exact grant to a broad one unregisters the script; no all-sites row without a broad grant", async () => {
     const { f, clock, bg } = await setup();
     expect(f._.registered).toHaveLength(1);
     expect(statusRows(bg.snapshot()).map(([k]) => k)).not.toContain("Site access");
     f._.state.granted = ["https://*/*"];
-    await Promise.all(f.permissions.onRemoved.emit({ origins: [GITHUB_PATTERN] } as never));
+    await Promise.all(f.permissions.onRemoved.emit({ origins: [TRACKER_PATTERN] } as never));
     await clock.advance(0);
     expect(f._.registered).toEqual([]);
     expect(bg.snapshot()).toMatchObject({ granted: [], broadGrantIgnored: true });
@@ -148,7 +165,7 @@ describe("granted list: the one source of truth", () => {
   });
 
   it("a snapshot sent while a revoke's getAll is pending omits the revoked origin, and so does the focus after it", async () => {
-    const { f, clock } = await setup({ granted: [GITHUB_PATTERN, EXAMPLE] });
+    const { f, clock } = await setup({ granted: [TRACKER_PATTERN, EXAMPLE] });
     activate(f, 12);
     dropPort(f);
     f._.state.host = "silent";
@@ -162,25 +179,25 @@ describe("granted list: the one source of truth", () => {
       await held;
       return orig();
     };
-    f._.state.granted = [GITHUB_PATTERN];
+    f._.state.granted = [TRACKER_PATTERN];
     f._.state.activeTabGrant = 12; // the panel's Remove click: Chrome still shows this tab's URL
     const removed = Promise.all(f.permissions.onRemoved.emit({ origins: [EXAMPLE] } as never));
     lastPort(f).onMessage.emit({ ...DISABLED_POLICY });
     await clock.advance(0);
     expect(kinds(lastPort(f).posted)).toEqual(["permissions", "focus"]);
     const [perm, focus] = lastPort(f).posted;
-    expect(perm).toMatchObject({ granted: [GITHUB_PATTERN] });
+    expect(perm).toMatchObject({ granted: [TRACKER_PATTERN] });
     expect(focus).toMatchObject({ kind: "focus", tabId: 12 });
     for (const k of ["url", "title"]) expect(k in focus!).toBe(false);
     release();
     await removed;
     await clock.advance(0);
-    expect(observations(f, "permissions").at(-1)).toMatchObject({ granted: [GITHUB_PATTERN] });
+    expect(observations(f, "permissions").at(-1)).toMatchObject({ granted: [TRACKER_PATTERN] });
     for (const o of observations(f, "focus").slice(-1)) expect("url" in o).toBe(false);
   });
 
   it("a failed getAll means no sites: empty snapshot, capture off, script unregistered", async () => {
-    const { f, clock, bg } = await setup({ granted: [GITHUB_PATTERN, STRIPE] });
+    const { f, clock, bg } = await setup({ granted: [TRACKER_PATTERN, STRIPE] });
     expect(f._.registered).toHaveLength(1);
     f.permissions.getAll = async () => {
       throw new Error("permissions unavailable");
@@ -190,13 +207,13 @@ describe("granted list: the one source of truth", () => {
     expect(observations(f, "permissions").at(-1)).toMatchObject({ granted: [] });
     expect(bg.snapshot()).toMatchObject({ granted: [] });
     expect(f._.registered).toEqual([]);
-    expect(await approve(bg, f)).toEqual({ approved: false, reason: "permission" });
+    expect(await approve(bg, f)).toEqual({ approved: false, reason: "sender" });
   });
 });
 
 describe("capture policy", () => {
   it("a first policy that already enables: the snapshot goes first, then the active issue tab is asked to refresh", async () => {
-    const { f, clock, bg } = await setup({ granted: [GITHUB_PATTERN], host: "silent", autoEnable: false });
+    const { f, clock, bg } = await setup({ granted: [TRACKER_PATTERN], host: "silent", autoEnable: false });
     lastPort(f).onMessage.emit(ENABLED(1));
     await clock.advance(0);
     expect(kinds(lastPort(f).posted)).toEqual(["permissions", "focus"]);
@@ -205,7 +222,7 @@ describe("capture policy", () => {
   });
 
   it("denies approval with 'policy' until the core enables capture", async () => {
-    const { f, clock, bg } = await setup({ granted: [GITHUB_PATTERN], autoEnable: false });
+    const { f, clock, bg } = await setup({ granted: [TRACKER_PATTERN], autoEnable: false });
     expect(bg.snapshot().policy).toEqual({ revision: 1, captureEnabled: false, paused: false });
     expect(await approve(bg, f)).toEqual({ approved: false, reason: "policy" });
     expect(f._.tabMessages.filter((m) => (m.msg as { type: string }).type === "refresh")).toEqual([]);
@@ -273,7 +290,7 @@ describe("capture policy", () => {
   });
 
   it("shows upgrade_required until a later port is ready", async () => {
-    const { f, bg } = await setup({ granted: [GITHUB_PATTERN], host: "silent" });
+    const { f, bg } = await setup({ granted: [TRACKER_PATTERN], host: "silent" });
     lastPort(f).onMessage.emit({ type: "core_unavailable", reason: "upgrade_required" });
     expect(bg.snapshot().link).toBe("upgrade_required");
     dropPort(f);
@@ -323,9 +340,9 @@ describe("pause", () => {
     await bg.panelRequest({ type: "pause", paused: true });
     corePolicy(f, true);
     const n = observations(f).length;
-    f._.state.granted = [GITHUB_PATTERN, STRIPE];
+    f._.state.granted = [TRACKER_PATTERN, STRIPE];
     await Promise.all(f.permissions.onAdded.emit({ origins: [STRIPE] } as never));
-    f._.state.granted = [GITHUB_PATTERN];
+    f._.state.granted = [TRACKER_PATTERN];
     await Promise.all(f.permissions.onRemoved.emit({ origins: [STRIPE] } as never));
     await clock.advance(1000);
     expect(observations(f)).toHaveLength(n);
@@ -334,13 +351,13 @@ describe("pause", () => {
     expect(commandsPosted(f)).toEqual([{ type: "pause" }, { type: "resume" }]);
     expect(observations(f)).toHaveLength(n); // still paused until the core says otherwise
     corePolicy(f, false);
-    expect(observations(f).at(n)).toMatchObject({ kind: "permissions", granted: [GITHUB_PATTERN] });
+    expect(observations(f).at(n)).toMatchObject({ kind: "permissions", granted: [TRACKER_PATTERN] });
     await clock.advance(0);
     expect(observations(f).at(n + 1)).toMatchObject({ kind: "focus", permissionsRevision: observations(f).at(n)!["revision"] });
   });
 
   it("a core that starts paused: nothing but the core's policy is waited on, and nothing is posted", async () => {
-    const { f, clock, bg } = await setup({ granted: [GITHUB_PATTERN], host: "silent", autoEnable: false });
+    const { f, clock, bg } = await setup({ granted: [TRACKER_PATTERN], host: "silent", autoEnable: false });
     lastPort(f).onMessage.emit({ type: "capture_policy", revision: 1, paused: true, captureEnabled: true });
     lastPort(f).onMessage.emit({ type: "ready" });
     await clock.advance(FOCUS_DEBOUNCE_MS);
@@ -353,15 +370,15 @@ describe("pause", () => {
   });
 
   it("drops the old stored paused flag on load and never reads it", async () => {
-    const { f, bg } = await setup({ granted: [GITHUB_PATTERN], local: { paused: true } });
+    const { f, bg } = await setup({ granted: [TRACKER_PATTERN], local: { paused: true } });
     await flush();
     expect(f._.store["paused"]).toBeUndefined();
     expect(bg.snapshot().paused).toBe(false);
     expect((await approve(bg, f)).approved).toBe(true);
   });
 
-  it("drops the old stored GitHub switch on load and never reads it: the grant alone governs capture", async () => {
-    const off = await setup({ granted: [GITHUB_PATTERN], local: { githubCapture: false } });
+  it("deletes a legacy stored githubCapture key on load and never reads it: the grants alone govern capture", async () => {
+    const off = await setup({ granted: [TRACKER_PATTERN], local: { githubCapture: false } });
     await flush();
     expect(off.f._.store).not.toHaveProperty("githubCapture");
     expect(off.f._.registered).toHaveLength(1);
@@ -370,12 +387,12 @@ describe("pause", () => {
     const on = await setup({ granted: [STRIPE], local: { githubCapture: true } });
     await flush();
     expect(on.f._.store).not.toHaveProperty("githubCapture");
-    expect(on.f._.registered).toEqual([]);
-    expect((await approve(on.bg, on.f)).approved).toBe(false);
+    expect(on.f._.registered).toEqual([expect.objectContaining({ matches: [STRIPE] })]);
+    expect((await approve(on.bg, on.f)).approved).toBe(false); // the tracker tab is not on a granted site
   });
 
   it("a pause with no core to reach sends nothing and changes nothing", async () => {
-    const { f, bg } = await setup({ granted: [GITHUB_PATTERN], host: "missing" });
+    const { f, bg } = await setup({ granted: [TRACKER_PATTERN], host: "missing" });
     expect(await bg.panelRequest({ type: "pause", paused: true })).toMatchObject({ written: false, status: { paused: false } });
     expect(commandsPosted(f)).toEqual([]);
   });

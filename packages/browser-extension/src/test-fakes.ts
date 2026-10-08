@@ -1,5 +1,5 @@
-// Test-only fakes (never bundled): a synthetic GitHub issue DOM mirroring the
-// live structure (data-testid layout verified 2026-09-24), a read-counting
+// Test-only fakes (never bundled): synthetic pages (a tracker issue, a docs
+// article, a body-only page, a page being typed into), a read-counting
 // jsdom with a synthetic History/Navigation driver, a fake clock, and a fake
 // `chrome` for the background. Ported from the Phase 0 spike's test-fakes.mjs.
 
@@ -9,33 +9,41 @@ export const EXT_ID = "abcdefghijklmnopabcdefghijklmnop";
 
 /** Strings that must never reach a message. */
 export const SENTINEL = {
-  comment: "SENTINEL-COMMENT-TEXT-1c1c",
-  sidebar: "SENTINEL-SIDEBAR-2d2d",
   nav: "SENTINEL-NAV-3e3e",
+  sidebar: "SENTINEL-SIDEBAR-2d2d",
+  footer: "SENTINEL-FOOTER-5a5a",
   draft: "SENTINEL-DRAFT-4f4f",
-  sticky: "SENTINEL-STICKY-7c7c",
+  dialog: "SENTINEL-DIALOG-6b6b",
 };
 
-export function issueMain({ owner = "acme", repo = "widgets", number = 1, title = "Issue title", body = "<p>Issue body</p>" } = {}): string {
-  return `<div data-testid="issue-viewer-container">
-  <div data-testid="issue-header"><h1><bdi data-testid="issue-title" class="markdown-title">${title}</bdi><span> #${number}</span></h1></div>
-  <div data-testid="issue-metadata-sticky"><span data-testid="issue-title-sticky">${SENTINEL.sticky}</span></div>
-  <div data-testid="issue-body">
-    <a data-testid="issue-body-header-link" href="https://github.com/${owner}/${repo}/issues/${number}#issue-9${number}">opened</a>
-    <div data-testid="issue-body-viewer"><div data-testid="markdown-body" class="markdown-body">${body}</div></div>
-  </div>
-  <div data-testid="issue-viewer-comments-container"><div data-testid="markdown-body">${SENTINEL.comment}</div></div>
-  <form data-testid="comment-composer"><textarea>${SENTINEL.draft}</textarea></form>
-  <div data-testid="issue-viewer-metadata-pane">${SENTINEL.sidebar}</div>
-</div>`;
+/** An issue on a tracker: page chrome around a `main` holding the issue and a comment box. */
+export function trackerPage({ title = "Widget breaks on save", body = "<p>Clicking save loses the draft every time.</p>" } = {}): string {
+  return `<header><nav>${SENTINEL.nav}</nav></header>
+<main id="main"><h1>${title}</h1><div class="issue-body">${body}</div>
+  <aside>${SENTINEL.sidebar}</aside>
+  <form><textarea>${SENTINEL.draft}</textarea></form>
+  <dialog open>${SENTINEL.dialog}</dialog>
+</main>
+<footer>${SENTINEL.footer}</footer>`;
 }
 
-export const listMain = (): string =>
-  `<div data-testid="issues-list-surface"><a data-testid="issue-listitem-title-link" href="https://github.com/acme/widgets/issues/1">One</a></div>`;
-export const repoHomeMain = (): string => `<div id="repo-home"><a href="/acme/widgets/issues">Issues</a> README text</div>`;
+/** A docs page: an `article` between landmark-role chrome, no `main`. */
+export function docsPage({ body = "<h2>Billing</h2><p>Invoices are sent on the first of each month.</p>" } = {}): string {
+  return `<div role="banner"><div role="navigation">${SENTINEL.nav}</div></div>
+<div class="layout"><article>${body}</article><div role="complementary">${SENTINEL.sidebar}</div></div>
+<div role="contentinfo">${SENTINEL.footer}</div>`;
+}
 
-const page = (main: string) =>
-  `<!doctype html><html><head><title>t</title></head><body><header><nav>${SENTINEL.nav}</nav></header><main id="main">${main}</main></body></html>`;
+/** A page with no `main` or `article`: its text sits straight in `body`. */
+export function bodyOnlyPage({ body = "<p>A plain page with its text straight in the body element.</p>" } = {}): string {
+  return `<nav>${SENTINEL.nav}</nav>${body}<footer>${SENTINEL.footer}</footer>`;
+}
+
+/** A page with a comment box (focus `#draft` to type into it). */
+export const typingPage = (): string =>
+  `<main><p>An issue being commented on, with enough text to send.</p><textarea id="draft">${SENTINEL.draft}</textarea></main>`;
+
+const page = (body: string, title: string) => `<!doctype html><html><head><title>${title}</title></head><body>${body}</body></html>`;
 
 /**
  * A jsdom window at `url` with counters on every text-reading accessor:
@@ -45,8 +53,8 @@ const page = (main: string) =>
  * History/Navigation driver: pushState, then the Navigation API's
  * `currententrychange` event (jsdom has no Navigation API).
  */
-export function makeDom(url: string, mainHtml: string) {
-  const dom = new JSDOM(page(mainHtml), { url, pretendToBeVisual: true });
+export function makeDom(url: string, body: string, title = "Page title") {
+  const dom = new JSDOM(page(body, title), { url, pretendToBeVisual: true });
   const win = dom.window as unknown as Window & typeof globalThis;
   const reads = { nodeValue: 0, other: 0, counting: true };
   const wrap = (proto: object, prop: string, key: "nodeValue" | "other") => {
@@ -86,9 +94,11 @@ export function makeDom(url: string, mainHtml: string) {
     doc: win.document,
     reads,
     navigation,
-    setMain(html: string) {
+    /** Replace the whole page (an SPA render), and its title when given. */
+    setBody(html: string, title?: string) {
       uncounted(() => {
-        win.document.getElementById("main")!.innerHTML = html;
+        win.document.body.innerHTML = html;
+        if (title !== undefined) win.document.title = title;
       });
     },
     /** SPA navigation: URL changes without a document load, with the Navigation API event. */
@@ -296,11 +306,14 @@ export function makeChrome({
   local = {} as Record<string, unknown>,
   autoEnable = true,
   getContexts = true,
+  /** chrome.scripting.updateContentScripts exists (Chrome 96+). */
+  updateScripts = true,
 } = {}) {
   const tabs = new Map<number, FakeTab>();
   const windows = new Map<number, { id: number; focused: boolean }>();
   const registered: chrome.scripting.RegisteredContentScript[] = [];
   const executeCalls: unknown[] = [];
+  const updateCalls: unknown[] = [];
   const tabMessages: Array<{ tabId: number; msg: unknown }> = [];
   const store: Record<string, unknown> = { ...local };
   const ports: FakePort[] = [];
@@ -351,7 +364,7 @@ export function makeChrome({
     return o as unknown as chrome.tabs.Tab;
   };
   const fake = {
-    _: { tabs, windows, registered, executeCalls, tabMessages, store, session, ports, state, panelPorts, created, requested, removedPerms },
+    _: { tabs, windows, registered, executeCalls, updateCalls, tabMessages, store, session, ports, state, panelPorts, created, requested, removedPerms },
     runtime: {
       id: EXT_ID,
       lastError: undefined as { message: string } | undefined,
@@ -444,6 +457,18 @@ export function makeChrome({
           registered.push(s);
         }
       },
+      ...(updateScripts
+        ? {
+            async updateContentScripts(arr: Array<Partial<chrome.scripting.RegisteredContentScript> & { id: string }>) {
+              for (const s of arr) {
+                const i = registered.findIndex((r) => r.id === s.id);
+                if (i < 0) throw new Error("Nonexistent script ID");
+                registered[i] = { ...registered[i]!, ...s } as chrome.scripting.RegisteredContentScript;
+              }
+              updateCalls.push(arr);
+            },
+          }
+        : {}),
       async getRegisteredContentScripts({ ids }: { ids: string[] }) {
         return registered.filter((r) => ids.includes(r.id));
       },
@@ -460,11 +485,11 @@ export function makeChrome({
       },
     },
     tabs: {
-      async query(q: { active?: boolean; lastFocusedWindow?: boolean; url?: string; windowId?: number }) {
+      async query(q: { active?: boolean; lastFocusedWindow?: boolean; url?: string | string[]; windowId?: number }) {
         return [...tabs.values()]
           .filter((t) => (!q.active || t.active) && (!q.lastFocusedWindow || t.windowId === state.lastFocusedWindow))
           .filter((t) => q.windowId === undefined || t.windowId === q.windowId)
-          .filter((t) => q.url === undefined || (visible(t.url) && patternCovers(q.url, t.url)))
+          .filter((t) => q.url === undefined || (visible(t.url) && [q.url].flat().some((u) => patternCovers(u, t.url))))
           .map(view);
       },
       async sendMessage(tabId: number, msg: unknown) {
@@ -523,8 +548,8 @@ export function makeChrome({
     },
   };
   windows.set(1, { id: 1, focused: true });
-  tabs.set(10, { id: 10, windowId: 1, active: true, url: "https://github.com/acme/widgets/issues/1", title: "Issue 1", incognito: false });
-  tabs.set(11, { id: 11, windowId: 1, active: false, url: "https://github.com/acme/widgets/issues/2", title: "Issue 2", incognito: false });
+  tabs.set(10, { id: 10, windowId: 1, active: true, url: "https://tracker.example/acme/widgets/issues/1", title: "Issue 1", incognito: false });
+  tabs.set(11, { id: 11, windowId: 1, active: false, url: "https://tracker.example/acme/widgets/issues/2", title: "Issue 2", incognito: false });
   tabs.set(12, { id: 12, windowId: 1, active: false, url: "https://example.com/", title: "Example", incognito: false });
   return fake;
 }
@@ -552,7 +577,7 @@ export function sender(f: FakeChrome, { tabId = 10, url, documentId = "doc-1", f
     documentId,
     documentLifecycle: "active",
     url: url ?? t.url,
-    origin: "https://github.com",
+    origin: "https://tracker.example",
     tab: fakeView(f, t),
   } as chrome.runtime.MessageSender;
 }

@@ -1,17 +1,24 @@
-// Issue extraction (pure; DOM injected). Ported from the Phase 0 spike.
+// Page extraction (pure; DOM injected).
 //
-// Reads the identity link's href first and reads text only if it names the
-// same issue as the URL, so stale SPA DOM from the previous page is never read
-// as the new issue. Only the title and the main issue body are read, through a
-// bounded text walker that skips form controls, contenteditable, buttons,
-// scripts and hidden subtrees. Never uses textContent/innerText/innerHTML.
+// Reads the page's main content: the first of `main`, `[role="main"]`,
+// `article`, else `body`, through a bounded text walker that skips form
+// controls, contenteditable, buttons, scripts, hidden subtrees and page chrome
+// (nav, header, footer, aside, dialog and their landmark roles). The title is
+// document.title, else the first h1. Nothing is read while the focused element
+// is editable, so a page being typed into is not read mid-edit. Never uses
+// textContent/innerText/innerHTML.
 
-import { type IssueRoute, parseIssueRoute } from "../route.js";
-import { LIMITS, type Limits, type Selector, SELECTORS } from "../selectors.js";
+import { LIMITS, type Limits } from "../limits.js";
 
-const SKIP_TAGS = new Set(["INPUT", "TEXTAREA", "SELECT", "OPTION", "BUTTON", "FORM", "SCRIPT", "STYLE", "NOSCRIPT", "TEMPLATE", "SVG", "IFRAME", "OBJECT", "EMBED", "CANVAS", "VIDEO", "AUDIO"]);
+const SKIP_TAGS = new Set(["NAV", "HEADER", "FOOTER", "ASIDE", "DIALOG", "INPUT", "TEXTAREA", "SELECT", "OPTION", "BUTTON", "FORM", "SCRIPT", "STYLE", "NOSCRIPT", "TEMPLATE", "SVG", "IFRAME", "OBJECT", "EMBED", "CANVAS", "VIDEO", "AUDIO"]);
 const BLOCK_TAGS = new Set(["P", "DIV", "LI", "UL", "OL", "H1", "H2", "H3", "H4", "H5", "H6", "PRE", "BR", "TR", "BLOCKQUOTE", "TABLE", "SECTION", "DETAILS", "SUMMARY", "HR", "DD", "DT"]);
-const EDITABLE_ANCESTOR = 'form, textarea, input, select, [contenteditable]:not([contenteditable="false"])';
+const SKIP_ROLES = new Set(["navigation", "banner", "contentinfo", "complementary"]);
+/** Elements that take typing (a focused checkbox or button is not "typing"). */
+const EDITABLE =
+  'textarea, select, input:not([type="checkbox"], [type="radio"], [type="button"], [type="submit"], [type="reset"], [type="image"], [type="file"], [type="range"], [type="color"], [type="hidden"]), [contenteditable]:not([contenteditable="false"])';
+const ROOTS = ["main", '[role="main"]', "article"];
+/** A body shorter than this after normalization is not worth sending. */
+const MIN_BODY_BYTES = 40;
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -57,7 +64,13 @@ export function boundedText(el: Element, maxBytes: number): { text: string; stop
         const e = n as Element;
         const tag = e.tagName.toUpperCase();
         const ce = e.getAttribute("contenteditable");
-        if (SKIP_TAGS.has(tag) || (ce !== null && ce !== "false") || e.hasAttribute("hidden") || e.getAttribute("aria-hidden") === "true") {
+        if (
+          SKIP_TAGS.has(tag) ||
+          (ce !== null && ce !== "false") ||
+          e.hasAttribute("hidden") ||
+          e.getAttribute("aria-hidden") === "true" ||
+          SKIP_ROLES.has(e.getAttribute("role") ?? "")
+        ) {
           return NF.FILTER_REJECT;
         }
         if (BLOCK_TAGS.has(tag)) pieces.push("\n");
@@ -78,59 +91,50 @@ export function boundedText(el: Element, maxBytes: number): { text: string; stop
   return { text: normalize(pieces.join("")), stoppedEarly };
 }
 
-type Match = { el: Element; id: string; ambiguous?: never } | { ambiguous: true; id: string; el?: never };
-
-function unique(doc: Document, candidates: readonly Selector[]): Match | null {
-  for (const c of candidates) {
-    const els = doc.querySelectorAll(c.css);
-    const first = els[0];
-    if (els.length === 1 && first) return { el: first, id: c.id };
-    if (els.length > 1) return { ambiguous: true, id: c.id };
-  }
-  return null;
+function isEditable(el: Element): boolean {
+  return !!el.closest(EDITABLE) || (el as HTMLElement).isContentEditable === true;
 }
 
-function isEditable(el: Element): boolean {
-  return !!el.closest(EDITABLE_ANCESTOR) || (el as HTMLElement).isContentEditable === true;
+const isHidden = (el: Element): boolean => !!el.closest('[hidden], [aria-hidden="true"]');
+
+/** The page's main content: the first visible `main`, `[role="main"]`, `article`, else `body`. */
+function contentRoot(doc: Document): Element | null {
+  for (const css of ROOTS) {
+    for (const el of doc.querySelectorAll(css)) if (!isHidden(el)) return el;
+  }
+  return doc.body;
 }
 
 export type ExtractResult =
   | { ok: true; title: string; body: string; titleTruncated: boolean; bodyTruncated: boolean }
-  | { ok: false; reason: string };
+  | { ok: false; reason: "no-content" | "editing" };
 
-/** Extract title + main body for `route` from `doc`. */
-export function extractIssue(doc: Document, route: IssueRoute, limits: Limits = LIMITS): ExtractResult {
-  const idm = unique(doc, SELECTORS.identity);
-  if (!idm) return { ok: false, reason: "identity-missing" };
-  if (idm.ambiguous) return { ok: false, reason: "identity-ambiguous" };
-  const href = idm.el.getAttribute("href");
-  let idRoute: IssueRoute | null = null;
-  try {
-    const u = new URL(href ?? "", "https://github.com");
-    u.hash = "";
-    u.search = "";
-    idRoute = parseIssueRoute(u.href);
-  } catch {
-    idRoute = null;
-  }
-  if (!idRoute || idRoute.key !== route.key) return { ok: false, reason: "identity-mismatch" };
-
-  const t = unique(doc, SELECTORS.title);
-  const b = unique(doc, SELECTORS.body);
-  if (!t || !b) return { ok: false, reason: !t ? "title-missing" : "body-missing" };
-  if (t.ambiguous || b.ambiguous) return { ok: false, reason: "ambiguous" };
-  if (isEditable(t.el) || isEditable(b.el)) return { ok: false, reason: "editable" };
-
-  const tt = boundedText(t.el, limits.titleChars * 4);
-  const title = truncateChars(tt.text.replace(/\s+/g, " "), limits.titleChars);
-  if (!title.text) return { ok: false, reason: "title-empty" };
-  const bt = boundedText(b.el, limits.bodyBytes);
+/** Extract the title and main content of `doc`. */
+export function extractPage(doc: Document, limits: Limits = LIMITS): ExtractResult {
+  const active = doc.activeElement;
+  if (active && active !== doc.body && isEditable(active)) return { ok: false, reason: "editing" };
+  const root = contentRoot(doc);
+  if (!root) return { ok: false, reason: "no-content" };
+  const bt = boundedText(root, limits.bodyBytes);
   const body = truncateUtf8(bt.text, limits.bodyBytes);
+  if (body.bytes < MIN_BODY_BYTES) return { ok: false, reason: "no-content" };
+
+  let rawTitle = (doc.title ?? "").replace(/\s+/g, " ").trim();
+  let titleCut = false;
+  if (!rawTitle) {
+    const h1 = doc.querySelector("h1");
+    if (h1) {
+      const tt = boundedText(h1, limits.titleChars * 4);
+      rawTitle = tt.text.replace(/\s+/g, " ");
+      titleCut = tt.stoppedEarly;
+    }
+  }
+  const title = truncateChars(rawTitle, limits.titleChars);
   return {
     ok: true,
     title: title.text,
     body: body.text,
-    titleTruncated: title.truncated || tt.stoppedEarly,
+    titleTruncated: title.truncated || titleCut,
     bodyTruncated: body.truncated || bt.stoppedEarly,
   };
 }

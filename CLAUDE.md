@@ -15,7 +15,8 @@ the user's agent (Claude Code, Codex or Pi) and shows up to three links from tha
 ## Structure
 
 - `packages/browser-extension`: the MV3 extension. The background worker reports the
-  focused site; the side panel is Scout's only UI.
+  focused site; a content script reads pages on allowed sites (`src/content/`); the side
+  panel is Scout's only UI.
 - `packages/native-host`: the relay Chrome starts; carries frames between the extension and
   the core.
 - `packages/scout-core`: the core. Owns all state: visits, discovery and catalogs, the

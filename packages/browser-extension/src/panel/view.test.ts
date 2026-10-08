@@ -125,15 +125,24 @@ describe("panel view", () => {
     expect(now()).toBe("Working · Looking for links…");
   });
 
-  it("Settings has no GitHub issue text switch: allowing github.com is what turns it on", () => {
+  it("Settings has no page-text switch: allowing a site is what turns it on; Page text is off with no site allowed", () => {
     const m = running();
     m.select("settings");
     const { root, v, render } = view(m);
-    v.status = { ...STATUS, granted: ["https://github.com/*"] };
+    v.status = { ...STATUS, granted: ["https://tracker.example/*"] };
     render();
-    expect(root.querySelector('[data-key="github-capture"], #github-capture')).toBeNull();
-    expect(root.textContent).not.toContain("GitHub issue text");
-    expect(statusRows(v.status)).toContainEqual(["Issue text", "on"]);
+    expect(root.querySelectorAll('input[type="checkbox"]')).toHaveLength(1);
+    expect(root.querySelector(`label[for="agent-context"]`)!.textContent).toContain("Let your agent see the current site and pages you read on allowed sites");
+    expect(statusRows(v.status)).toContainEqual(["Page text", "on"]);
+    expect(statusRows({ ...STATUS, granted: [] })).toContainEqual(["Page text", "off"]);
+  });
+
+  it("Sites says, under Allow, that Scout reads the pages you open there and keeps nothing past 15 minutes", () => {
+    const m = running();
+    m.select("sites");
+    const { root } = view(m);
+    const notes = [...root.querySelectorAll(".add-site ~ p.note")].map((p) => p.textContent);
+    expect(notes[1]).toBe("Scout reads the pages you open here. Nothing is kept past 15 minutes.");
   });
 
   it("Settings has an Agent row: one button per agent the core found, the current one pressed, no other text", () => {
@@ -222,9 +231,9 @@ describe("panel view", () => {
     expect(statusRows(STATUS)).toEqual([
       ["Status", "connected"],
       ["Allowed sites", "docs.example.com"],
-      ["Issue text", "off"],
+      ["Page text", "on"],
     ]);
-    expect(sentText(STATUS)).toBe("tab updates 1 · issues 0 · received 0 · dropped 0 · blocked 0");
+    expect(sentText(STATUS)).toBe("tab updates 1 · pages 0 · received 0 · dropped 0 · blocked 0");
   });
 
   it("names a site by its host, for any host", () => {
@@ -330,17 +339,17 @@ describe("panel view", () => {
     expect([...second.root.querySelectorAll("#preview-pane .review-actions button")].map((b) => b.textContent)).toEqual(["Approve"]);
   });
 
-  it("the context chip shows only while the agent grant is on, github.com is allowed, and an issue has been sent", () => {
+  it("the context chip shows only while the agent grant is on, a site is allowed, and a page has been sent", () => {
     const m = running();
     m.apply({ type: "grant", agentBrowserContext: true, destinations: [] });
     const { root, v, render } = view(m);
     const chip = () => root.querySelector(".tray .chip");
-    const on = { ...STATUS, granted: [...STATUS.granted, "https://github.com/*"], counters: { ...STATUS.counters, forwarded: 1 } };
+    const on = { ...STATUS, counters: { ...STATUS.counters, forwarded: 1 } };
     v.status = on;
     render();
-    expect(chip()!.textContent).toBe("Using your recent GitHub activity");
+    expect(chip()!.textContent).toBe("Using pages you read recently");
 
-    v.status = { ...on, granted: STATUS.granted };
+    v.status = { ...on, granted: [] };
     render();
     expect(chip()).toBeNull();
     v.status = { ...on, counters: { ...on.counters, forwarded: 0 } };

@@ -1,16 +1,18 @@
 // Test-only harness (never bundled): a started background over the fake
 // chrome, plus helpers to send content messages and read what reached the port.
 
-import { createBackground, FOCUS_DEBOUNCE_MS, GITHUB_PATTERN } from "./background-core.js";
+import { createBackground, FOCUS_DEBOUNCE_MS } from "./background-core.js";
 import { asChrome, type FakeChrome, fakeClock, makeChrome, sender } from "./test-fakes.js";
 
-export const ISSUE1 = "https://github.com/acme/widgets/issues/1";
-export const ISSUE2 = "https://github.com/acme/widgets/issues/2";
+/** An example allowed site: an issue tracker. */
+export const TRACKER_PATTERN = "https://tracker.example/*";
+export const ISSUE1 = "https://tracker.example/acme/widgets/issues/1";
+export const ISSUE2 = "https://tracker.example/acme/widgets/issues/2";
 
 export type Bg = ReturnType<typeof createBackground>;
 
-/** Default: GitHub granted, so the gate's other checks are what tests exercise. */
-export async function setup(opts: Parameters<typeof makeChrome>[0] = { granted: [GITHUB_PATTERN] }, start?: number) {
+/** Default: the tracker granted, so the gate's other checks are what tests exercise. */
+export async function setup(opts: Parameters<typeof makeChrome>[0] = { granted: [TRACKER_PATTERN] }, start?: number) {
   const f = makeChrome(opts);
   const clock = fakeClock(start);
   const bg = createBackground(asChrome(f), { clock });

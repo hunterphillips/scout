@@ -3,7 +3,6 @@
 // part can be built and tested on its own.
 
 import type { BrowserObservation } from "@scout/contracts";
-import { GITHUB_PATTERN } from "./hosts.js";
 import type { PolicyState, StatusSnapshot } from "./messages.js";
 import type { Clock } from "./reconnect.js";
 
@@ -26,7 +25,7 @@ export interface SharedState {
   /**
    * The exact-origin patterns from the last successful permissions.getAll
    * (empty after a failed one), pruned at once by a revoke. The only source of
-   * "is GitHub granted": a broad all-sites grant is not in it.
+   * "is this site granted": a broad all-sites grant is not in it.
    */
   granted: readonly string[];
   /** The last getAll also held a broad (non-exact) grant, which Scout ignores. */
@@ -50,8 +49,31 @@ export function createSharedState(clock: Clock): SharedState {
   };
 }
 
-/** Chrome's exact GitHub grant is in the last reconciled list: GitHub issue text is captured only then. */
-export const githubGranted = (state: SharedState): boolean => state.granted.includes(GITHUB_PATTERN);
+/** Page text is captured while at least one exact site grant is in the last reconciled list. */
+export const anyGranted = (state: SharedState): boolean => state.granted.length > 0;
+
+/**
+ * The canonical page URL, the same rule as the core's canonicalPageUrl: https, no
+ * credentials, default port, lowercase host, no fragment; path and query verbatim. Else null.
+ */
+export function canonicalPageUrl(raw: string | undefined): string | null {
+  if (typeof raw !== "string") return null;
+  let u: URL;
+  try {
+    u = new URL(raw);
+  } catch {
+    return null;
+  }
+  if (u.protocol !== "https:" || u.port !== "" || u.username || u.password) return null;
+  u.hash = "";
+  return u.href;
+}
+
+/** `url` is an https page on an origin in the last reconciled exact grants. */
+export function grantedPage(state: SharedState, url: string | undefined): boolean {
+  const page = canonicalPageUrl(url);
+  return page !== null && state.granted.includes(`${new URL(page).origin}/*`);
+}
 
 /**
  * Scout is paused: the core's latest capture_policy says so. The core is the one source of
