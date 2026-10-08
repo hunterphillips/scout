@@ -262,7 +262,7 @@ describe("job wiring: process ownership and the agent profile", () => {
     expect(w.adapter?.id).toBe("codex");
     expect(changed).toBe(1);
     const written = JSON.parse(readFileSync(join(home, "agent-profile.json"), "utf8")) as AgentProfile;
-    expect(written).toEqual({ schemaVersion: 1, adapter: "codex", codexPath: join(bin, "codex"), model: "gpt-6-sol", tools: { revision: 4, connections: [], selections: [] } });
+    expect(written).toEqual({ schemaVersion: 1, adapter: "codex", codexPath: join(bin, "codex"), model: "gpt-6-luna", tools: { revision: 4, connections: [], selections: [] } });
 
     // Choosing the current adapter again writes nothing.
     expect(w.switchAgent("codex")).toEqual({ ok: true, written: false });

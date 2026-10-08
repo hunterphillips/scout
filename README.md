@@ -67,10 +67,12 @@ run out of `~/.scout`.
 1. `npm run build`
 2. `npm run setup` writes `~/.scout/config.json`, the native-host wrapper in
    `~/.scout/bin`, Chrome's native-messaging manifest, and the job profile
-   (`agent-profile.json`, which names the agent binary and model the jobs use). Jobs run
-   through Claude Code, Codex or Pi: `--agent claude-code`, `--agent codex` or
+   (`agent-profile.json`, which names the agent binary, model and reasoning level the jobs
+   use). Jobs run through Claude Code, Codex or Pi: `--agent claude-code`, `--agent codex` or
    `--agent pi` picks one; without the flag, setup uses the first of `claude`, `codex`
-   and `pi` it finds. Everything it writes is listed in `~/.scout/installed.json`. `--dry-run`
+   and `pi` it finds. By default Claude Code jobs run `claude-haiku-5-5` at low effort, Codex
+   jobs run `gpt-6-luna` at low reasoning effort, and Pi jobs run your own Pi model at low
+   thinking. Everything it writes is listed in `~/.scout/installed.json`. `--dry-run`
    shows the paths first. `--agent-integration` also registers the `scout` MCP connection
    with that agent (`claude mcp add` at user scope, `codex mcp add` or `pi mcp add`) and installs the
    `scout-integration` skill where the agent reads skills. Setup refuses if a foreign

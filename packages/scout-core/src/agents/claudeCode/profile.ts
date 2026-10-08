@@ -6,9 +6,12 @@
 // - `model` is explicit, required and a full model name (no alias). The initial value is
 //   DEFAULT_CLAUDE_CODE_MODEL; editable in the profile file. A job never inherits a CLI, settings
 //   or gateway default model, and the init check stops a job whose CLI reports a different model.
+// - `reasoningEffort` is optional and passed as `--effort`; jobs run at
+//   DEFAULT_CLAUDE_CODE_REASONING_EFFORT without it.
 //
-// scripts/setup.mjs reads CLAUDE_CODE_ADAPTER_ID and DEFAULT_CLAUDE_CODE_MODEL from the built
-// file as plain `export const` literals: keep them literals.
+// scripts/setup.mjs reads CLAUDE_CODE_ADAPTER_ID, DEFAULT_CLAUDE_CODE_MODEL and
+// DEFAULT_CLAUDE_CODE_REASONING_EFFORT from the built file as plain `export const` literals: keep
+// them literals.
 
 import { isAbsolute, join } from "node:path";
 import { z } from "zod";
@@ -20,7 +23,12 @@ export const CLAUDE_CODE_ADAPTER_ID = "claude-code";
 /** The adapter's name in the side panel's Settings. */
 export const CLAUDE_CODE_LABEL = "Claude Code";
 /** The initial model for the Claude Code profile; editable in the profile file. */
-export const DEFAULT_CLAUDE_CODE_MODEL = "claude-sonnet-5-5";
+export const DEFAULT_CLAUDE_CODE_MODEL = "claude-haiku-5-5";
+/** The effort a job runs at when the profile names none. */
+export const DEFAULT_CLAUDE_CODE_REASONING_EFFORT = "low";
+
+/** The levels Claude Code's `--effort` accepts. */
+export const CLAUDE_CODE_REASONING_EFFORTS = ["low", "medium", "high", "xhigh", "max"] as const;
 
 /**
  * A profile's model: the full `claude-<family>-<major>-<minor>` name, optionally dated
@@ -37,8 +45,9 @@ export const ClaudeCodeProfileSchema = z.strictObject({
     .max(1024)
     .refine((p) => isAbsolute(p) && !p.includes("\0"), { message: "claudePath must be absolute" }),
   model: z.string().regex(PROFILE_MODEL_RE, {
-    message: "model must be a full Claude model name such as claude-sonnet-5-5, not an alias such as sonnet",
+    message: "model must be a full Claude model name such as claude-haiku-5-5, not an alias such as haiku",
   }),
+  reasoningEffort: z.enum(CLAUDE_CODE_REASONING_EFFORTS).optional(),
   tools: ToolsProfileSchema.optional(),
 });
 

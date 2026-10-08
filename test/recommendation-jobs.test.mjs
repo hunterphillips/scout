@@ -921,7 +921,7 @@ describe.skipIf(!BUILT)("Settings agent choice: set_agent from the side panel sw
   it("choosing Codex writes its default profile (0600), the watcher swaps the adapter, and the next frame shows it; choosing it again writes nothing", async () => {
     const before = agentsFrames().length;
     expect(await setAgent("codex")).toMatchObject({ ok: true, revision: 0 });
-    expect(profile()).toEqual({ schemaVersion: 1, adapter: "codex", codexPath: join(home, "bin", "codex"), model: "gpt-6-sol" });
+    expect(profile()).toEqual({ schemaVersion: 1, adapter: "codex", codexPath: join(home, "bin", "codex"), model: "gpt-6-luna" });
     expect(statSync(join(home, "agent-profile.json")).mode & 0o777).toBe(0o600);
     await until(() => agentsFrames().slice(before).some((f) => f.agents.current === "codex"), "a frame showing Codex");
     await until(() => b.diagEvents().some((e) => e.event === "agent_profile_changed"), "the watcher's swap");

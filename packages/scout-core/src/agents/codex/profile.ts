@@ -20,7 +20,7 @@ export const CODEX_ADAPTER_ID = "codex";
 /** The adapter's name in the side panel's Settings. */
 export const CODEX_LABEL = "Codex";
 /** The initial model for the Codex profile; editable in the profile file. */
-export const DEFAULT_CODEX_MODEL = "gpt-6-sol";
+export const DEFAULT_CODEX_MODEL = "gpt-6-luna";
 /** The reasoning effort a job runs at when the profile names none. */
 export const DEFAULT_CODEX_REASONING_EFFORT = "low";
 
@@ -36,7 +36,7 @@ export const CodexProfileSchema = z.strictObject({
     .string()
     .max(1024)
     .refine((p) => isAbsolute(p) && !p.includes("\0"), { message: "codexPath must be absolute" }),
-  model: z.string().regex(CODEX_MODEL_RE, { message: "model must be a plain model name such as gpt-6-sol" }),
+  model: z.string().regex(CODEX_MODEL_RE, { message: "model must be a plain model name such as gpt-6-luna" }),
   reasoningEffort: z.enum(CODEX_REASONING_EFFORTS).optional(),
   tools: ToolsProfileSchema.optional(),
 });

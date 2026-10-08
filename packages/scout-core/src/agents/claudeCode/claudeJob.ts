@@ -89,7 +89,7 @@ import { createJsonLineStream } from "../jsonLineStream.js";
 import { createLaunchProfile, LaunchProfileError, runDirectPreflight, type DirectPreflightOptions, type LaunchProfile } from "./launchProfile.js";
 import { mapOutcome, recordUsage } from "./mapOutcome.js";
 import { MODEL_RE, profileFingerprint } from "../profile.js";
-import { CLAUDE_CODE_ADAPTER_ID, type ClaudeCodeProfile } from "./profile.js";
+import { CLAUDE_CODE_ADAPTER_ID, DEFAULT_CLAUDE_CODE_REASONING_EFFORT, type ClaudeCodeProfile } from "./profile.js";
 import { buildJobInstructions, buildJobPrompt } from "../prompt.js";
 import { writeTreeRecord, type ProcessTracker } from "../processTree.js";
 import { createStreamMonitor } from "./streamMonitor.js";
@@ -106,6 +106,8 @@ export type { SpawnFn, SnapshotFn } from "../childSupervisor.js";
  * build on this record; a newer CLI needs these rechecked before jobs are enabled.
  *
  *   --model <m>                    shown   explicit profile model, never inherited
+ *   --effort <level>               shown   profile reasoningEffort, else low (checked in
+ *                                          `claude --help` of 2.1.294: low..max)
  *   -p                             shown   non-interactive
  *   --output-format stream-json    shown   events streamed, so init can be checked
  *   --verbose                      shown   required by stream-json in -p
@@ -142,10 +144,18 @@ export { MIN_LAUNCH_MS } from "../adapter.js";
 export const JOB_FILES = Object.freeze({ mcp: "mcp.json", settings: "settings.json", instructions: "instructions.md", token: "agent-token", bridge: "bridge.json" });
 
 /** argv after the claude path. */
-export function buildJobArgv(model: string, jobDir: string, allowedToolsArg: string, maxTurns = JOB_MAX_TURNS): string[] {
+export function buildJobArgv(
+  model: string,
+  jobDir: string,
+  allowedToolsArg: string,
+  reasoningEffort: string = DEFAULT_CLAUDE_CODE_REASONING_EFFORT,
+  maxTurns = JOB_MAX_TURNS,
+): string[] {
   return [
     "--model",
     model,
+    "--effort",
+    reasoningEffort,
     "-p",
     "--output-format",
     "stream-json",
@@ -575,7 +585,7 @@ export function createClaudeJobAdapter(deps: ClaudeJobDeps): ClaudeJobAdapter {
       sup = startChild({
         spawn,
         command: launch.claudePath,
-        args: buildJobArgv(launch.model, jobDir, surface.allowedToolsArg),
+        args: buildJobArgv(launch.model, jobDir, surface.allowedToolsArg, profile.reasoningEffort ?? DEFAULT_CLAUDE_CODE_REASONING_EFFORT),
         options: { cwd, env: { ...withCliDirOnPath(launch.env, launch.claudePath) }, stdio: ["pipe", "pipe", "pipe"] },
         killGraceMs,
         ...(deps.psSnapshot ? { snapshot: deps.psSnapshot } : {}),

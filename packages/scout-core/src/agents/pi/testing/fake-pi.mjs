@@ -107,6 +107,7 @@ for (const name of [
 ]) {
   if (!argv.includes(name)) violations.push(`missing ${name}`);
 }
+if (!["off", "minimal", "low", "medium", "high", "xhigh", "max"].includes(flag("--thinking"))) violations.push("invalid --thinking");
 log({ argv, cwd: process.cwd(), envKeys, pid: process.pid, violations, authLinked: authLinked() });
 
 let prompt = "";

@@ -77,6 +77,15 @@ describe("Pi launch", () => {
     expect(existsSync(join(world.root, ".pi", "agent", "auth.json"))).toBe(true);
   });
 
+  it("thinks at low by default and at the profile's level when set", () => {
+    const world = setup();
+    const surface = { expected: [{ name: "scout", tools: ["mcp__scout__current_site"], required: true, optionalTools: [] }] };
+    const level = (argv: string[]) => argv.slice(argv.indexOf("--thinking"), argv.indexOf("--thinking") + 2);
+    const { thinking: _omitted, ...noThinking } = world.profile;
+    expect(level(buildPiArgv({ profile: noThinking, surface }))).toEqual(["--thinking", "low"]);
+    expect(level(buildPiArgv({ profile: { ...world.profile, thinking: "high" }, surface }))).toEqual(["--thinking", "high"]);
+  });
+
   it("adds --model only for a provider-qualified model", () => {
     const world = setup();
     const argv = buildPiArgv({

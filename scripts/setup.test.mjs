@@ -101,7 +101,7 @@ describe("setup", () => {
       extensionId: expect.stringMatching(/^[a-p]{32}$/),
       destinations: [],
     });
-    expect(json(L.agentProfile)).toEqual({ schemaVersion: 1, adapter: "claude-code", model: "claude-sonnet-5-5", claudePath: join(fx.binDir, "claude") });
+    expect(json(L.agentProfile)).toEqual({ schemaVersion: 1, adapter: "claude-code", model: "claude-haiku-5-5", reasoningEffort: "low", claudePath: join(fx.binDir, "claude") });
 
     const ext = json(L.extensionManifest);
     expect(extensionIdFromManifestKey(ext.key)).toBe(scout.extensionId);
@@ -139,7 +139,7 @@ describe("setup", () => {
     const { loadAgentProfile } = await import("../packages/scout-core/dist/agents/profile.js");
     expect(setup().code).toBe(0);
     const L = layout({ env: fx.env, scoutRoot: fx.scoutRoot });
-    expect(loadAgentProfile(L.scoutHome)).toMatchObject({ claudePath: join(fx.binDir, "claude"), model: "claude-sonnet-5-5" });
+    expect(loadAgentProfile(L.scoutHome)).toMatchObject({ claudePath: join(fx.binDir, "claude"), model: "claude-haiku-5-5", reasoningEffort: "low" });
     // A re-run keeps it and its record.
     const first = json(L.installed).files.find((f) => f.kind === "agent-profile");
     expect(setup().code).toBe(0);

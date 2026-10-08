@@ -58,7 +58,7 @@ describe("background: cases", () => {
     expect(rep.preflight).toMatchObject({ verdict: "ready", cliVersion: "2.1.286" });
     expect(rep.result.items.map((i) => i.id)).toEqual(["c1", "c2"]);
     expect(rep.details.toolUses).toEqual(["mcp__scout__current_site", "mcp__scout__recent_activity"]);
-    expect(rep.details).toMatchObject({ termination: "completed", model: "claude-sonnet-5-5", cliVersion: "2.1.286" });
+    expect(rep.details).toMatchObject({ termination: "completed", model: "claude-haiku-5-5", cliVersion: "2.1.286" });
     expect(rep.details.usage.outputTokens).toBe(20);
     expect(rep.init.mcpServers).toEqual([{ name: "scout", status: "connected" }]);
     expect(rep.argv).toEqual(expect.arrayContaining(["--strict-mcp-config", "--disable-slash-commands", "--no-session-persistence"]));
@@ -161,13 +161,13 @@ describe("background --adapter codex", () => {
     expect(rep).toMatchObject({ case: "baseline", adapter: "codex", pass: true, outcome: "ok", failures: [] });
     expect(rep.preflight).toMatchObject({ verdict: "ready", cliVersion: "0.155.1" });
     expect(rep.result.items.map((i) => i.id)).toEqual(["c1", "c2"]);
-    expect(rep.details).toMatchObject({ termination: "completed", model: "gpt-6-sol", cliVersion: "0.155.1", toolUses: ["mcp__scout__current_site"] });
+    expect(rep.details).toMatchObject({ termination: "completed", model: "gpt-6-luna", cliVersion: "0.155.1", toolUses: ["mcp__scout__current_site"] });
     expect(rep.init).toEqual({ seen: true, event: "thread.started" });
     expect(rep.argv).toEqual(expect.arrayContaining(["exec", "--ephemeral", "--ignore-user-config", "read-only"]));
     expect(rep.cleanup).toMatchObject({ ok: true, jobDirRemoved: true, processesRemaining: 0, fixtureConnectionsAtEnd: 0 });
     const [launch] = codexLaunches(w);
     expect(launch.violations).toEqual([]);
-    expect(JSON.parse(readFileSync(join(w.scoutHome, "agent-profile.json"), "utf8"))).toMatchObject({ adapter: "codex", codexPath: w.codex, model: "gpt-6-sol" });
+    expect(JSON.parse(readFileSync(join(w.scoutHome, "agent-profile.json"), "utf8"))).toMatchObject({ adapter: "codex", codexPath: w.codex, model: "gpt-6-luna" });
     expectClean(w, r, token);
   });
 

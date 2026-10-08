@@ -39,7 +39,7 @@ import { serveFixture } from "../../packages/scout-mcp/dist/test-support/fixture
 import { shellish } from "./report.mjs";
 
 export const SCOUT_MCP_MAIN = join(REPO_ROOT, "packages", "scout-mcp", "dist", "main.js");
-export const DEFAULT_MODEL = "gpt-6-sol";
+export const DEFAULT_MODEL = "gpt-6-luna";
 export const VARIANTS = Object.freeze(["default", "no-approval-mode", "shell-on"]);
 export const FORWARDED_ENV = Object.freeze(["HOME", "USER", "LOGNAME", "PATH", "SHELL", "LANG", "LC_ALL", "LC_CTYPE", "TMPDIR"]);
 export const API_KEY_ENV = Object.freeze(["CODEX_API_KEY", "CODEX_ACCESS_TOKEN", "OPENAI_API_KEY"]);

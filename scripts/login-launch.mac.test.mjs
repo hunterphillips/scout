@@ -292,7 +292,7 @@ describe("uninstall: LaunchAgent and installed app", () => {
 
   it("removes an unchanged agent profile but keeps an edited one", async () => {
     expect(setup().code).toBe(0);
-    writeFileSync(L.agentProfile, readFileSync(L.agentProfile, "utf8").replace("claude-sonnet-5-5", "claude-opus-5-5"));
+    writeFileSync(L.agentProfile, readFileSync(L.agentProfile, "utf8").replace("claude-haiku-5-5", "claude-opus-5-5"));
     const r = await uninstall(["--yes", "--include-key"]);
     expect(r.code).toBe(2);
     expect(existsSync(L.agentProfile)).toBe(true);

@@ -78,7 +78,7 @@ describe("setup --agent and the Codex profile", () => {
     const { loadAgentProfile } = await import("../packages/scout-core/dist/agents/profile.js");
     const r = setup(["--agent", "codex"], { ...env, SCOUT_CLAUDE_BIN: claude.path });
     expect(r.code, r.text()).toBe(0);
-    expect(json(L.agentProfile)).toEqual({ schemaVersion: 1, adapter: "codex", codexPath: codex.path, model: "gpt-6-sol", reasoningEffort: "low" });
+    expect(json(L.agentProfile)).toEqual({ schemaVersion: 1, adapter: "codex", codexPath: codex.path, model: "gpt-6-luna", reasoningEffort: "low" });
     expect(Object.keys(json(L.agentProfile))).toEqual(["schemaVersion", "adapter", "codexPath", "model", "reasoningEffort"]);
     expect(mode(L.agentProfile)).toBe(0o600);
     expect(loadAgentProfile(L.scoutHome)).toMatchObject({ adapter: "codex", codexPath: codex.path });

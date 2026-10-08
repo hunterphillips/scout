@@ -27,10 +27,19 @@ describe("Pi profile", () => {
     expect(AgentProfileSchema.safeParse({ ...world.profile, model: "gpt-6-sol" }).success).toBe(false);
   });
 
+  it("accepts Pi's thinking levels and rejects anything else", () => {
+    const world = setup();
+    for (const thinking of ["off", "minimal", "low", "medium", "high", "xhigh", "max"]) {
+      expect(AgentProfileSchema.safeParse({ ...world.profile, thinking }).success).toBe(true);
+    }
+    for (const thinking of ["none", "--foo", "LOW"]) expect(AgentProfileSchema.safeParse({ ...world.profile, thinking }).success).toBe(false);
+  });
+
   it("finds Pi and leaves model selection to the user's settings", () => {
     const world = setup();
     const profile = createDefaultPiProfile(world.env, { systemDirs: [] });
     expect(profile).toEqual(world.profile);
     expect(profile.model).toBeUndefined();
+    expect(profile.thinking).toBe("low");
   });
 });

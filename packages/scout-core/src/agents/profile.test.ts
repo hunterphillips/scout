@@ -12,8 +12,8 @@ import {
   type AgentProfile,
 } from "./profile.js";
 import { createDefaultAgentProfile } from "./registry.js";
-import { DEFAULT_CLAUDE_CODE_MODEL } from "./claudeCode/profile.js";
-import { createDefaultCodexProfile, DEFAULT_CODEX_MODEL } from "./codex/profile.js";
+import { DEFAULT_CLAUDE_CODE_MODEL, DEFAULT_CLAUDE_CODE_REASONING_EFFORT } from "./claudeCode/profile.js";
+import { createDefaultCodexProfile, DEFAULT_CODEX_MODEL, DEFAULT_CODEX_REASONING_EFFORT } from "./codex/profile.js";
 
 const dirs: string[] = [];
 afterEach(() => {
@@ -45,7 +45,8 @@ describe("agent profile", () => {
     writeFileSync(claude, "#!/bin/sh\n");
     chmodSync(claude, 0o755);
     expect(createDefaultAgentProfile({ PATH: bin })).toEqual({ ...profile, claudePath: claude });
-    expect(DEFAULT_CLAUDE_CODE_MODEL).toBe("claude-sonnet-5-5");
+    expect(DEFAULT_CLAUDE_CODE_MODEL).toBe("claude-haiku-5-5");
+    expect(DEFAULT_CLAUDE_CODE_REASONING_EFFORT).toBe("low");
     expect(codeOf(() => createDefaultAgentProfile({ PATH: h }))).toBe("profile: claude not found on PATH");
   });
 
@@ -74,10 +75,21 @@ describe("agent profile", () => {
     ["another schema version", { ...profile, schemaVersion: 2 }],
     ["an unknown adapter", { ...profile, adapter: "other-agent" }],
     ["no adapter", { schemaVersion: 1, claudePath: "/opt/bin/claude", model: DEFAULT_CLAUDE_CODE_MODEL }],
+    ["an unknown reasoning effort", { ...profile, reasoningEffort: "minimal" }],
+    ["a flag-shaped reasoning effort", { ...profile, reasoningEffort: "--bare" }],
   ])("refuses %s", (_l, content) => {
     const h = home();
     writeFileSync(agentProfilePath(h), JSON.stringify(content), { mode: 0o600 });
     expect(codeOf(() => loadAgentProfile(h))).toBe("profile: invalid");
+  });
+
+  it("keeps a named model and accepts every Claude Code effort level", () => {
+    const h = home();
+    for (const reasoningEffort of ["low", "medium", "high", "xhigh", "max"] as const) {
+      writeAgentProfile(h, { ...profile, model: "claude-sonnet-5-5", reasoningEffort });
+      expect(loadAgentProfile(h)).toEqual({ ...profile, model: "claude-sonnet-5-5", reasoningEffort });
+    }
+    expect(profileFingerprint({ ...profile, reasoningEffort: "high" })).not.toBe(profileFingerprint(profile));
   });
 
   it("accepts full model names, dated or not, and explains a refused alias", () => {
@@ -110,7 +122,9 @@ describe("agent profile: the Codex member", () => {
     expect(loadAgentProfile(h)).toEqual({ ...codex, reasoningEffort: "medium" });
   });
 
-  it("defaults to gpt-6-sol and the codex found on PATH", () => {
+  it("defaults to gpt-6-luna at low effort and the codex found on PATH", () => {
+    expect(DEFAULT_CODEX_MODEL).toBe("gpt-6-luna");
+    expect(DEFAULT_CODEX_REASONING_EFFORT).toBe("low");
     const h = home();
     const bin = join(h, "bin");
     mkdirSync(bin);

@@ -73,19 +73,19 @@ describe("switching the agent", () => {
     const { home, bin } = setup("claude", "codex");
     writeAgentProfile(home, claudeProfile(bin, { tools: TOOLS }));
     expect(switchAgent(home, "codex", { PATH: bin })).toEqual({ ok: true, written: true });
-    expect(read(home)).toEqual({ schemaVersion: 1, adapter: "codex", codexPath: join(bin, "codex"), model: "gpt-6-sol", tools: TOOLS });
+    expect(read(home)).toEqual({ schemaVersion: 1, adapter: "codex", codexPath: join(bin, "codex"), model: "gpt-6-luna", tools: TOOLS });
     expect(statSync(agentProfilePath(home)).mode & 0o777).toBe(0o600);
     expect(switchAgent(home, "claude-code", { PATH: bin })).toEqual({ ok: true, written: true });
-    expect(read(home)).toEqual(claudeProfile(bin, { tools: TOOLS }));
+    expect(read(home)).toEqual(claudeProfile(bin, { model: "claude-haiku-5-5", tools: TOOLS }));
   });
 
   it("writes a profile where there was none, or an unusable one", () => {
     const { home, bin } = setup("codex");
     expect(switchAgent(home, "codex", { PATH: bin })).toEqual({ ok: true, written: true });
-    expect(read(home)).toEqual({ schemaVersion: 1, adapter: "codex", codexPath: join(bin, "codex"), model: "gpt-6-sol" });
+    expect(read(home)).toEqual({ schemaVersion: 1, adapter: "codex", codexPath: join(bin, "codex"), model: "gpt-6-luna" });
     writeFileSync(agentProfilePath(home), JSON.stringify({ schemaVersion: 1, adapter: "codex", codexPath: "relative/codex", model: "gpt-6-sol" }), { mode: 0o600 });
     expect(switchAgent(home, "codex", { PATH: bin })).toEqual({ ok: true, written: true });
-    expect(read(home)).toEqual({ schemaVersion: 1, adapter: "codex", codexPath: join(bin, "codex"), model: "gpt-6-sol" });
+    expect(read(home)).toEqual({ schemaVersion: 1, adapter: "codex", codexPath: join(bin, "codex"), model: "gpt-6-luna" });
   });
 
   it("choosing the current adapter writes nothing, so an edited model survives a retry", () => {

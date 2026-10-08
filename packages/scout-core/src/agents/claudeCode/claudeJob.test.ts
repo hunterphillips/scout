@@ -24,7 +24,7 @@ import {
 import { FORWARD_KEYS, runDirectPreflight } from "./launchProfile.js";
 import { createPreflightFacade, type PreflightReportLike } from "./preflightWorker.js";
 import { ProcessTracker } from "../processTree.js";
-import { DEFAULT_CLAUDE_CODE_MODEL } from "./profile.js";
+import { DEFAULT_CLAUDE_CODE_MODEL, type ClaudeCodeProfile } from "./profile.js";
 import type { AgentProfile } from "../profile.js";
 import { markerInstructionText, newInstructionMarker } from "../prompt.js";
 import { fakeBackend, selection, type FakeBackendDef } from "../testing/fakeBackend.js";
@@ -66,7 +66,7 @@ afterEach(async () => {
   cleanupSandboxes();
 });
 
-async function setup(opts: { mode?: string; version?: string; preflightVersion?: string; tools?: (base: string) => ToolsProfile; deps?: Partial<ClaudeJobDeps> } = {}): Promise<Env> {
+async function setup(opts: { mode?: string; version?: string; preflightVersion?: string; tools?: (base: string) => ToolsProfile; profile?: Partial<ClaudeCodeProfile>; deps?: Partial<ClaudeJobDeps> } = {}): Promise<Env> {
   const base = realpathSync(mkdtempSync(join(tmpdir(), "scj-")));
   chmodSync(base, 0o700);
   const scoutHome = join(base, "h");
@@ -75,7 +75,7 @@ async function setup(opts: { mode?: string; version?: string; preflightVersion?:
   mkdirSync(join(userHome, ".claude"), { recursive: true });
   const fake = installFakeCli(base, opts.mode ?? "ok", opts.version);
   const core = await startFixtureCore(base);
-  const profile: AgentProfile = { schemaVersion: 1, adapter: "claude-code", claudePath: fake.path, model: DEFAULT_CLAUDE_CODE_MODEL };
+  const profile: AgentProfile = { schemaVersion: 1, adapter: "claude-code", claudePath: fake.path, model: DEFAULT_CLAUDE_CODE_MODEL, ...opts.profile };
   if (opts.tools) profile.tools = opts.tools(base);
   const diagPath = join(base, "diag.jsonl");
   const diagWarnings: string[] = [];
@@ -217,6 +217,8 @@ describe("claude job: happy path", () => {
     // The argv names the private job dir SCOUT_HOME/run/jobs/<request id>, which is gone.
     const jobDir = join(e.scoutHome, "run", "jobs", "job-1");
     expect(call!.argv).toEqual(buildJobArgv(DEFAULT_CLAUDE_CODE_MODEL, jobDir, allowed));
+    // No effort in the profile: the job runs at low.
+    expect(call!.argv!.slice(call!.argv!.indexOf("--effort"), call!.argv!.indexOf("--effort") + 2)).toEqual(["--effort", "low"]);
     expect(existsSync(jobDir)).toBe(false);
     // The CLI ran from the one stable cwd, SCOUT_HOME/run/agent-cwd (0700), which stays.
     expect(call!.cwd).toBe(join(e.scoutHome, "run", AGENT_CWD_DIR));
@@ -248,6 +250,17 @@ describe("claude job: happy path", () => {
     const text = readFileSync(e.diagPath, "utf8");
     for (const s of ["job-1", TITLE_SENTINEL, MALICIOUS, "billing", e.core.token, e.base]) expect(text).not.toContain(s);
     expect(sentinelsIn(text)).toEqual([]);
+  });
+
+  it("passes the profile's model and effort", async () => {
+    const e = await setup({ profile: { model: "claude-sonnet-5-5", reasoningEffort: "high" } });
+    const out = await e.adapter.run(request(e), { toolSurface: surface(e) });
+    expect(out.result.status).toBe("ok");
+    const [call] = e.fake.lines();
+    expect(call!.violations).toEqual([]);
+    const at = (flag: string) => call!.argv!.slice(call!.argv!.indexOf(flag), call!.argv!.indexOf(flag) + 2);
+    expect(at("--model")).toEqual(["--model", "claude-sonnet-5-5"]);
+    expect(at("--effort")).toEqual(["--effort", "high"]);
   });
 
   it("the CLI's PATH leads with the claude binary's directory", async () => {

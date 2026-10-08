@@ -89,7 +89,7 @@ describe("codex-probe dry run", () => {
       "exec --json --ephemeral --ignore-user-config --ignore-rules --skip-git-repo-check",
       "--color never",
       "-s read-only",
-      "-m gpt-6-sol",
+      "-m gpt-6-luna",
       "features.shell_tool=false",
       `'web_search="disabled"'`,
       "--disable apps",
@@ -189,7 +189,7 @@ describe("codex-probe run against a fake codex", () => {
     const s = JSON.parse(summaryText);
     expect(s).toMatchObject({
       variant: "default",
-      model: "gpt-6-sol",
+      model: "gpt-6-luna",
       codexVersion: "codex-cli 0.155.1",
       exitCode: 0,
       signal: null,

@@ -14,9 +14,9 @@
 // Setup registers nothing for the side panel: the extension bundle carries it.
 // <SCOUT_HOME>/agent-profile.json is written only when absent, with the absolute CLI path
 // resolved here, so jobs launched from a Finder-started app never look it up on
-// PATH; an existing profile is never rewritten. The Codex profile's adapter id, model and
-// reasoning effort, and Pi's thinking level, come from the built scout-core
-// (dist/agents/<adapter>/profile.js).
+// PATH; an existing profile is never rewritten. Each profile's adapter id and defaults (Claude
+// Code's and Codex's model and reasoning effort, Pi's thinking level) come from the built
+// scout-core (dist/agents/<adapter>/profile.js).
 //
 // Usage: node scripts/setup.mjs [--dry-run] [--scout-root <dir>] [--agent <claude-code|codex|pi>]
 //                               [--agent-integration] [--login-launch [--app <Scout.app>]]
@@ -273,10 +273,13 @@ function builtConstants(L, rel, names) {
   return values;
 }
 
-/** The Claude Code profile: adapter id and initial model from the built scout-core. */
+/** The Claude Code profile: adapter id, initial model and effort from the built scout-core. */
 function claudeProfileText(L, claudePath) {
-  const [adapter, model] = builtConstants(L, ["agents", "claudeCode", "profile.js"], ["CLAUDE_CODE_ADAPTER_ID", "DEFAULT_CLAUDE_CODE_MODEL"]);
-  return { text: JSON.stringify({ schemaVersion: 1, adapter, model, claudePath }, null, 2) + "\n", summary: `claudePath=${claudePath} model=${model}` };
+  const [adapter, model, reasoningEffort] = builtConstants(L, ["agents", "claudeCode", "profile.js"], ["CLAUDE_CODE_ADAPTER_ID", "DEFAULT_CLAUDE_CODE_MODEL", "DEFAULT_CLAUDE_CODE_REASONING_EFFORT"]);
+  return {
+    text: JSON.stringify({ schemaVersion: 1, adapter, model, reasoningEffort, claudePath }, null, 2) + "\n",
+    summary: `claudePath=${claudePath} model=${model} reasoningEffort=${reasoningEffort}`,
+  };
 }
 
 /** The Codex profile: adapter id, initial model and reasoning effort from the built scout-core. */

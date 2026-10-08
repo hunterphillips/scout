@@ -137,6 +137,11 @@ logged in.
 The Claude Code adapter runs one `claude -p` per job with a strict MCP config, an exact
 `--allowedTools` list, hooks off, and no session persistence.
 
+Each profile sets the job's model and reasoning level. The defaults favour speed, since a
+job only ranks a site's links: Claude Code runs `claude-haiku-5-5` at `--effort low`, Codex
+runs `gpt-6-luna` at low reasoning effort, and Pi runs the user's own Pi model at
+`--thinking low`.
+
 The Codex adapter runs one `codex exec --ephemeral` per job in a read-only sandbox with
 the shell, web search and apps off, and Scout's MCP server passed as `-c mcp_servers.*`
 overrides. Jobs get a private `CODEX_HOME` (`~/.scout/run/codex-home`) that holds only

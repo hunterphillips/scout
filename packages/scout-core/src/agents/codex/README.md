@@ -8,6 +8,8 @@ A job runs only when `codex login status` reports a login and the auth link is i
 
 Codex sends the output schema as an OpenAI strict schema, so `outputSchema.ts` requires both fields and has no length or pattern limits. The empty answer comes back as `{"status":"empty","items":[]}` and is normalized before the usual validation.
 
+Jobs run on the profile's `model` (default `gpt-6-luna`) at its `reasoningEffort` (default `low`; `low`, `medium`, `high` or `xhigh`).
+
 `profile.ts` holds the union member, the Settings label, the default profile and the usual install locations the core searches after PATH; `../registry.ts` switches on all of them, so a new adapter does not compile until it adds its cases.
 
 `testing/` holds the scripted fake `codex` the tests use (`fake-codex.mjs` for `exec`, `--version` and `login status`; `fake-codex-mcp.mjs` for `mcp add|get|remove` against a temp Codex home).

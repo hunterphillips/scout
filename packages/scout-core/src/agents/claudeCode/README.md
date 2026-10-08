@@ -8,4 +8,6 @@ An adapter provides:
 - a factory returning an `AgentJobAdapter` (`../adapter.ts`): `id`, `profileFingerprint`, `readiness` and `refreshReadiness()` (whether inference may run now), `run()` (one job, ending in a `HostJobResult`), and `abortAll()`;
 - a case in `createJobAdapter` in `../registry.ts`. The switch is exhaustive, so a new profile member does not compile until the registry knows it.
 
+Jobs run on the profile's `model` (default `claude-haiku-5-5`) at the profile's `reasoningEffort`, passed as `--effort` (default `low`; `low`, `medium`, `high`, `xhigh` or `max`).
+
 `testing/` holds the scripted fake `claude` CLI the tests use.

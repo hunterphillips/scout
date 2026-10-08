@@ -17,8 +17,9 @@
 //   - --settings without disableAllHooks: a user SessionStart hook runs (hook events);
 //   - user-level instructions (CLAUDE.md in the config dir) are visible unless the default
 //     system prompt was replaced or --bare/--safe-mode was passed.
-// Flags no job may ever pass (resume, replacement prompts, permission bypass, ...) are
-// recorded as `violations`; tests assert there are none.
+// Flags no job may ever pass (resume, replacement prompts, permission bypass, ...), a missing
+// required flag and an --effort level the CLI does not know are recorded as `violations`; tests
+// assert there are none.
 //
 // In the answering modes it connects to the REAL scout-mcp server named in the job's
 // mcp.json (which talks to the fixture core socket) and calls Scout tools before answering.
@@ -70,8 +71,10 @@ const FORBIDDEN = [
   "--bare",
   "--add-dir",
 ];
-const REQUIRED = ["-p", "--no-session-persistence", "--strict-mcp-config", "--disable-slash-commands", "--json-schema"];
+const REQUIRED = ["-p", "--no-session-persistence", "--strict-mcp-config", "--disable-slash-commands", "--json-schema", "--effort"];
+const EFFORTS = ["low", "medium", "high", "xhigh", "max"];
 const violations = [...FORBIDDEN.filter(has).map((f) => `forbidden ${f}`), ...REQUIRED.filter((f) => !has(f)).map((f) => `missing ${f}`)];
+if (has("--effort") && !EFFORTS.includes(flag("--effort"))) violations.push("invalid --effort");
 const logLine = (obj) => {
   if (process.env.FAKE_LOG) appendFileSync(process.env.FAKE_LOG, JSON.stringify(obj) + "\n");
 };

@@ -33,11 +33,11 @@ export function makeFixture({ withClaude = true, rootPrefix = "scout setup test 
   mkdirSync(join(scoutRoot, "packages", "scout-core", "dist", "agents", "codex"), { recursive: true });
   writeFileSync(join(scoutRoot, "packages/contracts/dist/bridge.js"), "export const BRIDGE_PROTOCOL = 3;\n");
   writeFileSync(join(scoutRoot, "packages/scout-core/dist/agents/claudeCode/claudeJob.js"), 'export const VERIFIED_CLI_VERSION = "2.1.286";\n');
-  writeFileSync(join(scoutRoot, "packages/scout-core/dist/agents/claudeCode/profile.js"), 'export const CLAUDE_CODE_ADAPTER_ID = "claude-code";\nexport const DEFAULT_CLAUDE_CODE_MODEL = "claude-sonnet-5-5";\n');
+  writeFileSync(join(scoutRoot, "packages/scout-core/dist/agents/claudeCode/profile.js"), 'export const CLAUDE_CODE_ADAPTER_ID = "claude-code";\nexport const DEFAULT_CLAUDE_CODE_MODEL = "claude-haiku-5-5";\nexport const DEFAULT_CLAUDE_CODE_REASONING_EFFORT = "low";\n');
   writeFileSync(join(scoutRoot, "packages/scout-core/dist/agents/codex/codexJob.js"), 'export const VERIFIED_CODEX_VERSION = "0.155.1";\n');
   writeFileSync(
     join(scoutRoot, "packages/scout-core/dist/agents/codex/profile.js"),
-    'export const CODEX_ADAPTER_ID = "codex";\nexport const DEFAULT_CODEX_MODEL = "gpt-6-sol";\nexport const DEFAULT_CODEX_REASONING_EFFORT = "low";\n',
+    'export const CODEX_ADAPTER_ID = "codex";\nexport const DEFAULT_CODEX_MODEL = "gpt-6-luna";\nexport const DEFAULT_CODEX_REASONING_EFFORT = "low";\n',
   );
   mkdirSync(join(scoutRoot, "packages/scout-core/dist/agents/pi"), { recursive: true });
   writeFileSync(join(scoutRoot, "packages/scout-core/dist/agents/pi/profile.js"), 'export const PI_ADAPTER_ID = "pi";\nexport const DEFAULT_PI_THINKING = "low";\n');
