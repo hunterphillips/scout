@@ -139,7 +139,7 @@ The Claude Code adapter runs one `claude -p` per job with a strict MCP config, a
 
 Each profile sets the job's model and reasoning level. The defaults favour speed, since a
 job only ranks a site's links: Claude Code runs `claude-haiku-5-5` at `--effort low`, Codex
-runs `gpt-6-luna` at low reasoning effort, and Pi runs the user's own Pi model at
+runs `gpt-6-luna` at medium reasoning effort (at low it returned no picks on a real case), and Pi runs the user's own Pi model at
 `--thinking low`.
 
 The Codex adapter runs one `codex exec --ephemeral` per job in a read-only sandbox with

@@ -122,9 +122,9 @@ describe("agent profile: the Codex member", () => {
     expect(loadAgentProfile(h)).toEqual({ ...codex, reasoningEffort: "medium" });
   });
 
-  it("defaults to gpt-6-luna at low effort and the codex found on PATH", () => {
+  it("defaults to gpt-6-luna at medium effort and the codex found on PATH", () => {
     expect(DEFAULT_CODEX_MODEL).toBe("gpt-6-luna");
-    expect(DEFAULT_CODEX_REASONING_EFFORT).toBe("low");
+    expect(DEFAULT_CODEX_REASONING_EFFORT).toBe("medium");
     const h = home();
     const bin = join(h, "bin");
     mkdirSync(bin);

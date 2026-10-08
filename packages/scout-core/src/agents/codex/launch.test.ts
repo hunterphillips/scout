@@ -79,7 +79,7 @@ describe("codex launch", () => {
     expect(l.argv).toEqual([
       "exec", "--json", "--ephemeral", "--ignore-user-config", "--ignore-rules", "--skip-git-repo-check", "--color", "never",
       "-C", cwd, "-s", "read-only", "-m", "gpt-6-sol",
-      "-c", 'model_reasoning_effort="low"', "-c", "features.hooks=false", "-c", "project_doc_max_bytes=0", "-c", 'history.persistence="none"',
+      "-c", 'model_reasoning_effort="medium"', "-c", "features.hooks=false", "-c", "project_doc_max_bytes=0", "-c", 'history.persistence="none"',
       "-c", "analytics.enabled=false", "-c", "check_for_update_on_startup=false", "-c", 'web_search="disabled"', "-c", "features.shell_tool=false",
       "--disable", "apps",
       "-c", 'mcp_servers.scout.command="/opt/node"',

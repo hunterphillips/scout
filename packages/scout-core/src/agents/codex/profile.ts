@@ -22,7 +22,7 @@ export const CODEX_LABEL = "Codex";
 /** The initial model for the Codex profile; editable in the profile file. */
 export const DEFAULT_CODEX_MODEL = "gpt-6-luna";
 /** The reasoning effort a job runs at when the profile names none. */
-export const DEFAULT_CODEX_REASONING_EFFORT = "low";
+export const DEFAULT_CODEX_REASONING_EFFORT = "medium";
 
 /** A plain model name: lower-case, never anything that parses as a flag. */
 export const CODEX_MODEL_RE = /^[a-z0-9][a-z0-9._:-]{0,63}$/;

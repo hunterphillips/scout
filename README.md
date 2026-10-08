@@ -71,7 +71,7 @@ run out of `~/.scout`.
    use). Jobs run through Claude Code, Codex or Pi: `--agent claude-code`, `--agent codex` or
    `--agent pi` picks one; without the flag, setup uses the first of `claude`, `codex`
    and `pi` it finds. By default Claude Code jobs run `claude-haiku-5-5` at low effort, Codex
-   jobs run `gpt-6-luna` at low reasoning effort, and Pi jobs run your own Pi model at low
+   jobs run `gpt-6-luna` at medium reasoning effort, and Pi jobs run your own Pi model at low
    thinking. Everything it writes is listed in `~/.scout/installed.json`. `--dry-run`
    shows the paths first. `--agent-integration` also registers the `scout` MCP connection
    with that agent (`claude mcp add` at user scope, `codex mcp add` or `pi mcp add`) and installs the

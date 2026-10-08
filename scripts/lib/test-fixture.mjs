@@ -37,7 +37,7 @@ export function makeFixture({ withClaude = true, rootPrefix = "scout setup test 
   writeFileSync(join(scoutRoot, "packages/scout-core/dist/agents/codex/codexJob.js"), 'export const VERIFIED_CODEX_VERSION = "0.155.1";\n');
   writeFileSync(
     join(scoutRoot, "packages/scout-core/dist/agents/codex/profile.js"),
-    'export const CODEX_ADAPTER_ID = "codex";\nexport const DEFAULT_CODEX_MODEL = "gpt-6-luna";\nexport const DEFAULT_CODEX_REASONING_EFFORT = "low";\n',
+    'export const CODEX_ADAPTER_ID = "codex";\nexport const DEFAULT_CODEX_MODEL = "gpt-6-luna";\nexport const DEFAULT_CODEX_REASONING_EFFORT = "medium";\n',
   );
   mkdirSync(join(scoutRoot, "packages/scout-core/dist/agents/pi"), { recursive: true });
   writeFileSync(join(scoutRoot, "packages/scout-core/dist/agents/pi/profile.js"), 'export const PI_ADAPTER_ID = "pi";\nexport const DEFAULT_PI_THINKING = "low";\n');
