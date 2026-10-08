@@ -22,7 +22,7 @@ registered for exactly the granted sites, reads a page's main content (`main`,
 `[role="main"]`, `article`, else `body`, without navigation, the page's own header and
 footer, asides, dialogs or text the page hides from the reader). Collapsed sections
 (closed `<details>`, `hidden="until-found"`) are read. Once the page has settled and stayed
-visible for 3 s, the script reads it again and sends that text; the worker forwards it only
+visible for 2.5 s, the script reads it again and sends that text; the worker forwards it only
 for the active tab of the focused window. Its side panel is Scout's
 only user interface, with four destinations: Page, Sites, Activity, Settings. The panel
 renders frames from the core and sends commands back. It holds no state of its own beyond
@@ -75,7 +75,7 @@ and reads a frozen snapshot of its visit instead.
 ## Job lifecycle
 
 1. A visit forms when the focused tab is on an allowed https origin. It settles after a
-   3 s dwell. Switching to another app keeps the visit; coming back to another page ends it.
+   2.5 s dwell. Switching to another app keeps the visit; coming back to another page ends it.
 2. A settled visit starts a discovery pass. One pass runs at a time, the latest visit
    wins, and a visit change cancels the pass. The pass builds the site's catalog of
    candidate links and checks for agent files.
@@ -100,7 +100,7 @@ and reads a frozen snapshot of its visit instead.
   until the core sends `capture_policy`. It reports url and title only for origins Chrome
   has granted. A Chrome all-sites grant counts as not granted.
 - Granting a site also allows reading its pages, with no second switch. A page's text is
-  sent after it settles and has been visible for 3 s, as the page stands at the end of
+  sent after it settles and has been visible for 2.5 s, as the page stands at the end of
   that wait (navigating away, switching windows or hiding it cancels the read). Nothing is
   sent while the user is typing into it, and only from the active tab of the focused
   window. The core keeps text only from pages on

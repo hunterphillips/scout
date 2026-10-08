@@ -10,7 +10,7 @@ On sites where you switch on suggestions, Scout runs a short background job thro
 agent and shows up to three links on that site that fit what you were just reading: the
 pages you read on sites you allowed. Read an issue on your tracker, then open the docs,
 and Scout suggests the docs pages for that issue. Scout reads a page once it has been on
-screen for three seconds, never while you are typing into it, and keeps the text in memory
+screen for 2.5 seconds, never while you are typing into it, and keeps the text in memory
 only, for at most 15 minutes. Site text is data to Scout, never instructions. No model runs
 during discovery, preview, or approval.
 
@@ -96,7 +96,7 @@ Every site starts with it off.
 The panel's bottom nav has four destinations: **Page**, **Sites**, **Activity**,
 **Settings**. On an unknown site, **Page** asks you to click the Scout icon; after that it
 offers **Allow Scout on <host>**, or the suggestions switch if Scout is already allowed.
-After three seconds on an allowed site that publishes agent files, a pill says the site
+After 2.5 seconds on an allowed site that publishes agent files, a pill says the site
 has files for your agent. **Review** streams the exact text, and **Approve** enables only
 once the whole text has arrived and its hash checks out. **Not now** declines. Approved
 files are listed below, each with **Revoke**.

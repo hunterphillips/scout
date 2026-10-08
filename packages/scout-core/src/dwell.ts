@@ -9,7 +9,7 @@ import { systemTimers, type Timers } from "./clock.js";
 import type { Diagnostics } from "./diagnostics.js";
 
 /** How long a visit must stay unchanged before it counts as settled. */
-export const DWELL_MS = 3000;
+export const DWELL_MS = 2500;
 
 export type DwellCancelReason =
   | "visit_changed"

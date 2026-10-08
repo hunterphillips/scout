@@ -264,7 +264,7 @@ describe.skipIf(SKIP !== null)(SKIP ? `Scout's side panel in Chrome for Testing 
     steps.panelWidth = width;
     expect(width[1]).toBeLessThanOrEqual(width[0]); // no horizontal scroll at the panel's width
 
-    // The allowed site's page was read: after it settled and stayed visible 3 s, one page reached Scout.
+    // The allowed site's page was read: after it settled and stayed visible 2.5 s, one page reached Scout.
     await click("nav-settings");
     const sentLine = () => panel.evaluate(() => document.getElementById("sent-line")?.textContent ?? "");
     await until(async () => / · pages 1 · /.test(await sentLine()), "Sent to show one page", 20_000);

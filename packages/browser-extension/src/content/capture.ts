@@ -7,7 +7,7 @@
 // starts a job. A job waits for the document to be visible, then asks the
 // background for approval (active tab of the focused window, site granted, not
 // paused, bridge up). After approval it waits until the title and body exist
-// and are unchanged for 500 ms (capped at 5 s), then holds for 3 s with the
+// and are unchanged for 500 ms (capped at 5 s), then holds for 2.5 s with the
 // page visible: navigation, blur or hiding the page cancels it. When the dwell
 // ends it reads the page again and sends that text, so content that loaded
 // during the dwell is included; if the page then has no content or is being

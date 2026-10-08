@@ -31,7 +31,7 @@ function stubChromeCheckVisibility(view: Window & typeof globalThis): void {
   };
 }
 
-/** Settle (500 ms of stable text, on 100 ms ticks) plus the 3 s dwell. */
+/** Settle (settleMs of stable text, on tickMs ticks) plus the dwell. */
 const SEND_AT = LIMITS.settleMs + LIMITS.dwellMs;
 
 describe("extractor", () => {
@@ -272,7 +272,7 @@ describe("capture controller (jsdom + synthetic History/Navigation driver + fake
     return { d, clock, ctl, sent, approvals };
   }
 
-  it("sends nothing before 3 s visible after the page settles, then sends once", async () => {
+  it("sends nothing before the dwell (visible after the page settles) ends, then sends once", async () => {
     const { clock, ctl, sent } = harness(ISSUE1, trackerPage({ body: "<p>The first issue, long enough to send.</p>" }));
     ctl.start();
     await clock.advance(SEND_AT - 100);

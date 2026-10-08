@@ -24,5 +24,5 @@ export const LIMITS: Readonly<Limits> = Object.freeze({
   maxWaitMs: 5000,
   tickMs: 100,
   pollMs: 1000,
-  dwellMs: 3000,
+  dwellMs: 2500,
 });
