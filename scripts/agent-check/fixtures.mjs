@@ -157,7 +157,7 @@ export function loadCaseInputs({ candidatesFile, activityFile } = {}) {
     if (!origin) throw new Error("--candidates: the catalog has no https origin");
     inputs.site = {
       origin,
-      catalogVersion: typeof cat.version === "string" && cat.version ? cat.version : "case-catalog",
+      catalogVersion: typeof cat.version === "string" && cat.version && cat.version.length <= 128 ? cat.version : "case-catalog",
       candidates: candidates.map((c) => ({ id: c.id, sourceUrl: c.sourceUrl, title: c.title, ...(c.description !== undefined ? { description: c.description } : {}), labelQuality: c.labelQuality })),
     };
   }
@@ -214,6 +214,8 @@ export async function startJobFixture(root, inputs = {}) {
     token,
     socketPath: served.socketPath,
     coreInstanceId: "core-check",
+    /** The fixture core's backend, so a test can ask it what the job would see. */
+    backend: served.backend,
     openConnections: () => served.socket.openConnections,
     close: () => served.socket.close(),
   };

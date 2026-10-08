@@ -206,7 +206,7 @@ const caseCandidate = (n, title, extra = {}) => ({ id: `c${n.toString(36)}`, sou
 /** A file shaped like Scout's catalog cache (`~/.scout/cache/catalog/<host>-<hash>.json`). */
 function writeCatalog(w, candidates, name = "catalog.json") {
   const file = join(w.root, name);
-  writeFileSync(file, JSON.stringify({ schema: 3, origin: CASE_ORIGIN, catalog: { origin: CASE_ORIGIN, version: "v-real", fetchedAt: 1, candidates, truncated: false, errors: [] } }));
+  writeFileSync(file, JSON.stringify({ schemaVersion: 3, origin: CASE_ORIGIN, fetchedAt: 1, resources: [], catalog: { origin: CASE_ORIGIN, version: "v-real", fetchedAt: 1, candidates, truncated: false, errors: [] } }));
   return file;
 }
 
@@ -272,13 +272,13 @@ describe("background: baseline with --candidates and --activity", () => {
 
   it.each([
     ["--candidates", "not json", "--candidates must name a readable JSON file"],
-    ["--candidates", [caseCandidate(1, "x".repeat(161))], "--candidates: [0].title: "],
+    ["--candidates", [caseCandidate(1, "x".repeat(161))], "--candidates: [0].title: Too big"],
     ["--candidates", [caseCandidate(1, "A"), caseCandidate(1, "B")], "--candidates: duplicate candidate id"],
-    ["--candidates", { catalog: { origin: CASE_ORIGIN, candidates: [] } }, "--candidates: "],
-    ["--candidates", Array.from({ length: 501 }, (_, i) => caseCandidate(i, `T${i}`)), "--candidates: "],
+    ["--candidates", { catalog: { origin: CASE_ORIGIN, candidates: [] } }, "--candidates: Too small"],
+    ["--candidates", Array.from({ length: 501 }, (_, i) => caseCandidate(i, `T${i}`)), "--candidates: Too big: expected array to have <=500"],
     ["--activity", [{ url: "http://plain.example.org/", title: "Plain http" }], "--activity: [0].url: not an https URL"],
-    ["--activity", [{ url: "https://a.example.org/", title: "Long", text: "x".repeat(8 * 1024 + 1) }], "--activity: [0].text: "],
-    ["--activity", Array.from({ length: 11 }, (_, i) => ({ url: `https://a.example.org/${i}`, title: `P${i}` })), "--activity: "],
+    ["--activity", [{ url: "https://a.example.org/", title: "Long", text: "x".repeat(8 * 1024 + 1) }], "--activity: [0].text: text exceeds 8192 bytes"],
+    ["--activity", Array.from({ length: 11 }, (_, i) => ({ url: `https://a.example.org/${i}`, title: `P${i}` })), "--activity: Too big: expected array to have <=10"],
     ["--activity", { url: "https://a.example.org/", title: "Not a list" }, "--activity: must be a JSON array"],
   ])("refuses an invalid %s file with a clear message", async (flag, value, message) => {
     const w = makeWorld("ok");
