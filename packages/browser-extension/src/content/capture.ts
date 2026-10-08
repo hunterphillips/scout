@@ -8,9 +8,12 @@
 // background for approval (active tab of the focused window, site granted, not
 // paused, bridge up). After approval it waits until the title and body exist
 // and are unchanged for 500 ms (capped at 5 s), then holds for 3 s with the
-// page visible: navigation, blur or hiding the page cancels it. It sends only
-// if the URL and `navCounter` still match the values captured when the job
-// started. The URL sent is `location.href` without its fragment.
+// page visible: navigation, blur or hiding the page cancels it. When the dwell
+// ends it reads the page again and sends that text, so content that loaded
+// during the dwell is included; if the page then has no content or is being
+// typed into, nothing is sent. It sends only if the URL and `navCounter` still
+// match the values captured when the job started. The URL sent is
+// `location.href` without its fragment.
 
 import type { ApproveResponse, PageTextMessage } from "../messages.js";
 import { LIMITS, type Limits } from "../limits.js";
@@ -168,6 +171,13 @@ export function createCaptureController(env: CaptureEnv): CaptureController {
       await sleep(Math.min(limits.tickMs, dwellEnd - clock.now()));
       if (!alive()) return;
     }
+    // Settling only gates the dwell; what is sent is the page as it is now.
+    const final = extractPage(doc, limits);
+    if (!final.ok) {
+      state.phase = "failed";
+      state.lastReason = final.reason;
+      return;
+    }
     capturedNav = myNav;
     state.phase = "sent";
     state.sent++;
@@ -175,11 +185,10 @@ export function createCaptureController(env: CaptureEnv): CaptureController {
       type: "page_text",
       navCounter: myNav,
       url: myHref,
-      title: result.title,
-      text: result.body,
-      truncated: result.bodyTruncated,
+      title: final.title,
+      text: final.body,
+      truncated: final.bodyTruncated,
     };
-    result = null;
     await env.sendPageText(msg).catch(() => {});
   }
 

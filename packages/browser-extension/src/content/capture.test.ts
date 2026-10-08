@@ -9,11 +9,33 @@ const ISSUE1 = "https://tracker.example/acme/widgets/issues/1";
 const ISSUE2 = "https://tracker.example/acme/widgets/issues/2";
 const DOCS = "https://docs.example/billing";
 
+/**
+ * Chrome's Element.checkVisibility({ opacityProperty }) modelled for jsdom: false when the
+ * element has no box (display:none on it or an ancestor, or display:contents), when it or an
+ * ancestor has opacity 0, or when an ancestor skips its contents: content-visibility:hidden
+ * (author-set, or hidden=until-found's UA style), or a closed <details>, whose children other
+ * than its first <summary> sit in a content-visibility:hidden slot.
+ */
+function stubChromeCheckVisibility(view: Window & typeof globalThis): void {
+  (view.Element.prototype as Element & { checkVisibility: (o?: { opacityProperty?: boolean }) => boolean }).checkVisibility = function (this: Element, o) {
+    if (view.getComputedStyle(this).display === "contents") return false;
+    for (let e: Element | null = this; e; e = e.parentElement) {
+      const cs = view.getComputedStyle(e);
+      if (cs.display === "none") return false;
+      if (o?.opacityProperty && cs.opacity === "0") return false;
+      if (e !== this && cs.getPropertyValue("content-visibility") === "hidden") return false;
+      const p: Element | null = e.parentElement;
+      if (p?.tagName === "DETAILS" && !p.hasAttribute("open") && p.querySelector(":scope > summary") !== e) return false;
+    }
+    return true;
+  };
+}
+
 /** Settle (500 ms of stable text, on 100 ms ticks) plus the 3 s dwell. */
 const SEND_AT = LIMITS.settleMs + LIMITS.dwellMs;
 
 describe("extractor", () => {
-  it("reads `main` only, never nav, header, footer, aside, dialog or form drafts, without textContent", () => {
+  it("reads `main` only, never nav, the page's header and footer, aside, dialog or form drafts, without textContent", () => {
     const d = makeDom(ISSUE1, trackerPage({ body: "<h2>Steps</h2><p>Click <code>save</code>.</p><ul><li>one</li><li>two</li></ul>" }), "  Widget  breaks\n on save · Tracker ");
     const r = extractPage(d.doc);
     expect(r).toMatchObject({ ok: true, title: "Widget breaks on save · Tracker", body: "Widget breaks on save\n\nSteps\nClick save.\n\none\ntwo", bodyTruncated: false });
@@ -133,6 +155,56 @@ describe("extractor", () => {
     expect(calls).toBeGreaterThan(0);
   });
 
+  // Both visibility paths: Chrome's checkVisibility (modelled below) and the computed-style fallback jsdom takes.
+  it.each([["Chrome checkVisibility", true], ["computed style", false]])(
+    "reads collapsed sections (closed <details> body, hidden=until-found) but not what is hidden inside them (%s)",
+    (_name, chrome) => {
+      const d = makeDom(
+        DOCS,
+        `<style>.gone { display: none } .cv { content-visibility: hidden }</style>
+<main><h2>Create a project</h2>
+  <details><summary>Code explanation</summary><p>The handler returns a Response for every request.</p>
+    <div class="gone"><p>${SENTINEL.dialog} display none inside a closed details</p></div>
+    <p style="opacity:0">${SENTINEL.nav} faded inside a closed details</p>
+    <section class="cv">${SENTINEL.draft} content-visibility hidden inside a closed details</section>
+    <details><summary>Nested question</summary><p>Nested answer text.</p></details>
+  </details>
+  <div hidden="until-found"><p>Found by find-in-page.</p><p class="gone">${SENTINEL.footer} display none inside until-found</p></div>
+  <div hidden><p>${SENTINEL.sidebar} hidden attribute</p></div>
+  <section class="cv">${SENTINEL.sidebar} author content-visibility hidden, direct text</section>
+  <p aria-hidden="true">${SENTINEL.sidebar} aria-hidden</p></main>`,
+      );
+      if (chrome) stubChromeCheckVisibility(d.win);
+      const r = extractPage(d.doc);
+      if (!r.ok) throw new Error("expected text");
+      expect(r.body).toBe("Create a project\n\nCode explanation\nThe handler returns a Response for every request.\n\nNested question\nNested answer text.\n\nFound by find-in-page.");
+      for (const s of Object.values(SENTINEL)) expect(r.body).not.toContain(s);
+    },
+  );
+
+  it("reads a header or footer inside article, aside, main, nav or section (or their roles); skips the page's own banner and contentinfo", () => {
+    const d = makeDom(
+      ISSUE1,
+      `<header><p>${SENTINEL.nav} site banner</p></header>
+<main><header class="issue-header"><h1>Pipeline fails on save</h1><p>Open</p></header>
+  <p>The description the user reads under the title.</p>
+  <footer>Edited 2 days ago</footer>
+  <div role="banner">${SENTINEL.dialog} explicit banner role</div>
+  <header role="banner">${SENTINEL.sidebar} explicit banner role on a header</header>
+  <footer role="contentinfo">${SENTINEL.draft} explicit contentinfo role</footer></main>
+<footer>${SENTINEL.footer}</footer>`,
+    );
+    const r = extractPage(d.doc);
+    if (!r.ok) throw new Error("expected text");
+    expect(r.body).toBe("Pipeline fails on save\nOpen\n\nThe description the user reads under the title.\n\nEdited 2 days ago");
+    for (const s of Object.values(SENTINEL)) expect(r.body).not.toContain(s);
+    // With body as the root, a top-level header is chrome and a section's header is content.
+    d.setBody(`<header>${SENTINEL.nav}</header><section><header><h2>Section heading in a header</h2></header><p>Section text long enough to send.</p></section><footer>${SENTINEL.footer}</footer>`);
+    expect(extractPage(d.doc)).toMatchObject({ ok: true, body: "Section heading in a header\nSection text long enough to send." });
+    d.setBody(`<header>${SENTINEL.nav}</header><div role="main"><header><h1>Role main header</h1></header><p>Text under a role=main region, long enough.</p></div>`);
+    expect(extractPage(d.doc)).toMatchObject({ ok: true, body: "Role main header\nText under a role=main region, long enough." });
+  });
+
   it("rejects a hidden subtree whole, without a style lookup per descendant", () => {
     const d = makeDom(ISSUE1, `<main><p>Visible text, with enough of it to be worth sending.</p><div style="display:none">${"<div><span>x</span></div>".repeat(500)}</div></main>`);
     const real = d.win.getComputedStyle.bind(d.win);
@@ -210,6 +282,38 @@ describe("capture controller (jsdom + synthetic History/Navigation driver + fake
     expect(sent).toEqual([{ type: "page_text", navCounter: 0, url: ISSUE1, title: "Page title", text: "Widget breaks on save\n\nThe first issue, long enough to send.", truncated: false }]);
     await clock.advance(10_000);
     expect(sent).toHaveLength(1);
+  });
+
+  it("reads the page again when the dwell ends: text that loads during the dwell is sent", async () => {
+    const description = "<p>The description, long enough to send.</p>";
+    const { d, clock, ctl, sent } = harness(ISSUE1, trackerPage({ body: description }));
+    ctl.start();
+    await clock.advance(LIMITS.settleMs + 1000);
+    expect(ctl.state.phase).toBe("dwelling");
+    d.setBody(trackerPage({ body: `${description}<ol class="activity"><li>mentioned in merge request !42</li></ol>` }));
+    await clock.advance(LIMITS.dwellMs);
+    expect(sent).toHaveLength(1);
+    expect(sent[0]!.text).toBe("Widget breaks on save\n\nThe description, long enough to send.\n\nmentioned in merge request !42");
+  });
+
+  it("a page that has no content when the dwell ends sends nothing", async () => {
+    const { d, clock, ctl, sent } = harness(ISSUE1, trackerPage());
+    ctl.start();
+    await clock.advance(LIMITS.settleMs + 1000);
+    d.setBody("<main><p>Loading…</p></main>");
+    await clock.advance(10_000);
+    expect(sent).toEqual([]);
+    expect(ctl.state).toMatchObject({ phase: "failed", lastReason: "no-content" });
+  });
+
+  it("a user who starts typing during the dwell is not read: nothing is sent", async () => {
+    const { d, clock, ctl, sent } = harness(ISSUE1, typingPage());
+    ctl.start();
+    await clock.advance(LIMITS.settleMs + 1000);
+    (d.doc.getElementById("draft") as HTMLTextAreaElement).focus();
+    await clock.advance(10_000);
+    expect(sent).toEqual([]);
+    expect(ctl.state).toMatchObject({ phase: "failed", lastReason: "editing" });
   });
 
   it("every URL change starts a job: tracker issue, then a docs page on another route", async () => {

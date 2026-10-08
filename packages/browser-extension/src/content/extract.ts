@@ -2,20 +2,28 @@
 //
 // Reads the page's main content: the first of `main`, `[role="main"]`,
 // `article`, else `body`, through a bounded text walker that skips form
-// controls, contenteditable, buttons, scripts, page chrome (nav, header,
-// footer, aside, dialog and their landmark roles) and anything not on screen:
-// the hidden and aria-hidden attributes, display:none, content-visibility:
-// hidden, opacity:0 and visibility:hidden. The 8 KiB body cap applies to the
-// whitespace-normalized text that is sent. The title is
+// controls, contenteditable, buttons, scripts, page chrome (nav, aside,
+// dialog, the banner/contentinfo/navigation/complementary roles, and a header
+// or footer that is not inside article, aside, main, nav or section, which is
+// the page's banner or contentinfo) and anything hidden from the reader: the
+// hidden attribute, aria-hidden, display:none, content-visibility:hidden,
+// opacity:0 and visibility:hidden. Sections the site collapsed for the
+// reader to expand are read: the body of a closed <details> and
+// hidden="until-found" content, minus anything hidden inside them. The 8 KiB
+// body cap applies to the whitespace-normalized text that is sent. The title is
 // document.title, else the first h1. Nothing is read while the focused element
 // is editable, so a page being typed into is not read mid-edit. Never uses
 // textContent/innerText/innerHTML.
 
 import { LIMITS, type Limits } from "../limits.js";
 
-const SKIP_TAGS = new Set(["NAV", "HEADER", "FOOTER", "ASIDE", "DIALOG", "INPUT", "TEXTAREA", "SELECT", "OPTION", "BUTTON", "FORM", "SCRIPT", "STYLE", "NOSCRIPT", "TEMPLATE", "SVG", "IFRAME", "OBJECT", "EMBED", "CANVAS", "VIDEO", "AUDIO"]);
-const BLOCK_TAGS = new Set(["P", "DIV", "LI", "UL", "OL", "H1", "H2", "H3", "H4", "H5", "H6", "PRE", "BR", "TR", "BLOCKQUOTE", "TABLE", "SECTION", "DETAILS", "SUMMARY", "HR", "DD", "DT"]);
+const SKIP_TAGS = new Set(["NAV", "ASIDE", "DIALOG", "INPUT", "TEXTAREA", "SELECT", "OPTION", "BUTTON", "FORM", "SCRIPT", "STYLE", "NOSCRIPT", "TEMPLATE", "SVG", "IFRAME", "OBJECT", "EMBED", "CANVAS", "VIDEO", "AUDIO"]);
+const BLOCK_TAGS = new Set(["P", "DIV", "LI", "UL", "OL", "H1", "H2", "H3", "H4", "H5", "H6", "PRE", "BR", "TR", "BLOCKQUOTE", "TABLE", "SECTION", "DETAILS", "SUMMARY", "HR", "DD", "DT", "HEADER", "FOOTER"]);
 const SKIP_ROLES = new Set(["navigation", "banner", "contentinfo", "complementary"]);
+/** A header or footer inside one of these is content, not the page's banner or contentinfo (HTML-AAM). */
+const SECTIONING = 'article, aside, main, nav, section, [role="article"], [role="complementary"], [role="main"], [role="navigation"], [role="region"]';
+/** Ancestors whose contents the site collapsed for the reader to expand. */
+const COLLAPSED = 'details:not([open]), [hidden="until-found" i]';
 /** Elements that take typing (a focused checkbox or button is not "typing"). */
 const EDITABLE =
   'textarea, select, input:not([type="checkbox"], [type="radio"], [type="button"], [type="submit"], [type="reset"], [type="image"], [type="file"], [type="range"], [type="color"], [type="hidden"]), [contenteditable]:not([contenteditable="false"])';
@@ -98,27 +106,49 @@ class BoundedWriter {
   }
 }
 
-/**
- * Whether `e` hides its whole subtree: display:none (or no box at all),
- * content-visibility:hidden, opacity:0. Uses Element.checkVisibility where it
- * exists (it also sees content-visibility on ancestors, such as a closed
- * <details>), falling back to computed style. content-visibility:auto content
- * that is merely off screen still counts. `visibility` is not checked here:
- * a descendant can override it, so it is checked per text node.
- */
-function hidesSubtree(e: Element, view: Window): boolean {
-  if (typeof e.checkVisibility === "function") {
-    if (e.checkVisibility({ opacityProperty: true })) return false;
-    // No box of its own: display:contents children still render.
-    return view.getComputedStyle(e).display !== "contents";
-  }
+const isUntilFound = (e: Element): boolean => e.getAttribute("hidden")?.toLowerCase() === "until-found";
+
+/** The hidden attribute, other than hidden="until-found" (a collapsed section). */
+const hiddenAttr = (e: Element): boolean => e.hasAttribute("hidden") && !isUntilFound(e);
+
+/** `e`'s own style hides its subtree: display:none, opacity:0, or content-visibility:hidden other than until-found's. */
+function ownStyleHides(e: Element, view: Window): boolean {
   const cs = view.getComputedStyle(e);
-  return cs.display === "none" || cs.getPropertyValue("content-visibility") === "hidden" || cs.opacity === "0";
+  return cs.display === "none" || cs.opacity === "0" || (cs.getPropertyValue("content-visibility") === "hidden" && !isUntilFound(e));
 }
 
 /**
- * Bounded text of `el`: text nodes only, skipping controls, editable,
- * hidden-attribute and CSS-hidden subtrees and visibility:hidden text.
+ * Whether `e` hides its whole subtree: display:none (or no box at all),
+ * content-visibility:hidden, opacity:0. Uses Element.checkVisibility where it
+ * exists, falling back to computed style. content-visibility:auto content
+ * that is merely off screen still counts. `visibility` is not checked here:
+ * a descendant can override it, so it is checked per text node.
+ *
+ * Collapsed sections are the exception: Chrome reports everything inside a
+ * closed <details> or hidden="until-found" as not visible (both skip their
+ * contents with content-visibility:hidden), so below one of those only `e`'s
+ * own style decides. Callers check ancestors top-down, so anything else above
+ * `e` that hides it has already been rejected.
+ */
+function hidesSubtree(e: Element, view: Window): boolean {
+  if (typeof e.checkVisibility === "function") {
+    if (e.checkVisibility({ opacityProperty: true })) {
+      // checkVisibility looks at ancestors' content-visibility, not the element's own.
+      return view.getComputedStyle(e).getPropertyValue("content-visibility") === "hidden" && !isUntilFound(e);
+    }
+    if (e.parentElement?.closest(COLLAPSED)) return ownStyleHides(e, view);
+    // No box of its own: display:contents children still render.
+    return view.getComputedStyle(e).display !== "contents";
+  }
+  return ownStyleHides(e, view);
+}
+
+/** A header or footer outside article, aside, main, nav and section: the page's banner or contentinfo. */
+const isPageChrome = (e: Element, tag: string): boolean => (tag === "HEADER" || tag === "FOOTER") && !e.parentElement?.closest(SECTIONING);
+
+/**
+ * Bounded text of `el`: text nodes only, skipping controls, editable, page
+ * chrome, hidden-attribute and CSS-hidden subtrees and visibility:hidden text.
  * Whitespace is collapsed while walking, and the walk stops once `maxBytes`
  * of normalized text are written.
  */
@@ -135,8 +165,9 @@ export function boundedText(el: Element, maxBytes: number): { text: string; trun
         const ce = e.getAttribute("contenteditable");
         if (
           SKIP_TAGS.has(tag) ||
+          isPageChrome(e, tag) ||
           (ce !== null && ce !== "false") ||
-          e.hasAttribute("hidden") ||
+          hiddenAttr(e) ||
           e.getAttribute("aria-hidden") === "true" ||
           SKIP_ROLES.has(e.getAttribute("role") ?? "") ||
           (view && hidesSubtree(e, view))
@@ -173,13 +204,15 @@ function isEditable(el: Element): boolean {
   return !!el.closest(EDITABLE) || (el as HTMLElement).isContentEditable === true;
 }
 
-/** Hidden by attribute, or it or an ancestor hides its subtree with CSS. */
+/** Hidden by attribute, or it or an ancestor hides its subtree with CSS. Collapsed sections do not count. */
 function isHidden(el: Element): boolean {
-  if (el.closest('[hidden], [aria-hidden="true"]')) return true;
+  if (el.closest('[hidden]:not([hidden="until-found" i]), [aria-hidden="true"]')) return true;
   const view = el.ownerDocument.defaultView;
   if (!view) return false;
-  for (let e: Element | null = el; e; e = e.parentElement) if (hidesSubtree(e, view)) return true;
-  return false;
+  const chain: Element[] = [];
+  for (let e: Element | null = el; e; e = e.parentElement) chain.unshift(e);
+  // Top-down, as the walker goes: hidesSubtree relies on the ancestors above having passed.
+  return chain.some((e) => hidesSubtree(e, view));
 }
 
 /** The page's main content: the first visible `main`, `[role="main"]`, `article`, else `body`. */

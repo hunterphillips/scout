@@ -19,8 +19,10 @@ Scout core -> fresh agent job -> validated result -> side panel
 background worker is the sensor: it reports the focused tab's origin, Chrome's per-site
 permissions, and the text of pages the user reads on allowed sites. One content script,
 registered for exactly the granted sites, reads a page's main content (`main`,
-`[role="main"]`, `article`, else `body`, without navigation, header, footer, aside,
-dialogs or text the page hides from view) once the page has settled and stayed visible for 3 s; the worker forwards it only
+`[role="main"]`, `article`, else `body`, without navigation, the page's own header and
+footer, asides, dialogs or text the page hides from the reader). Collapsed sections
+(closed `<details>`, `hidden="until-found"`) are read. Once the page has settled and stayed
+visible for 3 s, the script reads it again and sends that text; the worker forwards it only
 for the active tab of the focused window. Its side panel is Scout's
 only user interface, with four destinations: Page, Sites, Activity, Settings. The panel
 renders frames from the core and sends commands back. It holds no state of its own beyond
@@ -97,10 +99,11 @@ and reads a frozen snapshot of its visit instead.
 - Chrome's optional per-site permission gates everything. The extension posts nothing
   until the core sends `capture_policy`. It reports url and title only for origins Chrome
   has granted. A Chrome all-sites grant counts as not granted.
-- Granting a site also allows reading its pages, with no second switch. A page is read
-  after it settles and has been visible for 3 s (navigating away, switching windows or
-  hiding it cancels the read), never while the user is typing into it, and only from the
-  active tab of the focused window. The core keeps text only from pages on
+- Granting a site also allows reading its pages, with no second switch. A page's text is
+  sent after it settles and has been visible for 3 s, as the page stands at the end of
+  that wait (navigating away, switching windows or hiding it cancels the read). Nothing is
+  sent while the user is typing into it, and only from the active tab of the focused
+  window. The core keeps text only from pages on
   granted origins, only in memory. When a permissions snapshot drops a site, that site's
   pages leave the activity buffer and the others stay; a snapshot with no sites clears it.
   Pause and disconnect keep it.
