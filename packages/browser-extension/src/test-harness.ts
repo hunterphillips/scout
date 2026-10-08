@@ -9,8 +9,8 @@ export const ISSUE2 = "https://github.com/acme/widgets/issues/2";
 
 export type Bg = ReturnType<typeof createBackground>;
 
-/** Default: GitHub granted and its capture toggle on, so the gate's other checks are what tests exercise. */
-export async function setup(opts: Parameters<typeof makeChrome>[0] = { granted: [GITHUB_PATTERN], local: { githubCapture: true } }, start?: number) {
+/** Default: GitHub granted, so the gate's other checks are what tests exercise. */
+export async function setup(opts: Parameters<typeof makeChrome>[0] = { granted: [GITHUB_PATTERN] }, start?: number) {
   const f = makeChrome(opts);
   const clock = fakeClock(start);
   const bg = createBackground(asChrome(f), { clock });

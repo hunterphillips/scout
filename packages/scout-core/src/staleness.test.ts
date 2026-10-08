@@ -242,7 +242,7 @@ function core() {
   const sensor: SocketClient = { id: 1, send: (_f: ToChromeFrame) => {}, onFrame: (h) => void handlers.push(h), onClose: () => {}, onDrained: () => {}, close: () => {} };
   const observe = (o: BrowserObservation) => handlers.forEach((h) => h({ type: "observation", observation: o }));
   coordinator.attachClient(sensor);
-  observe({ kind: "permissions", revision: 1, at: clock.t, granted: [`${ORIGIN}/*`], githubCapture: false });
+  observe({ kind: "permissions", revision: 1, at: clock.t, granted: [`${ORIGIN}/*`] });
   coordinator.handleNativeCommand({ type: "frontmost", bundleId: "com.google.Chrome", at: clock.t }, STDIO);
   let seq = 0;
   const focus = (tabId: number, documentId: string) =>

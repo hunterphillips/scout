@@ -13,7 +13,7 @@
 //        page's links and its running job.
 //   B7/B12/B13: permission loss, pause, resource revoke, deadline and shutdown each end the
 //        running job (its token refused on agent.sock, its process gone, the window out of
-//        `working`), GitHub grant loss clears captured activity, and no fixture text reaches
+//        `working`), losing a site's grant removes its captured pages (the others' stay), and no fixture text reaches
 //        the diagnostics file or the core's stderr.
 //   Switch: the side panel's per-site recommendations switch (`set_destination`) and a hand
 //        edit of config.json take effect in the running core: a job on the next settled visit
@@ -42,10 +42,11 @@ if (!BUILT) console.warn("recommendation-jobs: skipped: run `npm run build` firs
 const EXT_ID = "a".repeat(32);
 const HOSTNAME = "docs.scout-p3.invalid";
 const SITE = `https://${HOSTNAME}`;
-const ISSUE = "https://github.com/o/r/issues/7";
+const ISSUE = "https://linear.app/acme/issue/ENG-7/checkout-fails";
 // Fixture text that must never reach a log.
 const TITLE = "P3V-SECRET-ISSUE-TITLE";
 const BODY = "P3V-SECRET-ISSUE-BODY";
+const NOTES_TITLE = "P3V-SECRET-NOTES-TITLE";
 const RESOURCE_TEXT = "P3V-SECRET-RESOURCE-TEXT: how to bill by usage\n".repeat(900);
 const CANDIDATES = ["alpha", "bravo", "charlie", "delta"].map((p, i) => ({
   id: `c${i}`,
@@ -208,9 +209,9 @@ async function boot(home, env, children) {
   let seq = 0;
   let permRev = 0;
   const sense = (obj) => host.stdin.write(frame({ seq: ++seq, at: Date.now(), ...obj }));
-  const grant = (granted, githubCapture) => {
+  const grant = (granted) => {
     permRev += 1;
-    host.stdin.write(frame({ kind: "permissions", revision: permRev, at: Date.now(), granted, githubCapture }));
+    host.stdin.write(frame({ kind: "permissions", revision: permRev, at: Date.now(), granted }));
   };
   const focus = (tabId, path, documentId) =>
     sense({ kind: "focus", browserFocused: true, windowId: 1, tabId, url: path.startsWith("https://") ? path : `${SITE}${path}`, title: "Docs", incognito: false, permissionsRevision: permRev, ...(documentId ? { documentId } : {}) });
@@ -223,16 +224,19 @@ async function boot(home, env, children) {
   return { host, core, toChrome, panel, command, panelCommand, sense, grant, focus, away, dns, exited, diagEvents, stderr: () => err, fake: () => readLines(join(home, "fake.log")) };
 }
 
-/** Capture one GitHub issue (title and body are fixture secrets) through the real gate. */
-async function captureIssue(b) {
-  b.grant([`${SITE}/*`, "https://github.com/*"], true);
-  b.focus(7, ISSUE, "D-issue");
+/** Capture one page through the real gate, with both sites granted. */
+async function capturePage(b, tabId, url, documentId, title, text) {
+  b.grant([`${SITE}/*`, "https://linear.app/*"]);
+  b.focus(tabId, url, documentId);
   await until(() => b.toChrome.filter((f) => f.type === "capture_policy").at(-1)?.captureEnabled === true, "the enabling capture_policy");
   const policy = b.toChrome.filter((f) => f.type === "capture_policy").at(-1).revision;
   const acks = b.toChrome.filter((f) => f.type === "ack").length;
-  b.sense({ kind: "page_text", tabId: 7, documentId: "D-issue", url: ISSUE, source: "github_issue", title: TITLE, text: BODY, truncated: false, policyRevision: policy });
+  b.sense({ kind: "page_text", tabId, documentId, url, source: "page", title, text, truncated: false, policyRevision: policy });
   await until(() => b.toChrome.filter((f) => f.type === "ack").length > acks, "ack for the page_text");
 }
+
+/** Capture one tracker issue (title and body are fixture secrets). */
+const captureIssue = (b) => capturePage(b, 7, ISSUE, "D-issue", TITLE, BODY);
 
 /** Focus a page and wait for its job's `working` frame; returns the job id and the visit epoch. */
 async function startJob(b, tabId, path, documentId) {
@@ -270,7 +274,7 @@ function leaked(b, home, secrets) {
   return undefined;
 }
 
-const SECRETS = [TITLE, BODY, REASON, "P3V-SECRET", ...CANDIDATES.map((c) => c.sourceUrl), "/docs/", "/issues/", "github.com/o/r"];
+const SECRETS = [TITLE, BODY, REASON, "P3V-SECRET", ...CANDIDATES.map((c) => c.sourceUrl), "/docs/", "/issue/", "/notes/", "linear.app/acme"];
 
 describe.skipIf(!BUILT)("recommendation jobs e2e: B10 outcomes and B11 click authorization (one core, a page per case)", () => {
   const children = [];
@@ -649,14 +653,25 @@ describe.skipIf(!BUILT)("recommendation jobs e2e: B7/B12/B13 closing paths end t
     if (home) rmSync(home, { recursive: true, force: true });
   });
 
-  it("permission loss (the site's grant and GitHub's removed): cancelled revoked; captured activity cleared", async () => {
+  it("removing one site's grant removes its pages and keeps the others'", async () => {
+    const interactive = join(home, "run", "agent-token");
+    await capturePage(b, 9, `${SITE}/notes/metered`, "D-notes", NOTES_TITLE, "P3V-SECRET-NOTES-BODY");
+    const titles = async () => (await agentCall(interactive, "recent_activity")).result.entries.map((e) => e.title);
+    expect(await titles()).toEqual([NOTES_TITLE, TITLE]);
+    b.grant([`${SITE}/*`]);
+    await until(async () => (await titles()).length === 1, "the tracker's pages removed");
+    expect(await titles()).toEqual([NOTES_TITLE]);
+    await captureIssue(b);
+  }, 60_000);
+
+  it("permission loss (every grant removed): cancelled revoked; captured activity cleared", async () => {
     const interactive = join(home, "run", "agent-token");
     expect(JSON.stringify(await agentCall(interactive, "recent_activity"))).toContain(TITLE);
     const job = await runningJob();
-    b.grant([], false);
+    b.grant([]);
     await closed(job, { status: "cancelled", reason: "revoked" });
-    // The live store is empty now: GitHub capture lost its grant.
-    b.grant([`${SITE}/*`, "https://github.com/*"], true);
+    // The live store is empty now: no site is granted.
+    b.grant([`${SITE}/*`, "https://linear.app/*"]);
     const after = await agentCall(interactive, "recent_activity");
     expect(after).toMatchObject({ status: "ok" });
     expect(after.result.entries).toEqual([]);

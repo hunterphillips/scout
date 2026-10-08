@@ -17,8 +17,11 @@
 // Never an `idle` for the visit after its publish (the side panel would drop the answer). A job
 // that ends without an answer (discarded) still gets its `idle`, so no spinner is left behind.
 //
-// The snapshot carries activity only when the browser-context grant is on and GitHub capture
-// is allowed right now; otherwise `activity: []`.
+// The snapshot carries activity only when the browser-context grant is on and page capture
+// is allowed right now; otherwise `activity: []`. The current page is never context: the
+// job's activity is the store's entries except the one whose URL is canonicalPageUrl of the
+// visit's URL (`visibleActivity`), and a page on the same origin that is not the current page
+// is included.
 //
 // Changes while a job runs:
 //   - fatal, nothing is published: visit change (navigation, a tab or window switch; another
@@ -26,8 +29,10 @@
 //     grant lost → `revoked` (the permissions change arrives before the visit change it
 //     causes, and the first cancel reason stands); sensor loss → `visit_changed`; pause →
 //     `paused`; stop → `shutdown`.
-//   - relevant: an accepted activity entry the job may see (→ `superseded`); capture
-//     disallowed or the grant turned off while the snapshot carried activity (→ `revoked`); a
+//   - relevant: an accepted activity entry the job may see that changes its visible activity
+//     (→ `superseded`; a capture of the current page changes nothing it sees); capture
+//     disallowed, the grant turned off, or an origin the snapshot's activity came from losing
+//     its grant, while the snapshot carried activity (→ `revoked`); a
 //     revoked resource the snapshot pinned (→ `revoked`). The job is cancelled and ONE
 //     replacement per visit may start, with a fresh snapshot, within the same budget, once the
 //     cancelled run has ended (the adapter runs one job at a time). With the replacement
@@ -70,7 +75,7 @@
 // (`onLinkOpened`, from the result registry's resolved `open_link`) gets no job of its own for
 // OPENED_BY_SCOUT_TTL_MS: its settle is `job_skipped {reason: "opened_by_scout"}` and publishes
 // nothing, even when the page has a stored answer. Pause clears the stored answers; losing an
-// origin's permission drops that origin's; issue capture withdrawn drops those that saw activity.
+// origin's permission drops that origin's; page capture withdrawn drops those that saw activity.
 //
 // Diagnostics (scalars only, never reasons, titles, URLs or prompts): job_started, job_finished,
 // job_cancelled, job_discarded, job_skipped, job_replaced, verify.
@@ -78,7 +83,7 @@
 import { randomBytes } from "node:crypto";
 import { JOB_MAX_DEADLINE_MS, type ActiveVisit, type ActivityEntry, type Candidate } from "@scout/contracts";
 import { snapshotCandidates, type JobSnapshot, type SnapshotRegistry } from "./activity/snapshots.js";
-import type { StoredActivity } from "./activity/store.js";
+import { canonicalPageUrl, type StoredActivity } from "./activity/store.js";
 import type { JobCancelReason } from "./agents/adapter.js";
 import type { CatalogResolution } from "./catalog/resolveCatalog.js";
 import type { Clock } from "./clock.js";
@@ -105,7 +110,7 @@ export interface SchedulerView {
   visit(): ActiveVisit | null;
   permissionsRevision(): number | null;
   isPermitted(origin: string): boolean;
-  /** GitHub capture is allowed right now (not paused, capture on, GitHub granted). */
+  /** Page capture is allowed right now (not paused, at least one origin granted). */
   captureAllowed(): boolean;
 }
 
@@ -219,6 +224,8 @@ interface Running {
   controller: AbortController;
   baseline: { permissionsRevision: number | null; grantRevision: number };
   hadActivity: boolean;
+  /** activityHash of the activity the job started with. */
+  activityHash: string;
   cancelled: JobCancelReason | null;
   after: AfterCancel;
   done: Promise<void>;
@@ -303,6 +310,12 @@ export function createJobScheduler(options: JobSchedulerOptions): JobScheduler {
     finished(answer, { termination: "not_launched", durationMs: 0, ...f });
   };
 
+  /** The stored activity a job for `visit` may see: everything but the current page. */
+  const visibleActivity = (visit: ActiveVisit): ActivityEntry[] => {
+    const current = canonicalPageUrl(visit.url);
+    return toEntries(options.activity().filter((e) => e.url !== current));
+  };
+
   const resumeKey = (b: Budget, activity: readonly ActivityEntry[]): JobResumeKey => ({
     coreInstanceId: options.coreInstanceId,
     origin: b.visit.origin,
@@ -324,7 +337,7 @@ export function createJobScheduler(options: JobSchedulerOptions): JobScheduler {
     const jobId = (options.newJobId ?? newJobId)();
     if (!options.results.beginJob(jobId).ok) return;
     options.window.working(visit.epoch, jobId);
-    const activity = options.browserContextGranted() && view.captureAllowed() ? toEntries(options.activity()) : [];
+    const activity = options.browserContextGranted() && view.captureAllowed() ? visibleActivity(visit) : [];
     const key = resumeKey(b, activity);
     const cached = options.resumeCache?.restore(key, { hasUserTools: profile.hasUserTools });
     if (cached) return answerNow(visit, jobId, cached, { epoch: visit.epoch, cached: true });
@@ -358,6 +371,7 @@ export function createJobScheduler(options: JobSchedulerOptions): JobScheduler {
       controller: new AbortController(),
       baseline: { permissionsRevision: view.permissionsRevision(), grantRevision: options.grantRevision() },
       hadActivity: activity.length > 0,
+      activityHash: activityHash(activity),
       cancelled: null,
       after: "drop",
       done: Promise.resolve(),
@@ -539,6 +553,7 @@ export function createJobScheduler(options: JobSchedulerOptions): JobScheduler {
       if (job === null || job.cancelled !== null) return;
       if (!view.isPermitted(job.visit.origin)) return cancel("revoked", "drop");
       if (job.hadActivity && !view.captureAllowed()) return relevantChange("revoked");
+      if (job.snapshot?.activity.some((a) => !view.isPermitted(a.origin))) return relevantChange("revoked");
       job.baseline.permissionsRevision = view.permissionsRevision();
     },
     onActivityAccepted() {
@@ -546,6 +561,10 @@ export function createJobScheduler(options: JobSchedulerOptions): JobScheduler {
       if (job === null || job.cancelled !== null) return;
       // Only activity the job could see makes its answer stale.
       if (!options.browserContextGranted() || !view.captureAllowed()) return;
+      // A capture of the destination page itself never supersedes the job it belongs to. An
+      // accepted page is the store's newest entry; the hash covers anything else unchanged.
+      if (options.activity()[0]?.url === canonicalPageUrl(job.visit.url)) return;
+      if (activityHash(visibleActivity(job.visit)) === job.activityHash) return;
       relevantChange("superseded");
     },
     onGrantChanged(enabled) {

@@ -92,7 +92,7 @@ export async function runBackground(caseName, o, deps) {
         ? `  readiness: codex --version and codex login status (ChatGPT login only) before any launch; private Codex home ${join(o.home, "run", "codex-home")}`
         : "  preflight: readiness check (claude --version, auth status) before any launch",
       `  job: ${o.agentPath} ${short(jobArgv)}${codex && caseName === "selected-tool" ? " (plus the scout_bridge server)" : ""}`,
-      "  fixture: synthetic Scout core on <throwaway>/a.sock (current site docs.example.com, one synthetic GitHub issue)",
+      "  fixture: synthetic Scout core on <throwaway>/a.sock (current site docs.example.com, one synthetic tracker issue)",
       caseName === "cancel" ? `  cancel: abort ${(deps.cancelAfterInitMs ?? BACKGROUND_DEFAULTS.cancelAfterInitMs) / 1000} s after the init event, then check processes, connections and the job dir` : "  expects: ok with at least one pick",
       "  inference requests: 1",
       `  report: ${join(o.home, "agent-check", `${caseName}-<timestamp>.json`)}`,

@@ -17,7 +17,7 @@ Scout core -> fresh agent job -> validated result -> side panel
 
 **Chrome extension** (`packages/browser-extension`). The MV3 extension has two parts. Its
 background worker is the sensor: it reports the focused tab's origin, Chrome's per-site
-permissions, and (on github.com, when switched on) issue text. Its side panel is Scout's
+permissions, and (on github.com, while it is allowed) issue text. Its side panel is Scout's
 only user interface, with four destinations: Page, Sites, Activity, Settings. The panel
 renders frames from the core and sends commands back. It holds no state of its own beyond
 a repaint cache.
@@ -54,7 +54,9 @@ socket is 0600 before it becomes visible.
 
 `core.sock` connects the relay to the core. It carries sensor frames (permissions, focus,
 page text) core-ward, `capture_policy` and panel frames Chrome-ward, and panel commands
-with their acks.
+with their acks. It speaks bridge protocol 4: page text comes from any page on a granted
+site, and the permissions snapshot is just the granted origins. A relay or extension on
+another protocol gets `upgrade_required`.
 
 `agent.sock` is the MCP adapter's read-only protocol. A client opens with `hello` and the
 token from `run/agent-token`, which the core rotates on every start. The calls are
@@ -75,7 +77,9 @@ and reads a frozen snapshot of its visit instead.
    runs one job at a time. A visit change cancels it, and the new visit gets one
    replacement. A page's answer is kept for 15 min after its visit ends: a later visit to
    it with the same catalog, approvals, grant and profile gets the answer back with no job.
-   A page Scout opened from its own links gets no job for 15 min.
+   A page Scout opened from its own links gets no job for 15 min. The job's recent activity
+   never includes the current page (other pages on the same site are included), and a
+   capture of the current page never cancels or replaces its job.
 4. The scheduler's states run `beginJob → working → take → run → idle → publish`. Every
    stage checks that the visit is still current.
 5. The job adapter launches a fresh agent process with Scout's MCP tools and any tools the
@@ -89,6 +93,10 @@ and reads a frozen snapshot of its visit instead.
 - Chrome's optional per-site permission gates everything. The extension posts nothing
   until the core sends `capture_policy`. It reports url and title only for origins Chrome
   has granted. A Chrome all-sites grant counts as not granted.
+- Granting a site also allows reading its pages. The core keeps text only from pages on
+  granted origins, only in memory. When a permissions snapshot drops a site, that site's
+  pages leave the activity buffer and the others stay; a snapshot with no sites clears it.
+  Pause and disconnect keep it.
 - Approvals bind to one exact content version, identified by its hash. A changed file is
   a new version and needs a new decision.
 - Revoking removes the exported skill wrapper and cancels a running job that used the
@@ -171,7 +179,7 @@ The main events are `catalog_discover`, `catalog_cache`, `job_started`, `job_fin
 | Fetch policy | HTTPS only; same-host redirects ≤3; 8 s deadline; 2 MiB decoded body; private, loopback, link-local, CGNAT, NAT64 and 6to4 ranges blocked; URLs ≤2048 chars |
 | Fetch pacing | Serial per origin, honours crawl delay; 128 requests and 90 s per window |
 | Target verification | ≤3 targets in parallel, 4 s each |
-| Activity buffer | ≤10 issue entries, 15 min TTL |
+| Activity buffer | ≤10 pages, 15 min TTL; 300-char title, 8 KiB text, URL ≤2048 chars |
 | Job tokens | ≤256 live; page answers 15 min, ≤32 |
 | Read audit | 200 entries |
 | Panel commands | 10 s expiry; 256-entry ack route map |

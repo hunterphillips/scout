@@ -10,7 +10,6 @@ const STATUS: StatusSnapshot = {
   link: "connected",
   paused: false,
   granted: ["https://docs.example.com/*"],
-  githubCapture: false,
   broadGrantIgnored: false,
   policy: { revision: 2, captureEnabled: true, paused: false },
   counters: { focus: 1, forwarded: 0, dropped: 0, acked: 0, denied: 0 },
@@ -18,7 +17,7 @@ const STATUS: StatusSnapshot = {
 
 function handlers(): PanelHandlers {
   const h = {} as Record<string, unknown>;
-  for (const k of ["select", "open", "allow", "remove", "allowTyped", "showPreview", "restartPreview", "closePreview", "approve", "decline", "revoke", "autoAcquire", "cancelSheet", "grant", "destination", "agent", "pause", "githubCapture", "reconnect", "refresh", "retry", "dismiss"])
+  for (const k of ["select", "open", "allow", "remove", "allowTyped", "showPreview", "restartPreview", "closePreview", "approve", "decline", "revoke", "autoAcquire", "cancelSheet", "grant", "destination", "agent", "pause", "reconnect", "refresh", "retry", "dismiss"])
     h[k] = vi.fn();
   return h as unknown as PanelHandlers;
 }
@@ -124,6 +123,17 @@ describe("panel view", () => {
     m.apply(state("working", { epoch: 1, jobId: "job-1" }));
     render();
     expect(now()).toBe("Working · Looking for links…");
+  });
+
+  it("Settings has no GitHub issue text switch: allowing github.com is what turns it on", () => {
+    const m = running();
+    m.select("settings");
+    const { root, v, render } = view(m);
+    v.status = { ...STATUS, granted: ["https://github.com/*"] };
+    render();
+    expect(root.querySelector('[data-key="github-capture"], #github-capture')).toBeNull();
+    expect(root.textContent).not.toContain("GitHub issue text");
+    expect(statusRows(v.status)).toContainEqual(["Issue text", "on"]);
   });
 
   it("Settings has an Agent row: one button per agent the core found, the current one pressed, no other text", () => {
@@ -320,17 +330,17 @@ describe("panel view", () => {
     expect([...second.root.querySelectorAll("#preview-pane .review-actions button")].map((b) => b.textContent)).toEqual(["Approve"]);
   });
 
-  it("the context chip shows only while the agent grant is on, GitHub issue text is on, and an issue has been sent", () => {
+  it("the context chip shows only while the agent grant is on, github.com is allowed, and an issue has been sent", () => {
     const m = running();
     m.apply({ type: "grant", agentBrowserContext: true, destinations: [] });
     const { root, v, render } = view(m);
     const chip = () => root.querySelector(".tray .chip");
-    const on = { ...STATUS, githubCapture: true, counters: { ...STATUS.counters, forwarded: 1 } };
+    const on = { ...STATUS, granted: [...STATUS.granted, "https://github.com/*"], counters: { ...STATUS.counters, forwarded: 1 } };
     v.status = on;
     render();
     expect(chip()!.textContent).toBe("Using your recent GitHub activity");
 
-    v.status = { ...on, githubCapture: false };
+    v.status = { ...on, granted: STATUS.granted };
     render();
     expect(chip()).toBeNull();
     v.status = { ...on, counters: { ...on.counters, forwarded: 0 } };

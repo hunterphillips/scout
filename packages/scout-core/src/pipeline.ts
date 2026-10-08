@@ -6,7 +6,7 @@
 //
 // The request carries only what the snapshot fixed: model-facing candidate fields (id, title,
 // description, label quality; never the link `site_links` serves), the snapshot's id and
-// revisions, and the remaining budget. Candidate, issue and site text are untrusted; the prompt
+// revisions, and the remaining budget. Candidate, page and site text are untrusted; the prompt
 // template (agents/prompt.ts) keeps them in its untrusted block, and nothing in them reaches
 // the tool grants, output schema, origin, or deadline.
 //

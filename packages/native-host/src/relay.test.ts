@@ -27,7 +27,7 @@ const EXT_ID = "abcdefghijklmnopabcdefghijklmnop";
 const ORIGIN = `chrome-extension://${EXT_ID}/`;
 
 const focus = { kind: "focus", seq: 1, at: 1000, browserFocused: true, windowId: 7 } as const;
-const permissions = { kind: "permissions", revision: 5, at: 999, granted: ["https://github.com/*"], githubCapture: false } as const;
+const permissions = { kind: "permissions", revision: 5, at: 999, granted: ["https://linear.app/*"] } as const;
 /** The core's answer to hello: capture disabled until it has the extension's snapshot. */
 const POLICY = { type: "capture_policy", revision: 1, paused: false, captureEnabled: false } as const;
 const HELLO = { type: "hello", protocol: BRIDGE_PROTOCOL } as const;
@@ -267,8 +267,8 @@ describe("relay", () => {
       at: 1001,
       tabId: 3,
       documentId: "doc-a",
-      url: "https://github.com/o/r/issues/1",
-      source: "github_issue",
+      url: "https://linear.app/acme/issue/ENG-1",
+      source: "page",
       title: "Issue",
       text: "body",
       truncated: false,
@@ -451,8 +451,8 @@ describe("protocol-3 window commands and panel frames", () => {
 
 describe("protocol-3 handshake", () => {
   const pageText = {
-    kind: "page_text", seq: 3, at: 1002, tabId: 3, documentId: "doc-a", url: "https://github.com/o/r/issues/1",
-    source: "github_issue", title: "Issue", text: "body", truncated: false,
+    kind: "page_text", seq: 3, at: 1002, tabId: 3, documentId: "doc-a", url: "https://linear.app/acme/issue/ENG-1",
+    source: "page", title: "Issue", text: "body", truncated: false,
   } as const;
 
   it("holds ready until the core's capture_policy, forwards the policy first, and buffers observations meanwhile", async () => {

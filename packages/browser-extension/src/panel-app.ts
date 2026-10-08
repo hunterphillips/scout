@@ -361,12 +361,6 @@ export function createPanelApp(deps: PanelAppDeps): PanelApp {
         renderSoon();
       });
     },
-    githubCapture(enabled) {
-      void request<StatusSnapshot>({ type: "github-capture", enabled }).then((s) => {
-        if (s) onStatus(s);
-        renderSoon();
-      });
-    },
     reconnect() {
       void request<StatusSnapshot>({ type: "reconnect" }).then((s) => {
         if (s) onStatus(s);

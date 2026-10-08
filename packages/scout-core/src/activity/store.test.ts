@@ -1,6 +1,6 @@
 import { PAGE_TEXT_BODY_MAX_BYTES, type PageTextObservation } from "@scout/contracts";
 import { describe, expect, it } from "vitest";
-import { ACTIVITY_MAX_ENTRIES, ACTIVITY_SEEN_SEQ_MAX, ACTIVITY_TTL_MS, createActivityStore } from "./store.js";
+import { ACTIVITY_MAX_ENTRIES, ACTIVITY_SEEN_SEQ_MAX, ACTIVITY_TTL_MS, canonicalPageUrl, createActivityStore } from "./store.js";
 
 function setup() {
   const clock = { t: 1_000_000, now: () => clock.t };
@@ -12,8 +12,8 @@ function setup() {
     at: 0,
     tabId: 1,
     documentId: "d",
-    url: "https://github.com/o/r/issues/1",
-    source: "github_issue",
+    url: "https://linear.app/acme/issue/ENG-1",
+    source: "page",
     title: "Title",
     text: "Body",
     truncated: false,
@@ -24,16 +24,31 @@ function setup() {
 }
 
 describe("activity store", () => {
-  it("stores the canonical issue URL, bounded fields and the core's observed time; nothing else", () => {
+  it("stores the canonical page URL, its origin, bounded fields and the core's observed time; nothing else", () => {
     const { clock, store, obs } = setup();
-    expect(store.accept(obs({ url: "https://github.com/O/R/issues/1/?q=secret#issuecomment-9", at: 5 }), "c1")).toEqual({
+    expect(store.accept(obs({ url: "https://Linear.APP/acme/issue/ENG-1/Title?view=all#comment-9", at: 5 }), "c1")).toEqual({
       accepted: true,
       duplicate: false,
       revision: 1,
     });
     expect(store.entries()).toEqual([
-      { origin: "https://github.com", url: "https://github.com/o/r/issues/1", observedAt: clock.t, source: "github_issue", title: "Title", text: "Body", textTruncated: false, revision: 1 },
+      { origin: "https://linear.app", url: "https://linear.app/acme/issue/ENG-1/Title?view=all", observedAt: clock.t, source: "page", title: "Title", text: "Body", textTruncated: false, revision: 1 },
     ]);
+  });
+
+  it("canonicalPageUrl: https, no credentials, default port, host lowercased, fragment dropped, path and query kept", () => {
+    expect(canonicalPageUrl("https://Docs.Stripe.com/API/Charges?Expand=x#top")).toBe("https://docs.stripe.com/API/Charges?Expand=x");
+    expect(canonicalPageUrl("https://docs.stripe.com:443/a")).toBe("https://docs.stripe.com/a");
+    expect(canonicalPageUrl("https://docs.stripe.com/a#")).toBe("https://docs.stripe.com/a");
+    for (const bad of [
+      "http://docs.stripe.com/a",
+      "https://u:p@docs.stripe.com/a",
+      "https://docs.stripe.com:8443/a",
+      "https://docs.stripe.com/" + "x".repeat(2048),
+      "not a url",
+    ]) {
+      expect(canonicalPageUrl(bad), bad).toBeNull();
+    }
   });
 
   it("cuts an oversized body at a code point and marks it truncated", () => {
@@ -47,9 +62,10 @@ describe("activity store", () => {
     expect(e!.title).toHaveLength(300);
   });
 
-  it("refuses a page that is not a GitHub issue, without a change", () => {
+  it("refuses a URL canonicalPageUrl refuses, or another source, without a change", () => {
     const { store, obs } = setup();
-    expect(store.accept(obs({ url: "https://github.com/o/r/pulls" }), "c1")).toEqual({ accepted: false, duplicate: false, revision: 0 });
+    expect(store.accept(obs({ url: "http://linear.app/acme/issue/ENG-1" }), "c1")).toEqual({ accepted: false, duplicate: false, revision: 0 });
+    expect(store.accept(obs({ source: "gitlab_issue" as "page" }), "c1")).toEqual({ accepted: false, duplicate: false, revision: 0 });
     expect(store.entries()).toEqual([]);
   });
 
@@ -57,22 +73,22 @@ describe("activity store", () => {
     const { clock, store, obs } = setup();
     for (let i = 1; i <= ACTIVITY_MAX_ENTRIES + 1; i++) {
       clock.t += 1;
-      store.accept(obs({ url: `https://github.com/o/r/issues/${i}` }), "c1");
+      store.accept(obs({ url: `https://linear.app/acme/issue/ENG-${i}` }), "c1");
     }
     const urls = store.entries().map((e) => e.url);
     expect(urls).toHaveLength(ACTIVITY_MAX_ENTRIES);
-    expect(urls[0]).toBe("https://github.com/o/r/issues/11");
-    expect(urls).not.toContain("https://github.com/o/r/issues/1");
+    expect(urls[0]).toBe("https://linear.app/acme/issue/ENG-11");
+    expect(urls).not.toContain("https://linear.app/acme/issue/ENG-1");
   });
 
   it("expires entries after 15 minutes, and the expiry is a change", () => {
     const { clock, store, obs } = setup();
-    store.accept(obs({ url: "https://github.com/o/r/issues/1" }), "c1");
+    store.accept(obs({ url: "https://linear.app/acme/issue/ENG-1" }), "c1");
     clock.t += 60_000;
-    store.accept(obs({ url: "https://github.com/o/r/issues/2" }), "c1");
+    store.accept(obs({ url: "https://linear.app/acme/issue/ENG-2" }), "c1");
     expect(store.revision).toBe(2);
     clock.t += ACTIVITY_TTL_MS - 60_000;
-    expect(store.entries().map((e) => e.url)).toEqual(["https://github.com/o/r/issues/2"]);
+    expect(store.entries().map((e) => e.url)).toEqual(["https://linear.app/acme/issue/ENG-2"]);
     expect(store.revision).toBe(3);
     clock.t += 60_000;
     expect(store.entries()).toEqual([]);
@@ -100,25 +116,25 @@ describe("activity store", () => {
     const { clock, store, obs } = setup();
     store.accept(obs(), "c1");
     clock.t += 1000;
-    expect(store.accept(obs({ url: "https://github.com/o/r/issues/1#x" }), "c2")).toEqual({ accepted: false, duplicate: true, revision: 1 });
+    expect(store.accept(obs({ url: "https://linear.app/acme/issue/ENG-1#x" }), "c2")).toEqual({ accepted: false, duplicate: true, revision: 1 });
     expect(store.entries()[0]!.observedAt).toBe(clock.t);
     expect(store.revision).toBe(1);
   });
 
   it("re-reading an older issue moves it to the front, keeps it alive past its first TTL, and is a change", () => {
     const { clock, store, obs } = setup();
-    store.accept(obs({ url: "https://github.com/o/r/issues/1" }), "c1");
+    store.accept(obs({ url: "https://linear.app/acme/issue/ENG-1" }), "c1");
     clock.t += 60_000;
-    store.accept(obs({ url: "https://github.com/o/r/issues/2" }), "c1");
+    store.accept(obs({ url: "https://linear.app/acme/issue/ENG-2" }), "c1");
     clock.t += 60_000;
-    expect(store.accept(obs({ url: "https://github.com/o/r/issues/1" }), "c1")).toEqual({ accepted: false, duplicate: true, revision: 3 });
+    expect(store.accept(obs({ url: "https://linear.app/acme/issue/ENG-1" }), "c1")).toEqual({ accepted: false, duplicate: true, revision: 3 });
     expect(store.entries().map((e) => [e.url, e.observedAt, e.revision])).toEqual([
-      ["https://github.com/o/r/issues/1", clock.t, 3],
-      ["https://github.com/o/r/issues/2", clock.t - 60_000, 2],
+      ["https://linear.app/acme/issue/ENG-1", clock.t, 3],
+      ["https://linear.app/acme/issue/ENG-2", clock.t - 60_000, 2],
     ]);
     // Past issue 1's first TTL, but not its refreshed one.
     clock.t += ACTIVITY_TTL_MS - 60_000;
-    expect(store.entries().map((e) => e.url)).toEqual(["https://github.com/o/r/issues/1"]);
+    expect(store.entries().map((e) => e.url)).toEqual(["https://linear.app/acme/issue/ENG-1"]);
   });
 
   it("a repeated (connection, seq) with the same content is a pure no-op: no refresh", () => {
@@ -132,27 +148,27 @@ describe("activity store", () => {
 
   it("view() returns the entries with the revision they belong to, after one prune", () => {
     const { clock, store, obs } = setup();
-    store.accept(obs({ url: "https://github.com/o/r/issues/1" }), "c1");
+    store.accept(obs({ url: "https://linear.app/acme/issue/ENG-1" }), "c1");
     clock.t += 1;
-    store.accept(obs({ url: "https://github.com/o/r/issues/2" }), "c1");
+    store.accept(obs({ url: "https://linear.app/acme/issue/ENG-2" }), "c1");
     clock.t += ACTIVITY_TTL_MS - 1;
     const view = store.view();
-    expect(view.entries.map((e) => e.url)).toEqual(["https://github.com/o/r/issues/2"]);
+    expect(view.entries.map((e) => e.url)).toEqual(["https://linear.app/acme/issue/ENG-2"]);
     expect(view.revision).toBe(3);
     expect(Object.isFrozen(view.entries)).toBe(true);
   });
 
   it("replaces a stored issue on new content, moving it to the front with a fresh observed time", () => {
     const { clock, store, obs } = setup();
-    store.accept(obs({ url: "https://github.com/o/r/issues/1" }), "c1");
+    store.accept(obs({ url: "https://linear.app/acme/issue/ENG-1" }), "c1");
     clock.t += 1;
-    store.accept(obs({ url: "https://github.com/o/r/issues/2" }), "c1");
+    store.accept(obs({ url: "https://linear.app/acme/issue/ENG-2" }), "c1");
     clock.t += 1;
-    store.accept(obs({ url: "https://github.com/o/r/issues/1", title: "Renamed" }), "c1");
+    store.accept(obs({ url: "https://linear.app/acme/issue/ENG-1", title: "Renamed" }), "c1");
     const entries = store.entries();
     expect(entries.map((e) => [e.url, e.title, e.observedAt])).toEqual([
-      ["https://github.com/o/r/issues/1", "Renamed", clock.t],
-      ["https://github.com/o/r/issues/2", "Title", clock.t - 1],
+      ["https://linear.app/acme/issue/ENG-1", "Renamed", clock.t],
+      ["https://linear.app/acme/issue/ENG-2", "Title", clock.t - 1],
     ]);
     expect(store.revision).toBe(3);
   });
@@ -171,5 +187,19 @@ describe("activity store", () => {
     store.clear();
     expect(store.entries()).toEqual([]);
     expect(store.revision).toBe(2);
+  });
+
+  it("removeOrigin drops that site's pages only, as one change", () => {
+    const { store, obs } = setup();
+    store.accept(obs({ url: "https://linear.app/acme/issue/ENG-1" }), "c1");
+    store.accept(obs({ url: "https://docs.stripe.com/api" }), "c1");
+    store.accept(obs({ url: "https://linear.app/acme/issue/ENG-2" }), "c1");
+    expect(store.revision).toBe(3);
+    expect(store.removeOrigin("https://linear.app")).toBe(true);
+    expect(store.entries().map((e) => e.url)).toEqual(["https://docs.stripe.com/api"]);
+    expect(store.revision).toBe(4);
+    expect(store.removeOrigin("https://linear.app")).toBe(false);
+    expect(store.removeOrigin("https://example.com")).toBe(false);
+    expect(store.revision).toBe(4);
   });
 });

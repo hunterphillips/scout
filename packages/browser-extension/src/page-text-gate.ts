@@ -11,18 +11,18 @@
 //   focus loss and port loss, that approval and forwarding snapshot on entry
 //   and re-check after every await.
 //
-// Capture needs three things, each checked on approval and again before
+// Capture needs two things, each checked on approval and again before
 // forwarding: Chrome's exact GitHub grant (from the background's reconciled
-// list, never a broad all-sites grant), the user's GitHub-capture toggle, and a
-// core capture_policy on this port with capture enabled and not paused. The
-// policy can only take capture away; it never stands in for the other two.
+// list, never a broad all-sites grant) and a core capture_policy on this port
+// with capture enabled and not paused. The policy can only take capture away;
+// it never stands in for the grant.
 
 import { type PageTextObservation, PageTextObservationSchema } from "@scout/contracts";
 import type { ApproveRequest, ApproveResponse, BackgroundToContent, DenialCode, PageTextMessage } from "./messages.js";
 import type { Clock } from "./reconnect.js";
 import { type IssueRoute, parseIssueRoute } from "./route.js";
 import { LIMITS } from "./selectors.js";
-import { activeTab, corePaused, type Counters, githubCaptureOn, policyAllowsCapture, post, type SharedState } from "./shared-state.js";
+import { activeTab, corePaused, type Counters, githubGranted, policyAllowsCapture, post, type SharedState } from "./shared-state.js";
 
 /** An approval older than the content script's longest settle (plus slack) is void. */
 export const APPROVAL_TTL_MS = LIMITS.maxWaitMs + 5_000;
@@ -92,7 +92,7 @@ export function createPageTextGate(deps: GateDeps): PageTextGate {
   }
 
   async function refreshActive(): Promise<void> {
-    if (corePaused(state) || !state.port || !githubCaptureOn(state) || !policyAllowsCapture(state)) return;
+    if (corePaused(state) || !state.port || !githubGranted(state) || !policyAllowsCapture(state)) return;
     const t = await activeTab(ch).catch(() => null);
     if (!t || t.incognito || t.id === undefined || !tabRoute(t)) return;
     sendToTab(t.id, { type: "refresh" });
@@ -122,7 +122,7 @@ export function createPageTextGate(deps: GateDeps): PageTextGate {
     );
   }
 
-  const captureAllowed = (): boolean => githubCaptureOn(state);
+  const captureAllowed = (): boolean => githubGranted(state);
 
   /** The browser's record of `tabId` if it is the active tab of the focused, non-incognito window. */
   async function foregroundTab(tabId: number): Promise<Tab | null> {
@@ -168,7 +168,7 @@ export function createPageTextGate(deps: GateDeps): PageTextGate {
   }
 
   /** Why a page_text message is dropped, or the route and sender it may be forwarded under. */
-  async function checkPageText(msg: PageTextMessage, sender: Sender): Promise<{ reason: string } | { route: IssueRoute; sender: ContentSender }> {
+  async function checkPageText(msg: PageTextMessage, sender: Sender): Promise<{ reason: string } | { route: IssueRoute; sender: ContentSender; url: string }> {
     if (!senderOk(sender)) return { reason: "sender" };
     const a = approvals.get(sender.tab.id);
     if (!a) return { reason: "no-approval" };
@@ -185,7 +185,8 @@ export function createPageTextGate(deps: GateDeps): PageTextGate {
     if (!fg) return { reason: "not-foreground" };
     const current = tabRoute(fg);
     if (!current || current.key !== msgRoute.key) return { reason: "url-changed" };
-    return { route: current, sender };
+    // The page's own URL, fragment dropped: the core compares it with the focused tab's.
+    return { route: current, sender, url: fg.url!.split("#")[0]! };
   }
 
   async function onPageText(msg: PageTextMessage, sender: Sender): Promise<{ ok: boolean; reason?: string }> {
@@ -205,8 +206,8 @@ export function createPageTextGate(deps: GateDeps): PageTextGate {
       at: clock.now(),
       tabId: c.sender.tab.id,
       documentId: c.sender.documentId,
-      url: c.route.canonicalUrl,
-      source: "github_issue",
+      url: c.url,
+      source: "page",
       title: msg.title,
       text: msg.text,
       truncated: msg.truncated,

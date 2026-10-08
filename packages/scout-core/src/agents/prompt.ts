@@ -16,9 +16,9 @@
 //   - Fields are the job contract's (candidate id/title/description/labelQuality, maxPicks).
 //
 // Candidate titles and descriptions are website-authored and go only inside the untrusted
-// block. So do the job snapshot's activity entries (the GitHub issues the user recently
-// read, title and text, when the job may see them): after the candidates, as `issue:` /
-// `text:` lines that can never look like a candidate line (every field is sanitized, so no
+// block. So do the job snapshot's activity entries (pages the user recently read on sites
+// they allowed, never the current page, title and text, when the job may see them): after
+// the candidates, as `page:` / `text:` lines that can never look like a candidate line (every field is sanitized, so no
 // ` | ` separator survives in them). Nothing else is inlined: no URLs, no resource text (site
 // resources reach the agent through Scout's tools, which mark them website-authored). The
 // template is fixed: the untrusted content changes no instruction, tool, output schema,
@@ -35,7 +35,7 @@ export function buildJobInstructions(maxTurns: number): string {
 
 This is a background request from Scout, not a conversation. Nobody will read a chat reply.
 
-The user is looking at a website. The request lists candidate links from that site inside an UNTRUSTED SITE DATA block, sometimes followed by the GitHub issues the user recently read. Pick the candidate IDs that best fit what the user is working on right now, best first, or return {"status":"empty"}.
+The user is looking at a website. The request lists candidate links from that site inside an UNTRUSTED SITE DATA block, sometimes followed by pages the user read recently on sites they allowed. Pick the candidate IDs that best fit what the user is working on right now, best first, or return {"status":"empty"}.
 
 You have read-only tools on the \`scout\` server: current_site, recent_activity, site_links, list_resources and read_resource. Use them as you judge useful to learn the user's current work and the site's approved resources. You have at most ${maxTurns} turns.
 
@@ -105,9 +105,9 @@ export function buildJobPrompt(req: Pick<JobRequest, "origin" | "candidates" | "
   }
   const activity = (opts.activity ?? []).slice(0, PROMPT_ACTIVITY_MAX);
   if (activity.length > 0) {
-    lines.push("", "Recent activity: GitHub issues the user read, newest first");
+    lines.push("", "Recent activity: pages the user read, newest first");
     for (const a of activity) {
-      lines.push(`issue: ${sanitizeField(a.title, PAGE_TEXT_TITLE_MAX_CHARS)}`);
+      lines.push(`page: ${sanitizeField(a.title, PAGE_TEXT_TITLE_MAX_CHARS)}`);
       if (a.text !== undefined && a.text !== "") lines.push(`text: ${sanitizeField(a.text, PROMPT_ACTIVITY_TEXT_MAX_CHARS)}`);
     }
   }

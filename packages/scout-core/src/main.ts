@@ -17,7 +17,7 @@
 // revocation hook to the agent socket. Skill wrappers are exported only when the
 // installer's record (installed.json) names a skills root.
 //
-// Accepted GitHub issue text lives in the in-memory activity store; each background job reads
+// Accepted page text lives in the in-memory activity store; each background job reads
 // only its own immutable snapshot (activity/snapshots.ts), built once the agent auth exists.
 // Pause and shutdown release every snapshot and revoke every job token (shutdown does it
 // before closing agent.sock, and no snapshot is taken after it or while paused); a revoked

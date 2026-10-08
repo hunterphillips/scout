@@ -157,7 +157,7 @@ describe.skipIf(!BUILT)("bridge protocol 3: the side panel over the relay", () =
     // 4. A settled visit to a recommendation host: the fake agent's results reach the side panel;
     // the app's stdout carries state frames only.
     const at = Date.now();
-    host.stdin.write(frame({ kind: "permissions", revision: 1, at, granted: [`${SITE}/*`], githubCapture: false }));
+    host.stdin.write(frame({ kind: "permissions", revision: 1, at, granted: [`${SITE}/*`] }));
     host.stdin.write(frame({ kind: "focus", seq: 1, at, browserFocused: true, windowId: 1, tabId: 8, url: `${SITE}/docs/billing`, title: "Billing", incognito: false, permissionsRevision: 1 }));
     await until(() => panel().some((f) => f.type === "results"), "results on the side panel", 40_000);
     const results = panel().find((f) => f.type === "results");
@@ -182,7 +182,7 @@ describe.skipIf(!BUILT)("bridge protocol 3: the side panel over the relay", () =
     await new Promise((r) => direct.once("connect", r));
     const fromCore = collectFrames(direct);
     const panelBefore = panel().length;
-    direct.write(frame({ type: "hello", protocol: 3 }));
+    direct.write(frame({ type: "hello", protocol: 4 }));
     await until(() => fromCore.filter((f) => f.type === "panel").length >= 4, "the replacing connection's repaint");
     expect(fromCore[0]).toEqual({ type: "capture_policy", revision: 0, paused: false, captureEnabled: false });
     expect(fromCore.filter((f) => f.type === "panel").slice(0, 4).map((f) => f.state.type)).toEqual(["grant", "capabilities", "audit", "state"]);

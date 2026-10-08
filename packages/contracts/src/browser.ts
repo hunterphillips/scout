@@ -24,15 +24,32 @@ export const FocusObservationSchema = z.object({
   permissionsRevision: z.int().nonnegative().optional(),
 });
 
-/** Text read from a supported page (Phase 1: a GitHub issue). */
+/** The longest page URL a page_text observation may carry. */
+export const PAGE_URL_MAX_CHARS = 2048;
+
+/**
+ * True when `v` is an https URL of at most PAGE_URL_MAX_CHARS with no fragment, no
+ * credentials and the default port: the shape of a page_text URL.
+ */
+export function isPageUrl(v: string): boolean {
+  if (typeof v !== "string" || v.length > PAGE_URL_MAX_CHARS || v.includes("#")) return false;
+  try {
+    const u = new URL(v);
+    return u.protocol === "https:" && u.username === "" && u.password === "" && u.port === "";
+  } catch {
+    return false;
+  }
+}
+
+/** Text read from a page on an allowed site. */
 export const PageTextObservationSchema = z.object({
   kind: z.literal("page_text"),
   seq: z.int().nonnegative(),
   at: z.number(),
   tabId: z.int(),
   documentId: z.string(),
-  url: z.string(),
-  source: z.literal("github_issue"),
+  url: z.string().refine(isPageUrl, { message: "not an https page URL" }),
+  source: z.literal("page"),
   title: z.string().max(PAGE_TEXT_TITLE_MAX_CHARS),
   text: z.string().refine((t) => utf8Encoder.encode(t).byteLength <= PAGE_TEXT_BODY_MAX_BYTES, {
     message: `text exceeds ${PAGE_TEXT_BODY_MAX_BYTES} bytes`,
@@ -56,17 +73,17 @@ export function isExactOriginPattern(p: string): boolean {
 }
 
 /**
- * The extension's full permissions snapshot: every exact origin the user granted, and the
- * popup's GitHub-capture toggle. `revision` rises with every snapshot an extension worker
+ * The extension's full permissions snapshot: every exact origin the user granted. Granting an
+ * origin also allows reading its pages (the core's capture_policy can still restrict it).
+ * `revision` rises with every snapshot an extension worker
  * sends (seeded from the clock, so a worker restart never goes backwards). A new bridge
  * connection must send one before the core accepts focus or page text.
  */
-export const PermissionsObservationSchema = z.object({
+export const PermissionsObservationSchema = z.strictObject({
   kind: z.literal("permissions"),
   revision: z.int().nonnegative(),
   at: z.number(),
   granted: z.array(z.string().refine(isExactOriginPattern, { message: "not an exact https origin pattern" })),
-  githubCapture: z.boolean(),
 });
 
 /** Extension -> core (via the native host). */

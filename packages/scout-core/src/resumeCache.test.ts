@@ -7,7 +7,7 @@ describe("job resume cache", () => {
     origin: "https://docs.example.com",
     url: "https://docs.example.com/billing#top",
     catalogHash: "cat",
-    activityHash: activityHash([{ url: "https://github.com/o/r/issues/1", title: "Issue", text: "Body" }]),
+    activityHash: activityHash([{ url: "https://linear.app/acme/issue/ENG-1", title: "Issue", text: "Body" }]),
     approvalRevision: 1,
     grantRevision: 0,
     profileFingerprint: "fp",

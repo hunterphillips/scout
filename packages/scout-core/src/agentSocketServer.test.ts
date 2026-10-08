@@ -413,7 +413,7 @@ describe("job snapshots through the socket", () => {
 
     const issue = (n: number) =>
       activity.accept(
-        { kind: "page_text", seq: n, at: 0, tabId: 1, documentId: "d", url: `https://github.com/o/r/issues/${n}`, source: "github_issue", title: `Issue ${n}`, text: "body", truncated: false, policyRevision: 0 },
+        { kind: "page_text", seq: n, at: 0, tabId: 1, documentId: "d", url: `https://linear.app/acme/issue/ENG-${n}`, source: "page", title: `Issue ${n}`, text: "body", truncated: false, policyRevision: 0 },
         "conn",
       );
     issue(1);

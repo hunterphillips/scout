@@ -1,0 +1,16 @@
+{
+  "type": "observation",
+  "observation": {
+    "kind": "page_text",
+    "seq": 7,
+    "at": 1759400001000,
+    "tabId": 12,
+    "documentId": "8F1C2A3B4D5E6F708192A3B4C5D6E7F8",
+    "url": "https://linear.app/acme/issue/ENG-42/checkout-fails-on-retry",
+    "source": "page",
+    "title": "ENG-42 Checkout fails on retry",
+    "text": "Retrying a declined card leaves the cart locked.",
+    "truncated": false,
+    "policyRevision": 1
+  }
+}

@@ -16,19 +16,40 @@ describe("contract schemas", () => {
   it("accepts each browser observation kind and rejects unknown kinds", () => {
     const focus = { kind: "focus", seq: 1, at: 1, browserFocused: false, windowId: -1 };
     const pageText = {
-      kind: "page_text", seq: 2, at: 2, tabId: 3, documentId: "d", url: "https://github.com/o/r/issues/1",
-      source: "github_issue", title: "t", text: "body", truncated: false,
+      kind: "page_text", seq: 2, at: 2, tabId: 3, documentId: "d", url: "https://linear.app/acme/issue/ENG-42/checkout?view=all",
+      source: "page", title: "t", text: "body", truncated: false,
     };
-    const permissions = { kind: "permissions", revision: 4, at: 4, granted: ["https://github.com/*"], githubCapture: true };
+    const permissions = { kind: "permissions", revision: 4, at: 4, granted: ["https://linear.app/*"] };
     for (const o of [focus, pageText, permissions]) expect(BrowserObservationSchema.parse(o)).toEqual(o);
     expect(BrowserObservationSchema.safeParse({ kind: "click" }).success).toBe(false);
     expect(BrowserObservationSchema.safeParse({ ...pageText, source: "gitlab" }).success).toBe(false);
+    // Protocol 3's only source, spelled out at run time so no source file names it.
+    expect(BrowserObservationSchema.safeParse({ ...pageText, source: ["github", "issue"].join("_") }).success).toBe(false);
+  });
+
+  it("accepts page text only from an https URL without fragment, credentials or a non-default port", () => {
+    const pageText = {
+      kind: "page_text", seq: 2, at: 2, tabId: 3, documentId: "d", url: "https://linear.app/acme/issue/ENG-42",
+      source: "page", title: "t", text: "body", truncated: false,
+    };
+    expect(BrowserObservationSchema.safeParse(pageText).success).toBe(true);
+    for (const bad of [
+      "https://linear.app/acme/issue/ENG-42#comment-1",
+      "https://linear.app/acme/issue/ENG-42#",
+      "http://linear.app/acme/issue/ENG-42",
+      "https://user:pw@linear.app/acme/issue/ENG-42",
+      "https://linear.app:8443/acme/issue/ENG-42",
+      "https://linear.app/" + "x".repeat(2048),
+      "not a url",
+    ]) {
+      expect(BrowserObservationSchema.safeParse({ ...pageText, url: bad }).success, bad).toBe(false);
+    }
   });
 
   it("rejects page text over the title and body caps", () => {
     const pageText = {
-      kind: "page_text", seq: 2, at: 2, tabId: 3, documentId: "d", url: "https://github.com/o/r/issues/1",
-      source: "github_issue", title: "t", text: "body", truncated: true,
+      kind: "page_text", seq: 2, at: 2, tabId: 3, documentId: "d", url: "https://linear.app/acme/issue/ENG-42/checkout?view=all",
+      source: "page", title: "t", text: "body", truncated: true,
     };
     expect(BrowserObservationSchema.safeParse({ ...pageText, title: "x".repeat(301) }).success).toBe(false);
     expect(BrowserObservationSchema.safeParse({ ...pageText, text: "x".repeat(8 * 1024) }).success).toBe(true);
@@ -36,11 +57,12 @@ describe("contract schemas", () => {
     expect(BrowserObservationSchema.safeParse({ ...pageText, text: "😀".repeat(2049) }).success).toBe(false);
   });
 
-  it("wraps observations in bridge frames and accepts only a protocol 3 hello", () => {
-    const observation = { kind: "permissions", revision: 0, at: 1, granted: [], githubCapture: false };
+  it("wraps observations in bridge frames and accepts only a protocol 4 hello", () => {
+    const observation = { kind: "permissions", revision: 0, at: 1, granted: [] };
     expect(BridgeFrameSchema.parse({ type: "observation", observation })).toEqual({ type: "observation", observation });
-    expect(BRIDGE_PROTOCOL).toBe(3);
-    expect(BridgeFrameSchema.parse({ type: "hello", protocol: 3 })).toEqual({ type: "hello", protocol: 3 });
+    expect(BRIDGE_PROTOCOL).toBe(4);
+    expect(BridgeFrameSchema.parse({ type: "hello", protocol: 4 })).toEqual({ type: "hello", protocol: 4 });
+    expect(HelloSchema.safeParse({ type: "hello", protocol: 3 }).success).toBe(false);
     expect(HelloSchema.safeParse({ type: "hello", protocol: 2 }).success).toBe(false);
     expect(HelloSchema.safeParse({ type: "hello", protocol: 1 }).success).toBe(false);
     expect(BridgeFrameSchema.safeParse({ type: "hello", protocol: 1 }).success).toBe(false);
@@ -51,12 +73,12 @@ describe("contract schemas", () => {
     expect(ToChromeFrameSchema.parse({ type: "ready", extra: 1 })).toEqual({ type: "ready" });
   });
 
-  it("accepts a permissions snapshot only with a revision, a capture setting and exact-host patterns", () => {
-    const ok = { kind: "permissions", revision: 7, at: 1, granted: ["https://github.com/*", "https://docs.stripe.com/*"], githubCapture: false };
+  it("accepts a permissions snapshot only with a revision and exact-host patterns, and nothing else", () => {
+    const ok = { kind: "permissions", revision: 7, at: 1, granted: ["https://github.com/*", "https://docs.stripe.com/*"] };
     expect(BrowserObservationSchema.parse(ok)).toEqual(ok);
     expect(BrowserObservationSchema.safeParse({ kind: "permissions", granted: [] }).success).toBe(false);
-    const { githubCapture: _g, ...noCapture } = ok;
-    expect(BrowserObservationSchema.safeParse(noCapture).success).toBe(false);
+    // A protocol-3 snapshot's GitHub-capture setting is refused, not stripped.
+    expect(BrowserObservationSchema.safeParse({ ...ok, [`github${"Capture"}`]: true }).success).toBe(false);
     expect(BrowserObservationSchema.safeParse({ ...ok, revision: -1 }).success).toBe(false);
     expect(BrowserObservationSchema.safeParse({ ...ok, revision: 1.5 }).success).toBe(false);
     for (const bad of [

@@ -45,8 +45,6 @@ export type PanelPortRequest =
   | { type: "pause"; paused: boolean }
   /** Reply: StatusSnapshot. */
   | { type: "reconnect" }
-  /** Reply: StatusSnapshot. */
-  | { type: "github-capture"; enabled: boolean }
   /** The active tab of the panel's window. Reply: CurrentSite (panel/sites.ts). */
   | { type: "site"; windowId: number }
   /** A window command for the core, never queued. Reply: CommandReply. */
@@ -105,8 +103,6 @@ export interface StatusSnapshot {
   paused: boolean;
   /** Exact-origin patterns Chrome has granted. */
   granted: string[];
-  /** The panel's "Capture GitHub issue text" toggle, as it takes effect (off without the exact GitHub grant). */
-  githubCapture: boolean;
   /** Chrome also holds a broad grant (e.g. all sites), which Scout ignores. */
   broadGrantIgnored: boolean;
   /** Null until the core sends a policy on the current port. */

@@ -395,8 +395,8 @@ export async function main(argv, deps = {}) {
       currentSite: { origin: PROBE_ORIGIN, url: `${PROBE_ORIGIN}/billing`, title: "Billing documentation", visitEpoch: 7 },
       activity: [
         {
-          origin: "https://github.com",
-          url: "https://github.com/example-org/example-api/issues/42",
+          origin: "https://linear.app",
+          url: "https://linear.app/example-org/issue/API-42/usage-based-billing",
           observedAt: Date.now() - 60_000,
           title: "Charge customers per API call",
           text: "Synthetic issue: we need usage-based billing. Meter each API call and send customers a monthly invoice.",

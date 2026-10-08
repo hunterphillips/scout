@@ -326,7 +326,7 @@ describe("main --stdio", () => {
     expect(panelFrames.slice(0, 4).map((f) => f.type)).toEqual(["grant", "capabilities", "audit", "state"]);
     send({
       type: "observation",
-      observation: { kind: "permissions", revision: 1, at: 1, granted: ["https://docs.stripe.com/*", "https://github.com/*"], githubCapture: true },
+      observation: { kind: "permissions", revision: 1, at: 1, granted: ["https://docs.stripe.com/*", "https://linear.app/*"] },
     });
     await until(() => received.length >= 2);
     expect(received[1]).toEqual({ type: "capture_policy", revision: 1, paused: false, captureEnabled: true });
@@ -342,7 +342,7 @@ describe("main --stdio", () => {
 
     send({
       type: "observation",
-      observation: { kind: "focus", seq: 2, at: 2, browserFocused: true, windowId: 1, tabId: 8, url: "https://github.com/o/r/issues/1" },
+      observation: { kind: "focus", seq: 2, at: 2, browserFocused: true, windowId: 1, tabId: 8, url: "https://linear.app/acme/issue/ENG-1" },
     });
     send({
       type: "observation",
@@ -352,8 +352,8 @@ describe("main --stdio", () => {
         at: 3,
         tabId: 8,
         documentId: "d",
-        url: "https://github.com/o/r/issues/1",
-        source: "github_issue",
+        url: "https://linear.app/acme/issue/ENG-1",
+        source: "page",
         title: "t",
         text: "body",
         truncated: false,
@@ -363,7 +363,7 @@ describe("main --stdio", () => {
     await until(() => acks().length === 1);
     expect(acks()).toEqual([{ type: "ack", seq: 3 }]);
     // GitHub is granted, so the issue tab is a visit too.
-    expect(states().slice(3)).toEqual([{ type: "state", status: "idle", visitEpoch: 3, detail: "github.com", permitted: true }]);
+    expect(states().slice(3)).toEqual([{ type: "state", status: "idle", visitEpoch: 3, detail: "linear.app", permitted: true }]);
 
     sock.destroy();
     await until(() => (states().at(-1) as { status?: string }).status === "disconnected");
@@ -373,7 +373,7 @@ describe("main --stdio", () => {
     const log = readFileSync(join(home, "logs", "diagnostics.jsonl"), "utf8");
     expect(log).toContain('"event":"native_command_invalid"');
     expect(log).toContain('"event":"activity_accepted"');
-    expect(log).not.toContain("github.com");
+    expect(log).not.toContain("linear.app");
     expect(log).not.toContain("body");
   });
 

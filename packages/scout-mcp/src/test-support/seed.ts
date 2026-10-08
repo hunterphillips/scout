@@ -21,7 +21,7 @@ export function seed(overrides: Partial<FixtureSeed> = {}): FixtureSeed {
     currentSite: { origin: SITE, url: `${SITE}/billing`, title: "Billing docs", visitEpoch: 7 },
     activity: [
       { origin: SITE, url: `${SITE}/billing`, observedAt: 2, title: "Billing docs", text: "How invoices work", textTruncated: false },
-      { origin: "https://github.com", url: "https://github.com/o/r/issues/1", observedAt: 1, title: "Issue 1", textTruncated: false },
+      { origin: "https://linear.app", url: "https://linear.app/acme/issue/ENG-1", observedAt: 1, title: "Issue 1", textTruncated: false },
     ],
     siteLinks: {
       origin: SITE,
