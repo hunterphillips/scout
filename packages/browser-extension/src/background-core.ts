@@ -4,8 +4,8 @@
 // browser events:
 // - port.ts: the native port to `dev.scout.bridge`, link health, reconnect;
 // - focus-observer.ts: debounced focus observations;
-// - page-text-gate.ts: the approval gate for GitHub issue text.
-// It also owns the host-permission lifecycle (the GitHub content script's
+// - page-text-gate.ts: the approval gate for page text from allowed sites.
+// It also owns the host-permission lifecycle (the content script's
 // registration), the permissions snapshot, the core's capture policy, and the side panel
 // (panel-bridge.ts: the panel's port, the window frames' cache, the badge; the
 // toolbar click opens the panel, there is no popup).
@@ -17,22 +17,22 @@
 // meanwhile) and a focus follow. The extension's old stored `paused` and
 // `githubCapture` keys are removed on load and never read.
 //
-// GitHub issue text is captured exactly while github.com is granted: there is
-// no separate switch.
+// Page text is read on exactly the sites the user allowed: Allow includes
+// reading that site's pages, and there is no separate switch.
 //
 // Handshake: on each port nothing is posted until the core's first
 // capture_policy arrives (the native host delivers it before `ready`). That
 // policy is answered with a full permissions snapshot (every exact origin
 // Chrome granted, a fresh revision) and then a focus observation. A grant
-// change sends a new snapshot and focus the same way. The GitHub content
-// script is registered only while the exact GitHub grant is on.
+// change sends a new snapshot and focus the same way. The content script is
+// registered for exactly the granted patterns, and not at all without one.
 //
 // "Granted" means an exact https origin in the last successful
 // permissions.getAll. A broad grant (https://*/* from Chrome's site-access
 // settings) is ignored everywhere, and a failed getAll means no sites.
 
 import { type CapturePolicy, isExactOriginPattern } from "@scout/contracts";
-import { GITHUB_PATTERN, HOST_NAME } from "./hosts.js";
+import { HOST_NAME } from "./hosts.js";
 import { createFocusObserver, FOCUS_DEBOUNCE_MS } from "./focus-observer.js";
 import type { ApproveRequest, CommandReply, PageTextMessage, PanelPortRequest, PauseReply, StatusSnapshot } from "./messages.js";
 import { checkSite } from "./origin.js";
@@ -41,23 +41,29 @@ import type { CurrentSite } from "./panel/sites.js";
 import { type Approval, createPageTextGate } from "./page-text-gate.js";
 import { createPortLink } from "./port.js";
 import type { Clock, ReconnectPolicy } from "./reconnect.js";
-import { activeTab, corePaused, createSharedState, defaultClock, githubGranted, newCounters, policyAllowsCapture, post } from "./shared-state.js";
+import { activeTab, anyGranted, corePaused, createSharedState, defaultClock, newCounters, policyAllowsCapture, post } from "./shared-state.js";
 
-export { FOCUS_DEBOUNCE_MS, GITHUB_PATTERN, HOST_NAME };
+export { FOCUS_DEBOUNCE_MS, HOST_NAME };
 
-export const CONTENT_SCRIPT_ID = "scout-github-issue";
-export const CONTENT_SCRIPT_FILE = "content/github-issue.js";
+export const CONTENT_SCRIPT_ID = "scout-page";
+export const CONTENT_SCRIPT_FILE = "content/page.js";
 export const WINDOW_ID_NONE = -1;
 
-export const CONTENT_SCRIPT: chrome.scripting.RegisteredContentScript = Object.freeze({
+/** The registration, less `matches` (the granted patterns at the time). */
+export const CONTENT_SCRIPT = Object.freeze({
   id: CONTENT_SCRIPT_ID,
-  matches: [GITHUB_PATTERN],
   js: [CONTENT_SCRIPT_FILE],
   runAt: "document_idle",
   allFrames: false,
   world: "ISOLATED",
   persistAcrossSessions: true,
-}) as chrome.scripting.RegisteredContentScript;
+});
+
+type Script = chrome.scripting.RegisteredContentScript;
+const contentScript = (matches: string[]): Script => ({ ...CONTENT_SCRIPT, js: [CONTENT_SCRIPT_FILE], matches }) as Script;
+
+const sameSet = (a: readonly string[] | undefined, b: readonly string[]): boolean =>
+  !!a && a.length === b.length && b.every((x) => a.includes(x));
 
 type Tab = chrome.tabs.Tab;
 type Sender = chrome.runtime.MessageSender;
@@ -172,10 +178,10 @@ export function createBackground(ch: typeof chrome, deps: BackgroundDeps = {}): 
 
   // ---------- permissions ----------
   /**
-   * Refresh the granted list and (un)register the GitHub content script.
-   * Resolves to "GitHub capture allowed" (the exact GitHub grant).
-   * Any failure means no sites: the list is emptied (so capture is effectively
-   * off) and the content script is unregistered.
+   * Refresh the granted list and match the content script's registration to it:
+   * exactly the granted patterns, or no registration without one. Resolves to
+   * "capture on" (at least one site granted). Any failure means no sites: the
+   * list is emptied (so capture is off) and the content script is unregistered.
    */
   function reconcile(): Promise<boolean> {
     chain = chain
@@ -184,14 +190,22 @@ export function createBackground(ch: typeof chrome, deps: BackgroundDeps = {}): 
         const all = (await ch.permissions.getAll()).origins ?? [];
         state.granted = all.filter(isExactOriginPattern);
         state.broadGrantIgnored = all.length > state.granted.length;
-        const capture = githubGranted(state);
-        const regs = await ch.scripting.getRegisteredContentScripts({ ids: [CONTENT_SCRIPT_ID] });
-        if (capture && regs.length === 0) await ch.scripting.registerContentScripts([{ ...CONTENT_SCRIPT }]);
-        if (!capture) {
+        const matches = [...state.granted];
+        const [reg] = await ch.scripting.getRegisteredContentScripts({ ids: [CONTENT_SCRIPT_ID] });
+        if (!anyGranted(state)) {
           gate.cancelTabs({ stop: true });
-          if (regs.length > 0) await ch.scripting.unregisterContentScripts({ ids: [CONTENT_SCRIPT_ID] });
+          if (reg) await ch.scripting.unregisterContentScripts({ ids: [CONTENT_SCRIPT_ID] });
+          return false;
         }
-        return capture;
+        if (!reg) await ch.scripting.registerContentScripts([contentScript(matches)]);
+        else if (!sameSet(reg.matches, matches)) {
+          if (typeof ch.scripting.updateContentScripts === "function") await ch.scripting.updateContentScripts([{ id: CONTENT_SCRIPT_ID, matches } as Script]);
+          else {
+            await ch.scripting.unregisterContentScripts({ ids: [CONTENT_SCRIPT_ID] });
+            await ch.scripting.registerContentScripts([contentScript(matches)]);
+          }
+        }
+        return true;
       })
       .catch(async () => {
         state.granted = [];
@@ -203,12 +217,13 @@ export function createBackground(ch: typeof chrome, deps: BackgroundDeps = {}): 
   }
 
   /**
-   * After a grant (or an install/update), GitHub pages already open never got
-   * the registered script, and SPA navigation will not load it. Inject into
-   * their top frames once; a second injection is a no-op.
+   * After a grant (or an install/update), pages already open on a granted site
+   * never got the registered script, and SPA navigation will not load it.
+   * Inject into their top frames once; a second injection is a no-op.
    */
-  async function injectIntoOpenGithubTabs(): Promise<void> {
-    const tabs = await ch.tabs.query({ url: GITHUB_PATTERN }).catch(() => [] as Tab[]);
+  async function injectIntoOpenTabs(): Promise<void> {
+    if (state.granted.length === 0) return;
+    const tabs = await ch.tabs.query({ url: [...state.granted] }).catch(() => [] as Tab[]);
     for (const t of tabs) {
       if (t.incognito || t.id === undefined || !Number.isInteger(t.id)) continue;
       await ch.scripting.executeScript({ target: { tabId: t.id, frameIds: [0] }, files: [CONTENT_SCRIPT_FILE] }).catch(() => {});
@@ -293,14 +308,14 @@ export function createBackground(ch: typeof chrome, deps: BackgroundDeps = {}): 
     });
     ch.runtime.onInstalled?.addListener(async () => {
       await panel.configureAction();
-      if (await reconcile()) await injectIntoOpenGithubTabs();
+      if (await reconcile()) await injectIntoOpenTabs();
     });
     ch.permissions.onAdded.addListener(async () => {
-      const gh = await reconcile();
+      const capture = await reconcile();
       sendSnapshot();
       panel.pushStatus();
-      if (gh) {
-        await injectIntoOpenGithubTabs();
+      if (capture) {
+        await injectIntoOpenTabs();
         void gate.refreshActive();
       }
     });
@@ -311,9 +326,12 @@ export function createBackground(ch: typeof chrome, deps: BackgroundDeps = {}): 
       const gone = new Set(removed?.origins ?? []);
       state.granted = state.granted.filter((o) => !gone.has(o));
       state.sentGranted = new Set([...state.sentGranted].filter((o) => !gone.has(o)));
-      await reconcile();
+      // Reads in flight stop; the sites still granted capture again on refresh.
+      gate.cancelTabs();
+      const capture = await reconcile();
       sendSnapshot();
       panel.pushStatus();
+      if (capture) void gate.refreshActive();
     });
     ch.tabs.onActivated.addListener((info) => {
       gate.cancelTabs({ except: info?.tabId ?? null });

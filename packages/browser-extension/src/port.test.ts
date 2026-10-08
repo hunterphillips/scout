@@ -1,17 +1,17 @@
 import { describe, expect, it } from "vitest";
-import { createBackground, GITHUB_PATTERN } from "./background-core.js";
+import { createBackground } from "./background-core.js";
 import type { PanelState } from "@scout/contracts";
 import { createPortLink, SERIES_KEY } from "./port.js";
 import { createSharedState, newCounters } from "./shared-state.js";
 import { RECONNECT_DELAYS_MS, type SeriesState } from "./reconnect.js";
 import { asChrome, fakeClock, flush, makeChrome } from "./test-fakes.js";
-import { approve, dropPort, lastPort, setup } from "./test-harness.js";
+import { approve, dropPort, lastPort, setup, TRACKER_PATTERN } from "./test-harness.js";
 
 const LONG = 10 * 60_000;
 
 describe("bounded reconnect (fake port and clock)", () => {
   it("runs 1, 2, 4, 8, 16, 30 s, then makes no attempt until a focus event", async () => {
-    const f = makeChrome({ granted: [GITHUB_PATTERN], host: "missing" });
+    const f = makeChrome({ granted: [TRACKER_PATTERN], host: "missing" });
     const clock = fakeClock();
     const bg = createBackground(asChrome(f), { clock });
     await bg.start();
@@ -46,7 +46,7 @@ describe("bounded reconnect (fake port and clock)", () => {
   });
 
   it("a port that never said ready is not healthy, however long it stayed open", async () => {
-    const { f, clock, bg } = await setup({ granted: [GITHUB_PATTERN], host: "silent" });
+    const { f, clock, bg } = await setup({ granted: [TRACKER_PATTERN], host: "silent" });
     expect(bg.snapshot().link).toBe("connecting");
     await clock.advance(2 * 60_000);
     dropPort(f); // > 60 s since the series began, but not healthy: continue, no fresh series
@@ -55,7 +55,7 @@ describe("bounded reconnect (fake port and clock)", () => {
   });
 
   it("the panel's Reconnect starts a series at once, even within 60 s", async () => {
-    const { f, clock, bg } = await setup({ granted: [GITHUB_PATTERN], host: "missing" });
+    const { f, clock, bg } = await setup({ granted: [TRACKER_PATTERN], host: "missing" });
     await clock.advance(LONG);
     f.tabs.onActivated.emit({ tabId: 10, windowId: 1 } as never);
     await clock.advance(0);
@@ -65,7 +65,7 @@ describe("bounded reconnect (fake port and clock)", () => {
   });
 
   it("shows connecting until ready, core unavailable when the host reports it, connected again on an ack", async () => {
-    const { f, bg } = await setup({ granted: [GITHUB_PATTERN], host: "silent" });
+    const { f, bg } = await setup({ granted: [TRACKER_PATTERN], host: "silent" });
     expect(bg.snapshot().link).toBe("connecting");
     lastPort(f).onMessage.emit({ type: "ready" });
     expect(bg.snapshot().link).toBe("connected");
@@ -78,7 +78,7 @@ describe("bounded reconnect (fake port and clock)", () => {
   });
 
   it("denies approval while no port is open", async () => {
-    const { f, clock, bg } = await setup({ granted: [GITHUB_PATTERN], host: "missing" });
+    const { f, clock, bg } = await setup({ granted: [TRACKER_PATTERN], host: "missing" });
     await clock.advance(1);
     await flush();
     expect(await approve(bg, f)).toEqual({ approved: false, reason: "bridge-disconnected" });
@@ -88,7 +88,7 @@ describe("bounded reconnect (fake port and clock)", () => {
 describe("reconnect across service-worker restarts", () => {
   /** A new worker: fresh fake chrome and background, same session storage, clock continuing. */
   async function restart(session: Record<string, unknown>, at: number) {
-    const f = makeChrome({ granted: [GITHUB_PATTERN], host: "missing", session });
+    const f = makeChrome({ granted: [TRACKER_PATTERN], host: "missing", session });
     const clock = fakeClock(at);
     const bg = createBackground(asChrome(f), { clock });
     await bg.start();
@@ -96,7 +96,7 @@ describe("reconnect across service-worker restarts", () => {
   }
 
   it("resumes a series mid-schedule at its step", async () => {
-    const first = await setup({ granted: [GITHUB_PATTERN], host: "missing" });
+    const first = await setup({ granted: [TRACKER_PATTERN], host: "missing" });
     await first.clock.advance(1000 + 2000); // attempts at 0, 1, 3 s; the 4 s retry is pending
     expect(first.f._.ports).toHaveLength(3);
     const { f, clock, bg } = await restart(first.f._.session, first.clock.now() + 1000);
@@ -139,7 +139,7 @@ describe("reconnect across service-worker restarts", () => {
 
 describe("window frames and commands over the port (bridge protocol 3)", () => {
   async function link(host: "ok" | "silent" = "ok") {
-    const f = makeChrome({ granted: [GITHUB_PATTERN], host });
+    const f = makeChrome({ granted: [TRACKER_PATTERN], host });
     const clock = fakeClock();
     const state = createSharedState(clock);
     const panel: PanelState[] = [];
@@ -169,7 +169,7 @@ describe("window frames and commands over the port (bridge protocol 3)", () => {
   });
 
   it("without an onPanel hook a panel frame is ignored", async () => {
-    const f = makeChrome({ granted: [GITHUB_PATTERN], host: "ok" });
+    const f = makeChrome({ granted: [TRACKER_PATTERN], host: "ok" });
     const clock = fakeClock();
     const l = createPortLink({ ch: asChrome(f), clock, state: createSharedState(clock), counters: newCounters(), onOpen: () => {}, onPolicy: () => {}, onLost: () => {} });
     await l.start();

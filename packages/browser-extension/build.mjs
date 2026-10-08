@@ -1,5 +1,5 @@
 // Builds the unpacked extension into dist/:
-//   manifest.json  background.js  panel.html  panel.js  content/github-issue.js
+//   manifest.json  background.js  panel.html  panel.js  content/page.js
 //   icons/*.png (rendered from assets/mark.svg by scripts/render-icons.mjs, committed)
 //   fonts/figtree-latin-wght.woff2 + fonts/OFL.txt (the panel's font; MV3 CSP forbids remote fonts)
 // The manifest has no `key`; scripts/setup.mjs adds it to dist/manifest.json
@@ -21,7 +21,7 @@ await mkdir(join(dist, "content"), { recursive: true });
 // Only the worker carries zod; zod-en-only.mjs drops its non-English locales (~820 KB -> ~456 KB).
 await build({ ...common, format: "esm", entryPoints: { background: "src/background.ts", panel: "src/panel.ts" }, outdir: dist, absWorkingDir: root, plugins: [zodEnglishOnly] });
 // Registered content scripts are classic scripts, not modules.
-await build({ ...common, format: "iife", entryPoints: { "content/github-issue": "src/content/github-issue.ts" }, outdir: dist, absWorkingDir: root });
+await build({ ...common, format: "iife", entryPoints: { "content/page": "src/content/page.ts" }, outdir: dist, absWorkingDir: root });
 await copyFile(join(root, "src/panel.html"), join(dist, "panel.html"));
 await cp(join(root, "icons"), join(dist, "icons"), { recursive: true });
 await cp(join(root, "assets/fonts"), join(dist, "fonts"), { recursive: true });

@@ -1,8 +1,8 @@
-// Content-script entry, registered on all of https://github.com/* after the
-// GitHub grant (GitHub moves from repo home to Issues to an issue without a
-// page load, so a script matched only to issue URLs would never be injected).
-// Bundled as a classic script (IIFE): registered content scripts cannot be
-// modules. It only watches the URL; see capture.ts for when it reads text.
+// Content-script entry, registered on every exact origin the user granted
+// (a single-page app moves between pages without a load, so the script watches
+// the URL for as long as the page lives). Bundled as a classic script (IIFE):
+// registered content scripts cannot be modules. See capture.ts for when it
+// reads text.
 
 import type { ApproveResponse, BackgroundToContent, ContentToBackground } from "../messages.js";
 import { type CaptureController, createCaptureController, type NavigationLike } from "./capture.js";
@@ -16,7 +16,7 @@ type ContentChrome = {
   runtime: Pick<typeof chrome.runtime, "id" | "sendMessage" | "onMessage">;
 };
 
-const HOLDER_KEY = "__scoutGithubIssue";
+const HOLDER_KEY = "__scoutPage";
 
 /**
  * One live controller per page: re-injection is a no-op while it runs, and

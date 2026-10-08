@@ -1,17 +1,16 @@
 import { BrowserObservationSchema } from "@scout/contracts";
 import { describe, expect, it } from "vitest";
-import { GITHUB_PATTERN } from "./hosts.js";
 import { APPROVAL_TTL_MS, createPageTextGate } from "./page-text-gate.js";
 import { createSharedState, newCounters } from "./shared-state.js";
 import { activate, EXT_ID, fakeClock } from "./test-fakes.js";
-import { approve, corePolicy, ISSUE1, ISSUE2, observations, pageText, setup } from "./test-harness.js";
+import { approve, corePolicy, ISSUE1, ISSUE2, observations, pageText, setup, TRACKER_PATTERN } from "./test-harness.js";
 
 describe("page_text gate (through the background)", () => {
   it("forwards when the sender tab is the active tab of the focused window and its URL equals the message URL; attaches documentId", async () => {
     const { f, bg } = await setup();
     // sender.url is stale (the document's first URL); the tab URL is current.
-    expect(await approve(bg, f, { url: "https://github.com/acme/widgets" })).toEqual({ approved: true });
-    expect(await pageText(bg, f, { url: "https://github.com/acme/widgets", documentId: "doc-1" })).toEqual({ ok: true });
+    expect(await approve(bg, f, { url: "https://tracker.example/acme/widgets" })).toEqual({ approved: true });
+    expect(await pageText(bg, f, { url: "https://tracker.example/acme/widgets", documentId: "doc-1" })).toEqual({ ok: true });
     const obs = observations(f, "page_text");
     expect(obs).toEqual([
       { kind: "page_text", seq: expect.any(Number), at: expect.any(Number), tabId: 10, documentId: "doc-1", url: ISSUE1, source: "page", title: "One", text: "body", truncated: false, policyRevision: 2 },
@@ -19,12 +18,24 @@ describe("page_text gate (through the background)", () => {
     expect(BrowserObservationSchema.safeParse(obs[0]).success).toBe(true);
   });
 
-  it("sends the tab's own URL with its fragment dropped and the query kept", async () => {
+  it("sends the canonical page URL: fragment dropped, query kept; a different query is a different page", async () => {
     const { f, bg } = await setup();
     f._.tabs.get(10)!.url = `${ISSUE1}?q=1#issuecomment-5`;
-    expect((await approve(bg, f)).approved).toBe(true);
-    expect(await pageText(bg, f)).toEqual({ ok: true });
+    expect(await approve(bg, f, {}, 3, ISSUE1)).toEqual({ approved: false, reason: "route" });
+    expect((await approve(bg, f, {}, 3, `${ISSUE1}?q=1`)).approved).toBe(true);
+    expect(await pageText(bg, f, {}, 3, `${ISSUE1}?q=1#other`)).toEqual({ ok: true });
     expect(observations(f, "page_text")[0]).toMatchObject({ url: `${ISSUE1}?q=1`, source: "page" });
+    expect((await approve(bg, f, {}, 4, `${ISSUE1}?q=1`)).approved).toBe(true);
+    f._.tabs.get(10)!.url = `${ISSUE1}?q=2`;
+    expect(await pageText(bg, f, {}, 4, `${ISSUE1}?q=1`)).toEqual({ ok: false, reason: "url-changed" });
+  });
+
+  it("denies a sender whose origin is not granted, even while another site is", async () => {
+    const { f, bg } = await setup();
+    f._.tabs.get(10)!.url = "https://docs.example/billing";
+    expect(await approve(bg, f, { url: "https://docs.example/billing" }, 3, "https://docs.example/billing")).toEqual({ approved: false, reason: "sender" });
+    expect(await pageText(bg, f, { url: "https://docs.example/billing" }, 3, "https://docs.example/billing")).toEqual({ ok: false, reason: "sender" });
+    expect(observations(f, "page_text")).toEqual([]);
   });
 
   it("stamps page text with the latest capture_policy revision the port received", async () => {
@@ -38,7 +49,7 @@ describe("page_text gate (through the background)", () => {
     expect(BrowserObservationSchema.safeParse(obs[0]).success).toBe(true);
   });
 
-  it("denies a subframe, an incognito sender, and a non-GitHub sender.url", async () => {
+  it("denies a subframe, an incognito sender, and a non-granted sender.url", async () => {
     const { f, bg } = await setup();
     expect(await approve(bg, f, { frameId: 1 })).toEqual({ approved: false, reason: "sender" });
     expect(await approve(bg, f, { url: "https://evil.example/acme/widgets/issues/1" })).toEqual({ approved: false, reason: "sender" });
@@ -124,7 +135,7 @@ describe("page_text gate (through the background)", () => {
     expect((await approve(bg, f)).approved).toBe(true);
     f._.state.granted = [];
     const p = pageText(bg, f);
-    f.permissions.onRemoved.emit({ origins: [GITHUB_PATTERN] } as never);
+    f.permissions.onRemoved.emit({ origins: [TRACKER_PATTERN] } as never);
     expect(await p).toMatchObject({ ok: false });
     expect(observations(f, "page_text")).toEqual([]);
   });
@@ -148,7 +159,7 @@ describe("page_text gate (standalone, shared state only)", () => {
     const posted: unknown[] = [];
     state.port = { postMessage: (m: unknown) => void posted.push(m) } as unknown as chrome.runtime.Port;
     state.policy = { revision: 2, captureEnabled: true, paused: false };
-    state.granted = [GITHUB_PATTERN];
+    state.granted = [TRACKER_PATTERN];
     const tab = { id: 10, windowId: 1, active: true, incognito: false, url: ISSUE1 };
     const ch = {
       runtime: { id: EXT_ID },
@@ -156,7 +167,7 @@ describe("page_text gate (standalone, shared state only)", () => {
       windows: { get: async () => ({ id: 1, focused: true, incognito: false }) },
     } as unknown as typeof chrome;
     const gate = createPageTextGate({ ch, clock, state, counters: newCounters(), trigger: () => {} });
-    const s = { id: EXT_ID, frameId: 0, documentId: "doc-1", url: ISSUE1, origin: "https://github.com", tab } as chrome.runtime.MessageSender;
+    const s = { id: EXT_ID, frameId: 0, documentId: "doc-1", url: ISSUE1, origin: "https://tracker.example", tab } as chrome.runtime.MessageSender;
     const text = { type: "page_text", navCounter: 3, url: ISSUE1, title: "One", text: "body", truncated: false } as const;
     return { clock, state, posted, gate, s, text };
   }

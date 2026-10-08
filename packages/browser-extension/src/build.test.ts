@@ -36,7 +36,7 @@ it("the service worker turns zod jitless before any Scout module runs; other bun
     expect(jitless).toBeLessThan(firstScoutModule);
     // zod's eval probe is still bundled, but it returns early once jitless is set.
     expect(bg).toMatch(/allowsEval = [^]*?if \(globalConfig\.jitless\) \{\s*return false;/);
-    for (const f of ["panel.js", "content/github-issue.js"]) {
+    for (const f of ["panel.js", "content/page.js"]) {
       expect(readFileSync(join(dist, f), "utf8")).not.toMatch(/new F\(|new Function|globalConfig\.jitless/);
     }
   } finally {
@@ -46,7 +46,7 @@ it("the service worker turns zod jitless before any Scout module runs; other bun
 
 const m0 = (dist: string) => JSON.parse(readFileSync(join(dist, "manifest.json"), "utf8")) as Record<string, unknown>;
 
-it("dist holds exactly the background, the side panel, the GitHub content script, the icons and the font; no popup", () => {
+it("dist holds exactly the background, the side panel, the page content script, the icons and the font; no popup", () => {
   const dist = join(mkdtempSync(join(tmpdir(), "scout-ext-")), "dist");
   try {
     const root = fileURLToPath(new URL("..", import.meta.url));
@@ -55,7 +55,7 @@ it("dist holds exactly the background, the side panel, the GitHub content script
     const files = (readdirSync(dist, { recursive: true }) as string[]).filter((f) => !statSync(join(dist, f)).isDirectory()).sort();
     const icons = ["icon-16", "icon-32", "icon-48", "icon-128", "paused-16", "paused-32"].map((n) => `icons/${n}.png`);
     const fonts = ["fonts/OFL.txt", "fonts/figtree-latin-wght.woff2"];
-    expect(files).toEqual(["background.js", "content/github-issue.js", ...fonts, ...icons, "manifest.json", "panel.html", "panel.js"].map((f) => f.split("/").join(sep)).sort());
+    expect(files).toEqual(["background.js", "content/page.js", ...fonts, ...icons, "manifest.json", "panel.html", "panel.js"].map((f) => f.split("/").join(sep)).sort());
     // Every icon the manifest names ships, and the panel loads its font from the extension itself.
     for (const p of [...Object.values(m0(dist)["icons"] as object), ...Object.values((m0(dist)["action"] as { default_icon: object }).default_icon)]) expect(files).toContain(String(p).split("/").join(sep));
     const html = readFileSync(join(dist, "panel.html"), "utf8");
@@ -82,7 +82,7 @@ it("the manifest asks for exact sites one at a time: https://*/* is optional onl
   expect(m["action"]).toEqual({ default_title: "Scout", default_icon: { 16: "icons/icon-16.png", 32: "icons/icon-32.png" } });
   expect(m["icons"]).toEqual({ 16: "icons/icon-16.png", 32: "icons/icon-32.png", 48: "icons/icon-48.png", 128: "icons/icon-128.png" });
   expect(m["optional_permissions"]).toBeUndefined();
-  expect(m["content_scripts"]).toBeUndefined(); // registered at runtime, only with the GitHub grant and toggle
+  expect(m["content_scripts"]).toBeUndefined(); // registered at runtime, for exactly the granted sites
   expect(m["incognito"]).toBe("not_allowed");
 });
 

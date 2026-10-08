@@ -23,7 +23,6 @@
 // Diagnostics disclosure (which ends with the "Sent to Scout" counters). Escape collapses the review card, then returns to Page (panel-app.ts).
 
 import type { CapabilityOffer, LibraryEntry } from "@scout/contracts";
-import { GITHUB_PATTERN } from "../hosts.js";
 import type { StatusSnapshot } from "../messages.js";
 import { hostOf } from "./capabilities.js";
 import { ACK_CODE_TEXT, type PanelModel, type PanelSection, type Problem, SECTIONS } from "./model.js";
@@ -92,12 +91,12 @@ export function hostLabel(pattern: string): string {
   return pattern.replace(/^https:\/\//, "").replace(/\/\*$/, "");
 }
 
-/** GitHub issue text is captured exactly while github.com is allowed. */
-const githubAllowed = (s: StatusSnapshot): boolean => s.granted.includes(GITHUB_PATTERN);
+/** Page text is captured exactly while at least one site is allowed. */
+const anySiteAllowed = (s: StatusSnapshot): boolean => s.granted.length > 0;
 
-/** What happens to GitHub issue text right now. */
+/** What happens to page text right now. */
 export function captureText(s: StatusSnapshot): string {
-  if (!githubAllowed(s)) return "off";
+  if (!anySiteAllowed(s)) return "off";
   if (s.policy === null) return "waiting for Scout";
   if (s.policy.paused) return "paused by Scout";
   return s.policy.captureEnabled ? "on" : "waiting for Scout";
@@ -110,14 +109,14 @@ export function statusRows(s: StatusSnapshot): Array<[string, string]> {
     ["Status", statusText(s)],
     ["Allowed sites", s.granted.length > 0 ? s.granted.map(hostLabel).join(", ") : "none"],
     ...(s.broadGrantIgnored ? [["Site access", BROAD_GRANT_TEXT] as [string, string]] : []),
-    ["Issue text", captureText(s)],
+    ["Page text", captureText(s)],
   ];
 }
 
 /** Diagnostics' "Sent to Scout" row: what the extension has sent Scout (metadata counts only). */
 export function sentText(s: StatusSnapshot): string {
   const c = s.counters;
-  return `tab updates ${c.focus} · issues ${c.forwarded} · received ${c.acked} · dropped ${c.dropped} · blocked ${c.denied}`;
+  return `tab updates ${c.focus} · pages ${c.forwarded} · received ${c.acked} · dropped ${c.dropped} · blocked ${c.denied}`;
 }
 
 // ---------- names ----------
@@ -201,7 +200,6 @@ const ICONS = {
   collapse: [["path", { d: "M6 15l6-6 6 6" }]],
   next: [["path", { d: "M9 6l6 6-6 6" }]],
   file: [["path", { d: "M6 3h9l4 4v14H6z" }], ["path", { d: "M14 3v5h5" }]],
-  github: [["path", { d: "M9 19c-4.3 1.4-4.3-2.5-6-3m12 5v-3.5c0-1 .1-1.4-.5-2 2.8-.3 5.5-1.4 5.5-6a4.6 4.6 0 0 0-1.3-3.2 4.2 4.2 0 0 0-.1-3.2s-1.1-.3-3.5 1.3a12.3 12.3 0 0 0-6.2 0C6.5 2.8 5.4 3.1 5.4 3.1a4.2 4.2 0 0 0-.1 3.2A4.6 4.6 0 0 0 4 9.5c0 4.6 2.7 5.7 5.5 6-.6.6-.6 1.2-.5 2V21" }]],
 } satisfies Record<string, Shape[]>;
 
 /** A site's tile: the host's first letter (drawn by CSS from `data-letter`, so it adds no text), neutral color, never a remote favicon. */
@@ -436,11 +434,11 @@ function destinationSwitch(doc: Document, v: ViewState, on: PanelHandlers, origi
   return toggle(doc, `destination-${origin}`, label, enabled, m.canToggleDestination(origin) && (granted || enabled), (x) => on.destination(origin, x), note, "switch-label site-switch");
 }
 
-/** The agent-context chip: only while the agent may read browser context, github.com is allowed and issue text has reached Scout. */
+/** The agent-context chip: only while the agent may read browser context, a site is allowed and page text has reached Scout. */
 function contextChip(doc: Document, v: ViewState): HTMLElement | null {
   const s = v.status;
-  if (v.model.capabilities.agentBrowserContext !== true || !s || !githubAllowed(s) || s.counters.forwarded === 0) return null;
-  return el(doc, "p", { class: "chip" }, icon(doc, 14, ICONS.github), el(doc, "span", { text: "Using your recent GitHub activity" }));
+  if (v.model.capabilities.agentBrowserContext !== true || !s || !anySiteAllowed(s) || s.counters.forwarded === 0) return null;
+  return el(doc, "p", { class: "chip" }, icon(doc, 14, ICONS.file), el(doc, "span", { text: "Using pages you read recently" }));
 }
 
 function tray(doc: Document, v: ViewState, on: PanelHandlers, reviewing: boolean): HTMLElement {
@@ -524,6 +522,7 @@ function sitesView(doc: Document, v: ViewState, on: PanelHandlers): HTMLElement[
   out.push(
     el(doc, "form", { class: "add-site", "data-submit": "site-add" }, el(doc, "label", { for: "site-input", text: "Allow another site" }), el(doc, "div", { class: "row" }, input, el(doc, "button", { type: "submit", class: "primary small", "data-key": "site-add", text: "Allow" }))),
     el(doc, "p", { id: "site-input-note", class: v.ui.siteInputError ? "error" : "note", text: v.ui.siteInputError ?? "Chrome asks you to confirm each site." }),
+    el(doc, "p", { class: "note", text: "Scout reads the pages you open here. Nothing is kept past 15 minutes." }),
   );
   if (v.status?.broadGrantIgnored) out.push(el(doc, "p", { class: "note", text: BROAD_GRANT_TEXT }));
   out.push(el(doc, "p", { class: "note", text: "Turn on suggestions for a site from the Page view while you're on it." }));
@@ -615,7 +614,7 @@ function settingsView(doc: Document, v: ViewState, on: PanelHandlers): HTMLEleme
       toggle(
         doc,
         "agent-context",
-        "Let your agent read the current site and recent GitHub issues",
+        "Let your agent see the current site and pages you read on allowed sites",
         grant === true,
         m.canToggleGrant,
         (x) => on.grant(x),

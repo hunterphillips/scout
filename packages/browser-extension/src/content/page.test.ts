@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { EXT_ID, flush, issueMain, makeDom, repoHomeMain } from "../test-fakes.js";
-import { startContentScript } from "./github-issue.js";
+import { docsPage, EXT_ID, flush, makeDom, trackerPage } from "../test-fakes.js";
+import { startContentScript } from "./page.js";
 
-const ISSUE1 = "https://github.com/acme/widgets/issues/1";
+const ISSUE1 = "https://tracker.example/acme/widgets/issues/1";
 
 function fakeRuntime(sendMessage: (m: unknown) => Promise<unknown>) {
   const listeners: unknown[] = [];
@@ -22,7 +22,7 @@ describe("content-script entry", () => {
   });
 
   it("re-injection into a page with a live controller is a no-op", () => {
-    const d = makeDom("https://github.com/acme/widgets", repoHomeMain());
+    const d = makeDom("https://docs.example/billing", docsPage());
     const { ch, listeners } = fakeRuntime(async () => ({ approved: false }));
     const ctl = startContentScript(ch, d.win)!;
     cleanups.push(() => (ctl.stop(), d.close()));
@@ -32,7 +32,7 @@ describe("content-script entry", () => {
   });
 
   it("stops the controller when sendMessage throws (extension reloaded)", async () => {
-    const d = makeDom(ISSUE1, issueMain());
+    const d = makeDom(ISSUE1, trackerPage());
     const { ch } = fakeRuntime(async () => {
       throw new Error("Extension context invalidated.");
     });
@@ -45,7 +45,7 @@ describe("content-script entry", () => {
 
   it("stops on the next poll tick once chrome.runtime.id is gone", () => {
     vi.useFakeTimers();
-    const d = makeDom("https://github.com/acme/widgets", repoHomeMain());
+    const d = makeDom("https://docs.example/billing", docsPage());
     const { ch, runtime } = fakeRuntime(async () => ({ approved: false }));
     const ctl = startContentScript(ch, d.win)!;
     cleanups.push(() => (ctl.stop(), d.close()));

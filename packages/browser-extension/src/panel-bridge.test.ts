@@ -408,11 +408,11 @@ describe("panel requests", () => {
   });
 
   it("the current site: only an origin, and only for a tab whose URL Chrome shows", async () => {
-    const { f } = await setup({ granted: ["https://github.com/*"] });
+    const { f } = await setup({ granted: ["https://tracker.example/*"] });
     const p = await openPanel(f);
-    // Tab 10 (github.com issue, granted): the origin only, never the path.
+    // Tab 10 (tracker issue, granted): the origin only, never the path.
     const granted = await p.request({ type: "site", windowId: 1 });
-    expect(granted).toEqual({ kind: "ok", origin: "https://github.com", pattern: "https://github.com/*", host: "github.com", tabId: 10, index: 0 });
+    expect(granted).toEqual({ kind: "ok", origin: "https://tracker.example", pattern: "https://tracker.example/*", host: "tracker.example", tabId: 10, index: 0 });
     expect(JSON.stringify(granted)).not.toContain("/issues");
     // Tab 12 (example.com, not granted): unknown until the toolbar click's activeTab grant.
     activate(f, 12);
@@ -429,10 +429,10 @@ describe("panel requests", () => {
   });
 
   it("Reconnect answers with the status", async () => {
-    const { f } = await setup({ granted: ["https://github.com/*"] });
+    const { f } = await setup({ granted: ["https://tracker.example/*"] });
     const p = await openPanel(f);
     expect(await p.request({ type: "reconnect" })).toMatchObject({ link: expect.any(String) });
-    expect(await p.request({ type: "status" })).toMatchObject({ granted: ["https://github.com/*"] });
+    expect(await p.request({ type: "status" })).toMatchObject({ granted: ["https://tracker.example/*"] });
   });
 
   it("a grant change pushes the status to open panels", async () => {

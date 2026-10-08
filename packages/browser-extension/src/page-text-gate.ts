@@ -1,41 +1,42 @@
-// The approval gate for GitHub issue text, and the content-script messaging
-// around it (refresh, cancel). Page text passes through memory once,
+// The approval gate for page text from allowed sites, and the content-script
+// messaging around it (refresh, cancel). Page text passes through memory once,
 // straight to the native port; it is never stored or logged.
 //
 // Kept from the live-verified Phase 0 spike:
 // - sender.url is not a route authority: Chrome appears to keep it at the
-//   document's first URL across GitHub's in-page navigation. It is checked for
-//   origin only. The route comes from the browser-owned tab URL: sender.tab.url
-//   at request time, then a fresh active-tab query.
+//   document's first URL across a single-page app's in-page navigation. It is
+//   checked for origin only. The page comes from the browser-owned tab URL:
+//   sender.tab.url at request time, then a fresh active-tab query. Pages are
+//   compared as canonical page URLs (canonicalPageUrl).
 // - the cancel epoch (shared state), bumped by pause, revoke, tab change,
 //   focus loss and port loss, that approval and forwarding snapshot on entry
 //   and re-check after every await.
 //
 // Capture needs two things, each checked on approval and again before
-// forwarding: Chrome's exact GitHub grant (from the background's reconciled
-// list, never a broad all-sites grant) and a core capture_policy on this port
+// forwarding: Chrome's exact grant for the page's origin (from the background's
+// reconciled list, never a broad all-sites grant) and a core capture_policy on this port
 // with capture enabled and not paused. The policy can only take capture away;
 // it never stands in for the grant.
 
 import { type PageTextObservation, PageTextObservationSchema } from "@scout/contracts";
 import type { ApproveRequest, ApproveResponse, BackgroundToContent, DenialCode, PageTextMessage } from "./messages.js";
 import type { Clock } from "./reconnect.js";
-import { type IssueRoute, parseIssueRoute } from "./route.js";
-import { LIMITS } from "./selectors.js";
-import { activeTab, corePaused, type Counters, githubGranted, policyAllowsCapture, post, type SharedState } from "./shared-state.js";
+import { LIMITS } from "./limits.js";
+import { activeTab, anyGranted, canonicalPageUrl, corePaused, type Counters, grantedPage, policyAllowsCapture, post, type SharedState } from "./shared-state.js";
 
-/** An approval older than the content script's longest settle (plus slack) is void. */
-export const APPROVAL_TTL_MS = LIMITS.maxWaitMs + 5_000;
+/** An approval older than the content script's longest settle and dwell (plus slack) is void. */
+export const APPROVAL_TTL_MS = LIMITS.maxWaitMs + LIMITS.dwellMs + 5_000;
 
 type Tab = chrome.tabs.Tab;
 type Sender = chrome.runtime.MessageSender;
-/** A sender that passed senderOk: top frame of a GitHub tab, not incognito. */
+/** A sender that passed senderOk: top frame of a tab on a granted origin, not incognito. */
 export type ContentSender = Sender & { tab: Tab & { id: number }; documentId: string; url: string };
 
 export interface Approval {
   documentId: string;
   navCounter: number;
-  routeKey: string;
+  /** Canonical page URL. */
+  page: string;
   at: number;
 }
 
@@ -54,7 +55,7 @@ export interface PageTextGate {
   cancelTabs(opts?: { stop?: boolean; except?: number | null }): void;
   /** Ask the active tab's script for a fresh capture (when capture is on and the port is open). */
   refreshActive(): Promise<void>;
-  /** Chrome's exact GitHub grant and the user's toggle are both on. */
+  /** At least one exact site grant: the content script runs. */
   captureAllowed(): boolean;
   onTabUpdated(tabId: number, url: string | undefined): void;
   onTabRemoved(tabId: number): void;
@@ -69,21 +70,21 @@ export interface GateDeps {
   trigger(): void;
 }
 
-const githubOrigin = (u: string): boolean => {
+const originOf = (u: string): string | null => {
   try {
-    return new URL(u).origin === "https://github.com";
+    return new URL(u).origin;
   } catch {
-    return false;
+    return null;
   }
 };
-
-const tabRoute = (t: { url?: string | undefined } | undefined | null): IssueRoute | null =>
-  typeof t?.url === "string" ? parseIssueRoute(t.url) : null;
 
 export function createPageTextGate(deps: GateDeps): PageTextGate {
   const { ch, clock, state, counters } = deps;
   const approvals = new Map<number, Approval>();
   const contentTabs = new Set<number>();
+  /** The tab's canonical page URL, if its origin is granted. */
+  const tabPage = (t: { url?: string | undefined } | undefined | null): string | null =>
+    grantedPage(state, t?.url) ? canonicalPageUrl(t?.url) : null;
 
   function sendToTab(tabId: number, msg: BackgroundToContent): void {
     Promise.resolve()
@@ -92,9 +93,9 @@ export function createPageTextGate(deps: GateDeps): PageTextGate {
   }
 
   async function refreshActive(): Promise<void> {
-    if (corePaused(state) || !state.port || !githubGranted(state) || !policyAllowsCapture(state)) return;
+    if (corePaused(state) || !state.port || !anyGranted(state) || !policyAllowsCapture(state)) return;
     const t = await activeTab(ch).catch(() => null);
-    if (!t || t.incognito || t.id === undefined || !tabRoute(t)) return;
+    if (!t || t.incognito || t.id === undefined || !tabPage(t)) return;
     sendToTab(t.id, { type: "refresh" });
   }
 
@@ -116,13 +117,13 @@ export function createPageTextGate(deps: GateDeps): PageTextGate {
       sender.tab.incognito !== true &&
       typeof sender.documentId === "string" &&
       typeof sender.url === "string" &&
-      githubOrigin(sender.url) &&
-      (sender.origin === undefined || sender.origin === "https://github.com") &&
+      grantedPage(state, sender.url) &&
+      (sender.origin === undefined || sender.origin === originOf(sender.url)) &&
       (sender.documentLifecycle === undefined || sender.documentLifecycle === "active")
     );
   }
 
-  const captureAllowed = (): boolean => githubGranted(state);
+  const captureAllowed = (): boolean => anyGranted(state);
 
   /** The browser's record of `tabId` if it is the active tab of the focused, non-incognito window. */
   async function foregroundTab(tabId: number): Promise<Tab | null> {
@@ -140,9 +141,9 @@ export function createPageTextGate(deps: GateDeps): PageTextGate {
 
   async function onApprove(msg: ApproveRequest, sender: Sender): Promise<ApproveResponse> {
     if (!senderOk(sender)) return deny("sender");
-    const route = tabRoute(sender.tab);
-    const asked = typeof msg.url === "string" ? parseIssueRoute(msg.url) : null;
-    if (!route || !asked || route.key !== asked.key || !Number.isSafeInteger(msg.navCounter)) return deny("route");
+    const page = tabPage(sender.tab);
+    const asked = canonicalPageUrl(msg.url);
+    if (!page || !asked || page !== asked || !Number.isSafeInteger(msg.navCounter)) return deny("route");
     if (corePaused(state)) return deny("paused");
     if (!state.port) {
       deps.trigger();
@@ -150,43 +151,42 @@ export function createPageTextGate(deps: GateDeps): PageTextGate {
     }
     if (!policyAllowsCapture(state)) return deny("policy");
     const epoch = state.cancelEpoch;
-    if (!captureAllowed()) return deny("permission");
+    if (!grantedPage(state, page)) return deny("permission");
     const fg = await foregroundTab(sender.tab.id).catch(() => null);
     if (!fg) return deny("not-foreground");
-    if (tabRoute(fg)?.key !== route.key) return deny("route");
+    if (tabPage(fg) !== page) return deny("route");
     if (epoch !== state.cancelEpoch || corePaused(state) || !policyAllowsCapture(state)) return deny("cancelled");
     if (!state.port) {
       deps.trigger();
       return deny("bridge-disconnected");
     }
-    approvals.set(sender.tab.id, { documentId: sender.documentId, navCounter: msg.navCounter, routeKey: route.key, at: clock.now() });
+    approvals.set(sender.tab.id, { documentId: sender.documentId, navCounter: msg.navCounter, page, at: clock.now() });
     return { approved: true };
   }
 
   function validText(msg: PageTextMessage): boolean {
-    return typeof msg.title === "string" && msg.title.length > 0 && typeof msg.text === "string" && typeof msg.truncated === "boolean";
+    return typeof msg.title === "string" && typeof msg.text === "string" && typeof msg.truncated === "boolean";
   }
 
-  /** Why a page_text message is dropped, or the route and sender it may be forwarded under. */
-  async function checkPageText(msg: PageTextMessage, sender: Sender): Promise<{ reason: string } | { route: IssueRoute; sender: ContentSender; url: string }> {
+  /** Why a page_text message is dropped, or the sender and page URL it may be forwarded under. */
+  async function checkPageText(msg: PageTextMessage, sender: Sender): Promise<{ reason: string } | { sender: ContentSender; url: string }> {
     if (!senderOk(sender)) return { reason: "sender" };
     const a = approvals.get(sender.tab.id);
     if (!a) return { reason: "no-approval" };
     approvals.delete(sender.tab.id); // single use
     if (clock.now() - a.at > APPROVAL_TTL_MS) return { reason: "expired" };
     if (a.documentId !== sender.documentId) return { reason: "document-changed" };
-    const msgRoute = typeof msg.url === "string" ? parseIssueRoute(msg.url) : null;
-    if (!msgRoute || a.navCounter !== msg.navCounter || a.routeKey !== msgRoute.key) return { reason: "stale" };
-    if (tabRoute(sender.tab)?.key !== msgRoute.key) return { reason: "url-changed" };
+    const msgPage = canonicalPageUrl(msg.url);
+    if (!msgPage || a.navCounter !== msg.navCounter || a.page !== msgPage) return { reason: "stale" };
+    if (canonicalPageUrl(sender.tab.url) !== msgPage) return { reason: "url-changed" };
     if (corePaused(state)) return { reason: "paused" };
     if (!policyAllowsCapture(state)) return { reason: "policy" };
-    if (!captureAllowed()) return { reason: "permission" };
+    if (!grantedPage(state, msgPage)) return { reason: "permission" };
     const fg = await foregroundTab(sender.tab.id).catch(() => null);
     if (!fg) return { reason: "not-foreground" };
-    const current = tabRoute(fg);
-    if (!current || current.key !== msgRoute.key) return { reason: "url-changed" };
-    // The page's own URL, fragment dropped: the core compares it with the focused tab's.
-    return { route: current, sender, url: fg.url!.split("#")[0]! };
+    if (tabPage(fg) !== msgPage) return { reason: "url-changed" };
+    // The page's canonical URL: the core compares it with the focused tab's.
+    return { sender, url: msgPage };
   }
 
   async function onPageText(msg: PageTextMessage, sender: Sender): Promise<{ ok: boolean; reason?: string }> {
@@ -234,7 +234,7 @@ export function createPageTextGate(deps: GateDeps): PageTextGate {
     captureAllowed,
     onTabUpdated(tabId, url) {
       const a = approvals.get(tabId);
-      if (a && url !== undefined && parseIssueRoute(url)?.key !== a.routeKey) approvals.delete(tabId);
+      if (a && url !== undefined && canonicalPageUrl(url) !== a.page) approvals.delete(tabId);
     },
     onTabRemoved(tabId) {
       approvals.delete(tabId);

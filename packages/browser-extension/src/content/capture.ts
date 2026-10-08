@@ -1,20 +1,19 @@
 // The SPA-aware capture controller (pure; window, document, navigation and
-// clock injected). Ported from the Phase 0 spike.
+// clock injected).
 //
-// On every page it only watches the URL (Navigation API `currententrychange`
-// plus a 1 s URL check). Every URL change bumps `navCounter` and cancels
-// in-flight work. Only on an issue path, and only while the document is
-// visible, does it ask the background for approval (active tab of the focused
-// window, permission granted, not paused, bridge up). After approval it waits
-// until the title and body exist and are unchanged for 500 ms (capped at 5 s).
-// The result is sent only if `location.href` and `navCounter` still match the
-// values captured when the extraction started. On any other path it reads
-// nothing and sends nothing.
+// It watches the URL (Navigation API `currententrychange` plus a 1 s URL
+// check). Every URL change bumps `navCounter`, cancels in-flight work and
+// starts a job. A job waits for the document to be visible, then asks the
+// background for approval (active tab of the focused window, site granted, not
+// paused, bridge up). After approval it waits until the title and body exist
+// and are unchanged for 500 ms (capped at 5 s), then holds for 3 s with the
+// page visible: navigation, blur or hiding the page cancels it. It sends only
+// if `location.href` and `navCounter` still match the values captured when the
+// job started. The URL sent is `location.href` without its fragment.
 
 import type { ApproveResponse, PageTextMessage } from "../messages.js";
-import { parseIssueRoute } from "../route.js";
-import { LIMITS, type Limits } from "../selectors.js";
-import { type ExtractResult, extractIssue } from "./extract.js";
+import { LIMITS, type Limits } from "../limits.js";
+import { type ExtractResult, extractPage } from "./extract.js";
 
 export interface ContentClock {
   now(): number;
@@ -41,7 +40,7 @@ export interface CaptureEnv {
   alive?: () => boolean;
 }
 
-export type CapturePhase = "idle" | "waiting-visible" | "approving" | "denied" | "settling" | "failed" | "sent" | "cancelled";
+export type CapturePhase = "idle" | "waiting-visible" | "approving" | "denied" | "settling" | "dwelling" | "failed" | "sent" | "cancelled";
 
 export interface CaptureController {
   readonly state: { phase: CapturePhase; lastReason: string | null; extractions: number; sent: number };
@@ -86,13 +85,13 @@ export function createCaptureController(env: CaptureEnv): CaptureController {
     listeners.push(() => target.removeEventListener(type, fn));
   };
   const sleep = (ms: number) => new Promise<void>((r) => void clock.setTimeout(r, ms));
+  const pageUrl = (href: string) => href.split("#")[0]!;
 
   async function runJob(): Promise<void> {
     const myNav = navCounter;
     const myJob = ++job;
     const myHref = win.location.href;
-    const route = parseIssueRoute(myHref);
-    if (!route || stopped) return;
+    if (stopped) return;
     if (doc.visibilityState !== "visible") {
       state.phase = "waiting-visible";
       return;
@@ -102,7 +101,7 @@ export function createCaptureController(env: CaptureEnv): CaptureController {
     state.phase = "approving";
     let appr: ApproveResponse | null;
     try {
-      appr = await env.requestApproval({ navCounter: myNav, url: myHref });
+      appr = await env.requestApproval({ navCounter: myNav, url: pageUrl(myHref) });
     } catch {
       appr = null;
     }
@@ -129,7 +128,7 @@ export function createCaptureController(env: CaptureEnv): CaptureController {
         const t = clock.now();
         if (dirty || lastSig === null || !mo) {
           dirty = false;
-          const r = extractIssue(doc, route, limits);
+          const r = extractPage(doc, limits);
           if (r.ok) {
             const sig = `${r.title}\u0000${r.body}\u0000${r.bodyTruncated}`;
             if (sig !== lastSig) {
@@ -160,13 +159,20 @@ export function createCaptureController(env: CaptureEnv): CaptureController {
       state.lastReason = lastReason;
       return;
     }
+    // The dwell: the page stays visible, focused and on this URL for dwellMs.
+    state.phase = "dwelling";
+    const dwellEnd = clock.now() + limits.dwellMs;
+    while (clock.now() < dwellEnd) {
+      await sleep(Math.min(limits.tickMs, dwellEnd - clock.now()));
+      if (!alive()) return;
+    }
     capturedNav = myNav;
     state.phase = "sent";
     state.sent++;
     const msg: PageTextMessage = {
       type: "page_text",
       navCounter: myNav,
-      url: myHref,
+      url: pageUrl(myHref),
       title: result.title,
       text: result.body,
       truncated: result.bodyTruncated,
@@ -179,8 +185,7 @@ export function createCaptureController(env: CaptureEnv): CaptureController {
     navCounter++;
     job++; // cancel in-flight work for the previous URL
     href = win.location.href;
-    if (parseIssueRoute(href)) void runJob();
-    else state.phase = "idle";
+    void runJob();
   }
 
   function checkUrl(): void {
@@ -190,11 +195,11 @@ export function createCaptureController(env: CaptureEnv): CaptureController {
 
   function cancel(): void {
     job++;
-    if (state.phase === "approving" || state.phase === "settling") state.phase = "cancelled";
+    if (state.phase === "approving" || state.phase === "settling" || state.phase === "dwelling") state.phase = "cancelled";
   }
 
   function retryIfNeeded(): void {
-    if (capturedNav !== navCounter && parseIssueRoute(win.location.href)) void runJob();
+    if (capturedNav !== navCounter) void runJob();
   }
 
   function onFocus(): void {
@@ -207,7 +212,7 @@ export function createCaptureController(env: CaptureEnv): CaptureController {
     if (stopped) return;
     if (doc.visibilityState !== "visible") {
       job++; // never keep reading a hidden page
-      if (state.phase === "approving" || state.phase === "settling") state.phase = "waiting-visible";
+      if (state.phase === "approving" || state.phase === "settling" || state.phase === "dwelling") state.phase = "waiting-visible";
       return;
     }
     checkUrl();
@@ -233,14 +238,14 @@ export function createCaptureController(env: CaptureEnv): CaptureController {
         if (env.alive && !env.alive()) ctl.stop();
         else checkUrl();
       }, limits.pollMs);
-      if (parseIssueRoute(href)) void runJob();
+      void runJob();
     },
     refresh() {
       if (stopped) return;
       const before = navCounter;
       checkUrl();
       if (navCounter !== before) return; // the navigation already started a job
-      if (parseIssueRoute(win.location.href)) void runJob();
+      void runJob();
     },
     checkUrl,
     cancel,
