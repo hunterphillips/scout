@@ -43,7 +43,6 @@ const status = (over = {}) => ({
   link: "connected",
   paused: false,
   granted: ["https://docs.stripe.com/*", "https://github.com/*"],
-  githubCapture: true,
   broadGrantIgnored: false,
   policy: { revision: 2, captureEnabled: true, paused: false },
   counters: { focus: 14, forwarded: 3, dropped: 0, acked: 17, denied: 0 },

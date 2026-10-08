@@ -6,7 +6,7 @@
 // - focus-observer.ts: debounced focus observations;
 // - page-text-gate.ts: the approval gate for GitHub issue text.
 // It also owns the host-permission lifecycle (the GitHub content script's
-// registration), the persisted GitHub-capture toggle, the permissions snapshot, the core's capture policy, and the side panel
+// registration), the permissions snapshot, the core's capture policy, and the side panel
 // (panel-bridge.ts: the panel's port, the window frames' cache, the badge; the
 // toolbar click opens the panel, there is no popup).
 //
@@ -14,16 +14,18 @@
 // Pause/Resume sends the core's pause/resume, and the Mac menu or window pausing
 // the core stops the extension too. While the core is paused nothing is posted;
 // when it resumes, the permissions snapshot (holding back any grant change made
-// meanwhile) and a focus follow. The extension's old stored `paused` key is
-// removed on load and never read.
+// meanwhile) and a focus follow. The extension's old stored `paused` and
+// `githubCapture` keys are removed on load and never read.
+//
+// GitHub issue text is captured exactly while github.com is granted: there is
+// no separate switch.
 //
 // Handshake: on each port nothing is posted until the core's first
 // capture_policy arrives (the native host delivers it before `ready`). That
 // policy is answered with a full permissions snapshot (every exact origin
-// Chrome granted, the GitHub-capture toggle, a fresh revision) and then a
-// focus observation. A grant change or toggle change sends a new snapshot and
-// focus the same way. The GitHub content script is registered only while
-// both the exact GitHub grant and the toggle are on.
+// Chrome granted, a fresh revision) and then a focus observation. A grant
+// change sends a new snapshot and focus the same way. The GitHub content
+// script is registered only while the exact GitHub grant is on.
 //
 // "Granted" means an exact https origin in the last successful
 // permissions.getAll. A broad grant (https://*/* from Chrome's site-access
@@ -39,7 +41,7 @@ import type { CurrentSite } from "./panel/sites.js";
 import { type Approval, createPageTextGate } from "./page-text-gate.js";
 import { createPortLink } from "./port.js";
 import type { Clock, ReconnectPolicy } from "./reconnect.js";
-import { activeTab, corePaused, createSharedState, defaultClock, githubCaptureOn, githubGranted, newCounters, policyAllowsCapture, post } from "./shared-state.js";
+import { activeTab, corePaused, createSharedState, defaultClock, githubGranted, newCounters, policyAllowsCapture, post } from "./shared-state.js";
 
 export { FOCUS_DEBOUNCE_MS, GITHUB_PATTERN, HOST_NAME };
 
@@ -97,24 +99,18 @@ export function createBackground(ch: typeof chrome, deps: BackgroundDeps = {}): 
   let loaded: Promise<void> | null = null;
   let chain: Promise<boolean> = Promise.resolve(false);
 
-  /** Load persisted state once; every content message waits for it. Fails closed (capture off). */
+  /**
+   * Once per worker: drop the keys older extensions stored. `paused` (the core is the one
+   * source of pause) and `githubCapture` (the github.com grant alone governs capture now).
+   * Every content message waits for it.
+   */
   function loadState(): Promise<void> {
     loaded ??= Promise.resolve()
-      .then(() => ch.storage.local.get({ githubCapture: false }))
+      .then(() => ch.storage.local.remove?.(["paused", "githubCapture"]))
       .then(
-        (stored) => {
-          state.githubCapture = stored?.["githubCapture"] === true;
-        },
-        () => {
-          state.githubCapture = false;
-        },
-      )
-      .then(() => {
-        // Drop the paused flag older extensions stored; the core is the one source of pause.
-        void Promise.resolve()
-          .then(() => ch.storage.local.remove?.("paused"))
-          .catch(() => {});
-      });
+        () => {},
+        () => {},
+      );
     return loaded;
   }
 
@@ -177,8 +173,7 @@ export function createBackground(ch: typeof chrome, deps: BackgroundDeps = {}): 
   // ---------- permissions ----------
   /**
    * Refresh the granted list and (un)register the GitHub content script.
-   * Losing the GitHub grant also turns the capture toggle off, so a later
-   * grant alone never re-enables capture. Resolves to "GitHub capture allowed".
+   * Resolves to "GitHub capture allowed" (the exact GitHub grant).
    * Any failure means no sites: the list is emptied (so capture is effectively
    * off) and the content script is unregistered.
    */
@@ -189,8 +184,7 @@ export function createBackground(ch: typeof chrome, deps: BackgroundDeps = {}): 
         const all = (await ch.permissions.getAll()).origins ?? [];
         state.granted = all.filter(isExactOriginPattern);
         state.broadGrantIgnored = all.length > state.granted.length;
-        if (!githubGranted(state) && state.githubCapture) await setGithubCapture(false);
-        const capture = githubCaptureOn(state);
+        const capture = githubGranted(state);
         const regs = await ch.scripting.getRegisteredContentScripts({ ids: [CONTENT_SCRIPT_ID] });
         if (capture && regs.length === 0) await ch.scripting.registerContentScripts([{ ...CONTENT_SCRIPT }]);
         if (!capture) {
@@ -206,27 +200,6 @@ export function createBackground(ch: typeof chrome, deps: BackgroundDeps = {}): 
         return false;
       });
     return chain;
-  }
-
-  /**
-   * Turning on persists first and changes memory only once storage has it (a
-   * failed write leaves capture off and throws). Turning off (by the user, or
-   * by reconcile when the GitHub grant is lost) takes effect in memory at once
-   * and never throws; the write is best effort. Limitation: if that write
-   * fails, a later worker restart reloads `true` from storage. Acceptable:
-   * storage is already failing, and a failed read starts paused.
-   */
-  async function setGithubCapture(next: boolean): Promise<void> {
-    if (!next) {
-      state.githubCapture = false;
-      gate.cancelTabs({ stop: true });
-      await Promise.resolve()
-        .then(() => ch.storage.local.set({ githubCapture: false }))
-        .catch(() => {});
-      return;
-    }
-    await ch.storage.local.set({ githubCapture: true });
-    state.githubCapture = true;
   }
 
   /**
@@ -248,24 +221,10 @@ export function createBackground(ch: typeof chrome, deps: BackgroundDeps = {}): 
       link: link.linkState(),
       paused: corePaused(state),
       granted: [...state.granted],
-      githubCapture: githubCaptureOn(state),
       broadGrantIgnored: state.broadGrantIgnored,
       policy: state.policy ? { ...state.policy } : null,
       counters: { ...counters },
     };
-  }
-
-  /** The side panel's checkbox (a user gesture). Turning it on needs the GitHub grant. */
-  async function onGithubToggle(enabled: boolean): Promise<void> {
-    if (enabled && !githubGranted(state)) return;
-    if (enabled === state.githubCapture) return;
-    await setGithubCapture(enabled);
-    const capture = await reconcile();
-    sendSnapshot();
-    if (capture) {
-      await injectIntoOpenGithubTabs();
-      void gate.refreshActive();
-    }
   }
 
   /**
@@ -304,10 +263,6 @@ export function createBackground(ch: typeof chrome, deps: BackgroundDeps = {}): 
         return onPause(req.paused === true);
       case "reconnect":
         link.manualReconnect();
-        panel.pushStatus();
-        return snapshot();
-      case "github-capture":
-        await onGithubToggle(req.enabled === true);
         panel.pushStatus();
         return snapshot();
       case "site":

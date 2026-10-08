@@ -67,7 +67,6 @@ export interface PanelHandlers {
   /** Settings' agent choice: run background jobs through adapter `id`. */
   agent(id: string): void;
   pause(): void;
-  githubCapture(enabled: boolean): void;
   reconnect(): void;
   refresh(): void;
   retry(commandId: string): void;
@@ -92,9 +91,14 @@ export function hostLabel(pattern: string): string {
   return pattern.replace(/^https:\/\//, "").replace(/\/\*$/, "");
 }
 
+const GITHUB_PATTERN = "https://github.com/*";
+
+/** GitHub issue text is captured exactly while github.com is allowed. */
+const githubAllowed = (s: StatusSnapshot): boolean => s.granted.includes(GITHUB_PATTERN);
+
 /** What happens to GitHub issue text right now. */
 export function captureText(s: StatusSnapshot): string {
-  if (!s.githubCapture) return "off";
+  if (!githubAllowed(s)) return "off";
   if (s.policy === null) return "waiting for Scout";
   if (s.policy.paused) return "paused by Scout";
   return s.policy.captureEnabled ? "on" : "waiting for Scout";
@@ -433,10 +437,10 @@ function destinationSwitch(doc: Document, v: ViewState, on: PanelHandlers, origi
   return toggle(doc, `destination-${origin}`, label, enabled, m.canToggleDestination(origin) && (granted || enabled), (x) => on.destination(origin, x), note, "switch-label site-switch");
 }
 
-/** The agent-context chip: only while the agent may read browser context and GitHub issue text has reached Scout. */
+/** The agent-context chip: only while the agent may read browser context, github.com is allowed and issue text has reached Scout. */
 function contextChip(doc: Document, v: ViewState): HTMLElement | null {
   const s = v.status;
-  if (v.model.capabilities.agentBrowserContext !== true || !s?.githubCapture || s.counters.forwarded === 0) return null;
+  if (v.model.capabilities.agentBrowserContext !== true || !s || !githubAllowed(s) || s.counters.forwarded === 0) return null;
   return el(doc, "p", { class: "chip" }, icon(doc, 14, ICONS.github), el(doc, "span", { text: "Using your recent GitHub activity" }));
 }
 
@@ -602,7 +606,6 @@ function agentCard(doc: Document, v: ViewState, on: PanelHandlers): HTMLElement 
 function settingsView(doc: Document, v: ViewState, on: PanelHandlers): HTMLElement[] {
   const m = v.model;
   const c = m.pauseState.control;
-  const gh = v.status?.granted.includes("https://github.com/*") === true;
   const grant = m.capabilities.agentBrowserContext;
   const grec = m.grantRecord;
   const out = [
@@ -610,7 +613,6 @@ function settingsView(doc: Document, v: ViewState, on: PanelHandlers): HTMLEleme
       doc,
       "div",
       { class: "card" },
-      toggle(doc, "github-capture", "GitHub issue text", v.status?.githubCapture === true, gh, (x) => on.githubCapture(x), gh ? "Scout reads the text of GitHub issues you open." : "Allow github.com in Sites first."),
       toggle(
         doc,
         "agent-context",

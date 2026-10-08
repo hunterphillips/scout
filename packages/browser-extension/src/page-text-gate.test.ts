@@ -130,21 +130,7 @@ describe("page_text gate (through the background)", () => {
   });
 });
 
-describe("page_text gate: capture toggle and core policy", () => {
-  it("denies with 'permission' when GitHub is granted but the capture toggle is off", async () => {
-    const { f, bg } = await setup({ granted: [GITHUB_PATTERN] });
-    expect(bg.snapshot().githubCapture).toBe(false);
-    expect(await approve(bg, f)).toEqual({ approved: false, reason: "permission" });
-  });
-
-  it("drops text approved before the toggle went off", async () => {
-    const { f, bg } = await setup();
-    expect((await approve(bg, f)).approved).toBe(true);
-    await bg.panelRequest({ type: "github-capture", enabled: false });
-    expect(await pageText(bg, f)).toMatchObject({ ok: false });
-    expect(observations(f, "page_text")).toEqual([]);
-  });
-
+describe("page_text gate: core policy", () => {
   it("drops text when the core's policy stops capture between approval and send", async () => {
     const { f, bg } = await setup();
     expect((await approve(bg, f)).approved).toBe(true);
@@ -162,7 +148,6 @@ describe("page_text gate (standalone, shared state only)", () => {
     const posted: unknown[] = [];
     state.port = { postMessage: (m: unknown) => void posted.push(m) } as unknown as chrome.runtime.Port;
     state.policy = { revision: 2, captureEnabled: true, paused: false };
-    state.githubCapture = true;
     state.granted = [GITHUB_PATTERN];
     const tab = { id: 10, windowId: 1, active: true, incognito: false, url: ISSUE1 };
     const ch = {

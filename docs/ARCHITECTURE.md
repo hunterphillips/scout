@@ -17,7 +17,7 @@ Scout core -> fresh agent job -> validated result -> side panel
 
 **Chrome extension** (`packages/browser-extension`). The MV3 extension has two parts. Its
 background worker is the sensor: it reports the focused tab's origin, Chrome's per-site
-permissions, and (on github.com, when switched on) issue text. Its side panel is Scout's
+permissions, and (on github.com, while it is allowed) issue text. Its side panel is Scout's
 only user interface, with four destinations: Page, Sites, Activity, Settings. The panel
 renders frames from the core and sends commands back. It holds no state of its own beyond
 a repaint cache.

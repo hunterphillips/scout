@@ -14,8 +14,6 @@ export interface SharedState {
   port: chrome.runtime.Port | null;
   /** Last observation seq used. Seeded from the clock so a worker restart never goes backwards. */
   seq: number;
-  /** The GitHub-capture toggle (persisted in chrome.storage.local; false when storage fails). */
-  githubCapture: boolean;
   /**
    * The latest core capture_policy on the current port; null from connect (and
    * after port loss) until the core sends one. Nothing is posted while null.
@@ -44,7 +42,6 @@ export function createSharedState(clock: Clock): SharedState {
     browserFocused: true,
     port: null,
     seq: seed,
-    githubCapture: false,
     policy: null,
     permissionsRevision: seed,
     sentGranted: new Set(),
@@ -53,11 +50,8 @@ export function createSharedState(clock: Clock): SharedState {
   };
 }
 
-/** Chrome's exact GitHub grant is in the last reconciled list. */
+/** Chrome's exact GitHub grant is in the last reconciled list: GitHub issue text is captured only then. */
 export const githubGranted = (state: SharedState): boolean => state.granted.includes(GITHUB_PATTERN);
-
-/** GitHub capture is effectively on: the user's toggle and the exact GitHub grant. */
-export const githubCaptureOn = (state: SharedState): boolean => state.githubCapture && githubGranted(state);
 
 /**
  * Scout is paused: the core's latest capture_policy says so. The core is the one source of

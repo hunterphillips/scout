@@ -428,10 +428,9 @@ describe("panel requests", () => {
     expect(await p.request({ type: "site", windowId: 1 })).toMatchObject({ kind: "refused", reason: "internal" });
   });
 
-  it("GitHub capture and Reconnect answer with the status", async () => {
+  it("Reconnect answers with the status", async () => {
     const { f } = await setup({ granted: ["https://github.com/*"] });
     const p = await openPanel(f);
-    expect(await p.request({ type: "github-capture", enabled: true })).toMatchObject({ githubCapture: true });
     expect(await p.request({ type: "reconnect" })).toMatchObject({ link: expect.any(String) });
     expect(await p.request({ type: "status" })).toMatchObject({ granted: ["https://github.com/*"] });
   });

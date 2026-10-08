@@ -19,7 +19,7 @@ describe("manifest-level wiring", () => {
   });
 
   it("posts nothing until the core's policy, then a permissions snapshot, then a focus stamped with its revision", async () => {
-    const { f, clock, bg } = await setup({ granted: [GITHUB_PATTERN, STRIPE], host: "silent", local: { githubCapture: true }, autoEnable: false });
+    const { f, clock, bg } = await setup({ granted: [GITHUB_PATTERN, STRIPE], host: "silent", autoEnable: false });
     f.tabs.onActivated.emit({ tabId: 10, windowId: 1 } as never);
     await clock.advance(1000);
     expect(lastPort(f).posted).toEqual([]);
@@ -71,43 +71,34 @@ describe("manifest-level wiring", () => {
     expect(observations(f, "focus").at(-1)).toMatchObject({ tabId: 12, url: "https://example.com/", title: "Example" });
   });
 
-  it("registers the GitHub content script only with both the GitHub grant and the capture toggle", async () => {
+  it("the GitHub grant alone registers the content script; losing it unregisters, re-granting registers again", async () => {
     const { f, clock, bg } = await setup({ granted: [] });
+    expect(f._.registered).toEqual([]);
     f._.state.granted = [GITHUB_PATTERN];
     await Promise.all(f.permissions.onAdded.emit({ origins: [GITHUB_PATTERN] } as never));
-    expect(f._.registered).toEqual([]); // a grant alone does not turn capture on
-    expect(observations(f, "permissions").at(-1)).toMatchObject({ granted: [GITHUB_PATTERN] });
-
-    const s = (await bg.panelRequest({ type: "github-capture", enabled: true })) as StatusSnapshot;
-    expect(s.githubCapture).toBe(true);
-    expect(f._.store["githubCapture"]).toBe(true);
     expect(f._.registered).toEqual([
       expect.objectContaining({ id: CONTENT_SCRIPT_ID, matches: ["https://github.com/*"], js: ["content/github-issue.js"], runAt: "document_idle", allFrames: false }),
     ]);
     await clock.advance(0);
-    expect(observations(f, "permissions").at(-1)).not.toHaveProperty("githubCapture");
+    expect(observations(f, "permissions").at(-1)).toEqual({ kind: "permissions", revision: expect.any(Number), at: expect.any(Number), granted: [GITHUB_PATTERN] });
+    expect((await approve(bg, f)).approved).toBe(true);
 
-    await bg.panelRequest({ type: "github-capture", enabled: false });
+    f._.state.granted = [];
+    await Promise.all(f.permissions.onRemoved.emit({ origins: [GITHUB_PATTERN] } as never));
+    await clock.advance(0);
     expect(f._.registered).toEqual([]);
-    expect(observations(f, "permissions").at(-1)).not.toHaveProperty("githubCapture");
+    expect((await approve(bg, f)).approved).toBe(false);
+    f._.state.granted = [GITHUB_PATTERN];
+    await Promise.all(f.permissions.onAdded.emit({ origins: [GITHUB_PATTERN] } as never));
+    expect(f._.registered).toHaveLength(1);
   });
 
-  it("the toggle cannot turn on without the GitHub grant, or from a content script; losing the grant turns it off", async () => {
-    const { bg } = await setup({ granted: [STRIPE] });
-    expect(((await bg.panelRequest({ type: "github-capture", enabled: true })) as StatusSnapshot).githubCapture).toBe(false);
-
-    const g = await setup();
-    expect(await g.bg.handleMessage({ type: "github-capture", enabled: false }, sender(g.f))).toEqual({ ok: false });
-    expect(g.bg.snapshot().githubCapture).toBe(true);
-    g.f._.state.granted = [];
-    await Promise.all(g.f.permissions.onRemoved.emit({ origins: [GITHUB_PATTERN] } as never));
-    await g.clock.advance(0);
-    expect(g.bg.snapshot().githubCapture).toBe(false);
-    expect(g.f._.store["githubCapture"]).toBe(false);
-    expect(g.f._.registered).toEqual([]);
-    g.f._.state.granted = [GITHUB_PATTERN];
-    await Promise.all(g.f.permissions.onAdded.emit({ origins: [GITHUB_PATTERN] } as never));
-    expect(g.f._.registered).toEqual([]); // re-granting alone does not bring capture back
+  it("the panel has no GitHub switch: the old request is ignored, and a content script cannot send it", async () => {
+    const { f, bg } = await setup();
+    expect(await bg.panelRequest({ type: "github-capture", enabled: false } as never)).toBeNull();
+    expect(await bg.handleMessage({ type: "github-capture", enabled: false }, sender(f))).toEqual({ ok: false });
+    expect(f._.registered).toHaveLength(1);
+    expect(bg.snapshot()).not.toHaveProperty("githubCapture");
   });
 
   it("injects into open GitHub tabs on the grant and on install, never on a plain worker wake", async () => {
@@ -132,19 +123,16 @@ describe("manifest-level wiring", () => {
 });
 
 describe("granted list: the one source of truth", () => {
-  it("https://*/* alone is no GitHub grant: approval denied with 'permission', no content script, githubCapture false everywhere", async () => {
-    const { f, bg } = await setup({ granted: ["https://*/*"], local: { githubCapture: true } });
+  it("https://*/* alone is no GitHub grant: approval denied with 'permission', no content script", async () => {
+    const { f, bg } = await setup({ granted: ["https://*/*"] });
     expect(await f.permissions.contains({ origins: [GITHUB_PATTERN] })).toBe(true); // what Chrome itself would answer
     expect(await approve(bg, f)).toEqual({ approved: false, reason: "permission" });
     expect(f._.registered).toEqual([]);
     expect(observations(f, "permissions").at(-1)).toMatchObject({ granted: [] });
     const s = bg.snapshot();
-    expect(s).toMatchObject({ granted: [], githubCapture: false, broadGrantIgnored: true });
-    expect(f._.store["githubCapture"]).toBe(false); // toggle forced off
+    expect(s).toMatchObject({ granted: [], broadGrantIgnored: true });
     expect(statusRows(s)).toContainEqual(["Site access", BROAD_GRANT_TEXT]);
-    const after = (await bg.panelRequest({ type: "github-capture", enabled: true })) as StatusSnapshot;
-    expect(after.githubCapture).toBe(false);
-    expect(f._.registered).toEqual([]);
+    expect(statusRows(s)).toContainEqual(["Issue text", "off"]);
   });
 
   it("losing the exact GitHub grant to a broad one unregisters the script; no all-sites row without a broad grant", async () => {
@@ -155,12 +143,12 @@ describe("granted list: the one source of truth", () => {
     await Promise.all(f.permissions.onRemoved.emit({ origins: [GITHUB_PATTERN] } as never));
     await clock.advance(0);
     expect(f._.registered).toEqual([]);
-    expect(bg.snapshot()).toMatchObject({ granted: [], githubCapture: false, broadGrantIgnored: true });
+    expect(bg.snapshot()).toMatchObject({ granted: [], broadGrantIgnored: true });
     expect(observations(f, "permissions").at(-1)).toMatchObject({ granted: [] });
   });
 
   it("a snapshot sent while a revoke's getAll is pending omits the revoked origin, and so does the focus after it", async () => {
-    const { f, clock } = await setup({ granted: [GITHUB_PATTERN, EXAMPLE], local: { githubCapture: true } });
+    const { f, clock } = await setup({ granted: [GITHUB_PATTERN, EXAMPLE] });
     activate(f, 12);
     dropPort(f);
     f._.state.host = "silent";
@@ -192,7 +180,7 @@ describe("granted list: the one source of truth", () => {
   });
 
   it("a failed getAll means no sites: empty snapshot, capture off, script unregistered", async () => {
-    const { f, clock, bg } = await setup({ granted: [GITHUB_PATTERN, STRIPE], local: { githubCapture: true } });
+    const { f, clock, bg } = await setup({ granted: [GITHUB_PATTERN, STRIPE] });
     expect(f._.registered).toHaveLength(1);
     f.permissions.getAll = async () => {
       throw new Error("permissions unavailable");
@@ -200,53 +188,15 @@ describe("granted list: the one source of truth", () => {
     await Promise.all(f.permissions.onAdded.emit({ origins: [STRIPE] } as never));
     await clock.advance(0);
     expect(observations(f, "permissions").at(-1)).toMatchObject({ granted: [] });
-    expect(bg.snapshot()).toMatchObject({ granted: [], githubCapture: false });
+    expect(bg.snapshot()).toMatchObject({ granted: [] });
     expect(f._.registered).toEqual([]);
-    expect(await approve(bg, f)).toEqual({ approved: false, reason: "permission" });
-  });
-
-  it("turning the toggle on persists first (a failed write leaves it off); turning it off takes effect even when the write fails", async () => {
-    const { f, bg } = await setup({ granted: [GITHUB_PATTERN] });
-    f._.state.storageSetFails = true;
-    await expect(bg.panelRequest({ type: "github-capture", enabled: true })).rejects.toThrow();
-    expect(bg.snapshot().githubCapture).toBe(false);
-    expect(f._.registered).toEqual([]);
-    expect(await approve(bg, f)).toEqual({ approved: false, reason: "permission" });
-    f._.state.storageSetFails = false;
-    await bg.panelRequest({ type: "github-capture", enabled: true });
-    expect(f._.store["githubCapture"]).toBe(true);
-    expect(bg.snapshot().githubCapture).toBe(true);
-    expect(f._.registered).toHaveLength(1);
-    f._.state.storageSetFails = true;
-    const s = (await bg.panelRequest({ type: "github-capture", enabled: false })) as StatusSnapshot;
-    expect(s.githubCapture).toBe(false);
-    expect(bg.snapshot().githubCapture).toBe(false);
-    expect(await approve(bg, f)).toEqual({ approved: false, reason: "permission" });
-    expect(f._.registered).toEqual([]);
-    expect(f._.store["githubCapture"]).toBe(true); // the known limitation: a restart would reload it
-  });
-
-  it("losing the GitHub grant switches capture off in memory even when the write fails; a later grant does not bring it back", async () => {
-    const { f, clock, bg } = await setup();
-    f._.state.storageSetFails = true;
-    f._.state.granted = [];
-    await Promise.all(f.permissions.onRemoved.emit({ origins: [GITHUB_PATTERN] } as never));
-    await clock.advance(0);
-    expect(bg.snapshot().githubCapture).toBe(false);
-    expect(f._.registered).toEqual([]);
-    f._.state.granted = [GITHUB_PATTERN];
-    await Promise.all(f.permissions.onAdded.emit({ origins: [GITHUB_PATTERN] } as never));
-    await clock.advance(0);
-    expect(bg.snapshot()).toMatchObject({ granted: [GITHUB_PATTERN], githubCapture: false });
-    expect(f._.registered).toEqual([]);
-    expect(observations(f, "permissions").at(-1)).toMatchObject({ granted: [GITHUB_PATTERN] });
     expect(await approve(bg, f)).toEqual({ approved: false, reason: "permission" });
   });
 });
 
 describe("capture policy", () => {
   it("a first policy that already enables: the snapshot goes first, then the active issue tab is asked to refresh", async () => {
-    const { f, clock, bg } = await setup({ granted: [GITHUB_PATTERN], host: "silent", local: { githubCapture: true }, autoEnable: false });
+    const { f, clock, bg } = await setup({ granted: [GITHUB_PATTERN], host: "silent", autoEnable: false });
     lastPort(f).onMessage.emit(ENABLED(1));
     await clock.advance(0);
     expect(kinds(lastPort(f).posted)).toEqual(["permissions", "focus"]);
@@ -255,7 +205,7 @@ describe("capture policy", () => {
   });
 
   it("denies approval with 'policy' until the core enables capture", async () => {
-    const { f, clock, bg } = await setup({ granted: [GITHUB_PATTERN], local: { githubCapture: true }, autoEnable: false });
+    const { f, clock, bg } = await setup({ granted: [GITHUB_PATTERN], autoEnable: false });
     expect(bg.snapshot().policy).toEqual({ revision: 1, captureEnabled: false, paused: false });
     expect(await approve(bg, f)).toEqual({ approved: false, reason: "policy" });
     expect(f._.tabMessages.filter((m) => (m.msg as { type: string }).type === "refresh")).toEqual([]);
@@ -390,7 +340,7 @@ describe("pause", () => {
   });
 
   it("a core that starts paused: nothing but the core's policy is waited on, and nothing is posted", async () => {
-    const { f, clock, bg } = await setup({ granted: [GITHUB_PATTERN], local: { githubCapture: true }, host: "silent", autoEnable: false });
+    const { f, clock, bg } = await setup({ granted: [GITHUB_PATTERN], host: "silent", autoEnable: false });
     lastPort(f).onMessage.emit({ type: "capture_policy", revision: 1, paused: true, captureEnabled: true });
     lastPort(f).onMessage.emit({ type: "ready" });
     await clock.advance(FOCUS_DEBOUNCE_MS);
@@ -403,11 +353,25 @@ describe("pause", () => {
   });
 
   it("drops the old stored paused flag on load and never reads it", async () => {
-    const { f, bg } = await setup({ granted: [GITHUB_PATTERN], local: { githubCapture: true, paused: true } });
+    const { f, bg } = await setup({ granted: [GITHUB_PATTERN], local: { paused: true } });
     await flush();
     expect(f._.store["paused"]).toBeUndefined();
     expect(bg.snapshot().paused).toBe(false);
     expect((await approve(bg, f)).approved).toBe(true);
+  });
+
+  it("drops the old stored GitHub switch on load and never reads it: the grant alone governs capture", async () => {
+    const off = await setup({ granted: [GITHUB_PATTERN], local: { githubCapture: false } });
+    await flush();
+    expect(off.f._.store).not.toHaveProperty("githubCapture");
+    expect(off.f._.registered).toHaveLength(1);
+    expect((await approve(off.bg, off.f)).approved).toBe(true);
+
+    const on = await setup({ granted: [STRIPE], local: { githubCapture: true } });
+    await flush();
+    expect(on.f._.store).not.toHaveProperty("githubCapture");
+    expect(on.f._.registered).toEqual([]);
+    expect((await approve(on.bg, on.f)).approved).toBe(false);
   });
 
   it("a pause with no core to reach sends nothing and changes nothing", async () => {

@@ -105,8 +105,9 @@ job for the page it opened, and when you return to a page within 15 minutes its 
 back without a new job. **Activity**
 lists problems first, then your agent's reads. **Settings** has Pause, the **Agent** row
 (every installed agent Scout finds, **Claude Code**, **Codex** or **Pi**; picking one applies at
-once, with no restart), issue text on github.com, the switch that lets your agent read the
-current site, and Diagnostics. With
+once, with no restart), the switch that lets your agent read the
+current site, and Diagnostics. Issue text on github.com is read while github.com is allowed
+in Sites. With
 the panel closed, the toolbar badge counts new links (blue) or files to review (amber), and
 the icon turns grey while Scout is paused. Pause works from the panel or the menu bar.
 Quitting the app makes the panel say the core is unavailable, and relaunching reconnects
