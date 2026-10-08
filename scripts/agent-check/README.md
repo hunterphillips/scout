@@ -35,6 +35,8 @@ arguments, the final output, usage, and whether Codex touched the user's `auth.j
 | `--codex <path>` | With `--adapter codex`: use this `codex` binary instead of the one on `PATH`. |
 | `--pi <path>` | With `--adapter pi`: use this `pi` binary instead of the one on `PATH`. |
 | `--pi-model <provider/id>` | With `--adapter pi`: pin the model. Without it the job uses the model your Pi would pick. |
+| `--candidates <file>` | baseline: the site's links, in place of the six synthetic ones. A Scout catalog cache file (`~/.scout/cache/catalog/<host>-<hash>.json`), its `catalog` object, or a plain JSON array of candidates (the site is then the first one's origin). Each candidate must match the contracts' `CandidateSchema` (`id`, `sourceUrl`, `title` up to 160 characters, optional `description`, `labelQuality`, `provenance`); 1 to 500 of them, ids unique. The fixture core serves them as the current site's links, at the site's root page. |
+| `--activity <file>` | baseline: the user's recent pages, in place of the synthetic tracker issue. A JSON array of 1 to 10 `{ "url", "title", "text" }` objects, newest first: an https `url`, `title` up to 300 characters, optional `text` up to 8 KiB. |
 | `--authorize-real-root` | hotload: the acceptance run. Adds one `scout-proof-<nonce>` MCP registration at user scope and one `scout-proof-<nonce>` skill directory in the real user skills root (`$CLAUDE_CONFIG_DIR/skills`, else `~/.claude/skills`), and removes both afterwards. |
 | `--preliminary` | hotload: put the skill in the throwaway cwd's `.claude/skills` and load the server with `--mcp-config`. Nothing installed changes; the result does not count for the gate. |
 | `--with-revocation` | hotload: after the skill works, revoke the resource, remove the skill, and ask for one more read. Needs one more request. |
@@ -69,6 +71,7 @@ same user config file. The report records whether the registry changed underneat
 | `... --case hotload --home <dir> --authorize-real-root --with-revocation --max-inference 3 --acknowledge-budget` | 3 |
 | `... --case hotload --home <dir> --authorize-real-root --two-session --max-inference 3 --acknowledge-budget` | 2, or 3 if turn 2 fails |
 | `... --case baseline --home <dir>` | 1 |
+| `... --case baseline --home <dir> --candidates <file> --activity <file>` | 1 |
 | `... --case selected-tool --home <dir>` | 1 |
 | `... --case cancel --home <dir>` | 1 |
 | `... --case baseline --home <dir> --adapter codex` (also `selected-tool`, `cancel`) | 1 |
@@ -152,7 +155,16 @@ credentials. The report's
 that event.
 
 **baseline.** One background job through the real job adapter, with Scout context only.
-Passes on `ok` with at least one pick and at least one Scout tool call.
+Passes on `ok` with at least one pick and at least one Scout tool call. With
+`--candidates` and `--activity` it runs on a real case instead: a site's catalog and the
+pages the user read. A file that does not fit the contracts is refused (exit 2) before
+anything runs, and `--dry-run` prints each file's path and count. For example:
+
+    npm run verify:agent -- --case baseline --adapter codex --home /tmp/scout-check \
+      --candidates ~/.scout/cache/catalog/stripe.com-1a2b3c.json --activity ./activity.json
+
+The report lists each pick's candidate title and URL next to its id and reason, so the
+picks can be judged against the case.
 
 **selected-tool.** The same job plus one selected synthetic tool: `fake-backend.mjs`
 behind the per-job bridge, with literal env only. Passes when the job called

@@ -5,11 +5,12 @@
 // What goes in: CLI version, effective argv, preflight verdict and reason codes, the env
 // filtering applied (forwarded key names, dropped key count), what the init event loaded
 // (Scout's servers and tools by name and status; everything else as counts), the model,
-// the outcome class, structured output (synthetic picks), timings, usage counts, cleanup
-// evidence, and each inference request made. What never goes in: tokens, env values, full
-// prompts, model text, the user's other skill/server/tool names, and absolute paths under $HOME (shown
-// as `~`). redactReport() enforces the last two on the finished object as well, and
-// writeReport() refuses to write if a secret survives.
+// the outcome class, structured output (the picks, each with its candidate's title and
+// URL), timings, usage counts, cleanup evidence, and each inference request made. What
+// never goes in: tokens, env values, full prompts, model text, the user's other
+// skill/server/tool names, and absolute paths under $HOME (shown as `~`). redactReport()
+// enforces the last two on the finished object as well, and writeReport() refuses to
+// write if a secret survives.
 
 import { chmodSync, mkdirSync, realpathSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -128,6 +129,7 @@ export function summaryLines(report, path) {
   if (Array.isArray(report.inferenceRequests)) lines.push(`  inference requests: ${report.inferenceRequests.length}`);
   if (report.mcpStatusAtInit) lines.push(`  proof MCP server at init: ${report.mcpStatusAtInit}${report.mcpToolsDeferred ? " (tools not listed in init; ToolSearch offered)" : ""}`);
   if (report.discovery) lines.push(`  turn 2 listing: ${report.discovery}`);
+  for (const i of report.result?.items ?? []) lines.push(`  pick ${i.id}: ${i.title ?? "(unknown id)"}${i.url ? ` <${i.url}>` : ""}`);
   if (Array.isArray(report.failures) && report.failures.length) lines.push(`  failures: ${report.failures.join(", ")}`);
   if (report.cleanup) lines.push(`  cleanup: ${report.cleanup.ok ? "complete" : "INCOMPLETE"}`);
   if (path) lines.push(`  report: ${path}`);

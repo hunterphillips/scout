@@ -1,9 +1,10 @@
 // The synthetic world for a compatibility check: a throwaway Scout home, a private temp
 // root, a fixture Scout core on a Unix socket, and the synthetic tools and job request.
-// Everything here is made up; no browsing, personal source or real site is involved.
+// Everything here is made up; no browsing, personal source or real site is involved, except
+// what the maintainer passes to the baseline case with --candidates and --activity.
 
 import { randomBytes } from "node:crypto";
-import { chmodSync, lstatSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import { REPO_ROOT } from "../lib/paths.mjs";
@@ -13,6 +14,7 @@ import { DEFAULT_CLAUDE_CODE_MODEL } from "../../packages/scout-core/dist/agents
 import { DEFAULT_CODEX_MODEL } from "../../packages/scout-core/dist/agents/codex/profile.js";
 import { DEFAULT_PI_THINKING } from "../../packages/scout-core/dist/agents/pi/profile.js";
 import { schemaHash } from "../../packages/scout-core/dist/agents/toolProfile.js";
+import { ActivityEntrySchema, CandidateSchema, JOB_MAX_CANDIDATES, RECENT_ACTIVITY_MAX_LIMIT } from "../../packages/contracts/dist/index.js";
 
 export const SCOUT_MCP_MAIN = join(REPO_ROOT, "packages", "scout-mcp", "dist", "main.js");
 /** The synthetic stdio backend (honest mode) used as the user's selected tool. */
@@ -108,15 +110,96 @@ export const JOB_CANDIDATES = Object.freeze([
   { id: "c6", title: "Press kit", labelQuality: "slug" },
 ]);
 
-/** The fixture core for a background job: a current site and recent activity that point at c1. */
-export async function startJobFixture(root) {
+function readJsonFile(file, flag) {
+  try {
+    return JSON.parse(readFileSync(file, "utf8"));
+  } catch {
+    throw new Error(`${flag} must name a readable JSON file`);
+  }
+}
+
+/** `schema.parse(value)`, or an Error naming the flag and the first problem's path. */
+function parseWith(schema, value, flag) {
+  const r = schema.safeParse(value);
+  if (r.success) return r.data;
+  const issue = r.error.issues[0];
+  const at = issue.path.map((p) => (typeof p === "number" ? `[${p}]` : `.${String(p)}`)).join("");
+  throw new Error(`${flag}: ${at ? `${at.replace(/^\./, "")}: ` : ""}${issue.message}`);
+}
+
+const httpsOrigin = (url) => {
+  try {
+    const u = new URL(url);
+    return u.protocol === "https:" ? u.origin : undefined;
+  } catch {
+    return undefined;
+  }
+};
+
+/**
+ * A real case for the baseline check, in place of the synthetic one.
+ *
+ * `candidatesFile`: a Scout catalog cache file (`~/.scout/cache/catalog/<host>-<hash>.json`),
+ * its `catalog` object (`{ origin, version, candidates }`), or a plain array of candidates (the
+ * site is the first one's origin). Candidates are checked against the contracts'
+ * CandidateSchema, 1-500 of them, ids unique. `activityFile`: a JSON array of 1-10 pages,
+ * `{ url, title, text? }`, newest first, checked against ActivityEntrySchema (title 300
+ * characters, text 8 KiB). Either may be omitted; the synthetic one is used then.
+ */
+export function loadCaseInputs({ candidatesFile, activityFile } = {}) {
+  const inputs = {};
+  if (candidatesFile) {
+    const raw = readJsonFile(candidatesFile, "--candidates");
+    const cat = Array.isArray(raw) ? { candidates: raw } : (raw?.catalog ?? raw);
+    const candidates = parseWith(CandidateSchema.array().min(1).max(JOB_MAX_CANDIDATES), cat?.candidates, "--candidates");
+    if (new Set(candidates.map((c) => c.id)).size !== candidates.length) throw new Error("--candidates: duplicate candidate id");
+    const origin = httpsOrigin(cat.origin ?? candidates[0].sourceUrl);
+    if (!origin) throw new Error("--candidates: the catalog has no https origin");
+    inputs.site = {
+      origin,
+      catalogVersion: typeof cat.version === "string" && cat.version && cat.version.length <= 128 ? cat.version : "case-catalog",
+      candidates: candidates.map((c) => ({ id: c.id, sourceUrl: c.sourceUrl, title: c.title, ...(c.description !== undefined ? { description: c.description } : {}), labelQuality: c.labelQuality })),
+    };
+  }
+  if (activityFile) {
+    const list = readJsonFile(activityFile, "--activity");
+    if (!Array.isArray(list)) throw new Error("--activity: must be a JSON array of { url, title, text } pages");
+    const now = Date.now();
+    const entries = list.map((a, i) => {
+      const origin = httpsOrigin(a?.url);
+      if (!origin) throw new Error(`--activity: [${i}].url: not an https URL`);
+      return {
+        origin,
+        url: a.url,
+        observedAt: now - (i + 1) * 60_000,
+        title: a.title,
+        ...(a.text !== undefined ? { text: a.text } : {}),
+        textTruncated: false,
+      };
+    });
+    inputs.activity = parseWith(ActivityEntrySchema.array().min(1).max(RECENT_ACTIVITY_MAX_LIMIT), entries, "--activity");
+  }
+  return inputs;
+}
+
+/**
+ * The fixture core for a background job: a current site and recent activity that point at c1,
+ * or, with `inputs` from loadCaseInputs, the case's site (its root page and its links) and pages.
+ */
+export async function startJobFixture(root, inputs = {}) {
   const token = newToken();
+  const site = inputs.site;
   const served = await serve(root, {
     coreInstanceId: "core-check",
     token,
     browserContextGranted: true,
-    currentSite: { origin: JOB_SITE, url: `${JOB_SITE}/billing`, title: "Billing documentation", visitEpoch: 7 },
-    activity: [
+    currentSite: site
+      ? { origin: site.origin, url: `${site.origin}/`, title: new URL(site.origin).host, visitEpoch: 7 }
+      : { origin: JOB_SITE, url: `${JOB_SITE}/billing`, title: "Billing documentation", visitEpoch: 7 },
+    ...(site
+      ? { siteLinks: { origin: site.origin, catalogVersion: site.catalogVersion, links: site.candidates.map((c) => ({ id: c.id, href: c.sourceUrl, title: c.title, ...(c.description ? { description: c.description } : {}) })) } }
+      : {}),
+    activity: inputs.activity ?? [
       {
         origin: "https://linear.app",
         url: "https://linear.app/example-org/issue/API-42/usage-based-billing",
@@ -131,25 +214,27 @@ export async function startJobFixture(root) {
     token,
     socketPath: served.socketPath,
     coreInstanceId: "core-check",
+    /** The fixture core's backend, so a test can ask it what the job would see. */
+    backend: served.backend,
     openConnections: () => served.socket.openConnections,
     close: () => served.socket.close(),
   };
 }
 
-/** A background job request over JOB_CANDIDATES for the given profile. */
-export function jobRequest({ requestId, coreInstanceId, profileFingerprint }) {
+/** A background job request over JOB_CANDIDATES, or the case's site, for the given profile. */
+export function jobRequest({ requestId, coreInstanceId, profileFingerprint, site }) {
   return {
     requestId,
     coreInstanceId,
     visitEpoch: 7,
-    origin: JOB_SITE,
+    origin: site?.origin ?? JOB_SITE,
     catalogHash: "check-catalog-1",
     browserSnapshot: { id: "snap-check", revision: 1 },
     approvalRevision: 0,
     grantRevision: 0,
     profileFingerprint,
     deadlineMs: 30_000,
-    candidates: JOB_CANDIDATES.map((c) => ({ ...c })),
+    candidates: site ? site.candidates.map(({ sourceUrl: _url, ...c }) => c) : JOB_CANDIDATES.map((c) => ({ ...c })),
     maxPicks: 3,
   };
 }
