@@ -1,6 +1,7 @@
 // The synthetic world for a compatibility check: a throwaway Scout home, a private temp
 // root, a fixture Scout core on a Unix socket, and the synthetic tools and job request.
-// Everything here is made up; no browsing, personal source or real site is involved.
+// Everything here is made up; no browsing, personal source or real site is involved, except
+// what the maintainer passes to the baseline case with --candidates and --activity.
 
 import { randomBytes } from "node:crypto";
 import { chmodSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
@@ -13,6 +14,7 @@ import { DEFAULT_CLAUDE_CODE_MODEL } from "../../packages/scout-core/dist/agents
 import { DEFAULT_CODEX_MODEL } from "../../packages/scout-core/dist/agents/codex/profile.js";
 import { DEFAULT_PI_THINKING } from "../../packages/scout-core/dist/agents/pi/profile.js";
 import { schemaHash } from "../../packages/scout-core/dist/agents/toolProfile.js";
+import { ActivityEntrySchema, CandidateSchema, JOB_MAX_CANDIDATES, RECENT_ACTIVITY_MAX_LIMIT } from "../../packages/contracts/dist/index.js";
 
 export const SCOUT_MCP_MAIN = join(REPO_ROOT, "packages", "scout-mcp", "dist", "main.js");
 /** The synthetic stdio backend (honest mode) used as the user's selected tool. */
@@ -108,10 +110,6 @@ export const JOB_CANDIDATES = Object.freeze([
   { id: "c6", title: "Press kit", labelQuality: "slug" },
 ]);
 
-const MAX_CASE_CANDIDATES = 500;
-const MAX_CASE_ACTIVITY = 10;
-const LABEL_QUALITIES = ["published", "image_title", "slug"];
-
 function readJsonFile(file, flag) {
   try {
     return JSON.parse(readFileSync(file, "utf8"));
@@ -120,50 +118,66 @@ function readJsonFile(file, flag) {
   }
 }
 
+/** `schema.parse(value)`, or an Error naming the flag and the first problem's path. */
+function parseWith(schema, value, flag) {
+  const r = schema.safeParse(value);
+  if (r.success) return r.data;
+  const issue = r.error.issues[0];
+  const at = issue.path.map((p) => (typeof p === "number" ? `[${p}]` : `.${String(p)}`)).join("");
+  throw new Error(`${flag}: ${at ? `${at.replace(/^\./, "")}: ` : ""}${issue.message}`);
+}
+
+const httpsOrigin = (url) => {
+  try {
+    const u = new URL(url);
+    return u.protocol === "https:" ? u.origin : undefined;
+  } catch {
+    return undefined;
+  }
+};
+
 /**
  * A real case for the baseline check, in place of the synthetic one.
  *
- * `candidatesFile`: a Scout catalog cache file (`~/.scout/cache/catalog/<host>-<hash>.json`) or
- * its `catalog` object: `{ origin, version, candidates: [{ id, sourceUrl, title, description?,
- * labelQuality }] }`, at most 500 candidates. `activityFile`: a JSON array of at most 10 pages,
- * `{ url, title, text? }`, newest first. Either may be omitted; the synthetic one is used then.
+ * `candidatesFile`: a Scout catalog cache file (`~/.scout/cache/catalog/<host>-<hash>.json`),
+ * its `catalog` object (`{ origin, version, candidates }`), or a plain array of candidates (the
+ * site is the first one's origin). Candidates are checked against the contracts'
+ * CandidateSchema, 1-500 of them, ids unique. `activityFile`: a JSON array of 1-10 pages,
+ * `{ url, title, text? }`, newest first, checked against ActivityEntrySchema (title 300
+ * characters, text 8 KiB). Either may be omitted; the synthetic one is used then.
  */
 export function loadCaseInputs({ candidatesFile, activityFile } = {}) {
   const inputs = {};
   if (candidatesFile) {
     const raw = readJsonFile(candidatesFile, "--candidates");
-    const cat = raw?.catalog ?? raw;
-    let origin;
-    try {
-      origin = new URL(cat?.origin).origin;
-    } catch {
-      throw new Error("--candidates: the catalog has no https origin");
-    }
-    if (!origin.startsWith("https://")) throw new Error("--candidates: the catalog has no https origin");
-    const list = cat.candidates;
-    if (!Array.isArray(list) || list.length < 1 || list.length > MAX_CASE_CANDIDATES) throw new Error(`--candidates: needs 1-${MAX_CASE_CANDIDATES} candidates`);
-    const candidates = list.map((c) => {
-      if (typeof c?.id !== "string" || !/^c[0-9a-z]+$/.test(c.id) || typeof c.title !== "string" || typeof c.sourceUrl !== "string" || !LABEL_QUALITIES.includes(c.labelQuality)) {
-        throw new Error("--candidates: each candidate needs id, sourceUrl, title and labelQuality");
-      }
-      return { id: c.id, sourceUrl: c.sourceUrl, title: c.title, ...(typeof c.description === "string" ? { description: c.description } : {}), labelQuality: c.labelQuality };
-    });
-    inputs.site = { origin, catalogVersion: typeof cat.version === "string" && cat.version ? cat.version : "case-catalog", candidates };
+    const cat = Array.isArray(raw) ? { candidates: raw } : (raw?.catalog ?? raw);
+    const candidates = parseWith(CandidateSchema.array().min(1).max(JOB_MAX_CANDIDATES), cat?.candidates, "--candidates");
+    if (new Set(candidates.map((c) => c.id)).size !== candidates.length) throw new Error("--candidates: duplicate candidate id");
+    const origin = httpsOrigin(cat.origin ?? candidates[0].sourceUrl);
+    if (!origin) throw new Error("--candidates: the catalog has no https origin");
+    inputs.site = {
+      origin,
+      catalogVersion: typeof cat.version === "string" && cat.version ? cat.version : "case-catalog",
+      candidates: candidates.map((c) => ({ id: c.id, sourceUrl: c.sourceUrl, title: c.title, ...(c.description !== undefined ? { description: c.description } : {}), labelQuality: c.labelQuality })),
+    };
   }
   if (activityFile) {
     const list = readJsonFile(activityFile, "--activity");
-    if (!Array.isArray(list) || list.length < 1 || list.length > MAX_CASE_ACTIVITY) throw new Error(`--activity: needs a list of 1-${MAX_CASE_ACTIVITY} pages`);
+    if (!Array.isArray(list)) throw new Error("--activity: must be a JSON array of { url, title, text } pages");
     const now = Date.now();
-    inputs.activity = list.map((a, i) => {
-      let url;
-      try {
-        url = new URL(a?.url);
-      } catch {
-        throw new Error("--activity: each page needs an https url and a title");
-      }
-      if (url.protocol !== "https:" || typeof a.title !== "string") throw new Error("--activity: each page needs an https url and a title");
-      return { origin: url.origin, url: url.href, observedAt: now - (i + 1) * 60_000, title: a.title, ...(typeof a.text === "string" ? { text: a.text } : {}), textTruncated: a.textTruncated === true };
+    const entries = list.map((a, i) => {
+      const origin = httpsOrigin(a?.url);
+      if (!origin) throw new Error(`--activity: [${i}].url: not an https URL`);
+      return {
+        origin,
+        url: a.url,
+        observedAt: now - (i + 1) * 60_000,
+        title: a.title,
+        ...(a.text !== undefined ? { text: a.text } : {}),
+        textTruncated: false,
+      };
     });
+    inputs.activity = parseWith(ActivityEntrySchema.array().min(1).max(RECENT_ACTIVITY_MAX_LIMIT), entries, "--activity");
   }
   return inputs;
 }

@@ -3,7 +3,8 @@
 // `--adapter codex`), one inference request each, against a fixture core on a temp socket and a
 // throwaway --home:
 //
-//   baseline       Scout context only; expects `ok` with at least one pick and Scout tool use
+//   baseline       Scout context only; expects `ok` with at least one pick and Scout tool use.
+//                  --candidates and --activity replace the synthetic site and pages with files
 //   selected-tool  plus one selected synthetic stdio tool (fake-backend.mjs behind the per-job
 //                  bridge, literal env only); expects the bridged tool to be called
 //   cancel         aborts the job a few seconds after its init event; expects `cancelled`, no
@@ -26,7 +27,7 @@ import { OwnedTree, psSnapshot } from "../../packages/scout-core/dist/agents/pro
 import { loadAgentProfile, writeAgentProfile } from "../../packages/scout-core/dist/agents/profile.js";
 import { createJobAdapter } from "../../packages/scout-core/dist/agents/registry.js";
 import { errorCode } from "./classify.mjs";
-import { checkModel, checkProfile, jobRequest, makeThrowawayRoot, selectedToolProfile, startJobFixture } from "./fixtures.mjs";
+import { checkModel, checkProfile, JOB_CANDIDATES, jobRequest, makeThrowawayRoot, selectedToolProfile, startJobFixture } from "./fixtures.mjs";
 import { buildReport, shellish, summarizeInit } from "./report.mjs";
 
 export const BACKGROUND_CASES = Object.freeze(["baseline", "selected-tool", "cancel"]);
@@ -52,7 +53,8 @@ async function waitFor(pred, ms) {
 
 /**
  * @param {string} caseName  one of BACKGROUND_CASES
- * @param {object} o  home, env, adapter (`claude-code`, `codex` or `pi`), agentPath, maxInference, dryRun
+ * @param {object} o  home, env, adapter (`claude-code`, `codex` or `pi`), agentPath, maxInference, dryRun,
+ *   and for baseline caseInputs (loadCaseInputs: site, activity) from candidates/activity, the files
  * @param {object} deps  out, err, and test seams: cancelAfterInitMs, preflightSeams
  *   ({ managedPaths }), killGraceMs, hooks.onStart
  */
@@ -68,6 +70,7 @@ export async function runBackground(caseName, o, deps) {
   const codex = adapterId === "codex";
   const pi = adapterId === "pi";
   const model = checkModel(adapterId);
+  const inputs = o.caseInputs ?? {};
 
   if (o.dryRun) {
     const short = (args) => args.map((a) => shellish(a.length > 60 ? `${a.slice(0, 57)}...` : a)).join(" ");
@@ -92,7 +95,13 @@ export async function runBackground(caseName, o, deps) {
         ? `  readiness: codex --version and codex login status (ChatGPT login only) before any launch; private Codex home ${join(o.home, "run", "codex-home")}`
         : "  preflight: readiness check (claude --version, auth status) before any launch",
       `  job: ${o.agentPath} ${short(jobArgv)}${codex && caseName === "selected-tool" ? " (plus the scout_bridge server)" : ""}`,
-      "  fixture: synthetic Scout core on <throwaway>/a.sock (current site docs.example.com, one synthetic tracker issue)",
+      ...(inputs.site || inputs.activity
+        ? [
+            "  fixture: Scout core on <throwaway>/a.sock with the case's inputs",
+            inputs.site ? `  candidates: ${o.candidates} (${inputs.site.candidates.length} on ${inputs.site.origin})` : "  candidates: synthetic (docs.example.com)",
+            inputs.activity ? `  activity: ${o.activity} (${inputs.activity.length} page${inputs.activity.length === 1 ? "" : "s"})` : "  activity: synthetic (one tracker issue)",
+          ]
+        : ["  fixture: synthetic Scout core on <throwaway>/a.sock (current site docs.example.com, one synthetic tracker issue)"]),
       caseName === "cancel" ? `  cancel: abort ${(deps.cancelAfterInitMs ?? BACKGROUND_DEFAULTS.cancelAfterInitMs) / 1000} s after the init event, then check processes, connections and the job dir` : "  expects: ok with at least one pick",
       "  inference requests: 1",
       `  report: ${join(o.home, "agent-check", `${caseName}-<timestamp>.json`)}`,
@@ -173,7 +182,7 @@ export async function runBackground(caseName, o, deps) {
   };
 
   try {
-    fixture = await startJobFixture(throwaway.root);
+    fixture = await startJobFixture(throwaway.root, inputs);
     secrets.push(fixture.token);
     await deps.hooks?.onStart?.({ token: fixture.token, root: throwaway.root });
     if (caseName === "selected-tool") selected = selectedToolProfile(throwaway.root);
@@ -201,7 +210,7 @@ export async function runBackground(caseName, o, deps) {
       failures.push("preflight");
     } else if (!ac.signal.aborted) {
       inference.push({ n: 1, purpose: caseName, at: new Date().toISOString() });
-      const request = jobRequest({ requestId, coreInstanceId: fixture.coreInstanceId, profileFingerprint: adapter.profileFingerprint });
+      const request = jobRequest({ requestId, coreInstanceId: fixture.coreInstanceId, profileFingerprint: adapter.profileFingerprint, site: inputs.site });
       job = await adapter.run(request, { toolSurface: { scout: { socketPath: fixture.socketPath, token: fixture.token } }, signal: ac.signal });
       const r = job.result;
       const d = job.details;
@@ -259,6 +268,7 @@ export async function runBackground(caseName, o, deps) {
   const pass = failures.length === 0 && (caseName === "cancel" ? outcome === "cancelled" : outcome === "ok");
   const r = job?.result;
   const d = job?.details;
+  const byId = new Map((inputs.site?.candidates ?? JOB_CANDIDATES).map((c) => [c.id, c]));
   const report = buildReport(caseName, {
     pass,
     outcome,
@@ -273,7 +283,7 @@ export async function runBackground(caseName, o, deps) {
     result: r && {
       status: r.status,
       ...(r.reason ? { reason: r.reason } : {}),
-      ...(r.status === "ok" ? { items: r.items.map((i) => ({ id: i.id, reason: i.reason })) } : {}),
+      ...(r.status === "ok" ? { items: r.items.map((i) => ({ id: i.id, title: byId.get(i.id)?.title, url: byId.get(i.id)?.sourceUrl, reason: i.reason })) } : {}),
     },
     details: d && {
       termination: d.termination,
@@ -290,6 +300,7 @@ export async function runBackground(caseName, o, deps) {
     selectedTool: selected?.evidence,
     cancel: caseName === "cancel" ? { cancelAfterInitMs: deps.cancelAfterInitMs ?? BACKGROUND_DEFAULTS.cancelAfterInitMs, cancelledAtMs: cancelAt } : undefined,
     inferenceRequests: inference,
+    inputs: inputs.site || inputs.activity ? { candidates: inputs.site?.candidates.length, origin: inputs.site?.origin, activity: inputs.activity?.length } : undefined,
     cleanup,
   });
   return { code: pass ? 0 : 1, report, secrets };

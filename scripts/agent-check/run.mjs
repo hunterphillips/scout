@@ -32,13 +32,17 @@ hotload only:
   --preliminary           preliminary run: project skills in a throwaway cwd and --mcp-config;
                           changes nothing installed; cannot pass the gate
   --with-revocation       after a successful use, revoke and read again (needs one more request)
-  --two-session           if turn 2 fails, retry in a fresh session (needs one more request)`;
+  --two-session           if turn 2 fails, retry in a fresh session (needs one more request)
+baseline only:
+  --candidates <file>     the site's links: a Scout catalog cache file or a JSON array of candidates
+                          (at most 500), in place of the synthetic ones
+  --activity <file>       the user's recent pages: a JSON array of { url, title, text } (at most 10)`;
 
 /** Parse argv; returns { opts } or { error }. */
 export function parseArgs(argv) {
   const o = { adapter: "claude-code", maxInference: PLAN_INFERENCE, dryRun: false, authorizeRealRoot: false, preliminary: false, withRevocation: false, twoSession: false, acknowledgeBudget: false };
   const bools = { "--dry-run": "dryRun", "--authorize-real-root": "authorizeRealRoot", "--preliminary": "preliminary", "--with-revocation": "withRevocation", "--two-session": "twoSession", "--acknowledge-budget": "acknowledgeBudget" };
-  const values = { "--case": "case", "--home": "home", "--max-inference": "maxInference", "--claude": "claude", "--adapter": "adapter", "--codex": "codex", "--pi": "pi", "--pi-model": "piModel" };
+  const values = { "--case": "case", "--home": "home", "--max-inference": "maxInference", "--claude": "claude", "--adapter": "adapter", "--codex": "codex", "--pi": "pi", "--pi-model": "piModel", "--candidates": "candidates", "--activity": "activity" };
   const seen = new Set();
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -61,6 +65,9 @@ export function parseArgs(argv) {
     return { error: `--max-inference ${n} is over the plan's budget ("${PLAN_BUDGET_QUOTE}"); pass --acknowledge-budget to run it anyway, or split the check` };
   }
   if (o.case !== "hotload" && (o.authorizeRealRoot || o.preliminary || o.withRevocation || o.twoSession)) return { error: `${o.case} takes no hotload options` };
+  if (o.case !== "baseline" && (o.candidates !== undefined || o.activity !== undefined)) return { error: "--candidates and --activity apply to --case baseline only" };
+  if (o.candidates !== undefined) o.candidates = resolve(o.candidates);
+  if (o.activity !== undefined) o.activity = resolve(o.activity);
   if (!ADAPTERS.includes(o.adapter)) return { error: `--adapter must be one of ${ADAPTERS.join(", ")}` };
   if (o.adapter !== "claude-code" && o.case === "hotload") return { error: `hotload checks Claude Code only; --adapter ${o.adapter} runs baseline, selected-tool or cancel` };
   if (o.adapter === "codex" && o.claude !== undefined) return { error: "--claude does not apply to --adapter codex; use --codex" };
@@ -157,6 +164,12 @@ export async function runAgentCheck(argv, io = {}) {
       err(`verify:agent hotload: ${refusal}`);
       return 2;
     }
+  }
+  try {
+    o.caseInputs = mods.fixtures.loadCaseInputs({ candidatesFile: o.candidates, activityFile: o.activity });
+  } catch (e) {
+    err(`verify:agent: ${e.message}`);
+    return 2;
   }
   try {
     mods.fixtures.prepareCheckHome(o.home, { env, dryRun: o.dryRun });
