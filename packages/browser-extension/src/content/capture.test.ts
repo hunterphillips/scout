@@ -54,6 +54,12 @@ describe("extractor", () => {
     expect(extractPage(d.doc)).toEqual({ ok: false, reason: "editing" });
   });
 
+  it("a focused checkbox is not typing; a hidden `main` is not the content root", () => {
+    const d = makeDom(ISSUE1, `<main hidden><p>${SENTINEL.dialog} an inactive view that is not on screen</p></main><main><p>The visible view, with enough text to be worth sending.</p><input id="done" type="checkbox"></main>`);
+    (d.doc.getElementById("done") as HTMLInputElement).focus();
+    expect(extractPage(d.doc)).toMatchObject({ ok: true, body: "The visible view, with enough text to be worth sending." });
+  });
+
   it("a body under 40 bytes is `no-content`", () => {
     const d = makeDom(ISSUE1, "<main><p>Loading…</p></main><footer>a long footer that does not count toward the body</footer>");
     expect(extractPage(d.doc)).toEqual({ ok: false, reason: "no-content" });
@@ -170,6 +176,20 @@ describe("capture controller (jsdom + synthetic History/Navigation driver + fake
     await clock.advance(SEND_AT - 100);
     expect(sent).toEqual([]);
     await clock.advance(200);
+    expect(sent).toHaveLength(1);
+  });
+
+  it("a fragment-only change is the same page: it neither cancels the dwell nor sends again", async () => {
+    const { d, clock, ctl, sent, approvals } = harness(DOCS, docsPage());
+    ctl.start();
+    await clock.advance(2000); // mid-dwell
+    d.navigate(`${DOCS}#invoices`);
+    await clock.advance(SEND_AT - 2000 + 100);
+    expect(sent.map((m) => m.url)).toEqual([DOCS]);
+    d.navigate(`${DOCS}#refunds`);
+    await clock.advance(SEND_AT + 1000);
+    expect(ctl.navCounter).toBe(0);
+    expect(approvals).toHaveLength(1);
     expect(sent).toHaveLength(1);
   });
 

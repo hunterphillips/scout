@@ -2,14 +2,15 @@
 // clock injected).
 //
 // It watches the URL (Navigation API `currententrychange` plus a 1 s URL
-// check). Every URL change bumps `navCounter`, cancels in-flight work and
+// check). Every URL change (the fragment aside: a page's own anchors are the
+// same page) bumps `navCounter`, cancels in-flight work and
 // starts a job. A job waits for the document to be visible, then asks the
 // background for approval (active tab of the focused window, site granted, not
 // paused, bridge up). After approval it waits until the title and body exist
 // and are unchanged for 500 ms (capped at 5 s), then holds for 3 s with the
 // page visible: navigation, blur or hiding the page cancels it. It sends only
-// if `location.href` and `navCounter` still match the values captured when the
-// job started. The URL sent is `location.href` without its fragment.
+// if the URL and `navCounter` still match the values captured when the job
+// started. The URL sent is `location.href` without its fragment.
 
 import type { ApproveResponse, PageTextMessage } from "../messages.js";
 import { LIMITS, type Limits } from "../limits.js";
@@ -85,23 +86,24 @@ export function createCaptureController(env: CaptureEnv): CaptureController {
     listeners.push(() => target.removeEventListener(type, fn));
   };
   const sleep = (ms: number) => new Promise<void>((r) => void clock.setTimeout(r, ms));
-  const pageUrl = (href: string) => href.split("#")[0]!;
+  /** `location.href` without its fragment: the page's identity everywhere here. */
+  const pageUrl = () => win.location.href.split("#")[0]!;
 
   async function runJob(): Promise<void> {
     const myNav = navCounter;
     const myJob = ++job;
-    const myHref = win.location.href;
+    const myHref = pageUrl();
     if (stopped) return;
     if (doc.visibilityState !== "visible") {
       state.phase = "waiting-visible";
       return;
     }
-    const alive = () => !stopped && myJob === job && myNav === navCounter && win.location.href === myHref && doc.visibilityState === "visible";
+    const alive = () => !stopped && myJob === job && myNav === navCounter && pageUrl() === myHref && doc.visibilityState === "visible";
 
     state.phase = "approving";
     let appr: ApproveResponse | null;
     try {
-      appr = await env.requestApproval({ navCounter: myNav, url: pageUrl(myHref) });
+      appr = await env.requestApproval({ navCounter: myNav, url: myHref });
     } catch {
       appr = null;
     }
@@ -172,7 +174,7 @@ export function createCaptureController(env: CaptureEnv): CaptureController {
     const msg: PageTextMessage = {
       type: "page_text",
       navCounter: myNav,
-      url: pageUrl(myHref),
+      url: myHref,
       title: result.title,
       text: result.body,
       truncated: result.bodyTruncated,
@@ -184,13 +186,13 @@ export function createCaptureController(env: CaptureEnv): CaptureController {
   function onNavigate(): void {
     navCounter++;
     job++; // cancel in-flight work for the previous URL
-    href = win.location.href;
+    href = pageUrl();
     void runJob();
   }
 
   function checkUrl(): void {
     if (stopped) return;
-    if (win.location.href !== href) onNavigate();
+    if (pageUrl() !== href) onNavigate();
   }
 
   function cancel(): void {
@@ -228,7 +230,7 @@ export function createCaptureController(env: CaptureEnv): CaptureController {
       return stopped;
     },
     start() {
-      href = win.location.href;
+      href = pageUrl();
       on(env.navigation, "currententrychange", checkUrl);
       on(win, "popstate", checkUrl);
       on(doc, "visibilitychange", onVisibility);

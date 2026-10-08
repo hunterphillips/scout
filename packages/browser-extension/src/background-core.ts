@@ -60,7 +60,7 @@ export const CONTENT_SCRIPT = Object.freeze({
 });
 
 type Script = chrome.scripting.RegisteredContentScript;
-const contentScript = (matches: string[]): Script => ({ ...CONTENT_SCRIPT, js: [CONTENT_SCRIPT_FILE], matches }) as Script;
+const contentScript = (matches: string[]): Script => ({ ...CONTENT_SCRIPT, js: [...CONTENT_SCRIPT.js], matches }) as Script;
 
 const sameSet = (a: readonly string[] | undefined, b: readonly string[]): boolean =>
   !!a && a.length === b.length && b.every((x) => a.includes(x));

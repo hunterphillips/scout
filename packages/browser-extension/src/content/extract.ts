@@ -13,7 +13,9 @@ import { LIMITS, type Limits } from "../limits.js";
 const SKIP_TAGS = new Set(["NAV", "HEADER", "FOOTER", "ASIDE", "DIALOG", "INPUT", "TEXTAREA", "SELECT", "OPTION", "BUTTON", "FORM", "SCRIPT", "STYLE", "NOSCRIPT", "TEMPLATE", "SVG", "IFRAME", "OBJECT", "EMBED", "CANVAS", "VIDEO", "AUDIO"]);
 const BLOCK_TAGS = new Set(["P", "DIV", "LI", "UL", "OL", "H1", "H2", "H3", "H4", "H5", "H6", "PRE", "BR", "TR", "BLOCKQUOTE", "TABLE", "SECTION", "DETAILS", "SUMMARY", "HR", "DD", "DT"]);
 const SKIP_ROLES = new Set(["navigation", "banner", "contentinfo", "complementary"]);
-const EDITABLE = 'textarea, input, select, [contenteditable]:not([contenteditable="false"])';
+/** Elements that take typing (a focused checkbox or button is not "typing"). */
+const EDITABLE =
+  'textarea, select, input:not([type="checkbox"], [type="radio"], [type="button"], [type="submit"], [type="reset"], [type="image"], [type="file"], [type="range"], [type="color"], [type="hidden"]), [contenteditable]:not([contenteditable="false"])';
 const ROOTS = ["main", '[role="main"]', "article"];
 /** A body shorter than this after normalization is not worth sending. */
 const MIN_BODY_BYTES = 40;
@@ -93,11 +95,12 @@ function isEditable(el: Element): boolean {
   return !!el.closest(EDITABLE) || (el as HTMLElement).isContentEditable === true;
 }
 
-/** The page's main content: the first of `main`, `[role="main"]`, `article`, else `body`. */
+const isHidden = (el: Element): boolean => !!el.closest('[hidden], [aria-hidden="true"]');
+
+/** The page's main content: the first visible `main`, `[role="main"]`, `article`, else `body`. */
 function contentRoot(doc: Document): Element | null {
   for (const css of ROOTS) {
-    const el = doc.querySelector(css);
-    if (el) return el;
+    for (const el of doc.querySelectorAll(css)) if (!isHidden(el)) return el;
   }
   return doc.body;
 }

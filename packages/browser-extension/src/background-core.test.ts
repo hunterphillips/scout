@@ -105,6 +105,19 @@ describe("manifest-level wiring", () => {
     }
   });
 
+  it("a failed script update fails closed: no sites, script unregistered, an empty snapshot", async () => {
+    const { f, clock, bg } = await setup({ granted: [TRACKER_PATTERN, STRIPE] });
+    f.scripting.updateContentScripts = async () => {
+      throw new Error("update failed");
+    };
+    f._.state.granted = [STRIPE];
+    await Promise.all(f.permissions.onRemoved.emit({ origins: [TRACKER_PATTERN] } as never));
+    await clock.advance(0);
+    expect(f._.registered).toEqual([]);
+    expect(bg.snapshot()).toMatchObject({ granted: [] });
+    expect(observations(f, "permissions").at(-1)).toMatchObject({ granted: [] });
+  });
+
   it("injects into open tabs on granted sites on the grant and on install, never on a plain worker wake", async () => {
     const { f } = await setup(); // the tracker already granted: this is a wake, not a grant
     expect(f._.executeCalls).toEqual([]);
