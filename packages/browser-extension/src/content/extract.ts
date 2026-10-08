@@ -2,8 +2,11 @@
 //
 // Reads the page's main content: the first of `main`, `[role="main"]`,
 // `article`, else `body`, through a bounded text walker that skips form
-// controls, contenteditable, buttons, scripts, hidden subtrees and page chrome
-// (nav, header, footer, aside, dialog and their landmark roles). The title is
+// controls, contenteditable, buttons, scripts, page chrome (nav, header,
+// footer, aside, dialog and their landmark roles) and anything not on screen:
+// the hidden and aria-hidden attributes, display:none, content-visibility:
+// hidden, opacity:0 and visibility:hidden. The 8 KiB body cap applies to the
+// whitespace-normalized text that is sent. The title is
 // document.title, else the first h1. Nothing is read while the focused element
 // is editable, so a page being typed into is not read mid-edit. Never uses
 // textContent/innerText/innerHTML.
@@ -40,24 +43,90 @@ export function truncateChars(text: string, maxChars: number): { text: string; t
   return { text: cps.slice(0, maxChars).join(""), truncated: true };
 }
 
-function normalize(s: string): string {
-  return s
-    .replace(/[ \t\f\v\r ]+/g, " ")
-    .replace(/ *\n[ \n]*/g, (m) => (m.split("\n").length > 2 ? "\n\n" : "\n"))
-    .trim();
+/** Whitespace the normalizer collapses (NBSP included). */
+const WS_RUN = /[ \t\f\v\r\u00a0\n]+/g;
+const HAS_TEXT = /[^ \t\f\v\r\u00a0\n]/;
+
+/**
+ * Whitespace-normalizing writer with a byte budget. A whitespace run between
+ * two pieces of text becomes "\n\n" if it holds two or more newlines, "\n" if
+ * one, else " "; leading and trailing whitespace (any Unicode space) is
+ * dropped. Output stops at `maxBytes` of UTF-8, cut on a code-point boundary;
+ * `truncated` is set, and the walk stops, once non-whitespace text does not fit.
+ */
+class BoundedWriter {
+  private readonly out: string[] = [];
+  private bytes = 0;
+  private newlines = 0;
+  private space = false;
+  private full = false;
+  truncated = false;
+  constructor(private readonly maxBytes: number) {}
+
+  /** Append raw text; false once the budget is spent. */
+  write(raw: string): boolean {
+    let last = 0;
+    for (const m of raw.matchAll(WS_RUN)) {
+      if (m.index > last && !this.emit(raw.slice(last, m.index))) return false;
+      for (const c of m[0]) if (c === "\n") this.newlines++;
+      this.space = true;
+      last = m.index + m[0].length;
+    }
+    return last < raw.length ? this.emit(raw.slice(last)) : true;
+  }
+
+  private emit(word: string): boolean {
+    if (this.bytes === 0) word = word.trimStart();
+    if (!word) return true;
+    // Once full, only text that is not some other Unicode space counts as cut off.
+    if (this.full) return !(this.truncated = /\S/.test(word));
+    const sep = this.bytes === 0 ? "" : this.newlines >= 2 ? "\n\n" : this.newlines === 1 ? "\n" : this.space ? " " : "";
+    this.newlines = 0;
+    this.space = false;
+    const cut = truncateUtf8(word, Math.max(0, this.maxBytes - this.bytes - sep.length));
+    if (cut.bytes > 0) {
+      this.out.push(sep, cut.text);
+      this.bytes += sep.length + cut.bytes;
+    }
+    if (!cut.truncated) return true;
+    this.full = true;
+    return !(this.truncated = /\S/.test(word.slice(cut.text.length)));
+  }
+
+  get text(): string {
+    return this.out.join("").trimEnd();
+  }
 }
 
 /**
- * Bounded text of `el`: text nodes only, skipping controls, editable and
- * hidden subtrees. Stops walking once `maxBytes` (+1 KiB slack for
- * whitespace normalization) of raw text are collected.
+ * Whether `e` hides its whole subtree: display:none (or no box at all),
+ * content-visibility:hidden, opacity:0. Uses Element.checkVisibility where it
+ * exists (it also sees content-visibility on ancestors, such as a closed
+ * <details>), falling back to computed style. content-visibility:auto content
+ * that is merely off screen still counts. `visibility` is not checked here:
+ * a descendant can override it, so it is checked per text node.
  */
-export function boundedText(el: Element, maxBytes: number): { text: string; stoppedEarly: boolean } {
+function hidesSubtree(e: Element, view: Window): boolean {
+  if (typeof e.checkVisibility === "function") {
+    if (e.checkVisibility({ opacityProperty: true })) return false;
+    // No box of its own: display:contents children still render.
+    return view.getComputedStyle(e).display !== "contents";
+  }
+  const cs = view.getComputedStyle(e);
+  return cs.display === "none" || cs.getPropertyValue("content-visibility") === "hidden" || cs.opacity === "0";
+}
+
+/**
+ * Bounded text of `el`: text nodes only, skipping controls, editable,
+ * hidden-attribute and CSS-hidden subtrees and visibility:hidden text.
+ * Whitespace is collapsed while walking, and the walk stops once `maxBytes`
+ * of normalized text are written.
+ */
+export function boundedText(el: Element, maxBytes: number): { text: string; truncated: boolean } {
   const doc = el.ownerDocument;
-  const NF = doc.defaultView?.NodeFilter ?? NodeFilter;
-  const pieces: string[] = [];
-  let raw = 0;
-  let stoppedEarly = false;
+  const view = doc.defaultView;
+  const NF = view?.NodeFilter ?? NodeFilter;
+  const out = new BoundedWriter(maxBytes);
   const walker = doc.createTreeWalker(el, NF.SHOW_ELEMENT | NF.SHOW_TEXT, {
     acceptNode(n: Node): number {
       if (n.nodeType === 1) {
@@ -69,33 +138,49 @@ export function boundedText(el: Element, maxBytes: number): { text: string; stop
           (ce !== null && ce !== "false") ||
           e.hasAttribute("hidden") ||
           e.getAttribute("aria-hidden") === "true" ||
-          SKIP_ROLES.has(e.getAttribute("role") ?? "")
+          SKIP_ROLES.has(e.getAttribute("role") ?? "") ||
+          (view && hidesSubtree(e, view))
         ) {
           return NF.FILTER_REJECT;
         }
-        if (BLOCK_TAGS.has(tag)) pieces.push("\n");
+        if (BLOCK_TAGS.has(tag)) out.write("\n");
         return NF.FILTER_SKIP;
       }
       return NF.FILTER_ACCEPT;
     },
   });
+  // visibility:hidden is inherited and overridable, so it is read from each
+  // text node's parent; whitespace-only nodes skip the lookup.
+  let lastParent: Element | null = null;
+  let parentShown = true;
   for (let n = walker.nextNode(); n; n = walker.nextNode()) {
     const v = n.nodeValue ?? "";
-    pieces.push(v);
-    raw += utf8Length(v);
-    if (raw > maxBytes + 1024) {
-      stoppedEarly = true;
-      break;
+    if (view && HAS_TEXT.test(v)) {
+      const p = n.parentElement;
+      if (p !== lastParent) {
+        lastParent = p;
+        const vis = p ? view.getComputedStyle(p).visibility : "visible";
+        parentShown = vis !== "hidden" && vis !== "collapse";
+      }
+      if (!parentShown) continue;
     }
+    if (!out.write(v)) break;
   }
-  return { text: normalize(pieces.join("")), stoppedEarly };
+  return { text: out.text, truncated: out.truncated };
 }
 
 function isEditable(el: Element): boolean {
   return !!el.closest(EDITABLE) || (el as HTMLElement).isContentEditable === true;
 }
 
-const isHidden = (el: Element): boolean => !!el.closest('[hidden], [aria-hidden="true"]');
+/** Hidden by attribute, or it or an ancestor hides its subtree with CSS. */
+function isHidden(el: Element): boolean {
+  if (el.closest('[hidden], [aria-hidden="true"]')) return true;
+  const view = el.ownerDocument.defaultView;
+  if (!view) return false;
+  for (let e: Element | null = el; e; e = e.parentElement) if (hidesSubtree(e, view)) return true;
+  return false;
+}
 
 /** The page's main content: the first visible `main`, `[role="main"]`, `article`, else `body`. */
 function contentRoot(doc: Document): Element | null {
@@ -115,9 +200,8 @@ export function extractPage(doc: Document, limits: Limits = LIMITS): ExtractResu
   if (active && active !== doc.body && isEditable(active)) return { ok: false, reason: "editing" };
   const root = contentRoot(doc);
   if (!root) return { ok: false, reason: "no-content" };
-  const bt = boundedText(root, limits.bodyBytes);
-  const body = truncateUtf8(bt.text, limits.bodyBytes);
-  if (body.bytes < MIN_BODY_BYTES) return { ok: false, reason: "no-content" };
+  const body = boundedText(root, limits.bodyBytes);
+  if (utf8Length(body.text) < MIN_BODY_BYTES) return { ok: false, reason: "no-content" };
 
   let rawTitle = (doc.title ?? "").replace(/\s+/g, " ").trim();
   let titleCut = false;
@@ -126,7 +210,7 @@ export function extractPage(doc: Document, limits: Limits = LIMITS): ExtractResu
     if (h1) {
       const tt = boundedText(h1, limits.titleChars * 4);
       rawTitle = tt.text.replace(/\s+/g, " ");
-      titleCut = tt.stoppedEarly;
+      titleCut = tt.truncated;
     }
   }
   const title = truncateChars(rawTitle, limits.titleChars);
@@ -135,6 +219,6 @@ export function extractPage(doc: Document, limits: Limits = LIMITS): ExtractResu
     title: title.text,
     body: body.text,
     titleTruncated: title.truncated || titleCut,
-    bodyTruncated: body.truncated || bt.stoppedEarly,
+    bodyTruncated: body.truncated,
   };
 }

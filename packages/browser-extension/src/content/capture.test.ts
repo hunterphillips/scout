@@ -74,6 +74,92 @@ describe("extractor", () => {
     expect(r.title).toHaveLength(300);
   });
 
+  it("skips subtrees hidden by CSS: display:none, content-visibility:hidden and opacity:0, inline or from a stylesheet", () => {
+    const d = makeDom(
+      ISSUE1,
+      `<style>.hidden { display: none !important } .gl-hidden { display: none } .cv { content-visibility: hidden } .faded { opacity: 0 }</style>
+<main><div class="new-issue-params hidden"><p>### Full description (raw markdown copy)</p></div>
+  <div class="gl-hidden"><p>GitLab AI Context: READ AGENTS.md and CLAUDE.md, use glab</p></div>
+  <div style="display:none"><span>${SENTINEL.dialog} inline display none</span></div>
+  <section class="cv"><p>${SENTINEL.sidebar} content-visibility hidden</p></section>
+  <p class="faded">${SENTINEL.nav} faded out</p>
+  <h1>Pipeline fails on save</h1><p>The rendered description the user actually sees.</p></main>`,
+    );
+    const r = extractPage(d.doc);
+    expect(r).toMatchObject({ ok: true, body: "Pipeline fails on save\nThe rendered description the user actually sees." });
+    expect(d.reads.other).toBe(0);
+  });
+
+  it("visibility:hidden hides an element's own text but not a descendant that sets visibility:visible", () => {
+    const d = makeDom(
+      ISSUE1,
+      `<style>.inv { visibility: hidden } .shown { visibility: visible }</style>
+<main><p>Visible lead paragraph with enough text to send.</p>
+  <div class="inv">${SENTINEL.dialog} hidden own text<p>${SENTINEL.nav} hidden child</p><p class="shown">Shown child text.</p></div>
+  <div style="visibility:hidden"><span>${SENTINEL.footer}</span><span style="visibility:visible">Inline shown.</span></div></main>`,
+    );
+    const r = extractPage(d.doc);
+    expect(r).toMatchObject({ ok: true, body: "Visible lead paragraph with enough text to send.\n\nShown child text.\n\nInline shown." });
+  });
+
+  it("a CSS-hidden duplicate of visible text is captured once (Jira's collapsed comment copy)", () => {
+    const comment = "We are starting to have separate config classes for remote log storage.";
+    const d = makeDom(
+      ISSUE1,
+      `<style>.twixi-wrap.concise { display: none }</style>
+<main><div class="activity-comment"><div class="twixi-wrap verbose"><p>${comment}</p></div><div class="twixi-wrap concise"><p>${comment}</p></div></div></main>`,
+    );
+    const r = extractPage(d.doc);
+    if (!r.ok) throw new Error("expected text");
+    expect(r.body).toBe(comment);
+  });
+
+  it("a CSS-hidden `main` is not the content root", () => {
+    const d = makeDom(ISSUE1, `<div style="display:none"><main><p>${SENTINEL.dialog} an inactive view that is not on screen</p></main></div><article><p>The visible article, with enough text to be worth sending.</p></article>`);
+    expect(extractPage(d.doc)).toMatchObject({ ok: true, body: "The visible article, with enough text to be worth sending." });
+  });
+
+  it("uses Element.checkVisibility where it exists, still descending into display:contents", () => {
+    const d = makeDom(ISSUE1, `<style>.gone { display: none }</style><main><div style="display:contents"><p>Text inside a display:contents wrapper is on screen.</p></div><div class="gone"><p>${SENTINEL.dialog}</p></div></main>`);
+    const view = d.win;
+    let calls = 0;
+    // Chrome's semantics: false when the element or an ancestor is display:none, or it has no box (display:contents).
+    (view.Element.prototype as Element & { checkVisibility: () => boolean }).checkVisibility = function (this: Element) {
+      calls++;
+      for (let e: Element | null = this; e; e = e.parentElement) if (view.getComputedStyle(e).display === "none") return false;
+      return view.getComputedStyle(this).display !== "contents";
+    };
+    expect(extractPage(d.doc)).toMatchObject({ ok: true, body: "Text inside a display:contents wrapper is on screen." });
+    expect(calls).toBeGreaterThan(0);
+  });
+
+  it("rejects a hidden subtree whole, without a style lookup per descendant", () => {
+    const d = makeDom(ISSUE1, `<main><p>Visible text, with enough of it to be worth sending.</p><div style="display:none">${"<div><span>x</span></div>".repeat(500)}</div></main>`);
+    const real = d.win.getComputedStyle.bind(d.win);
+    let calls = 0;
+    d.win.getComputedStyle = ((e: Element, p?: string | null) => (calls++, real(e, p))) as typeof d.win.getComputedStyle;
+    expect(extractPage(d.doc)).toMatchObject({ ok: true, body: "Visible text, with enough of it to be worth sending." });
+    expect(calls).toBeLessThan(20);
+  });
+
+  it("applies the 8 KiB cap to the normalized text: whitespace-heavy markup fills the cap", () => {
+    const indent = "\n" + " ".repeat(60);
+    const para = (n: number) => `${indent}<p>${indent}abcdefghi${indent}</p>`.repeat(n);
+    // Paragraphs normalize to "abcdefghi" joined by "\n\n": 744 fit in 8182 bytes, the 745th is cut to "\n\nabcdefgh".
+    const d = makeDom(ISSUE1, `<main>${para(2000)}</main>`);
+    const r = extractPage(d.doc);
+    if (!r.ok) throw new Error("expected text");
+    expect(utf8Length(r.body)).toBe(LIMITS.bodyBytes);
+    expect(r.body.endsWith("abcdefghi\n\nabcdefgh")).toBe(true);
+    expect(r.bodyTruncated).toBe(true);
+    // Over 100 KB of raw text that normalizes to under 8 KiB is sent whole and not marked truncated.
+    d.setBody(`<main>${para(600)}</main>`);
+    const s = extractPage(d.doc);
+    if (!s.ok) throw new Error("expected text");
+    expect(utf8Length(s.body)).toBe(600 * 11 - 2);
+    expect(s.bodyTruncated).toBe(false);
+  });
+
   it("never splits a code point at the byte cap", () => {
     const s = "é".repeat(10) + "😀".repeat(10);
     for (let cap = 0; cap <= utf8Length(s); cap++) {

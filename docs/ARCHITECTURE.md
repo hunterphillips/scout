@@ -19,8 +19,8 @@ Scout core -> fresh agent job -> validated result -> side panel
 background worker is the sensor: it reports the focused tab's origin, Chrome's per-site
 permissions, and the text of pages the user reads on allowed sites. One content script,
 registered for exactly the granted sites, reads a page's main content (`main`,
-`[role="main"]`, `article`, else `body`, without navigation, header, footer, aside or
-dialogs) once the page has settled and stayed visible for 3 s; the worker forwards it only
+`[role="main"]`, `article`, else `body`, without navigation, header, footer, aside,
+dialogs or text the page hides from view) once the page has settled and stayed visible for 3 s; the worker forwards it only
 for the active tab of the focused window. Its side panel is Scout's
 only user interface, with four destinations: Page, Sites, Activity, Settings. The panel
 renders frames from the core and sends commands back. It holds no state of its own beyond
