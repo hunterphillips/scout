@@ -3,7 +3,7 @@
 import { describe, expect, it } from "vitest";
 import { createBackground } from "./background-core.js";
 import { PANEL_PORT_NAME, type StatusSnapshot, type WorkerToPanel } from "./messages.js";
-import { FILES_BADGE_COLOR, ICON_PATHS, LINKS_BADGE_COLOR, PAUSED_ICON_PATHS } from "./panel-bridge.js";
+import { BADGE_DOT, FILES_BADGE_COLOR, ICON_PATHS, LINKS_BADGE_COLOR, PAUSED_ICON_PATHS } from "./panel-bridge.js";
 import { F } from "./panel/test-frames.js";
 import { activate, asChrome, EXT_ID, type FakeChrome, fakeClock, flush, makeChrome } from "./test-fakes.js";
 import { approve, commandsPosted, corePolicy, dropPort, lastPort, pageText, setup } from "./test-harness.js";
@@ -13,8 +13,8 @@ const CAPS = F.frame("frame.capabilities.minimal.json");
 const AUDIT = F.frame("frame.audit.json");
 const STATE_IDLE = { type: "state", status: "idle", visitEpoch: 3, detail: "docs.example.com", permitted: true } as const;
 const RESULTS = F.frame("frame.results.ok.json");
-/** The fixture's two links, as the badge counts them. */
-const LINKS = "2";
+/** The fixture's links, as the badge shows them: a dot, not a count. */
+const LINKS = BADGE_DOT;
 const ACK = F.frame("frame.ack.ok-target.json");
 const PREVIEW = F.frame("frame.preview.first.json");
 
@@ -299,7 +299,7 @@ describe("badge", () => {
     expect(f._.state.badge).toBe(""); // no visit yet
     frame(f, STATE_IDLE);
     await flush();
-    expect([f._.state.badge, f._.state.badgeColor]).toEqual(["1", FILES_BADGE_COLOR]);
+    expect([f._.state.badge, f._.state.badgeColor]).toEqual([BADGE_DOT, FILES_BADGE_COLOR]);
     frame(f, RESULTS);
     await flush();
     expect([f._.state.badge, f._.state.badgeColor]).toEqual([LINKS, LINKS_BADGE_COLOR]);
@@ -315,7 +315,7 @@ describe("badge", () => {
     const caps = CAPS as Extract<typeof CAPS, { type: "capabilities" }>;
     frame(f, { ...caps, revision: 2, offers: [{ ...caps.offers[0]!, version: F.v2 }] });
     await flush();
-    expect([f._.state.badge, f._.state.badgeColor]).toEqual(["1", FILES_BADGE_COLOR]);
+    expect([f._.state.badge, f._.state.badgeColor]).toEqual([BADGE_DOT, FILES_BADGE_COLOR]);
     // Offers on another site, or a visit Chrome does not permit, set nothing.
     frame(f, { type: "state", status: "idle", visitEpoch: 5, detail: "other.example", permitted: true });
     await flush();

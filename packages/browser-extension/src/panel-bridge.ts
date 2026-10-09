@@ -43,6 +43,8 @@ import { iconClickAction } from "./panel/toggle.js";
 
 export const PANEL_PAGE = "panel.html";
 /** Links found: the count on the accent blue. */
+/** The badge is a plain dot (a one-space badge): it says Scout has something, not how much. */
+export const BADGE_DOT = " ";
 export const LINKS_BADGE_COLOR = "#1F5FCC";
 /** Files for the user's agent to review: the count on the attention amber. */
 export const FILES_BADGE_COLOR = "#A35D00";
@@ -152,11 +154,11 @@ export function createPanelBridge(deps: PanelBridgeDeps): PanelBridge {
     setBadge("");
   }
 
-  /** Links win over files; nothing while a panel is open (asked of Chrome; a panel connecting meanwhile wins). */
+  /** A dot, not a count: Scout has something new. Links win over files; nothing while a panel is open (asked of Chrome; a panel connecting meanwhile wins). */
   function refreshBadge(): void {
     const seq = ++badgeSeq;
     const offers = currentOffers();
-    const want = links > 0 ? { text: String(links), color: LINKS_BADGE_COLOR } : offers.some((o) => !seenOffers.has(o)) ? { text: String(offers.length), color: FILES_BADGE_COLOR } : null;
+    const want = links > 0 ? { text: BADGE_DOT, color: LINKS_BADGE_COLOR } : offers.some((o) => !seenOffers.has(o)) ? { text: BADGE_DOT, color: FILES_BADGE_COLOR } : null;
     if (ports.size > 0) {
       seen();
       return;

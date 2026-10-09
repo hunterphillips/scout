@@ -185,7 +185,7 @@ describe("side panel page", () => {
       lastPort(f).onMessage.emit({ type: "panel", state: s });
     lastPort(f).onMessage.emit({ type: "panel", state: { type: "results", coreInstanceId: INSTANCE, visitEpoch: 3, origin: "https://docs.example.com", jobId: "job-3a", status: "ok", items: ITEMS } });
     await flush();
-    expect(f._.state.badge).toBe("2"); // the two links
+    expect(f._.state.badge).toBe(" "); // a dot for the links
     const dom = new JSDOM(`<!doctype html><body><div id="root"></div></body>`);
     const app = createPanelApp({ ch: asChrome(f), doc: dom.window.document, root: dom.window.document.getElementById("root")!, setInterval: () => 0, setTimeout: () => 0 });
     await app.start();
