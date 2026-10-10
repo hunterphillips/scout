@@ -45,6 +45,21 @@ describe("verifyTargets", () => {
     expect(result.dropped).toEqual([]);
   });
 
+  it("checks a .md source's HTML twin without reading its body, so a twin over the size cap still counts", async () => {
+    const { fetch, calls } = fakeFetch({
+      "/api/subscriptions": (url) => ok(url, ""),
+      "/guide": (url) => ok(url, "<title>Guide</title>"),
+    });
+
+    const result = await verifyTargets([candidate("c0", "/api/subscriptions.md"), candidate("c1", "/guide")], { origin: ORIGIN, fetch });
+
+    expect(calls.map((c) => [new URL(c.url).pathname, c.options.readBody])).toEqual([
+      ["/api/subscriptions", false],
+      ["/guide", true],
+    ]);
+    expect(result.verified.map((v) => v.humanHref)).toEqual([`${ORIGIN}/api/subscriptions`, `${ORIGIN}/guide`]);
+  });
+
   it("keeps the .md source when the twin answers 200 but is not HTML", async () => {
     const { fetch } = fakeFetch({ "/a": (url) => ok(url, "# A", "text/markdown") });
 

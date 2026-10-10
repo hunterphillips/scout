@@ -70,6 +70,11 @@ export interface GuardedFetchOptions {
   timeoutMs?: number;
   /** Cap on decoded body bytes. */
   maxBytes?: number;
+  /**
+   * False: a 2xx is answered from its status and headers, and its body is cancelled unread
+   * (`ok` with an empty `body` and `bytes`, whatever the body's size). Defaults to true.
+   */
+  readBody?: boolean;
   maxRedirects?: number;
   ifNoneMatch?: string;
   ifModifiedSince?: string;
@@ -232,6 +237,19 @@ async function guardedFetchWith(hooks: GuardedFetchHooks, url: string, options: 
         return fail("http", `Unexpected status ${response.status} from ${target.href}`, response.status);
       }
 
+      const answer = {
+        kind: "ok",
+        status: response.status,
+        ...optionalHeader(response, "etag", "etag"),
+        ...optionalHeader(response, "last-modified", "lastModified"),
+        ...optionalHeader(response, "content-type", "contentType"),
+        finalUrl: target.toString(),
+      } as const;
+      if (options.readBody === false) {
+        await drain(response);
+        return { ...answer, body: "", bytes: new Uint8Array(0) };
+      }
+
       let read: Awaited<ReturnType<typeof readDecodedBody>>;
       try {
         read = await readDecodedBody(response.body, response.headers.get("content-encoding"), maxBytes, controller.signal);
@@ -243,15 +261,10 @@ async function guardedFetchWith(hooks: GuardedFetchHooks, url: string, options: 
       if (read.kind === "unsupported") return fail("http", `Unsupported content-encoding ${read.coding} from ${target.href}`, response.status);
 
       return {
-        kind: "ok",
-        status: response.status,
+        ...answer,
         // `ignoreBOM` keeps a leading BOM in the decoded text instead of swallowing it.
         body: new TextDecoder("utf-8", { ignoreBOM: true }).decode(read.bytes),
         bytes: read.bytes,
-        ...optionalHeader(response, "etag", "etag"),
-        ...optionalHeader(response, "last-modified", "lastModified"),
-        ...optionalHeader(response, "content-type", "contentType"),
-        finalUrl: target.toString(),
       };
     }
   } finally {

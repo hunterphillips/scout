@@ -22,7 +22,7 @@ const VERIFY_ACCEPT = "text/html, application/xhtml+xml;q=0.9, */*;q=0.1";
 /** The fetch verification uses. Only these named options reach `guardedFetch`. */
 export type VerifyFetch = (
   url: string,
-  options: { maxBytes: number; accept: string; timeoutMs: number },
+  options: { maxBytes: number; accept: string; timeoutMs: number; readBody: boolean },
 ) => Promise<GuardedFetchResult>;
 
 export type VerifyDropReason = "not_found" | "off_host" | "invalid_url" | "off_origin";
@@ -48,7 +48,7 @@ export interface VerifyResult {
   ms: number;
 }
 
-const defaultFetch: VerifyFetch = (url, { maxBytes, accept, timeoutMs }) => guardedFetch(url, { maxBytes, accept, timeoutMs });
+const defaultFetch: VerifyFetch = (url, { maxBytes, accept, timeoutMs, readBody }) => guardedFetch(url, { maxBytes, accept, timeoutMs, readBody });
 
 function isHtml(contentType: string | undefined): boolean {
   const type = contentType?.split(";")[0]?.trim().toLowerCase();
@@ -93,7 +93,7 @@ type Outcome = { keep: true; humanHref: string; displayTitle?: string } | { keep
  *
  * - A `.md` source URL: the same URL without `.md` is proposed as the human page. It
  *   becomes `humanHref` only on a 200 `text/html` response from the same host (the final
- *   URL after any same-host redirect). Any other answer, including a 404 on the twin or a
+ *   URL after any same-host redirect), judged from the headers with the body unread. Any other answer, including a 404 on the twin or a
  *   twin that leaves the host, keeps the candidate with `humanHref` = the source URL: the `.md`
  *   page itself is never fetched, so the twin's answer says nothing against it.
  * - Any other URL is fetched itself. A 200 keeps it with `humanHref = sourceUrl` and a
@@ -114,7 +114,7 @@ export async function verifyTargets(candidates: readonly Candidate[], options: V
   const maxCandidates = options.maxCandidates ?? VERIFY_MAX_CANDIDATES;
   const started = clock.now();
 
-  const fetchWithinBudget = async (url: string): Promise<GuardedFetchResult> => {
+  const fetchWithinBudget = async (url: string, readBody: boolean): Promise<GuardedFetchResult> => {
     const remaining = Math.max(1, budgetMs - (clock.now() - started));
     let timer: ReturnType<typeof setTimeout> | undefined;
     // guardedFetch enforces `timeoutMs` itself; the race also bounds an injected fetch that does not.
@@ -127,7 +127,7 @@ export async function verifyTargets(candidates: readonly Candidate[], options: V
     });
     try {
       if (options.signal?.aborted) return await deadline;
-      return await Promise.race([fetch(url, { maxBytes: VERIFY_MAX_BYTES, accept: VERIFY_ACCEPT, timeoutMs: remaining }), deadline]);
+      return await Promise.race([fetch(url, { maxBytes: VERIFY_MAX_BYTES, accept: VERIFY_ACCEPT, timeoutMs: remaining, readBody }), deadline]);
     } catch {
       return { kind: "error", reason: "network", message: "verification fetch threw" };
     } finally {
@@ -147,7 +147,9 @@ export async function verifyTargets(candidates: readonly Candidate[], options: V
     if (isMarkdown) target.pathname = target.pathname.replace(/\.md$/i, "");
     if (target.origin !== source.origin) return { keep: false, reason: "invalid_url" };
 
-    const result = await fetchWithinBudget(target.href);
+    // A twin is judged by its status, type and final URL alone, so its body is never read:
+    // a twin over VERIFY_MAX_BYTES (a long API reference page) still counts.
+    const result = await fetchWithinBudget(target.href, !isMarkdown);
     const offHost: Outcome = isMarkdown ? keepSource : { keep: false, reason: "off_host" };
     if (result.kind === "error") return result.reason === "policy" ? offHost : keepSource;
     if (result.kind === "absent") return isMarkdown ? keepSource : { keep: false, reason: "not_found" };

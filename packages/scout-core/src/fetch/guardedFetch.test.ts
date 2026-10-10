@@ -283,6 +283,36 @@ describe("guardedFetch", () => {
     expect(overCap).toMatchObject({ kind: "error", reason: "too_large" });
   });
 
+  it("with readBody false, answers a 2xx from its headers and cancels the body unread, whatever its size", async () => {
+    let pulled = 0;
+    let cancelled = false;
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        pulled += 1;
+        controller.enqueue(new Uint8Array(1024));
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+    const { impl } = stubFetch(() => new Response(body, { status: 200, headers: { "content-type": "text/html; charset=utf-8", etag: '"v1"' } }));
+
+    const result = await guardedFetch("https://example.com/guide", { fetch: impl, lookup: PUBLIC_LOOKUP, maxBytes: 128, readBody: false });
+
+    expect(result).toEqual({
+      kind: "ok",
+      status: 200,
+      body: "",
+      bytes: new Uint8Array(0),
+      etag: '"v1"',
+      contentType: "text/html; charset=utf-8",
+      finalUrl: "https://example.com/guide",
+    });
+    expect(cancelled).toBe(true);
+    // The stream may pre-fill its queue once; the body itself is never read.
+    expect(pulled).toBeLessThanOrEqual(1);
+  });
+
   it("reports an unsupported content-encoding as an http error", async () => {
     const { impl } = stubFetch(() => new Response("compressed?", { status: 200, headers: { "content-encoding": "zstd" } }));
 
